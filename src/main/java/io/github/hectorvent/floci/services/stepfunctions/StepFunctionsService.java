@@ -1067,6 +1067,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     // Payload is "<target state name><SOH><location>"; SOH cannot appear in a state name.
     private static final String DANGLING_TARGET_MARKER = "DANGLING_TARGET:";
     private static final char DANGLING_TARGET_SEPARATOR = '\u0001';
+    private static final String INVALID_JSONATA_MARKER = "INVALID_JSONATA_EXPRESSION:";
 
     // Parse the structured location out of validator flat error strings,
     // which currently encode it as "...field 'X' ... at /States/Y".
@@ -1140,7 +1141,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                     error.substring(PARSE_ERROR_MARKER.length()).trim(), null);
         }
         if (error.startsWith(UNSUPPORTED_JSONATA_MARKER)) {
-            return toJsonataDiagnostic(error.substring(UNSUPPORTED_JSONATA_MARKER.length()).trim());
+            return toJsonataDiagnostic("UNSUPPORTED_JSONATA_EXPRESSION",
+                    error.substring(UNSUPPORTED_JSONATA_MARKER.length()).trim());
+        }
+        if (error.startsWith(INVALID_JSONATA_MARKER)) {
+            return toJsonataDiagnostic("INVALID_JSONATA_EXPRESSION",
+                    error.substring(INVALID_JSONATA_MARKER.length()).trim());
         }
         if (error.startsWith(UNSUPPORTED_FIELD_MARKER)) {
             return toUnsupportedFieldDiagnostic(error.substring(UNSUPPORTED_FIELD_MARKER.length()));
@@ -1178,12 +1184,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return new Diagnostic("ERROR", "SCHEMA_VALIDATION_FAILED", message, location);
     }
 
-    private static Diagnostic toJsonataDiagnostic(String message) {
+    private static Diagnostic toJsonataDiagnostic(String code, String message) {
         Matcher locationMatcher = JSONATA_LOCATION_SUFFIX_PATTERN.matcher(message);
         if (!locationMatcher.find()) {
-            return new Diagnostic("ERROR", "UNSUPPORTED_JSONATA_EXPRESSION", message, null);
+            return new Diagnostic("ERROR", code, message, null);
         }
-        return new Diagnostic("ERROR", "UNSUPPORTED_JSONATA_EXPRESSION",
+        return new Diagnostic("ERROR", code,
                 message.substring(0, locationMatcher.start()).trim(), locationMatcher.group(1));
     }
 
@@ -1450,7 +1456,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         // A JSONata error already carries its own AWS code and location, so it is reported on its
         // own rather than folded into the rest.
         List<String> nonJsonataErrors = errors.stream()
-                .filter(error -> !error.startsWith(UNSUPPORTED_JSONATA_MARKER))
+                .filter(error -> !error.startsWith(UNSUPPORTED_JSONATA_MARKER)
+                        && !error.startsWith(INVALID_JSONATA_MARKER))
                 .toList();
         if (nonJsonataErrors.isEmpty()) {
             throw new AwsException("InvalidDefinition",
@@ -1692,12 +1699,14 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Reports every JSONata expression in the state that reads the top-level context, which real
-     * AWS refuses at CreateStateMachine time. Only the fields AWS parses as JSONata are walked:
-     * measured against {@code validate-state-machine-definition}, a {@code {% %}} string in
-     * Comment, Next, Default, Resource, ErrorEquals, Retry, Credentials or ReaderConfig.CSVHeaders
-     * is left alone, while Output, Assign, Arguments, Items, Seconds, Condition, ItemBatcher,
-     * ItemReader, ItemSelector, ResultWriter and the rest are parsed and reported.
+     * Reports every JSONata expression in the state that does not parse, or that reads the
+     * top-level context, or that reads {@code $states.errorOutput} outside the one place it
+     * exists: all three are refused by real AWS at CreateStateMachine time. Only the fields AWS
+     * parses as JSONata are walked: measured against {@code validate-state-machine-definition}, a
+     * {@code {% %}} string in Comment, Next, Default, Resource, ErrorEquals, Retry, Credentials or
+     * ReaderConfig.CSVHeaders is left alone, while Output, Assign, Arguments, Items, Seconds,
+     * Condition, ItemBatcher, ItemReader, ItemSelector, ResultWriter and the rest are parsed and
+     * reported.
      *
      * <p>Those names are ASL fields, not payload keys. AWS parses a payload whole, so
      * {@code Assign: {"Next": "{% phone %}"}} and {@code Arguments: {"Payload": {"Comment":
@@ -1705,35 +1714,84 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
      * walk enters one of {@link #JSONATA_PAYLOAD_FIELDS}.
      */
     private static void collectTopLevelReferences(String path, JsonNode node, List<String> errors) {
-        collectTopLevelReferences(path, node, false, errors);
+        collectTopLevelReferences(path, node, JsonataScope.STATE_ROOT, errors);
     }
 
-    private static void collectTopLevelReferences(String path, JsonNode node, boolean insidePayload,
+    private static void collectTopLevelReferences(String path, JsonNode node, JsonataScope scope,
                                                   List<String> errors) {
         if (node.isObject()) {
             node.fields().forEachRemaining(field -> {
-                String name = field.getKey();
-                if (insidePayload || !ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA.contains(name)) {
-                    collectTopLevelReferences(path + "/" + name, field.getValue(),
-                            insidePayload || JSONATA_PAYLOAD_FIELDS.contains(name), errors);
+                if (scope.parsesAsJsonata(field.getKey())) {
+                    collectTopLevelReferences(path + "/" + field.getKey(), field.getValue(),
+                            scope.enter(field.getKey()), errors);
                 }
             });
             return;
         }
         if (node.isArray()) {
             for (int index = 0; index < node.size(); index++) {
-                collectTopLevelReferences(path + "[" + index + "]", node.get(index), insidePayload,
-                        errors);
+                collectTopLevelReferences(path + "[" + index + "]", node.get(index), scope, errors);
             }
             return;
         }
         if (!node.isTextual() || !JsonataEvaluator.isExpression(node.asText())) {
             return;
         }
-        for (String reference : JsonataTopLevelReferences.in(JsonataEvaluator.unwrap(node.asText()))) {
-            errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '" + reference
-                    + "' at the top level is not supported. at " + path);
+        JsonataTopLevelReferences.Analysis analysis =
+                JsonataTopLevelReferences.analyze(JsonataEvaluator.unwrap(node.asText()));
+        if (analysis.parseError() != null) {
+            errors.add(INVALID_JSONATA_MARKER + " " + analysis.parseError() + " at " + path);
+            return;
         }
+        for (String reference : analysis.topLevelReferences()) {
+            addUnsupportedReferenceError(path, reference, scope, errors);
+        }
+    }
+
+    /**
+     * The three things the walk carries down from the ASL fields it has already entered, each of
+     * which changes how a {@code {% %}} string below is read: inside a payload every key is a
+     * payload key, so {@link #ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA} no longer applies;
+     * {@code atCatchEntry} marks a catcher object, whose own {@code Output} and {@code Assign} are
+     * the one place {@code $states.errorOutput} resolves; and {@code insideCatchOutputOrAssign}
+     * says the walk is in one of those two, at any depth.
+     */
+    private record JsonataScope(boolean insidePayload, boolean atCatchEntry,
+                                boolean insideCatchOutputOrAssign) {
+
+        private static final JsonataScope STATE_ROOT = new JsonataScope(false, false, false);
+
+        private boolean parsesAsJsonata(String field) {
+            return insidePayload || !ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA.contains(field);
+        }
+
+        private JsonataScope enter(String field) {
+            if (insidePayload) {
+                return this;
+            }
+            return new JsonataScope(
+                    JSONATA_PAYLOAD_FIELDS.contains(field),
+                    "Catch".equals(field),
+                    insideCatchOutputOrAssign
+                            || (atCatchEntry && ("Output".equals(field) || "Assign".equals(field))));
+        }
+    }
+
+    private static void addUnsupportedReferenceError(String path, String reference,
+                                                     JsonataScope scope, List<String> errors) {
+        if (JsonataTopLevelReferences.STATES_ERROR_OUTPUT.equals(reference)) {
+            if (!scope.insideCatchOutputOrAssign()) {
+                errors.add(UNSUPPORTED_JSONATA_MARKER
+                        + " Field '$states.errorOutput' does not exist. at " + path);
+            }
+            return;
+        }
+        if (JsonataTopLevelReferences.ROOT_REFERENCE.equals(reference)) {
+            errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '$$' is not supported. at " + path);
+            return;
+        }
+        errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '" + reference
+                + "' at the top level is not supported. at " + path);
     }
 
     private void validateNestedStates(JsonNode states, String statesPath, String startAt,

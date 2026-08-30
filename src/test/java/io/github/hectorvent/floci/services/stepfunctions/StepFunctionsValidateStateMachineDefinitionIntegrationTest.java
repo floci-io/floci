@@ -1,12 +1,18 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -94,6 +100,42 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    // A one-state Pass machine whose Output holds the given JSONata expression. The ObjectMapper
+    // escapes the quotes and braces the expressions carry into a valid JSON string.
+    private static String outputExpressionDefinition(String expression) {
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        root.put("QueryLanguage", "JSONata");
+        root.put("StartAt", "Main");
+        ObjectNode main = root.putObject("States").putObject("Main");
+        main.put("Type", "Pass");
+        main.put("Output", "{% " + expression + " %}");
+        main.put("End", true);
+        return root.toString();
+    }
+
+    // A Task whose Catch entry holds the given JSONata expression in its own Output or Assign,
+    // the one place AWS resolves $states.errorOutput.
+    private static String catchDefinition(String catcherField, String expression) {
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        root.put("QueryLanguage", "JSONata");
+        root.put("StartAt", "Main");
+        ObjectNode states = root.putObject("States");
+        ObjectNode main = states.putObject("Main");
+        main.put("Type", "Task");
+        main.put("Resource", "arn:aws:states:::lambda:invoke");
+        main.put("Next", "Handled");
+        ObjectNode catcher = main.putArray("Catch").addObject();
+        catcher.putArray("ErrorEquals").add("States.ALL");
+        catcher.put("Next", "Handled");
+        if ("Assign".equals(catcherField)) {
+            catcher.putObject("Assign").put("lastError", "{% " + expression + " %}");
+        } else {
+            catcher.put(catcherField, "{% " + expression + " %}");
+        }
+        states.putObject("Handled").put("Type", "Pass").put("End", true);
+        return root.toString();
+    }
+
     private static Response validateDefinition(String definition) {
         String body = OBJECT_MAPPER.createObjectNode().put("definition", definition).toString();
         return given().contentType(CT).header("X-Amz-Target", TARGET)
@@ -153,6 +195,76 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                   }
                 }
                 """.replace("__RESULT_WRITER__", resultWriter);
+    }
+
+    // Every (expression, message) pair here was run through
+    // `aws stepfunctions validate-state-machine-definition --region us-east-1`: the message is
+    // AWS's INVALID_JSONATA_EXPRESSION text, which is floci's own parser message with its
+    // "S0xxx: " code prefix stripped.
+    private static Stream<Arguments> invalidJsonataExpressions() {
+        return Stream.of(
+                Arguments.of("a[1,2)", "Expected \"]\", got \",\""),
+                Arguments.of("\"unterminated", "String literal must be terminated by a matching quote"),
+                Arguments.of("1 +", "Unexpected end of expression"),
+                Arguments.of("{\"a\":}", "The symbol \"}\" cannot be used as a unary operator"),
+                Arguments.of("$x :=", "Unexpected end of expression"),
+                Arguments.of("$match(\"a\", /abc", "No terminating / in regular expression"),
+                Arguments.of("phone %.other", "The symbol \".\" cannot be used as a unary operator"),
+                Arguments.of("", "Unexpected end of expression"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidJsonataExpressions")
+    void unparsableJsonataExpression_returnsFailWithInvalidJsonataExpression(
+            String expression, String expectedMessage) {
+        validateDefinition(outputExpressionDefinition(expression))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("INVALID_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", equalTo(expectedMessage))
+                .body("diagnostics[0].location", equalTo("/States/Main/Output"));
+    }
+
+    @Test
+    void doubleDollarReference_returnsFailWithUnsupportedJsonataExpression() {
+        validateDefinition(outputExpressionDefinition("$$"))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("UNSUPPORTED_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", equalTo("Reference to '$$' is not supported."))
+                .body("diagnostics[0].location", equalTo("/States/Main/Output"));
+    }
+
+    @Test
+    void statesErrorOutputOutsideCatch_returnsFailWithUnsupportedJsonataExpression() {
+        validateDefinition(outputExpressionDefinition("$states.errorOutput"))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("UNSUPPORTED_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", equalTo("Field '$states.errorOutput' does not exist."))
+                .body("diagnostics[0].location", equalTo("/States/Main/Output"));
+    }
+
+    @Test
+    void statesErrorOutputInsideCatchOutput_isAccepted() {
+        validateDefinition(catchDefinition("Output", "$states.errorOutput"))
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void statesErrorOutputInsideCatchAssign_isAccepted() {
+        validateDefinition(catchDefinition("Assign", "$states.errorOutput"))
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
     }
 
     @Test
