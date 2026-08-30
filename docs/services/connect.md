@@ -5,8 +5,9 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateInstance` | Create an instance; returns `Id` and `Arn`, ACTIVE immediately |
 | `DescribeInstance` | Get the full instance including tags |
 | `DeleteInstance` | Delete an instance and its storage config associations |
@@ -19,9 +20,10 @@
 | `UpdateInstanceStorageConfig` | Replace a storage config |
 | `DisassociateInstanceStorageConfig` | Remove a storage config |
 | `ListInstanceStorageConfigs` | List storage configs for one resource type |
+| `ListTagsForResource` | List instance tags (`GET /tags/{resourceArn}`) |
 | `TagResource` | Tag an instance (`POST /tags/{resourceArn}`) |
 | `UntagResource` | Remove instance tags (`DELETE /tags/{resourceArn}?tagKeys=`) |
-| `ListTagsForResource` | List instance tags (`GET /tags/{resourceArn}`) |
+<!-- floci:actions:end -->
 
 `InstanceStatus` is `ACTIVE` from the first read, so `aws_connect_instance`'s status
 poll completes without a transition. `CreateInstance` returns only `Id` and `Arn` —

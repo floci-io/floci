@@ -38,6 +38,19 @@ services:
     doc: docs/services/comprehend.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/comprehend/ComprehendJsonHandler.java, mode: switch }
+  - service: connect
+    doc: docs/services/connect.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/connect/ConnectController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: rekognition
     doc: docs/services/rekognition.md
     sources:
