@@ -1078,7 +1078,20 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.getEngineVersion(), effectiveRegion);
             instance.setOptionGroupName(optionGroupName);
         }
+        boolean passwordRotated = false;
         if (newPassword != null && !newPassword.isBlank()) {
+            String oldPassword = instance.getMasterPassword();
+            boolean backendRunning = !config.services().rds().mock()
+                    && instance.getDbClusterIdentifier() == null && instance.getContainerId() != null;
+            passwordRotated = backendRunning && !newPassword.equals(oldPassword);
+            // Propagate the rotation into the running backend DB before overwriting the stored
+            // password — this is the last moment the old credential (which the backend still
+            // holds) is known. Without it every later connection fails: the proxy dials the
+            // backend with the rotated password against a database still holding the original.
+            if (passwordRotated) {
+                containerManager.rotateMasterPassword(id, instance.getContainerId(),
+                        instance.getEngine(), instance.getMasterUsername(), oldPassword, newPassword);
+            }
             instance.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
@@ -1096,6 +1109,15 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         effective.applyTo(instance);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+
+        // The running auth proxy holds a password snapshot from start time, so swap it in place
+        // (a stop/start here races the listener rebind while relay connections are still open,
+        // and would drop live connections rotation shouldn't touch).
+        if (passwordRotated) {
+            proxyManager.updateMasterPassword(
+                    rdsResourceRelayKey(instance.getDbInstanceArn(), id), instance.getMasterPassword());
+        }
+
         LOG.infov("DB instance {0} modified", id);
         return instance;
     }

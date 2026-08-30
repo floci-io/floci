@@ -1661,27 +1661,42 @@ public class ApiGatewayExecuteController {
         if (parts.length != 2) return Map.of();
         String template = parts[1];
 
-        Pattern p = ROUTE_TEMPLATE_PATTERNS.computeIfAbsent(template, t -> {
-            String regex = t.replaceAll("\\{([a-zA-Z_]+)\\+\\}", "(?<$1>.+)")
-                            .replaceAll("\\{([a-zA-Z_]+)\\}", "(?<$1>[^/]+)");
-            return Pattern.compile("^" + regex + "$");
-        });
-        Matcher m = p.matcher(actualPath);
+        CompiledRouteTemplate compiled = ROUTE_TEMPLATE_PATTERNS.computeIfAbsent(
+                template, ApiGatewayExecuteController::compileRouteTemplate);
+        Matcher m = compiled.pattern().matcher(actualPath);
         if (!m.matches()) return Map.of();
 
         Map<String, String> result = new java.util.LinkedHashMap<>();
-        Matcher names = ROUTE_PARAM_NAMES.matcher(template);
-        while (names.find()) {
-            try { result.put(names.group(1), m.group(names.group(1))); } catch (Exception ignored) {}
+        for (int i = 0; i < compiled.parameterNames().size(); i++) {
+            result.put(compiled.parameterNames().get(i), m.group(i + 1));
         }
         return result;
     }
 
     /** Cache of compiled route-template patterns keyed by the raw template (e.g. {@code "/wallet/{proxy+}"}). */
-    private static final ConcurrentHashMap<String, Pattern> ROUTE_TEMPLATE_PATTERNS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, CompiledRouteTemplate> ROUTE_TEMPLATE_PATTERNS =
+            new ConcurrentHashMap<>();
 
     /** Extracts parameter names from a route template; the pattern itself is constant. */
-    private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
+    private static final Pattern ROUTE_PARAM_NAMES =
+            Pattern.compile("\\{([a-zA-Z_][a-zA-Z0-9_]*)\\+?\\}");
+
+    private static CompiledRouteTemplate compileRouteTemplate(String template) {
+        List<String> parameterNames = new ArrayList<>();
+        StringBuilder regex = new StringBuilder("^");
+        Matcher parameters = ROUTE_PARAM_NAMES.matcher(template);
+        int literalStart = 0;
+        while (parameters.find()) {
+            regex.append(Pattern.quote(template.substring(literalStart, parameters.start())));
+            regex.append(parameters.group().endsWith("+}") ? "(.+)" : "([^/]+)");
+            parameterNames.add(parameters.group(1));
+            literalStart = parameters.end();
+        }
+        regex.append(Pattern.quote(template.substring(literalStart))).append('$');
+        return new CompiledRouteTemplate(Pattern.compile(regex.toString()), List.copyOf(parameterNames));
+    }
+
+    private record CompiledRouteTemplate(Pattern pattern, List<String> parameterNames) {}
 
     // Mirrors AuthorizerResult's shape (used by the v1/REST CUSTOM-authorizer path) for the same
     // reason: a null errorResponse means "authorized, proceed", and claims (when non-null) is what

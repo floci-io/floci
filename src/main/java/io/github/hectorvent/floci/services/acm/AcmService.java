@@ -18,7 +18,8 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.*;
@@ -46,8 +47,6 @@ public class AcmService implements ResourceProvider {
     private static final int MAX_TAG_VALUE_LENGTH = 256;
     private static final int MAX_SANS = 100;
     private static final int MAX_DOMAIN_LENGTH = 253;
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
-
     private final StorageBackend<String, Certificate> store;
     private final CertificateGenerator certificateGenerator;
     private final RegionResolver regionResolver;
@@ -661,8 +660,9 @@ public class AcmService implements ResourceProvider {
      */
     private DomainValidation generateDomainValidation(String domain, ValidationMethod method, CertificateType type) {
         String validationToken = generateValidationToken(domain);
+        String validationDomain = baseDomain(domain);
         ResourceRecord resourceRecord = new ResourceRecord(
-            "_" + validationToken.substring(0, 32) + "." + domain + ".",
+            "_" + validationToken.substring(0, 32) + "." + validationDomain + ".",
             "CNAME",
             "_" + validationToken.substring(32) + ".acm-validations.aws."
         );
@@ -681,9 +681,19 @@ public class AcmService implements ResourceProvider {
     }
 
     private String generateValidationToken(String domain) {
-        byte[] randomBytes = new byte[32];
-        SECURE_RANDOM.nextBytes(randomBytes);
-        return HexFormat.of().formatHex(randomBytes);
+        String tokenInput = regionResolver.getAccountId() + ":" + baseDomain(domain);
+        try {
+            return HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(tokenInput.getBytes(StandardCharsets.UTF_8))
+            );
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+    }
+
+    private static String baseDomain(String domain) {
+        String stripped = domain.startsWith("*.") ? domain.substring(2) : domain;
+        return stripped.toLowerCase(Locale.ROOT);
     }
 
     private String buildCertificateArn(String region, String certId) {

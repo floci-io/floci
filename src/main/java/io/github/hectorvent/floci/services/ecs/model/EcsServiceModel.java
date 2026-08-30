@@ -25,6 +25,8 @@ public class EcsServiceModel {
     private Instant lastDeploymentAt;
     private String namespace;
     private String deploymentController;
+    private String schedulingStrategy;
+    private String availabilityZoneRebalancing;
     private Map<String, String> tags = new HashMap<>();
     private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
     private NetworkConfiguration networkConfiguration;
@@ -66,6 +68,14 @@ public class EcsServiceModel {
 
     public String getDeploymentController() { return deploymentController; }
     public void setDeploymentController(String deploymentController) { this.deploymentController = deploymentController; }
+
+    public String getSchedulingStrategy() { return schedulingStrategy; }
+    public void setSchedulingStrategy(String schedulingStrategy) { this.schedulingStrategy = schedulingStrategy; }
+
+    public String getAvailabilityZoneRebalancing() { return availabilityZoneRebalancing; }
+    public void setAvailabilityZoneRebalancing(String availabilityZoneRebalancing) {
+        this.availabilityZoneRebalancing = availabilityZoneRebalancing;
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

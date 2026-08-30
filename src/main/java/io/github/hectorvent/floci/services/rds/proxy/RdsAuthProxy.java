@@ -22,7 +22,7 @@ public class RdsAuthProxy {
     private final String instanceId;
     private final String backendHost;
     private final String masterUsername;
-    private final String masterPassword;
+    private volatile String masterPassword;
     private final String dbName;
     private final DatabaseEngine engine;
     private final RdsSigV4Validator sigV4;
@@ -58,6 +58,11 @@ public class RdsAuthProxy {
         Thread.ofVirtual().name("rds-proxy-accept-" + instanceId).start(this::acceptLoop);
         LOG.infov("RDS proxy started for instance {0} on port {1} → {2}:{3}",
                 instanceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    /** Swap the master-password snapshot after a rotation; new connections authenticate against it. */
+    public void updateMasterPassword(String newPassword) {
+        this.masterPassword = newPassword;
     }
 
     public void stop() {

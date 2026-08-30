@@ -162,6 +162,10 @@ floci:
       proxy-base-port: 6400
       proxy-max-port: 6419
       default-image: "valkey/valkey:8"
+    redshift:
+      enabled: true
+      default-port: 5439
+      image-version: postgres:15-alpine
     rds:
       enabled: true
       mock: false
@@ -297,6 +301,8 @@ floci:
     textract:
       enabled: true
     comprehend:
+      enabled: true
+    rekognition:
       enabled: true
     pricing:
       enabled: true

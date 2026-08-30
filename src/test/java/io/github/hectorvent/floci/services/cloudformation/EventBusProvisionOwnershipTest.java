@@ -5,14 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -51,15 +49,10 @@ class EventBusProvisionOwnershipTest {
     @BeforeEach
     void setUp() {
         eventBridgeService = mock(EventBridgeService.class);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null,
-                null, null, null, null, eventBridgeService,
-                null, null, null, null, null, null,
-                MAPPER,
-                null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null,
-                null, null,
-                new CloudFormationResourceRegistry(List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .eventBridge(eventBridgeService)
+                .objectMapper(MAPPER)
+                .build();
     }
 
     /**

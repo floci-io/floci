@@ -38,6 +38,10 @@ services:
     doc: docs/services/comprehend.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/comprehend/ComprehendJsonHandler.java, mode: switch }
+  - service: rekognition
+    doc: docs/services/rekognition.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/rekognition/RekognitionJsonHandler.java, mode: switch }
   - service: docdb
     doc: docs/services/docdb.md
     sources:
@@ -125,6 +129,13 @@ services:
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
     exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove]
+  - service: redshift
+    doc: docs/services/redshift.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftQueryHandler.java, mode: switch }
+    # SubnetIds / VpcSecurityGroupIds / TagKeys are labels of an inner member-name
+    # switch (memberKeyRegex), not actions — same shape as the rds exclusions above.
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, TagKeys]
   - service: route53resolver
     doc: docs/services/route53resolver.md
     sources:
@@ -164,6 +175,7 @@ services:
 deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java }  # single-op Identity Center stub, no standalone doc page yet
   - { path: src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2JsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/applicationautoscaling/ScalingPolicyAlarmActionHandler.java }  # not a JSON/Query action dispatcher — its `case "X" ->` arms are the StepScaling AdjustmentType switch, not AWS actions
   - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/bcmdataexports/BcmDataExportsJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/ce/CostExplorerJsonHandler.java }  # no standalone action table yet

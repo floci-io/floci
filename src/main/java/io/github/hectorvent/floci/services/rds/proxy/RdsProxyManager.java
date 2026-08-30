@@ -73,6 +73,14 @@ public class RdsProxyManager {
         }
     }
 
+    public synchronized void updateMasterPassword(String instanceId, String newPassword) {
+        RdsAuthProxy proxy = proxies.get(instanceId);
+        if (proxy != null) {
+            proxy.updateMasterPassword(newPassword);
+            LOG.infov("Updated RDS proxy master password for instance {0}", instanceId);
+        }
+    }
+
     public synchronized void stopProxy(String instanceId) {
         RdsAuthProxy proxy = proxies.get(instanceId);
         if (proxy != null) {

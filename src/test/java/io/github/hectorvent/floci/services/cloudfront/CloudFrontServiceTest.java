@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
@@ -32,6 +33,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -131,6 +133,90 @@ class CloudFrontServiceTest {
         when(cloudFrontConfig.domainSuffix()).thenReturn(domainSuffix);
 
         return new CloudFrontService(storageFactory, config);
+    }
+
+    @Test
+    void publishFunctionCopiesDevelopmentToLive() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        function.setFunctionCode("function handler(event) { return event.request; }");
+        function.setRuntime("cloudfront-js-2.0");
+        function.setComment("routing function");
+
+        CloudFrontFunction development = service.createFunction(function);
+        CloudFrontFunction live = service.publishFunction(function.getName(), development.getEtag());
+
+        CloudFrontFunction describedDevelopment = service.describeFunction(function.getName(), "DEVELOPMENT");
+        CloudFrontFunction describedLive = service.describeFunction(function.getName(), "LIVE");
+        assertEquals("DEVELOPMENT", describedDevelopment.getStage());
+        assertEquals("LIVE", describedLive.getStage());
+        assertEquals(development.getFunctionCode(), describedLive.getFunctionCode());
+        assertEquals(development.getEtag(), describedDevelopment.getEtag());
+        assertNotEquals(development.getEtag(), live.getEtag());
+    }
+
+    @Test
+    void listFunctionsWithoutStageReturnsDevelopmentAndLive() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+
+        CloudFrontFunction development = service.createFunction(function);
+        service.publishFunction(function.getName(), development.getEtag());
+
+        assertEquals(List.of("DEVELOPMENT", "LIVE"), service.listFunctions(null, null, LIST_MAX_ITEMS)
+                .stream()
+                .map(CloudFrontFunction::getStage)
+                .toList());
+    }
+
+    @Test
+    void functionStageLookupRejectsUnsupportedValues() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        service.createFunction(function);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeFunction(function.getName(), "TESTING"));
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void legacyLiveFunctionIsNeverReturnedAsDevelopment() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("legacy-routing");
+        CloudFrontFunction legacyLive = service.createFunction(function);
+        legacyLive.setStage("LIVE");
+        legacyLive.setStatus("DEPLOYED");
+
+        AwsException developmentError = assertThrows(AwsException.class,
+                () -> service.describeFunction(function.getName(), "DEVELOPMENT"));
+        assertEquals("NoSuchFunctionExists", developmentError.getErrorCode());
+        assertEquals(legacyLive, service.describeFunction(function.getName(), "LIVE"));
+
+        AwsException publishError = assertThrows(AwsException.class,
+                () -> service.publishFunction(function.getName(), legacyLive.getEtag()));
+        assertEquals("NoSuchFunctionExists", publishError.getErrorCode());
+    }
+
+    @Test
+    void legacyLiveFunctionCanBeDeleted() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("legacy-routing");
+        CloudFrontFunction legacyLive = service.createFunction(function);
+        legacyLive.setStage("LIVE");
+        legacyLive.setStatus("DEPLOYED");
+
+        service.deleteFunction(function.getName(), legacyLive.getEtag());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeFunction(function.getName(), "LIVE"));
+        assertEquals("NoSuchFunctionExists", error.getErrorCode());
     }
 
     @Test

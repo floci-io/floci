@@ -45,6 +45,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class EcsJsonHandler {
@@ -403,9 +404,14 @@ public class EcsJsonHandler {
         List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
         Map<String, String> tags = parseTagMap(req.path("tags"));
+        String schedulingStrategy = parseChoice(req, "schedulingStrategy", SCHEDULING_STRATEGIES);
+        String deploymentControllerType = parseChoice(req.path("deploymentController"), "type",
+                "deploymentController.type", DEPLOYMENT_CONTROLLER_TYPES);
+        String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, loadBalancers, networkConfiguration, tags, region);
+                desiredCount, launchType, loadBalancers, networkConfiguration, tags,
+                schedulingStrategy, deploymentControllerType, availabilityZoneRebalancing, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -480,9 +486,10 @@ public class EcsJsonHandler {
         String taskDefinition = req.has("taskDefinition") ? req.path("taskDefinition").asText() : null;
         Integer desiredCount = req.has("desiredCount") ? req.path("desiredCount").asInt() : null;
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
+        String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
 
         EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount,
-                networkConfiguration, region);
+                networkConfiguration, availabilityZoneRebalancing, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -1162,6 +1169,28 @@ public class EcsJsonHandler {
         return n;
     }
 
+    private static final Set<String> SCHEDULING_STRATEGIES = Set.of("REPLICA", "DAEMON");
+    private static final Set<String> DEPLOYMENT_CONTROLLER_TYPES = Set.of("ECS", "CODE_DEPLOY", "EXTERNAL");
+    private static final Set<String> AZ_REBALANCING = Set.of("ENABLED", "DISABLED");
+
+    /** Optional enum-valued string field: absent → {@code null}; present but not in {@code allowed} → 400. */
+    private static String parseChoice(JsonNode node, String field, Set<String> allowed) {
+        return parseChoice(node, field, field, allowed);
+    }
+
+    private static String parseChoice(JsonNode node, String field, String displayName, Set<String> allowed) {
+        if (node == null || node.isMissingNode() || !node.hasNonNull(field)) {
+            return null;
+        }
+        String value = node.path(field).asText();
+        if (!allowed.contains(value)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid " + displayName + ": " + value + ". Valid values: "
+                            + String.join(", ", new java.util.TreeSet<>(allowed)) + ".", 400);
+        }
+        return value;
+    }
+
     private ObjectNode serviceNode(EcsServiceModel s) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("serviceArn", s.getServiceArn());
@@ -1175,6 +1204,13 @@ public class EcsJsonHandler {
         if (s.getLaunchType() != null) { n.put("launchType", s.getLaunchType().name()); }
         if (s.getCreatedAt() != null) { n.put("createdAt", s.getCreatedAt().toEpochMilli() / 1000.0); }
         if (s.getNamespace() != null) { n.put("namespace", s.getNamespace()); }
+        // Services persisted before these fields existed read back with the AWS defaults.
+        n.put("schedulingStrategy", s.getSchedulingStrategy() != null
+                ? s.getSchedulingStrategy() : EcsService.DEFAULT_SCHEDULING_STRATEGY);
+        n.putObject("deploymentController").put("type", s.getDeploymentController() != null
+                ? s.getDeploymentController() : EcsService.DEFAULT_DEPLOYMENT_CONTROLLER);
+        n.put("availabilityZoneRebalancing", s.getAvailabilityZoneRebalancing() != null
+                ? s.getAvailabilityZoneRebalancing() : EcsService.DEFAULT_AZ_REBALANCING_UNSET);
         if (s.getTags() != null && !s.getTags().isEmpty()) {
             n.set("tags", tagsNode(s.getTags()));
         }

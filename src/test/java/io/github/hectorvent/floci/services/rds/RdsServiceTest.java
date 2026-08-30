@@ -58,6 +58,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -736,6 +737,56 @@ class RdsServiceTest {
 
         assertEquals("original-password", modified.getMasterPassword());
         assertFalse(modified.isIamDatabaseAuthenticationEnabled());
+    }
+
+    @Test
+    void modifyDbInstancePasswordRotationPropagatesToBackendAndProxy() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "mysql", "8.0",
+                "admin", "original-password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        instance.setContainerId("container-1");
+        instance.setContainerHost("10.0.0.5");
+        instance.setContainerPort(3306);
+
+        DbInstance modified = rdsService.modifyDbInstance("mydb", "rotated-password", null, null);
+
+        assertEquals("rotated-password", modified.getMasterPassword());
+        // The backend learns the new credential while the old one is still known...
+        verify(containerManager).rotateMasterPassword("mydb", "container-1",
+                DatabaseEngine.MYSQL, "admin", "original-password", "rotated-password");
+        // ...and the running proxy's password snapshot is swapped in place, without a restart
+        // (a stop/start would race the listener rebind and drop live connections).
+        verify(proxyManager).updateMasterPassword(anyString(), eq("rotated-password"));
+        verify(proxyManager, never()).stopProxy(anyString());
+    }
+
+    @Test
+    void modifyDbInstanceSamePasswordDoesNotTouchBackendOrProxy() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "mysql", "8.0",
+                "admin", "original-password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        instance.setContainerId("container-1");
+
+        rdsService.modifyDbInstance("mydb", "original-password", null, null);
+
+        verify(containerManager, never()).rotateMasterPassword(
+                anyString(), anyString(), any(), anyString(), anyString(), anyString());
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
+    }
+
+    @Test
+    void modifyDbInstancePasswordRotationSkipsBackendInMockMode() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbInstance("mydb", "mysql", "8.0",
+                "admin", "original-password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        DbInstance modified = rdsService.modifyDbInstance("mydb", "rotated-password", null, null);
+
+        assertEquals("rotated-password", modified.getMasterPassword());
+        verify(containerManager, never()).rotateMasterPassword(
+                anyString(), anyString(), any(), anyString(), anyString(), anyString());
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
     }
 
     @Test

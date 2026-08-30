@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
@@ -175,6 +176,117 @@ public class CloudFormationResourceProvisioner {
     private static final String APIGATEWAY_V2_BODY_AUTHORIZER_IDS_ATTR =
             "__FlociApiGatewayV2BodyAuthorizerIds";
 
+    /**
+     * Every resource type the switch in {@link #provision} still serves. Load-bearing: the
+     * default arm throws for a member of this set, so deleting an arm during the migration to
+     * per-service provisioners without deleting its entry here fails loudly instead of
+     * silently stubbing the resource. Kept in step with the registry by
+     * {@code CfnResourceInventoryTest}.
+     */
+    /**
+     * Types whose delete needs the whole {@link StackResource} — a create-time attribute (the
+     * rule's event bus, the authorizer's api id, the nodegroup's cluster) or the stashed
+     * custom-resource properties. Deleting one of these from type and physical id alone silently
+     * no-ops and leaves the resource live, so they route through
+     * {@link #deleteUsingCreateTimeAttributes} instead.
+     *
+     * <p>Gates that method, so the set cannot drift from its branches. When one of these types
+     * moves to a per-service provisioner, its logic moves into that provisioner's
+     * {@code delete(StackResource, String)} override and its entry leaves this set;
+     * {@code CfnDeletePrecedenceTest} fails while both claim it.
+     */
+    static final Set<String> DELETE_NEEDS_STACK_RESOURCE = Set.of(
+            "AWS::ApiGatewayV2::Authorizer",
+            "AWS::CloudFormation::CustomResource",
+            "AWS::EKS::Nodegroup",
+            "AWS::Events::EventBus",
+            "AWS::Events::Rule",
+            "AWS::IAM::ManagedPolicy",
+            "AWS::IAM::Policy",
+            "AWS::SecretsManager::SecretTargetAttachment",
+            "Custom::DynamoDBReplica");
+
+    static final Set<String> LEGACY_SWITCH_TYPES = Set.of(
+            "AWS::ApiGateway::Authorizer",
+            "AWS::ApiGateway::Deployment",
+            "AWS::ApiGateway::Method",
+            "AWS::ApiGateway::Resource",
+            "AWS::ApiGateway::RestApi",
+            "AWS::ApiGateway::Stage",
+            "AWS::ApiGatewayV2::Api",
+            "AWS::ApiGatewayV2::Authorizer",
+            "AWS::ApiGatewayV2::Deployment",
+            "AWS::ApiGatewayV2::Integration",
+            "AWS::ApiGatewayV2::Route",
+            "AWS::ApiGatewayV2::Stage",
+            "AWS::AutoScaling::AutoScalingGroup",
+            "AWS::AutoScaling::LaunchConfiguration",
+            "AWS::Batch::ComputeEnvironment",
+            "AWS::Batch::JobDefinition",
+            "AWS::Batch::JobQueue",
+            "AWS::CDK::Metadata",
+            "AWS::CloudFormation::CustomResource",
+            "AWS::CloudFront::Distribution",
+            "AWS::CloudWatch::Alarm",
+            "AWS::Cognito::UserPool",
+            "AWS::Cognito::UserPoolClient",
+            "AWS::DynamoDB::GlobalTable",
+            "AWS::DynamoDB::Table",
+            "AWS::EC2::EIP",
+            "AWS::EC2::Instance",
+            "AWS::EC2::InternetGateway",
+            "AWS::EC2::NatGateway",
+            "AWS::EC2::Route",
+            "AWS::EC2::RouteTable",
+            "AWS::EC2::SecurityGroup",
+            "AWS::EC2::Subnet",
+            "AWS::EC2::SubnetRouteTableAssociation",
+            "AWS::ECR::Repository",
+            "AWS::ECS::Cluster",
+            "AWS::ECS::Service",
+            "AWS::ECS::TaskDefinition",
+            "AWS::EKS::Cluster",
+            "AWS::EKS::Nodegroup",
+            "AWS::ElasticLoadBalancingV2::Listener",
+            "AWS::ElasticLoadBalancingV2::ListenerRule",
+            "AWS::ElasticLoadBalancingV2::LoadBalancer",
+            "AWS::ElasticLoadBalancingV2::TargetGroup",
+            "AWS::Events::EventBus",
+            "AWS::Events::EventBusPolicy",
+            "AWS::Events::Rule",
+            "AWS::IAM::AccessKey",
+            "AWS::IAM::InstanceProfile",
+            "AWS::IAM::ManagedPolicy",
+            "AWS::IAM::Policy",
+            "AWS::IAM::User",
+            "AWS::KMS::Alias",
+            "AWS::KMS::Key",
+            "AWS::Kinesis::Stream",
+            "AWS::KinesisFirehose::DeliveryStream",
+            "AWS::Lambda::EventSourceMapping",
+            "AWS::Lambda::Function",
+            "AWS::Lambda::LayerVersion",
+            "AWS::Logs::LogGroup",
+            "AWS::Pipes::Pipe",
+            "AWS::RDS::DBCluster",
+            "AWS::RDS::DBClusterParameterGroup",
+            "AWS::RDS::DBInstance",
+            "AWS::RDS::DBParameterGroup",
+            "AWS::RDS::DBProxy",
+            "AWS::RDS::DBProxyTargetGroup",
+            "AWS::RDS::DBSubnetGroup",
+            "AWS::Route53::HostedZone",
+            "AWS::Route53::RecordSet",
+            "AWS::S3::Bucket",
+            "AWS::S3::BucketPolicy",
+            "AWS::SNS::Subscription",
+            "AWS::SNS::Topic",
+            "AWS::SSM::Parameter",
+            "AWS::SecretsManager::Secret",
+            "AWS::SecretsManager::SecretTargetAttachment",
+            "AWS::StepFunctions::StateMachine",
+            "Custom::DynamoDBReplica");
+
     /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
     private static final String CR_SERVICE_TOKEN_ATTR = "__FlociServiceToken";
     private static final String CR_PROPERTIES_ATTR = "__FlociResourceProperties";
@@ -186,7 +298,6 @@ public class CloudFormationResourceProvisioner {
     private static final Duration CR_RESPONSE_TIMEOUT = Duration.ofSeconds(10);
 
     private final S3Service s3Service;
-    private final SqsService sqsService;
     private final SnsService snsService;
     private final DynamoDbService dynamoDbService;
     private final LambdaService lambdaService;
@@ -222,10 +333,11 @@ public class CloudFormationResourceProvisioner {
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
     private final CloudFormationResourceRegistry resourceRegistry;
+    private final CfnDynamicReferences dynamicReferences;
     private final EmulatorConfig config;
 
     @Inject
-    public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
+    public CloudFormationResourceProvisioner(S3Service s3Service,
                                              SnsService snsService, DynamoDbService dynamoDbService,
                                              LambdaService lambdaService, IamService iamService,
                                              SsmService ssmService, KmsService kmsService,
@@ -255,10 +367,10 @@ public class CloudFormationResourceProvisioner {
                                              DocDbService docDbService,
                                              CloudFrontService cloudFrontService,
                                              CloudFormationResourceRegistry resourceRegistry,
+                                             CfnDynamicReferences dynamicReferences,
                                              EmulatorConfig config) {
         this.config = config;
         this.s3Service = s3Service;
-        this.sqsService = sqsService;
         this.snsService = snsService;
         this.dynamoDbService = dynamoDbService;
         this.lambdaService = lambdaService;
@@ -291,6 +403,7 @@ public class CloudFormationResourceProvisioner {
         this.docDbService = docDbService;
         this.cloudFrontService = cloudFrontService;
         this.resourceRegistry = resourceRegistry;
+        this.dynamicReferences = dynamicReferences;
     }
 
     /**
@@ -324,7 +437,7 @@ public class CloudFormationResourceProvisioner {
             CfnResourceProvisioner extracted = resourceRegistry.forType(resourceType).orElse(null);
             if (extracted != null) {
                 extracted.provision(resource, properties,
-                        new ProvisionContext(engine, region, accountId, stackName));
+                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId));
                 resource.setStatus("CREATE_COMPLETE");
                 return resource;
             }
@@ -447,6 +560,14 @@ public class CloudFormationResourceProvisioner {
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
+                    } else if (LEGACY_SWITCH_TYPES.contains(resourceType)) {
+                        // A declared legacy type reaching the default arm means its case was removed
+                        // without removing its LEGACY_SWITCH_TYPES entry (or without registering a
+                        // provisioner). Stubbing it would report CREATE_COMPLETE with a fake ARN and
+                        // hide the mistake, so fail instead.
+                        throw new IllegalStateException("No switch arm for declared legacy type "
+                                + resourceType + " — remove its LEGACY_SWITCH_TYPES entry when it "
+                                + "moves to a per-service provisioner.");
                     } else {
                         LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
                         resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
@@ -502,15 +623,42 @@ public class CloudFormationResourceProvisioner {
      */
     public void delete(StackResource resource, String region) {
         String resourceType = resource.getResourceType();
+        // Registry first. An extracted provisioner owns its type outright, and gets the whole
+        // resource so an attribute-aware delete can read its create-time attributes. Consulting it
+        // ahead of the branches below means an exact match always beats the Custom:: prefix branch
+        // (so Custom::DynamoDBReplica can move to a provisioner), and that migrating one of the
+        // DELETE_NEEDS_STACK_RESOURCE types cannot silently keep using the stale branch here.
+        CfnResourceProvisioner extractedForDelete = resourceRegistry.forType(resourceType).orElse(null);
+        if (extractedForDelete != null) {
+            extractedForDelete.delete(resource, region);
+            return;
+        }
+        if (DELETE_NEEDS_STACK_RESOURCE.contains(resourceType)) {
+            deleteUsingCreateTimeAttributes(resource, region);
+            return;
+        }
+        if (resourceType != null && resourceType.startsWith("Custom::")) {
+            deleteCustomResource(resource, region);
+            return;
+        }
+        delete(resourceType, resource.getPhysicalId(), region);
+    }
+
+    /**
+     * Deletes one of the {@link #DELETE_NEEDS_STACK_RESOURCE} types, whose delete needs state the
+     * type/physicalId path cannot supply — a create-time attribute, or the stashed custom-resource
+     * properties. Reached only through that set, so the set and these branches stay in step: a
+     * listed type with no branch throws rather than silently no-opping.
+     */
+    private void deleteUsingCreateTimeAttributes(StackResource resource, String region) {
+        String resourceType = resource.getResourceType();
         // Custom::DynamoDBReplica is applied natively against the DynamoDB service (not via its
         // provider Lambda), so remove the replica the same way rather than invoking the handler.
         if ("Custom::DynamoDBReplica".equals(resourceType)) {
             deleteDynamoDbReplicaSafe(resource, region);
             return;
         }
-        boolean custom = "AWS::CloudFormation::CustomResource".equals(resourceType)
-                || (resourceType != null && resourceType.startsWith("Custom::"));
-        if (custom) {
+        if ("AWS::CloudFormation::CustomResource".equals(resourceType)) {
             deleteCustomResource(resource, region);
             return;
         }
@@ -566,27 +714,13 @@ public class CloudFormationResourceProvisioner {
             deleteManagedPolicy(resource);
             return;
         }
-        // A Rule on a custom bus is keyed by that bus; the physical id is only the rule name, so the
-        // type/physicalId path resolves to the "default" bus and never finds it — leaving the rule (and
-        // then its bus) undeletable. Pass the bus name captured at provision time.
-        if ("AWS::Events::Rule".equals(resourceType)) {
-            deleteEventBridgeRuleSafe(resource.getPhysicalId(),
-                    resource.getAttributes().get("EventBusName"), region);
-            return;
-        }
         if ("AWS::Events::EventBus".equals(resourceType)) {
             deleteEventBusSafe(resource, region);
             return;
         }
-        // Extracted provisioners get the whole resource, so the ones whose delete needs more than
-        // the physical id can read their create-time attributes instead of guessing. Placed after
-        // the special cases above so extracting one of those types later cannot silently bypass them.
-        CfnResourceProvisioner extractedForDelete = resourceRegistry.forType(resourceType).orElse(null);
-        if (extractedForDelete != null) {
-            extractedForDelete.delete(resource, region);
-            return;
-        }
-        delete(resourceType, resource.getPhysicalId(), region);
+        throw new IllegalStateException("DELETE_NEEDS_STACK_RESOURCE lists " + resourceType
+                + " but no branch here deletes it — deleting it by physical id alone would "
+                + "silently no-op and leave the resource live.");
     }
 
     /**
@@ -3258,6 +3392,9 @@ public class CloudFormationResourceProvisioner {
         }
         ssmService.putParameter(name, value, type, null, true, region);
         r.setPhysicalId(name);
+        r.getAttributes().put("Name", name);
+        r.getAttributes().put("Type", type);
+        r.getAttributes().put("Value", value);
     }
 
     // ── KMS ───────────────────────────────────────────────────────────────────
@@ -6505,13 +6642,13 @@ public class CloudFormationResourceProvisioner {
                         "Custom resource handler errored (" + result.getFunctionError() + "): " + body, 400);
             }
 
-            return customResourceResponseStore.await(token, CR_RESPONSE_TIMEOUT);
+            return customResourceResponseStore.await(token, CR_RESPONSE_TIMEOUT, serviceToken, region);
         } catch (AwsException e) {
             throw e;
         } catch (TimeoutException e) {
             throw new AwsException("CustomResourceTimeout",
                     "Timed out waiting for custom resource " + logicalId
-                            + " to PUT its response to ResponseURL", 504);
+                            + " to PUT its response to ResponseURL: " + e.getMessage(), 504);
         } catch (Exception e) {
             throw new AwsException("CustomResourceFailed",
                     "Failed to invoke custom resource " + logicalId + ": " + e.getMessage(), 500);
@@ -7334,194 +7471,12 @@ public class CloudFormationResourceProvisioner {
         return engine.resolve(props.get(name));
     }
 
-    private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.*?)\\}\\}");
-    private static final Pattern SSM_DYNAMIC_REF_BODY =
-            Pattern.compile("([a-zA-Z0-9_.\\-/]+)(?::([0-9]+))?");
-
     /**
-     * Resolves CloudFormation dynamic references embedded in a string. Supports
-     * {@code {{resolve:secretsmanager:<secret-id-or-arn>:SecretString:<json-key>:<stage>:<version>}}}
-     * and {@code {{resolve:ssm:<name>:<version>}}} / {@code {{resolve:ssm-secure:<name>:<version>}}},
-     * which CloudFormation substitutes with the live value at deploy time (e.g. an RDS
-     * MasterUserPassword sourced from a generated secret). Unsupported services are left verbatim.
+     * Resolves CloudFormation dynamic references in a provisioned property value. Delegates to
+     * {@link CfnDynamicReferences}; the RDS master-credential paths are its only callers today.
      */
     private String resolveDynamicReferences(String value, String region, boolean allowSsmSecure) {
-        if (value == null || !value.contains("{{resolve:")) {
-            return value;
-        }
-        Matcher m = DYNAMIC_REF.matcher(value);
-        StringBuilder sb = new StringBuilder();
-        int previousEnd = 0;
-        while (m.find()) {
-            rejectUnclosedDynamicReference(value.substring(previousEnd, m.start()));
-            String replacement = resolveDynamicRef(m.group(1), m.group(2), region, allowSsmSecure);
-            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
-            previousEnd = m.end();
-        }
-        rejectUnclosedDynamicReference(value.substring(previousEnd));
-        m.appendTail(sb);
-        return sb.toString();
-    }
-
-    private String resolveDynamicRef(String service, String body, String region, boolean allowSsmSecure) {
-        if ("secretsmanager".equals(service)) {
-            // body = <secret-id-or-arn>:SecretString:<json-key>:<version-stage>:<version-id>. The
-            // secret id may be an ARN (which itself contains colons), so split on the ":SecretString"
-            // marker rather than on ":". AWS also accepts <secret-id-or-arn>:::: as shorthand for
-            // retrieving the whole current SecretString with the optional fields omitted.
-            String secretId;
-            String[] parts;
-            if (body.endsWith("::::")) {
-                secretId = body.substring(0, body.length() - 4);
-                parts = new String[0];
-            } else if (isValidSecretsManagerSecretId(body)) {
-                secretId = body;
-                parts = new String[0];
-            } else {
-                int marker = body.lastIndexOf(":SecretString");
-                if (marker < 0) {
-                    throw invalidSecretsManagerDynamicReference();
-                }
-                secretId = body.substring(0, marker);
-                String rest = body.substring(marker + ":SecretString".length());
-                if (!rest.isEmpty() && !rest.startsWith(":")) {
-                    throw invalidSecretsManagerDynamicReference();
-                }
-                parts = rest.startsWith(":")
-                        ? rest.substring(1).split(":", -1)
-                        : new String[0];
-            }
-            if (!isValidSecretsManagerSecretId(secretId) || parts.length > 3) {
-                throw invalidSecretsManagerDynamicReference();
-            }
-            String jsonKey = parts.length > 0 ? parts[0] : "";
-            String versionStage = parts.length > 1 && !parts[1].isBlank() ? parts[1] : null;
-            String versionId = parts.length > 2 && !parts[2].isBlank() ? parts[2] : null;
-            if (versionStage != null && versionId != null) {
-                throw new AwsException("ValidationError",
-                        "version-stage and version-id cannot both be specified", 400);
-            }
-            String secretRegion = AwsArnUtils.regionOrDefault(secretId, region);
-            String secretString = secretsManagerService
-                    .getSecretValue(secretId, versionId, versionStage, secretRegion).getSecretString();
-            if (secretString == null) {
-                // A binary-only secret has no SecretString to substitute, so resource creation fails.
-                throw new IllegalStateException(
-                        "secret " + secretId + " has no SecretString value to resolve");
-            }
-            if (jsonKey.isBlank()) {
-                return secretString;
-            }
-            JsonNode json;
-            try {
-                json = objectMapper.readTree(secretString);
-            } catch (Exception e) {
-                throw new AwsException("ValidationError",
-                        "secret " + secretId + " does not contain valid JSON", 400);
-            }
-            if (!json.has(jsonKey)) {
-                // A missing key would otherwise resolve to "" — silently provisioning e.g. a blank
-                // MasterUserPassword. Fail resource creation instead.
-                throw new IllegalStateException(
-                        "JSON key '" + jsonKey + "' not found in secret " + secretId);
-            }
-            return json.get(jsonKey).asText();
-        }
-        if ("ssm".equals(service) || "ssm-secure".equals(service)) {
-            if ("ssm-secure".equals(service) && !allowSsmSecure) {
-                throw new AwsException("ValidationError",
-                        "ssm-secure dynamic references are supported only for MasterUserPassword "
-                                + "on AWS::RDS::DBInstance and AWS::RDS::DBCluster", 400);
-            }
-            Matcher reference = SSM_DYNAMIC_REF_BODY.matcher(body);
-            if (!reference.matches()) {
-                throw invalidSsmDynamicReference();
-            }
-            String parameterName = reference.group(1);
-            String version = reference.group(2);
-            if (version != null) {
-                long wantedVersion;
-                try {
-                    wantedVersion = Long.parseLong(version);
-                } catch (NumberFormatException e) {
-                    throw new AwsException("ValidationError",
-                            "SSM parameter version must be a positive integer: " + version, 400);
-                }
-                if (wantedVersion < 1) {
-                    throw new AwsException("ValidationError",
-                            "SSM parameter version must be a positive integer: " + version, 400);
-                }
-                ParameterHistory parameter = ssmService.getParameterHistory(parameterName, region).stream()
-                        .filter(h -> h.getVersion() == wantedVersion)
-                        .findFirst()
-                        .orElseThrow(() -> new AwsException(
-                                "ParameterVersionNotFound",
-                                "Parameter version " + wantedVersion + " not found.", 400));
-                return validatedSsmParameterValue(
-                        service, parameterName, parameter.getType(), parameter.getValue());
-            }
-            Parameter parameter = ssmService.getParameter(parameterName, region);
-            return validatedSsmParameterValue(
-                    service, parameterName, parameter.getType(), parameter.getValue());
-        }
-        // Other dynamic-reference services are not resolved here; leave verbatim.
-        return "{{resolve:" + service + ":" + body + "}}";
-    }
-
-    private static boolean isValidSecretsManagerSecretId(String secretId) {
-        if (secretId == null || secretId.isBlank()) {
-            return false;
-        }
-        if (!secretId.contains(":")) {
-            return true;
-        }
-        try {
-            AwsArnUtils.Arn arn = AwsArnUtils.parse(secretId);
-            String resource = arn.resource();
-            return "secretsmanager".equals(arn.service())
-                    && !arn.region().isBlank()
-                    && !arn.accountId().isBlank()
-                    && resource.startsWith("secret:")
-                    && resource.length() > "secret:".length()
-                    && !resource.substring("secret:".length()).contains(":");
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
-    }
-
-    private static AwsException invalidSecretsManagerDynamicReference() {
-        return new AwsException("ValidationError",
-                "Invalid Secrets Manager dynamic reference", 400);
-    }
-
-    private static void rejectUnclosedDynamicReference(String value) {
-        if (value.contains("{{resolve:secretsmanager:")) {
-            throw invalidSecretsManagerDynamicReference();
-        }
-        if (value.contains("{{resolve:ssm:") || value.contains("{{resolve:ssm-secure:")) {
-            throw invalidSsmDynamicReference();
-        }
-    }
-
-    private static String validatedSsmParameterValue(
-            String service, String parameterName, String parameterType, String value) {
-        boolean validType = "ssm-secure".equals(service)
-                ? "SecureString".equals(parameterType)
-                : "String".equals(parameterType) || "StringList".equals(parameterType);
-        if (!validType) {
-            String expectedType = "ssm-secure".equals(service)
-                    ? "SecureString"
-                    : "String or StringList";
-            throw new AwsException("ValidationError",
-                    "SSM parameter " + parameterName + " must be type " + expectedType
-                            + " for an " + service + " dynamic reference", 400);
-        }
-        return value;
-    }
-
-    private static AwsException invalidSsmDynamicReference() {
-        return new AwsException("ValidationError",
-                "Invalid SSM dynamic reference", 400);
+        return dynamicReferences.resolveDynamicReferences(value, region, allowSsmSecure);
     }
 
     private String resolveOrDefault(JsonNode props, String name,

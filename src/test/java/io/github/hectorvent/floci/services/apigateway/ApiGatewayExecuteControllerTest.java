@@ -61,6 +61,22 @@ class ApiGatewayExecuteControllerTest {
     }
 
     @Test
+    void capturesNamedParamsContainingUnderscores() {
+        Map<String, String> p = ApiGatewayExecuteController.extractV2PathParams(
+                "GET /api/v1/key-ids/{key_id}/jobs/{job_id}",
+                "/api/v1/key-ids/key-123/jobs/job-456");
+        assertEquals("key-123", p.get("key_id"));
+        assertEquals("job-456", p.get("job_id"));
+    }
+
+    @Test
+    void capturesNamedParamsContainingDigits() {
+        Map<String, String> p = ApiGatewayExecuteController.extractV2PathParams(
+                "GET /items/{item1}", "/items/value-1");
+        assertEquals("value-1", p.get("item1"));
+    }
+
+    @Test
     void capturesMixedGreedyAndNamedParams() {
         Map<String, String> p = ApiGatewayExecuteController.extractV2PathParams(
                 "ANY /users/{user}/files/{path+}", "/users/u-1/files/a/b/c");

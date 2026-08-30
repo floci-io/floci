@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
+import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -938,6 +939,126 @@ public class SesController {
             String tenantName = stringMemberOrAbsent(request, "TenantName");
             sesService.deleteTenant(tenantName, region);
             return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    // Phase 2: tenant→resource associations. AWS's wire format for ResourceType — in responses and as
+    // the RESOURCE_TYPE filter value — is the ARN segment (identity / configuration-set / template),
+    // not the SDK's EMAIL_IDENTITY-style enum spelling; real AWS rejects the enum spelling.
+
+    @POST
+    @Path("/tenants/resources")
+    public Response createTenantResourceAssociation(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            String resourceArn = stringMemberOrAbsent(request, "ResourceArn");
+            sesService.createTenantResourceAssociation(tenantName, resourceArn,
+                    regionResolver.getAccountId(), region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    @POST
+    @Path("/tenants/resources/delete")
+    public Response deleteTenantResourceAssociation(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            String resourceArn = stringMemberOrAbsent(request, "ResourceArn");
+            sesService.deleteTenantResourceAssociation(tenantName, resourceArn,
+                    regionResolver.getAccountId(), region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    @POST
+    @Path("/tenants/resources/list")
+    public Response listTenantResources(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            String resourceTypeFilter = null;
+            JsonNode filter = request.path("Filter");
+            if (!filter.isMissingNode() && !filter.isNull()) {
+                if (!filter.isObject()) {
+                    throw new AwsException("SerializationException", null, 400);
+                }
+                resourceTypeFilter = stringMemberOrAbsent(filter, "RESOURCE_TYPE");
+            }
+            Integer pageSize = intMemberOrAbsent(request, "PageSize");
+            String nextToken = stringMemberOrAbsent(request, "NextToken");
+            List<TenantResourceAssociation> associations = sesService.listTenantResources(
+                    tenantName, resourceTypeFilter, pageSize, nextToken, region);
+            ObjectNode result = objectMapper.createObjectNode();
+            // AWS renders NextToken as an explicit null on the last (here: only) page.
+            result.putNull("NextToken");
+            ArrayNode resources = result.putArray("TenantResources");
+            for (TenantResourceAssociation a : associations) {
+                ObjectNode item = resources.addObject();
+                item.put("ResourceArn", a.resourceArn());
+                item.put("ResourceType", a.resourceType());
+            }
+            return Response.ok(result).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    @POST
+    @Path("/resources/tenants/list")
+    public Response listResourceTenants(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String resourceArn = stringMemberOrAbsent(request, "ResourceArn");
+            Integer pageSize = intMemberOrAbsent(request, "PageSize");
+            String nextToken = stringMemberOrAbsent(request, "NextToken");
+            List<TenantResourceAssociation> associations = sesService.listResourceTenants(
+                    resourceArn, pageSize, nextToken, regionResolver.getAccountId(), region);
+            ObjectNode result = objectMapper.createObjectNode();
+            result.putNull("NextToken");
+            ArrayNode tenants = result.putArray("ResourceTenants");
+            for (TenantResourceAssociation a : associations) {
+                // ResourceTenantMetadata has no TenantArn (probe-confirmed).
+                ObjectNode item = tenants.addObject();
+                item.put("TenantName", a.tenantName());
+                item.put("TenantId", a.tenantId());
+                item.put("ResourceArn", a.resourceArn());
+                if (a.associatedTimestamp() != null) {
+                    item.put("AssociatedTimestamp", a.associatedTimestamp().toEpochMilli() / 1000.0);
+                }
+            }
+            return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
@@ -2139,6 +2260,20 @@ public class SesController {
             throw new AwsException("SerializationException", null, 400);
         }
         return n.textValue();
+    }
+
+    // Integer variant of stringMemberOrAbsent: absent/null returns null, non-integral JSON is
+    // rejected rather than coerced, and so is an integral value outside the int range (intValue
+    // would silently truncate it).
+    private static Integer intMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode n = parent.path(field);
+        if (n.isMissingNode() || n.isNull()) {
+            return null;
+        }
+        if (!n.isIntegralNumber() || !n.canConvertToInt()) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return n.intValue();
     }
 
     // Parse an AWS FeatureStatus (ENABLED/DISABLED) field. A required member that is absent, or any

@@ -263,6 +263,7 @@ public interface EmulatorConfig {
         ElastiCacheStorageConfig elasticache();
         MemoryDbStorageConfig memorydb();
         RdsStorageConfig rds();
+        RedshiftStorageConfig redshift();
         Ec2StorageConfig ec2();
         NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
@@ -399,6 +400,10 @@ public interface EmulatorConfig {
 
         @WithDefault("5000")
         long flushIntervalMs();
+    }
+
+    interface RedshiftStorageConfig {
+        Optional<String> mode();
     }
 
     interface RdsStorageConfig {
@@ -609,6 +614,7 @@ public interface EmulatorConfig {
         ElastiCacheServiceConfig elasticache();
         MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
+        RedshiftServiceConfig redshift();
         RdsDataServiceConfig rdsData();
         EventBridgeServiceConfig eventbridge();
         CloudMapServiceConfig cloudmap();
@@ -658,6 +664,7 @@ public interface EmulatorConfig {
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
         ComprehendServiceConfig comprehend();
+        RekognitionServiceConfig rekognition();
         PricingServiceConfig pricing();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
@@ -1094,6 +1101,16 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
     }
 
+    interface RedshiftServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+        @WithDefault("5439")
+        int defaultPort();
+        @WithDefault("postgres:15-alpine")
+        String imageVersion();
+        Optional<String> dockerNetwork();
+    }
+
     interface RdsServiceConfig {
         String DEFAULT_POSTGRES_IMAGE = "postgres:16-alpine";
         String DEFAULT_MYSQL_IMAGE = "mysql:8.0";
@@ -1385,6 +1402,8 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean scpEnforcementEnabled();
+
+        Optional<String> managementAccountEmail();
     }
 
     interface AthenaServiceConfig {
@@ -1545,6 +1564,11 @@ public interface EmulatorConfig {
     }
 
     interface ComprehendServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RekognitionServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

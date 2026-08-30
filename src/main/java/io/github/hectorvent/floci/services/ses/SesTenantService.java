@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
+import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -28,8 +29,9 @@ import java.util.regex.Pattern;
  * built here carry only region and tenant name. The caller's account is used for the ARN (and the
  * AlreadyExists message), not the key.
  *
- * <p>This is Phase 1 (tenant CRUD); resource associations, tenant suppression, and tenant-scoped
- * sending are separate follow-ups.
+ * <p>Phase 2 adds tenant→resource associations, owned here as well ({@code associationStore}); the
+ * facade validates that the referenced resource exists before delegating. Tenant suppression and
+ * tenant-scoped sending are separate follow-ups.
  */
 @ApplicationScoped
 public class SesTenantService {
@@ -40,7 +42,26 @@ public class SesTenantService {
     private static final Pattern TENANT_NAME_CHARS = Pattern.compile("[A-Za-z0-9_-]+");
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
+    // The wire values for ResourceType — the ARN segment, not the SDK enum spelling. Real AWS both
+    // returns these and requires them as Filter values; the SDK's EMAIL_IDENTITY-style enum constants
+    // are rejected by the service (probe-confirmed 2026-08-28).
+    static final String RESOURCE_TYPE_IDENTITY = "identity";
+    static final String RESOURCE_TYPE_CONFIGURATION_SET = "configuration-set";
+    static final String RESOURCE_TYPE_TEMPLATE = "template";
+    private static final List<String> SUPPORTED_RESOURCE_TYPES =
+            List.of(RESOURCE_TYPE_IDENTITY, RESOURCE_TYPE_CONFIGURATION_SET, RESOURCE_TYPE_TEMPLATE);
+
+    /**
+     * A parsed, format-validated SES resource ARN for the association operations; {@code type} is one
+     * of the wire resource types. Deliberately separate from the tag dispatch's {@code parseSesArn}
+     * in {@code SesService}: the association APIs have their own probe-confirmed error messages and
+     * validation precedence (type before region before account), so the parsers must not be merged.
+     */
+    record AssociationResource(String type, String name, String arn) {
+    }
+
     private final StorageBackend<String, Tenant> tenantStore;
+    private final StorageBackend<String, TenantResourceAssociation> associationStore;
     private final Clock clock;
     private final SecureRandom random;
     // Serializes the per-name check-then-put so concurrent creates for the same tenant can't both
@@ -50,11 +71,17 @@ public class SesTenantService {
     @Inject
     public SesTenantService(StorageFactory storageFactory, Clock clock) {
         this(storageFactory.create("ses", "ses-tenants.json",
-                new TypeReference<Map<String, Tenant>>() {}), clock, new SecureRandom());
+                        new TypeReference<Map<String, Tenant>>() {}),
+                storageFactory.create("ses", "ses-tenant-associations.json",
+                        new TypeReference<Map<String, TenantResourceAssociation>>() {}),
+                clock, new SecureRandom());
     }
 
-    SesTenantService(StorageBackend<String, Tenant> tenantStore, Clock clock, SecureRandom random) {
+    SesTenantService(StorageBackend<String, Tenant> tenantStore,
+                     StorageBackend<String, TenantResourceAssociation> associationStore,
+                     Clock clock, SecureRandom random) {
         this.tenantStore = tenantStore;
+        this.associationStore = associationStore;
         this.clock = clock;
         this.random = random;
     }
@@ -101,8 +128,16 @@ public class SesTenantService {
         validateTenantName(tenantName);
         String key = tenantKey(region, tenantName);
         synchronized (tenantMutationLock) {
-            if (tenantStore.get(key).isEmpty()) {
-                throw tenantNotFound(tenantName);
+            Tenant tenant = tenantStore.get(key).orElseThrow(() -> tenantNotFound(tenantName));
+            // AWS cascades: deleting a tenant silently removes its resource associations
+            // (probe-confirmed 2026-08-28). Keys carry the TenantId, so a recreated same-name tenant
+            // never sees the old associations. The associations go first — persistent/wal backends
+            // apply each deletion durably, so a crash mid-cascade must leave the tenant record (a
+            // retryable DeleteTenant) rather than orphan associations no API call can remove.
+            String assocPrefix = associationKeyPrefix(region, tenant.tenantId());
+            for (String assocKey : associationStore.keys().stream()
+                    .filter(k -> k.startsWith(assocPrefix)).toList()) {
+                associationStore.delete(assocKey);
             }
             tenantStore.delete(key);
         }
@@ -113,6 +148,200 @@ public class SesTenantService {
      * existence through the facade without duplicating the key derivation. */
     public Optional<Tenant> find(String tenantName, String region) {
         return tenantStore.get(tenantKey(region, tenantName));
+    }
+
+    // ──────────────────────── Resource associations (Phase 2) ────────────────────────
+    // Behavior and messages probe-confirmed against real AWS us-east-1, 2026-08-28.
+
+    /**
+     * Resolves the tenant for the association operations. Unlike the CRUD operations, the association
+     * request shapes carry no Smithy min-length on TenantName, so an empty value gets the
+     * service-level message instead of the Smithy one.
+     */
+    public Tenant tenantForAssociation(String tenantName, String region) {
+        if (tenantName == null) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (tenantName.isBlank()) {
+            throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
+        }
+        return tenantStore.get(tenantKey(region, tenantName))
+                .orElseThrow(() -> tenantNotFound(tenantName));
+    }
+
+    /**
+     * Parses and format-validates a resource ARN for the association operations. Check order matches
+     * the observed AWS precedence: not an ARN at all, then not an SES ARN, then an unsupported SES
+     * resource type, then region and account mismatches. Existence is the facade's job.
+     */
+    public static AssociationResource parseResourceArn(String resourceArn, String accountId, String region) {
+        if (resourceArn == null) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'resourceArn' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        String[] parts = resourceArn.split(":", 6);
+        if (parts.length < 6 || !"arn".equals(parts[0])) {
+            throw new AwsException("BadRequestException",
+                    "Provided resource identifier is not an SES resource", 400);
+        }
+        if (!"ses".equals(parts[2])) {
+            throw new AwsException("BadRequestException",
+                    "Provided ARN is not in SES resource ARN format", 400);
+        }
+        String resource = parts[5];
+        int slash = resource.indexOf('/');
+        String type = slash < 0 ? resource : resource.substring(0, slash);
+        if (!SUPPORTED_RESOURCE_TYPES.contains(type)) {
+            throw new AwsException("BadRequestException", "Unsupported resource type: " + type, 400);
+        }
+        if (slash < 0 || slash == resource.length() - 1) {
+            // A supported type with no name segment can never reference a resource; reject it as
+            // malformed rather than letting it 404 with an empty name.
+            throw new AwsException("BadRequestException",
+                    "Provided resource identifier is not an SES resource", 400);
+        }
+        if (!region.equals(parts[3])) {
+            throw new AwsException("BadRequestException",
+                    "Resource <" + resourceArn + "> must be in the same region", 400);
+        }
+        if (!accountId.equals(parts[4])) {
+            throw new AwsException("BadRequestException",
+                    "Resource <" + resourceArn + "> must be in the same account", 400);
+        }
+        return new AssociationResource(type, resource.substring(slash + 1), resourceArn);
+    }
+
+    /**
+     * Creates the association under the shared lock. The tenant is revalidated (a concurrent
+     * {@code DeleteTenant} may have cascaded since the caller resolved it) and
+     * {@code resourceExistenceCheck} — the facade's throwing existence check — runs inside the lock
+     * too, so a backing resource cannot slip through {@link #deleteBackingResource} concurrently and
+     * leave an association pointing at a deleted resource.
+     */
+    public void associate(Tenant tenant, AssociationResource ref, String region,
+                          Runnable resourceExistenceCheck) {
+        String key = associationKey(region, tenant.tenantId(), ref);
+        synchronized (tenantMutationLock) {
+            Tenant current = tenantStore.get(tenantKey(region, tenant.tenantName())).orElse(null);
+            if (current == null || !tenant.tenantId().equals(current.tenantId())) {
+                throw tenantNotFound(tenant.tenantName());
+            }
+            resourceExistenceCheck.run();
+            if (associationStore.get(key).isPresent()) {
+                // "Resources" is AWS's own grammar for this message.
+                throw new AwsException("AlreadyExistsException",
+                        "Resources " + ref.arn() + " has already been associated with tenant "
+                                + tenant.tenantName(), 400);
+            }
+            associationStore.put(key, new TenantResourceAssociation(tenant.tenantName(),
+                    tenant.tenantId(), ref.arn(), ref.type(), Instant.now(clock)));
+        }
+        LOG.infov("Associated SES resource {0} with tenant {1} in region {2}",
+                ref.arn(), tenant.tenantName(), region);
+    }
+
+    /**
+     * Runs a backing-resource deletion under the same lock as association creation: AWS refuses to
+     * delete an identity, configuration set, or template that still has tenant associations, and the
+     * shared lock keeps that guard atomic with {@link #associate}'s existence check.
+     */
+    public void deleteBackingResource(String resourceType, String resourceName, String region,
+                                      Runnable deleteAction) {
+        synchronized (tenantMutationLock) {
+            findAssociationForResource(resourceType, resourceName, region).ifPresent(a -> {
+                throw new AwsException("BadRequestException",
+                        "Cannot delete <" + a.resourceArn() + "> because it has tenant associations. "
+                                + "Remove all tenant associations and try again.", 400);
+            });
+            deleteAction.run();
+        }
+    }
+
+    /** Removing an association that does not exist is a silent success on AWS. */
+    public void disassociate(Tenant tenant, AssociationResource ref, String region) {
+        associationStore.delete(associationKey(region, tenant.tenantId(), ref));
+        LOG.infov("Disassociated SES resource {0} from tenant {1} in region {2}",
+                ref.arn(), tenant.tenantName(), region);
+    }
+
+    /** AWS returns the tenant's resources ordered by ARN. */
+    public List<TenantResourceAssociation> listTenantResources(Tenant tenant, String typeFilter,
+                                                               String region) {
+        String prefix = associationKeyPrefix(region, tenant.tenantId());
+        return associationStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(a -> typeFilter == null || typeFilter.equals(a.resourceType()))
+                .sorted(Comparator.comparing(TenantResourceAssociation::resourceArn,
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    // The resource lookups match on the stored record, not on a key suffix: a resource name may
+    // itself contain the "::" delimiter (Floci barely restricts identity and template names), so a
+    // suffix match on the key could alias one resource's associations to another's.
+
+    /** AWS returns a resource's tenants ordered by association time. */
+    public List<TenantResourceAssociation> listResourceTenants(AssociationResource ref, String region) {
+        String regionPrefix = "tenantAssoc::" + region + "::";
+        return associationStore.scan(k -> k.startsWith(regionPrefix)).stream()
+                .filter(a -> ref.arn().equals(a.resourceArn()))
+                .sorted(Comparator.comparing(TenantResourceAssociation::associatedTimestamp,
+                                Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(TenantResourceAssociation::tenantName,
+                                Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    /**
+     * Finds any association for the given resource, for the facade's delete guards: AWS refuses to
+     * delete an identity, configuration set, or template that still has tenant associations.
+     */
+    public Optional<TenantResourceAssociation> findAssociationForResource(String resourceType,
+                                                                          String resourceName,
+                                                                          String region) {
+        String regionPrefix = "tenantAssoc::" + region + "::";
+        return associationStore.scan(k -> k.startsWith(regionPrefix)).stream()
+                .filter(a -> resourceType.equals(a.resourceType())
+                        && resourceName.equals(resourceNameFromArn(a.resourceArn())))
+                .findFirst();
+    }
+
+    // Stored ARNs were validated by parseResourceArn, so the resource part always has a name segment.
+    private static String resourceNameFromArn(String arn) {
+        String resource = arn.split(":", 6)[5];
+        return resource.substring(resource.indexOf('/') + 1);
+    }
+
+    public static void validateResourceTypeFilter(String value) {
+        if (value != null && !SUPPORTED_RESOURCE_TYPES.contains(value)) {
+            throw new AwsException("BadRequestException",
+                    "Invalid resource type " + value + " specified.", 400);
+        }
+    }
+
+    /**
+     * The list operations return everything in one page, so any client-supplied NextToken is invalid —
+     * which is also what AWS answers for a token it cannot decrypt. PageSize is still range-checked.
+     */
+    public static void validateListPaging(Integer pageSize, String nextToken) {
+        if (pageSize != null && pageSize < 1) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value '" + pageSize + "' at 'pageSize' failed to "
+                            + "satisfy constraint: Member must have value greater than or equal to 1", 400);
+        }
+        if (nextToken != null) {
+            throw new AwsException("BadRequestException", "Invalid Next Token", 400);
+        }
+    }
+
+    private static String associationKey(String region, String tenantId, AssociationResource ref) {
+        return associationKeyPrefix(region, tenantId) + ref.type() + "::" + ref.name();
+    }
+
+    private static String associationKeyPrefix(String region, String tenantId) {
+        return "tenantAssoc::" + region + "::" + tenantId + "::";
     }
 
     // Validation order and messages verified against real AWS (2026-08-22): an empty string is the
