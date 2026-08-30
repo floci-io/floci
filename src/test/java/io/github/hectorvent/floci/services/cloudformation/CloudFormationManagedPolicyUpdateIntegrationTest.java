@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -12,6 +14,8 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * Regression for the LZA OperationsStack second-pass failure: a stack UPDATE whose template
@@ -33,7 +37,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     @Inject
     CloudFormationService cloudFormationService;
 
-    @Inject
+    @InjectSpy
     IamService iamService;
 
     private String iam(String action, String... kv) {
@@ -464,5 +468,31 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<DefaultVersionId>v1</DefaultVersionId>"));
+    }
+
+    @Test
+    void failedCompensatingReattachDuringUpdateMarksUpdateRollbackFailed() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-restorefail-" + suffix;
+        String policyName = "mp-restorefail-" + suffix;
+        String oldRole = "mp-restorefail-old-" + suffix;
+        String badRole = "mp-restorefail-missing-" + suffix;
+
+        iam("CreateRole", "RoleName", oldRole, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+
+        createStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:GetObject", oldRole));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        // Retargeting to a role that does not exist fails the attach loop after the obsolete-role
+        // detach loop has already detached oldRole. The compensating reattach that restore()
+        // performs for oldRole is made to fail here too, so cleanup itself does not complete —
+        // the stack must report UPDATE_ROLLBACK_FAILED, not silently claim UPDATE_ROLLBACK_COMPLETE.
+        doThrow(new AwsException("ServiceFailure", "simulated reattach failure", 500))
+                .when(iamService).attachRolePolicy(eq(oldRole), eq(policyArn(policyName)));
+
+        updateStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:PutObject", badRole));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_FAILED");
     }
 }

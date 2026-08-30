@@ -3380,6 +3380,16 @@ public class CloudFormationResourceProvisioner {
         if (cleanupSucceeded && createdPolicy) {
             r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
         }
+        if (!cleanupSucceeded) {
+            // A compensating call above failed (added as a suppressed exception on `failure`) —
+            // the policy's version/attachments were only partially restored. Surface that so the
+            // stack reports UPDATE_ROLLBACK_FAILED instead of the caller assuming this resource is
+            // fully restored just because UPDATE_ROLLBACK_FAILURE_ATTR was never set.
+            String reason = failure.getMessage() != null
+                    ? failure.getMessage()
+                    : failure.getClass().getSimpleName();
+            r.getAttributes().put(UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+        }
     }
 
     // ── IAM Instance Profile ──────────────────────────────────────────────────
