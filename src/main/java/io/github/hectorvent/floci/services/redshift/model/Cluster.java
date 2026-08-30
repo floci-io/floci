@@ -37,6 +37,23 @@ public class Cluster {
     public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
     public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) { this.vpcSecurityGroupIds = vpcSecurityGroupIds; }
 
+    // Real backend address of this cluster's PostgreSQL container. `endpoint` now points at the
+    // auth proxy, not the container, so the container address is kept here for proxy wiring and
+    // for restarting the proxy after a reboot or an adopt-on-startup.
+    private String containerHost = null;
+    private int containerPort = 0;
+
+    // Host port the cluster's auth proxy binds. Kept stable across reboot and adopt so the
+    // advertised endpoint does not change.
+    private int proxyPort = 0;
+
+    public String getContainerHost() { return containerHost; }
+    public void setContainerHost(String containerHost) { this.containerHost = containerHost; }
+    public int getContainerPort() { return containerPort; }
+    public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+    public int getProxyPort() { return proxyPort; }
+    public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
     private Map<String, String> tags = new LinkedHashMap<>();
 
     public Map<String, String> getTags() { return tags; }
