@@ -127,13 +127,12 @@ class SesTenantServiceTest {
 
     @Test
     void getAndDelete_rejectMalformedName() {
-        // A required, min-length-1 member: a blank name is a BadRequest, not a NotFound.
-        AwsException g = assertThrows(AwsException.class, () -> service.getTenant("", REGION));
-        assertEquals("BadRequestException", g.getErrorCode());
-        AwsException d = assertThrows(AwsException.class, () -> service.deleteTenant("   ", REGION));
-        assertEquals("BadRequestException", d.getErrorCode());
-        // Unlike CreateTenant, an absent name collapses to the service-level message here
-        // (probe-confirmed 2026-08-30).
+        // Unlike CreateTenant, both an absent and an empty name collapse to the service-level
+        // message here (probe-confirmed 2026-08-30) — the Smithy wordings are CreateTenant-only.
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class, () -> service.getTenant("", REGION)).getMessage());
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class, () -> service.deleteTenant("   ", REGION)).getMessage());
         assertEquals("TenantName cannot be empty",
                 assertThrows(AwsException.class, () -> service.getTenant(null, REGION)).getMessage());
         assertEquals("TenantName cannot be empty",

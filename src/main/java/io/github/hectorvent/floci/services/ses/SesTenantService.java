@@ -456,13 +456,13 @@ public class SesTenantService {
         return new TenantSuppressionAttributes(List.copyOf(suppressedReasons), suppressionScope);
     }
 
-    // Validation order and messages verified against real AWS (2026-08-22 and 2026-08-30): an empty
-    // string is the Smithy min-length violation, a whitespace-only value is "cannot be empty", then
-    // length, then the character-set rule. An ABSENT name gets the Smithy not-null message only on
-    // CreateTenant; every other tenant operation collapses it to "TenantName cannot be empty".
-    private static void validateTenantName(String name, boolean smithyNotNull) {
+    // Validation order and messages verified against real AWS (2026-08-22 and 2026-08-30): the two
+    // Smithy wordings (not-null for an absent name, min-length for an empty one) exist ONLY on
+    // CreateTenant; every other tenant operation collapses both to "TenantName cannot be empty".
+    // Then a whitespace-only value is "cannot be empty", then length, then the character-set rule.
+    private static void validateTenantName(String name, boolean createTenantSmithyVariants) {
         if (name == null) {
-            if (smithyNotNull) {
+            if (createTenantSmithyVariants) {
                 throw new AwsException("BadRequestException",
                         "1 validation error detected: Value at 'tenantName' failed to satisfy "
                                 + "constraint: Member must not be null", 400);
@@ -470,9 +470,12 @@ public class SesTenantService {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         if (name.isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1", 400);
+            if (createTenantSmithyVariants) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'tenantName' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1", 400);
+            }
+            throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         if (name.isBlank()) {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
