@@ -11,6 +11,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -109,7 +110,7 @@ class RedshiftAuthProxyTest {
 
         proxy.updateMasterPassword("rotated");
 
-        java.lang.reflect.Field f = RedshiftAuthProxy.class.getDeclaredField("masterPassword");
+        Field f = RedshiftAuthProxy.class.getDeclaredField("masterPassword");
         f.setAccessible(true);
         assertEquals("rotated", f.get(proxy));
     }

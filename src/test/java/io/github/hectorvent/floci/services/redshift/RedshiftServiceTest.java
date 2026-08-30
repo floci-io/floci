@@ -15,6 +15,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -66,7 +70,7 @@ class RedshiftServiceTest {
         when(servicesConfig.redshift()).thenReturn(redshiftConfig);
         when(redshiftConfig.proxyBasePort()).thenReturn(7100);
         when(redshiftConfig.proxyMaxPort()).thenReturn(7199);
-        when(redshiftConfig.endpointHost()).thenReturn(java.util.Optional.empty());
+        when(redshiftConfig.endpointHost()).thenReturn(Optional.empty());
 
         when(sf.<Cluster>create(eq("redshift"), eq("redshift-clusters.json"), any())).thenReturn(clusterBackend);
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
@@ -81,7 +85,7 @@ class RedshiftServiceTest {
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
     private static String dumpPath(String snapshotId) {
-        return java.nio.file.Paths.get("target/test-data", "redshift-dumps", "111111111111", snapshotId + ".sql")
+        return Paths.get("target/test-data", "redshift-dumps", "111111111111", snapshotId + ".sql")
                 .toAbsolutePath().normalize().toString();
     }
 
@@ -271,10 +275,10 @@ class RedshiftServiceTest {
         when(cm.start(eq("111111111111"), eq("my-cluster"), eq("admin"), eq("pw")))
                 .thenReturn(new RedshiftContainerHandle("c-rebooted", "my-cluster", "localhost", 5555));
         doAnswer(invocation -> {
-            java.nio.file.Path dumpFile = invocation.getArgument(3);
-            java.nio.file.Files.writeString(dumpFile, "-- dump");
+            Path dumpFile = invocation.getArgument(3);
+            Files.writeString(dumpFile, "-- dump");
             return null;
-        }).when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        }).when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
 
         Cluster rebooted = service.rebootCluster("my-cluster");
 
@@ -284,7 +288,7 @@ class RedshiftServiceTest {
         assertTrue(rebooted.getEndpoint().getPort() >= 7100 && rebooted.getEndpoint().getPort() <= 7199);
         verify(cm).stop("111111111111", "my-cluster");
         verify(cm).start("111111111111", "my-cluster", "admin", "pw");
-        verify(cm).restoreSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).restoreSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
     }
 
     @Test
@@ -330,7 +334,7 @@ class RedshiftServiceTest {
 
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.empty());
-        doNothing().when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
 
         Snapshot snapshot = service.createSnapshot("my-snapshot", "my-cluster");
         assertNotNull(snapshot);
@@ -346,7 +350,7 @@ class RedshiftServiceTest {
         assertTrue(snapshot.getSqlDump().endsWith("my-snapshot.sql"));
         verify(snapshotBackend).put(eq("my-snapshot"), any(Snapshot.class));
         verify(snapshotBackend).flush();
-        verify(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
     }
 
     @Test
@@ -386,7 +390,7 @@ class RedshiftServiceTest {
             assertEquals("InvalidParameterValue", ex.getErrorCode(), id);
             assertEquals(400, ex.getHttpStatus(), id);
         }
-        verify(cm, never()).takeSnapshot(any(), any(), any(), any(java.nio.file.Path.class));
+        verify(cm, never()).takeSnapshot(any(), any(), any(), any(Path.class));
         verify(snapshotBackend, never()).put(anyString(), any(Snapshot.class));
     }
 
@@ -480,7 +484,7 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("password123")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertNotNull(cluster);
@@ -493,7 +497,7 @@ class RedshiftServiceTest {
 
         // Restore must use the source cluster's actual password, not a hardcoded one
         verify(cm).start("111111111111", "restored-cluster", "admin", "password123");
-        verify(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
         verify(clusterBackend, times(2)).put(eq("restored-cluster"), any(Cluster.class));
         verify(clusterBackend, times(2)).flush();
     }
@@ -509,7 +513,7 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("original-secret")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertEquals("original-secret", cluster.getMasterPassword());
@@ -525,7 +529,7 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("admin")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertEquals("admin", cluster.getMasterPassword());
@@ -726,7 +730,7 @@ class RedshiftServiceTest {
     @Test
     void testDescribeClusterParametersReturnsStoredValues() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
-        group.setParameters(new java.util.ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
+        group.setParameters(new ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
         List<Parameter> params = service.describeClusterParameters("my-pg");
@@ -760,7 +764,7 @@ class RedshiftServiceTest {
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         service.createTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster",
-                java.util.Map.of("env", "test"));
+                Map.of("env", "test"));
 
         assertEquals("test", cluster.getTags().get("env"));
         verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
@@ -770,31 +774,31 @@ class RedshiftServiceTest {
     void testDeleteTagsForCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
-        cluster.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "test", "team", "data")));
+        cluster.setTags(new LinkedHashMap<>(Map.of("env", "test", "team", "data")));
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
-        service.deleteTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster", java.util.List.of("env"));
+        service.deleteTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster", List.of("env"));
 
-        assertEquals(java.util.Map.of("team", "data"), cluster.getTags());
+        assertEquals(Map.of("team", "data"), cluster.getTags());
     }
 
     @Test
     void testCreateTagsRejectsNonArnResourceName() {
         assertThrows(AwsException.class, () ->
-                service.createTags("my-cluster", java.util.Map.of("env", "test")));
+                service.createTags("my-cluster", Map.of("env", "test")));
     }
 
     @Test
     void testCreateTagsRejectsUnknownResourceType() {
         assertThrows(AwsException.class, () ->
-                service.createTags("arn:aws:redshift:us-east-1:111111111111:reservednode:foo", java.util.Map.of("env", "test")));
+                service.createTags("arn:aws:redshift:us-east-1:111111111111:reservednode:foo", Map.of("env", "test")));
     }
 
     @Test
     void testDescribeTagsForSpecificResource() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
-        cluster.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "test")));
+        cluster.setTags(new LinkedHashMap<>(Map.of("env", "test")));
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         List<RedshiftService.TaggedResource> tagged =
@@ -810,14 +814,14 @@ class RedshiftServiceTest {
     void testDescribeTagsScansAllResourcesOfType() {
         Cluster a = new Cluster();
         a.setClusterIdentifier("cluster-a");
-        a.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "prod")));
+        a.setTags(new LinkedHashMap<>(Map.of("env", "prod")));
         Cluster b = new Cluster();
         b.setClusterIdentifier("cluster-b");
-        b.setTags(new java.util.LinkedHashMap<>());
-        when(clusterBackend.scan(any())).thenReturn(java.util.List.of(a, b));
-        when(snapshotBackend.scan(any())).thenReturn(java.util.List.of());
-        when(parameterGroupBackend.scan(any())).thenReturn(java.util.List.of());
-        when(subnetGroupBackend.scan(any())).thenReturn(java.util.List.of());
+        b.setTags(new LinkedHashMap<>());
+        when(clusterBackend.scan(any())).thenReturn(List.of(a, b));
+        when(snapshotBackend.scan(any())).thenReturn(List.of());
+        when(parameterGroupBackend.scan(any())).thenReturn(List.of());
+        when(subnetGroupBackend.scan(any())).thenReturn(List.of());
 
         List<RedshiftService.TaggedResource> tagged = service.describeTags(null, "cluster", null);
 

@@ -11,6 +11,10 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
+import java.util.Objects;
+import org.awaitility.Awaitility;
+import org.awaitility.core.ConditionTimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -37,12 +41,12 @@ class RedshiftProxyIntegrationTest {
 
     private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
         try {
-            return org.awaitility.Awaitility.await()
-                    .atMost(java.time.Duration.ofSeconds(30))
-                    .pollInterval(java.time.Duration.ofMillis(500))
+            return Awaitility.await()
+                    .atMost(Duration.ofSeconds(30))
+                    .pollInterval(Duration.ofMillis(500))
                     .ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(jdbcUrl(cluster), username, password), java.util.Objects::nonNull);
-        } catch (org.awaitility.core.ConditionTimeoutException e) {
+                    .until(() -> DriverManager.getConnection(jdbcUrl(cluster), username, password), Objects::nonNull);
+        } catch (ConditionTimeoutException e) {
             return DriverManager.getConnection(jdbcUrl(cluster), username, password); // throw original
         }
     }
