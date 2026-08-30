@@ -527,9 +527,11 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         var history = new ArrayList<HistoryEvent>();
         var startEvent = new HistoryEvent();
         startEvent.setId(1L);
+        startEvent.setPreviousEventId(0L);
         startEvent.setType("ExecutionStarted");
         startEvent.setDetails(Map.of("input", input != null ? input : "{}",
-                                     "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : ""));
+                                     "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : "",
+                                     "inputDetails", Map.of("truncated", false)));
         history.add(startEvent);
         historyCache.put(arn, history);
 
@@ -579,9 +581,11 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         var history = new ArrayList<HistoryEvent>();
         var startEvent = new HistoryEvent();
         startEvent.setId(1L);
+        startEvent.setPreviousEventId(0L);
         startEvent.setType("ExecutionStarted");
         startEvent.setDetails(Map.of("input", input != null ? input : "{}",
-                                     "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : ""));
+                                     "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : "",
+                                     "inputDetails", Map.of("truncated", false)));
         history.add(startEvent);
 
         aslExecutor.executeSync(sm, exec, history, (updatedExec, updatedHistory) -> {
@@ -668,6 +672,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         List<HistoryEvent> history = historyCache.getOrDefault(arn, new ArrayList<>());
         HistoryEvent event = new HistoryEvent();
         event.setId(history.size() + 1L);
+        event.setPreviousEventId((long) history.size());
         event.setType("ExecutionAborted");
         Map<String, Object> details = new HashMap<>();
         if (error != null) details.put("error", error);

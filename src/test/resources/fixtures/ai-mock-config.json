@@ -1,0 +1,42 @@
+{
+  "comprehend": {
+    "I absolutely love this product!": {
+      "DetectSentiment": {
+        "Sentiment": "POSITIVE",
+        "SentimentScore": {
+          "Positive": 0.98,
+          "Negative": 0.01,
+          "Neutral": 0.01,
+          "Mixed": 0.0
+        }
+      }
+    }
+  },
+  "textract": {
+    "mock-bucket/invoice.pdf": {
+      "DetectDocumentText": {
+        "DocumentMetadata": { "Pages": 1 },
+        "Blocks": [
+          {
+            "BlockType": "LINE",
+            "Id": "mock-line-1",
+            "Confidence": 99.5,
+            "Text": "Invoice Total: $42.00"
+          }
+        ],
+        "DetectDocumentTextModelVersion": "1.0"
+      }
+    }
+  },
+  "rekognition": {
+    "mock-bucket/cat.jpg": {
+      "DetectLabels": {
+        "Labels": [
+          { "Name": "Cat", "Confidence": 97.2 },
+          { "Name": "Animal", "Confidence": 98.1 }
+        ],
+        "LabelModelVersion": "1.0"
+      }
+    }
+  }
+}

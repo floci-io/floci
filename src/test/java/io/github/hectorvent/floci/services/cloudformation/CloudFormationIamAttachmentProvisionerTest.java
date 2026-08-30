@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
@@ -47,14 +46,11 @@ class CloudFormationIamAttachmentProvisionerTest {
     @BeforeEach
     void setUp() {
         iamService = mock(IamService.class);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null, iamService, null, null, null, null,
-                null, null, null, null, null, null,
-                mapper,
-                null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null,
-                null, null,
-                new CloudFormationResourceRegistry(List.of(new IamRoleCfnProvisioner(iamService))), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .iam(iamService)
+                .objectMapper(mapper)
+                .provisioners(new IamRoleCfnProvisioner(iamService))
+                .build();
     }
 
     @Test

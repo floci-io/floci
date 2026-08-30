@@ -3,12 +3,10 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -41,14 +39,10 @@ class CloudFormationLogGroupProvisionerTest {
     @BeforeEach
     void setUp() {
         logsService = mock(CloudWatchLogsService.class);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null,
-                mapper,
-                null, null, null, null, null, null, null,
-                null, null, logsService, null, null, null, null,
-                null, null,
-                new CloudFormationResourceRegistry(List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .objectMapper(mapper)
+                .logs(logsService)
+                .build();
     }
 
     @Test

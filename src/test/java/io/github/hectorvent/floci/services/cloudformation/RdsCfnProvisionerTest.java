@@ -64,14 +64,12 @@ class RdsCfnProvisionerTest {
         rdsService = mock(RdsService.class);
         secretsManagerService = mock(SecretsManagerService.class);
         ssmService = mock(SsmService.class);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null, null, ssmService, null, secretsManagerService, null,
-                null, null, null, null, null, null,
-                mapper,
-                null, null, null, null, null, null, null,
-                rdsService, null, null, null, null, null, null,
-                null, null,
-                new io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry(java.util.List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .ssm(ssmService)
+                .secretsManager(secretsManagerService)
+                .objectMapper(mapper)
+                .rds(rdsService)
+                .build();
     }
 
     private CloudFormationTemplateEngine engine() {

@@ -76,6 +76,7 @@ class AslExecutorEcsRunTaskModeTest {
                 new JsonataEvaluator(objectMapper),
                 mock(Instance.class),
                 mock(EmulatorConfig.class),
+                null,
                 null);
     }
 

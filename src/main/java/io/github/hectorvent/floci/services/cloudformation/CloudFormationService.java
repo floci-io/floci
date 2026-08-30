@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,6 +63,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private final CloudFormationResourceProvisioner provisioner;
     private final S3Service s3Service;
+    private final SsmService ssmService;
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -78,11 +80,12 @@ public class CloudFormationService implements ResourceProvider {
 
     @Inject
     public CloudFormationService(CloudFormationResourceProvisioner provisioner, S3Service s3Service,
-                                 ObjectMapper objectMapper, EmulatorConfig config,
+                                 SsmService ssmService, ObjectMapper objectMapper, EmulatorConfig config,
                                  RegionResolver regionResolver, Clock clock,
                                  StorageFactory storageFactory) {
         this.provisioner = provisioner;
         this.s3Service = s3Service;
+        this.ssmService = ssmService;
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -149,6 +152,16 @@ public class CloudFormationService implements ResourceProvider {
                 .filter(s -> region.equals(s.getRegion()))
                 .sorted(Comparator.comparing(Stack::getCreationTime))
                 .toList();
+    }
+
+    /**
+     * The stack's current parameter values, or an empty map if it does not exist (yet). Used to
+     * resolve {@code UsePreviousValue} on an update before the stack lookup that
+     * {@code createChangeSet}/{@code executeChangeSet} would otherwise perform.
+     */
+    public Map<String, String> currentParameters(String stackName, String region) {
+        Stack stack = resolveStack(stackName, region);
+        return stack != null ? stack.getParameters() : Map.of();
     }
 
     // ── CreateChangeSet ───────────────────────────────────────────────────────
@@ -298,6 +311,152 @@ public class CloudFormationService implements ResourceProvider {
                     "ChangeSet [" + changeSetName + "] does not exist", 400);
         }
         return cs;
+    }
+
+    /**
+     * Computes the per-resource changes a change set would apply, by diffing its template against
+     * the stack's currently deployed template. CREATE-type change sets (and stacks that have never
+     * executed a template) report every resource with a truthy {@code Condition} as an Add.
+     */
+    public List<ResourceChange> computeChangeSetChanges(ChangeSet cs, String region) {
+        Stack stack = getStackOrThrow(cs.getStackName(), region);
+        try {
+            JsonNode newTemplate = parseTemplate(cs.getTemplateBody());
+            if (samTransformProcessor.hasSamTransform(newTemplate)) {
+                // The deployed stack's template is always the SAM-expanded form (see
+                // executeTemplate); comparing the change set's raw SAM source against it would
+                // report every SAM-generated resource as Add/Remove even on a no-op update.
+                newTemplate = samTransformProcessor.expandSamTemplate(newTemplate);
+            }
+            JsonNode newResources = newTemplate.path("Resources");
+            boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
+                    || stack.getTemplateBody() == null;
+            JsonNode oldResources = createType
+                    ? objectMapper.createObjectNode()
+                    : parseTemplate(stack.getTemplateBody()).path("Resources");
+
+            Map<String, String> oldParams = stack.getParameters() != null
+                    ? stack.getParameters() : Map.of();
+            // Prefer the SSM-resolved values captured by the last executeTemplate run; fall back to
+            // the raw parameters for stacks persisted before resolvedParameters existed.
+            Map<String, String> oldResolvedParams = stack.getResolvedParameters() != null
+                    && !stack.getResolvedParameters().isEmpty()
+                    ? stack.getResolvedParameters() : oldParams;
+            // A parameter omitted from the update falls back to the template's Default when
+            // ExecuteChangeSet actually runs it, so the preview must resolve the same defaults or
+            // it will under-report changes to resources that depend on that fallback value.
+            Map<String, String> newParams = resolveDefaultParameters(newTemplate,
+                    cs.getParameters() != null ? cs.getParameters() : Map.of());
+            // ExecuteChangeSet also resolves AWS::SSM::Parameter::Value<String> parameters against
+            // the live Parameter Store before applying resource changes, and the stored SSM value
+            // can drift between deploys even when the referencing parameter name is unchanged. Diff
+            // on the resolved values, like execution does, so the preview agrees with what actually
+            // gets applied. A preview must not fail harder than the operation it previews though: if
+            // the referenced SSM parameter is missing, fall back to the unresolved values here and
+            // let ExecuteChangeSet raise that ValidationError when it actually resolves them.
+            Map<String, String> ssmResolvedNewParams;
+            try {
+                ssmResolvedNewParams = resolveSsmParameters(newTemplate, newParams, region);
+            } catch (AwsException e) {
+                ssmResolvedNewParams = newParams;
+            }
+            final Map<String, String> newResolvedParams = ssmResolvedNewParams;
+            Set<String> changedParams = new HashSet<>();
+            newResolvedParams.forEach((k, v) -> {
+                if (!Objects.equals(v, oldResolvedParams.get(k))) {
+                    changedParams.add(k);
+                }
+            });
+            // A parameter that was deployed but is omitted from this update with no template
+            // Default is dropped entirely by resolveDefaultParameters (matching what
+            // ExecuteChangeSet does); flag its disappearance too, not just a value change.
+            oldResolvedParams.keySet().forEach(k -> {
+                if (!newResolvedParams.containsKey(k)) {
+                    changedParams.add(k);
+                }
+            });
+
+            // A resource whose Condition depends on a changed parameter can flip from excluded to
+            // included (or back) even when its own definition text is unchanged; ExecuteChangeSet
+            // applies that as an Add or Remove (see hasRemovedOrConditionFalseResources /
+            // deleteRemovedOrConditionFalseResources), so the preview must evaluate Conditions too
+            // rather than only scanning each resource's own Ref/Sub usage. A resource is "active" in
+            // the deployed stack precisely when it's present in stack.getResources() - the same
+            // ground truth execution uses - so no separate old-conditions evaluation is needed.
+            Map<String, Boolean> newConditions = resolveConditions(
+                    newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
+            Set<String> deployedIds = stack.getResources().keySet();
+
+            List<ResourceChange> changes = new ArrayList<>();
+            newResources.fields().forEachRemaining(e -> {
+                String logicalId = e.getKey();
+                JsonNode newDef = e.getValue();
+                String resourceType = newDef.path("Type").asText();
+                JsonNode oldDef = oldResources.get(logicalId);
+                String newConditionName = newDef.path("Condition").asText(null);
+                boolean newActive = newConditionName == null
+                        || newConditions.getOrDefault(newConditionName, false);
+                if (oldDef == null) {
+                    if (newActive) {
+                        changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
+                    }
+                    return;
+                }
+                boolean wasDeployed = deployedIds.contains(logicalId);
+                if (wasDeployed && !newActive) {
+                    // Condition flipped true -> false: the definition text is unchanged, but
+                    // ExecuteChangeSet deletes the resource (see deleteRemovedOrConditionFalseResources).
+                    changes.add(new ResourceChange("Remove", logicalId,
+                            resourcePhysicalId(stack, logicalId), oldDef.path("Type").asText(), null));
+                } else if (!wasDeployed && newActive) {
+                    // Condition flipped false -> true: never created before, ExecuteChangeSet creates
+                    // it now.
+                    changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
+                } else if (newActive
+                        && (!oldDef.equals(newDef) || referencesAnyParameter(newDef, changedParams))) {
+                    boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
+                    changes.add(new ResourceChange("Modify", logicalId,
+                            resourcePhysicalId(stack, logicalId), resourceType,
+                            typeChanged ? "True" : "False"));
+                }
+            });
+            oldResources.fields().forEachRemaining(e -> {
+                if (!newResources.has(e.getKey())) {
+                    changes.add(new ResourceChange("Remove", e.getKey(),
+                            resourcePhysicalId(stack, e.getKey()),
+                            e.getValue().path("Type").asText(), null));
+                }
+            });
+            return changes;
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ValidationError",
+                    "Unable to compute changes for change set " + cs.getChangeSetName()
+                            + ": " + e.getMessage(), 400);
+        }
+    }
+
+    /** True if a resource's definition references any of the given (changed) parameter names. */
+    private boolean referencesAnyParameter(JsonNode resourceDef, Set<String> parameterNames) {
+        if (parameterNames.isEmpty()) {
+            return false;
+        }
+        String json = resourceDef.toString();
+        for (String name : parameterNames) {
+            if (json.contains("\"Ref\":\"" + name + "\"") || json.contains("${" + name + "}")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
+                                 String resourceType, String replacement) {}
+
+    private String resourcePhysicalId(Stack stack, String logicalId) {
+        StackResource resource = stack.getResources().get(logicalId);
+        return resource != null ? resource.getPhysicalId() : null;
     }
 
     // ── ExecuteChangeSet ──────────────────────────────────────────────────────
@@ -629,6 +788,43 @@ public class CloudFormationService implements ResourceProvider {
         return resolved;
     }
 
+    /**
+     * Substitutes {@code AWS::SSM::Parameter::Value<String>}-typed parameter values — which carry
+     * an SSM parameter <em>name</em> — with the value stored in Parameter Store for the stack's
+     * account and region, as real CloudFormation does before template processing. Missing
+     * parameters fail the stack operation with the real AWS ValidationError. The related types
+     * {@code AWS::SSM::Parameter::Value<List<String>>} and {@code AWS::SSM::Parameter::Name} are
+     * not resolved and pass through verbatim.
+     */
+    private Map<String, String> resolveSsmParameters(JsonNode template, Map<String, String> params, String region) {
+        JsonNode paramDefs = template.path("Parameters");
+        if (!paramDefs.isObject()) {
+            return params;
+        }
+        Map<String, String> resolved = new HashMap<>(params);
+        List<String> missing = new ArrayList<>();
+        paramDefs.fields().forEachRemaining(e -> {
+            if (!"AWS::SSM::Parameter::Value<String>".equals(e.getValue().path("Type").asText())) {
+                return;
+            }
+            String parameterName = resolved.get(e.getKey());
+            if (parameterName == null || parameterName.isBlank()) {
+                return;
+            }
+            try {
+                resolved.put(e.getKey(), ssmService.getParameter(parameterName, region).getValue());
+            } catch (AwsException ex) {
+                missing.add(parameterName);
+            }
+        });
+        if (!missing.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Unable to fetch parameters [" + String.join(",", missing)
+                            + "] from parameter store for this account", 400);
+        }
+        return resolved;
+    }
+
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
                                  boolean isCreate, String region, String accountId) {
         StackUpdateSnapshot previousState = snapshotForUpdate(stack);
@@ -649,7 +845,11 @@ public class CloudFormationService implements ResourceProvider {
             stack.setTemplateBody(templateBody);
 
             // Merge default parameter values from the template with caller-supplied params
-            Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
+            Map<String, String> givenParams = resolveDefaultParameters(template, params);
+            stack.getParameters().clear();
+            stack.getParameters().putAll(givenParams);
+            Map<String, String> resolvedParams = resolveSsmParameters(template, givenParams, region);
+            stack.setResolvedParameters(new LinkedHashMap<>(resolvedParams));
 
             // Resolve conditions first
             Map<String, Boolean> conditions = resolveConditions(template, resolvedParams, stack, region, accountId);
@@ -1069,6 +1269,14 @@ public class CloudFormationService implements ResourceProvider {
 
         List<String> rollbackFailures = rollbackUpdatedResources(
                 stack, previousState.resources(), attemptedResourceIds, region);
+        // Parameters are independent of resource-rollback outcome - always restore them to the last
+        // successfully deployed values, even when resource rollback itself fails and the stack lands
+        // in UPDATE_ROLLBACK_FAILED, so DescribeStacks and later change-set previews don't keep
+        // serving the failed update's attempted values.
+        stack.getParameters().clear();
+        stack.getParameters().putAll(previousState.parameters());
+        stack.getResolvedParameters().clear();
+        stack.getResolvedParameters().putAll(previousState.resolvedParameters());
         if (rollbackFailures.isEmpty()) {
             stack.setTemplateBody(previousState.templateBody());
         }
@@ -1214,6 +1422,8 @@ public class CloudFormationService implements ResourceProvider {
     private StackUpdateSnapshot snapshotForUpdate(Stack stack) {
         return new StackUpdateSnapshot(
                 stack.getTemplateBody(),
+                new LinkedHashMap<>(stack.getParameters()),
+                new LinkedHashMap<>(stack.getResolvedParameters()),
                 new LinkedHashMap<>(stack.getOutputs()),
                 new LinkedHashMap<>(stack.getExports()),
                 new LinkedHashMap<>(stack.getOutputExportNames()),
@@ -1244,6 +1454,8 @@ public class CloudFormationService implements ResourceProvider {
 
     private record StackUpdateSnapshot(
             String templateBody,
+            Map<String, String> parameters,
+            Map<String, String> resolvedParameters,
             Map<String, String> outputs,
             Map<String, String> exports,
             Map<String, String> outputExportNames,

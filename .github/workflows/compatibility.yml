@@ -38,8 +38,12 @@ jobs:
           build-args: VERSION=latest
           load: true
           tags: floci-compat-shim-test
+          # Read-only; warm-compat-caches.yml produces this scope on main. Unlike
+          # floci-native above, these layers are worth caching: the image builds
+          # FROM a published floci/floci tag and its cost is a microdnf install
+          # that changes only when the Dockerfile does. Writing from here would
+          # put a per-PR copy no other PR can read back into the budget.
           cache-from: type=gha,scope=compat-shim
-          cache-to: type=gha,scope=compat-shim,mode=max
 
       - name: Unflagged aws sqs call routes to AWS_ENDPOINT_URL
         run: |
@@ -133,8 +137,14 @@ jobs:
           file: docker/Dockerfile.native-package
           tags: floci:test-native
           outputs: type=docker,dest=/tmp/floci-native-image.tar
-          cache-from: type=gha,scope=floci-native
-          cache-to: type=gha,scope=floci-native,mode=max
+          # No layer cache here, deliberately. The `COPY native/$TARGETARCH/`
+          # below brings in a binary that changes every commit, and Docker layer
+          # reuse is sequential, so nothing after it can ever be reused. Measured:
+          # the build imported a cache manifest but reported **zero CACHED
+          # layers** — it was write-only. `mode=max` still stored the whole image
+          # including that volatile multi-hundred-MB binary layer, per PR ref,
+          # which was the largest single consumer of the repo's 10 GB budget.
+          # The step costs ~19-28s either way.
 
       - name: Compress native image
         run: gzip /tmp/floci-native-image.tar

@@ -94,7 +94,8 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 | Operation | Method | Path |
 |---|---|---|
 | `CreateFunction` | POST | `/2020-05-31/function` |
-| `DescribeFunction` | GET | `/2020-05-31/function/{Name}` |
+| `GetFunction` | GET | `/2020-05-31/function/{Name}` |
+| `DescribeFunction` | GET | `/2020-05-31/function/{Name}/describe` |
 | `UpdateFunction` | PUT | `/2020-05-31/function/{Name}` |
 | `PublishFunction` | POST | `/2020-05-31/function/{Name}/publish` |
 | `DeleteFunction` | DELETE | `/2020-05-31/function/{Name}` |

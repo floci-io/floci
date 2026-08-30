@@ -37,6 +37,7 @@ public class MetricAlarm {
     private String treatMissingData = "missing";
     private String evaluateLowSampleCountPercentile;
     private Map<String, String> tags = new HashMap<>();
+    private String region;
 
     public MetricAlarm() {
         long now = Instant.now().getEpochSecond();
@@ -118,4 +119,9 @@ public class MetricAlarm {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    /** Not part of the AWS shape; set by {@code putMetricAlarm} so a background evaluator
+     * that only holds the alarm object still knows which region's metric data to query. */
+    public String getRegion() { return region; }
+    public void setRegion(String region) { this.region = region; }
 }

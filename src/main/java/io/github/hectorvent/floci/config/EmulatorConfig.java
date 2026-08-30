@@ -57,6 +57,16 @@ public interface EmulatorConfig {
     @WithDefault("public.ecr.aws")
     String ecrBaseUri();
 
+    /**
+     * Path to a shared mock-response configuration file used by the fixed-stub AI services
+     * (Textract, Comprehend, Rekognition) to return a caller-configured response instead of
+     * their default canned stub. See {@link io.github.hectorvent.floci.core.common.AiMockConfigLoader}.
+     * Equivalent to Step Functions' {@code SFN_MOCK_CONFIG}, but shared across services since
+     * mocking here is opt-in on top of an always-available default, not the only way to invoke
+     * an action.
+     */
+    Optional<String> aiMockConfigFile();
+
     StorageConfig storage();
 
     DnsConfig dns();
@@ -263,6 +273,7 @@ public interface EmulatorConfig {
         ElastiCacheStorageConfig elasticache();
         MemoryDbStorageConfig memorydb();
         RdsStorageConfig rds();
+        RedshiftStorageConfig redshift();
         Ec2StorageConfig ec2();
         NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
@@ -399,6 +410,10 @@ public interface EmulatorConfig {
 
         @WithDefault("5000")
         long flushIntervalMs();
+    }
+
+    interface RedshiftStorageConfig {
+        Optional<String> mode();
     }
 
     interface RdsStorageConfig {
@@ -609,6 +624,7 @@ public interface EmulatorConfig {
         ElastiCacheServiceConfig elasticache();
         MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
+        RedshiftServiceConfig redshift();
         RdsDataServiceConfig rdsData();
         EventBridgeServiceConfig eventbridge();
         CloudMapServiceConfig cloudmap();
@@ -658,6 +674,7 @@ public interface EmulatorConfig {
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
         ComprehendServiceConfig comprehend();
+        RekognitionServiceConfig rekognition();
         PricingServiceConfig pricing();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
@@ -689,11 +706,18 @@ public interface EmulatorConfig {
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
+        ConnectServiceConfig connect();
 
         ApsServiceConfig aps();
 
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
+        CodeGuruReviewerServiceConfig codegurureviewer();
+    }
+
+    interface ConnectServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface SsoAdminServiceConfig {
@@ -702,6 +726,11 @@ public interface EmulatorConfig {
     }
 
     interface ApsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CodeGuruReviewerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1094,6 +1123,16 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
     }
 
+    interface RedshiftServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+        @WithDefault("5439")
+        int defaultPort();
+        @WithDefault("postgres:15-alpine")
+        String imageVersion();
+        Optional<String> dockerNetwork();
+    }
+
     interface RdsServiceConfig {
         String DEFAULT_POSTGRES_IMAGE = "postgres:16-alpine";
         String DEFAULT_MYSQL_IMAGE = "mysql:8.0";
@@ -1385,6 +1424,8 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean scpEnforcementEnabled();
+
+        Optional<String> managementAccountEmail();
     }
 
     interface AthenaServiceConfig {
@@ -1549,6 +1590,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface RekognitionServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface PricingServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1661,6 +1707,35 @@ public interface EmulatorConfig {
         boolean keepRunningOnShutdown();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Overrides the Floci endpoint handed to the UI sidecar, instead of deriving it from
+         * the resolved Docker host and {@link EmulatorConfig#tls()}.
+         * Env: {@code FLOCI_SERVICES_UI_ENDPOINT}
+         *
+         * <p>The derived value is {@code https://<floci-container-ip>:<port>} when TLS is on,
+         * which the sidecar's Node/Bun proxy rejects: Floci's self-signed certificate carries no
+         * IP SAN for its own container IP, so verification fails with
+         * {@code ERR_TLS_CERT_ALTNAME_INVALID} even when the CA is trusted. Floci's port does
+         * HTTP/HTTPS protocol detection, so pointing the sidecar at {@code http://<ip>:<port>}
+         * reaches the same server over the private container network with TLS left enabled.
+         *
+         * <p>Must be an absolute {@code http://} or {@code https://} URL. A blank or malformed
+         * value is a hard error rather than a silent fall back to the derived endpoint.
+         */
+        Optional<String> endpoint();
+
+        /**
+         * Disables TLS certificate verification in the UI sidecar's Node/Bun proxy by injecting
+         * {@code NODE_TLS_REJECT_UNAUTHORIZED=0}. Env: {@code FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY}
+         *
+         * <p>Trusting Floci's CA alone is not sufficient — it fixes the chain but not the missing
+         * IP SAN — so this is the only trust knob that makes an {@code https://<container-ip>}
+         * endpoint work. Scoped to the sidecar's connection to Floci; it does not affect Floci's
+         * own TLS. Prefer {@link #endpoint()} where an {@code http://} endpoint is acceptable.
+         */
+        @WithDefault("false")
+        boolean insecureSkipTlsVerify();
     }
 
     interface EcrServiceConfig {

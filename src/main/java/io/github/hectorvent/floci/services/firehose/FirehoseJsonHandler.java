@@ -67,7 +67,8 @@ public class FirehoseJsonHandler {
                 KinesisStreamSource source = request.has("KinesisStreamSourceConfiguration")
                         ? mapper.treeToValue(request.get("KinesisStreamSourceConfiguration"), KinesisStreamSource.class)
                         : null;
-                String arn = firehoseService.createDeliveryStream(name, s3, tags, deliveryStreamType, source);
+                String arn = firehoseService.createDeliveryStream(
+                        region, name, s3, tags, deliveryStreamType, source);
                 yield Response.ok(Map.of("DeliveryStreamARN", arn)).build();
             }
             case "UpdateDestination" -> {

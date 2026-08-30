@@ -32,6 +32,7 @@ import jakarta.inject.Inject;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -39,6 +40,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -1068,14 +1070,16 @@ public class CloudFrontService {
     }
 
     public CloudFrontFunction describeFunction(String name, String stage) {
-        CloudFrontFunction fn = functionStore.get(name).orElseThrow(() ->
+        String effectiveStage = normalizeFunctionStage(stage);
+        Optional<CloudFrontFunction> function = functionStore.get(functionKey(name, effectiveStage));
+        if (function.isEmpty() && "LIVE".equals(effectiveStage)) {
+            // Releases before stage-aware keys stored a published LIVE function under
+            // the bare name. Keep that state readable without exposing it as DEVELOPMENT.
+            function = functionStore.get(name).filter(fn -> "LIVE".equals(fn.getStage()));
+        }
+        return function.filter(fn -> effectiveStage.equals(fn.getStage())).orElseThrow(() ->
                 new AwsException("NoSuchFunctionExists",
                         "The specified function does not exist.", 404));
-        if (stage != null && !stage.isEmpty() && !fn.getStage().equals(stage)) {
-            throw new AwsException("NoSuchFunctionExists",
-                    "The specified function does not exist.", 404);
-        }
-        return fn;
     }
 
     public synchronized CloudFrontFunction updateFunction(String name, String ifMatch,
@@ -1096,36 +1100,79 @@ public class CloudFrontService {
     }
 
     public synchronized CloudFrontFunction publishFunction(String name, String ifMatch) {
-        CloudFrontFunction fn = describeFunction(name, null);
-        if (!fn.getEtag().equals(ifMatch)) {
+        CloudFrontFunction development = describeFunction(name, "DEVELOPMENT");
+        if (!development.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
-        fn.setStage("LIVE");
-        fn.setStatus("DEPLOYED");
-        fn.setEtag(UUID.randomUUID().toString());
-        fn.setLastModifiedTime(Instant.now());
-        functionStore.put(name, fn);
-        return fn;
+        CloudFrontFunction live = copyFunction(development);
+        live.setStage("LIVE");
+        live.setStatus("DEPLOYED");
+        live.setEtag(UUID.randomUUID().toString());
+        live.setLastModifiedTime(Instant.now());
+        functionStore.put(functionKey(name, "LIVE"), live);
+        return live;
     }
 
     public synchronized void deleteFunction(String name, String ifMatch) {
-        CloudFrontFunction existing = describeFunction(name, null);
+        CloudFrontFunction existing = functionStore.get(name)
+                .or(() -> functionStore.get(functionKey(name, "LIVE")))
+                .orElseThrow(() -> new AwsException("NoSuchFunctionExists",
+                        "The specified function does not exist.", 404));
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
         functionStore.delete(name);
+        functionStore.delete(functionKey(name, "LIVE"));
     }
 
     public List<CloudFrontFunction> listFunctions(String stage, String marker, int maxItems) {
         List<CloudFrontFunction> all = new ArrayList<>(functionStore.scan(k -> true));
         if (stage != null && !stage.isEmpty()) {
-            all = all.stream().filter(f -> stage.equals(f.getStage())).toList();
-            all = new ArrayList<>(all);
+            String effectiveStage = normalizeFunctionStage(stage);
+            all = new ArrayList<>(all.stream()
+                    .filter(f -> effectiveStage.equals(f.getStage()))
+                    .toList());
         }
-        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        all.sort(Comparator.comparing(CloudFrontFunction::getName)
+                .thenComparing(CloudFrontFunction::getStage));
         return paginate(all, marker, maxItems, CloudFrontFunction::getName);
+    }
+
+    private static String functionKey(String name, String stage) {
+        return switch (stage) {
+            case "DEVELOPMENT" -> name;
+            case "LIVE" -> name + "::LIVE";
+            default -> throw invalidFunctionStage(stage);
+        };
+    }
+
+    private static String normalizeFunctionStage(String stage) {
+        String effectiveStage = stage == null || stage.isEmpty() ? "DEVELOPMENT" : stage;
+        if (!"DEVELOPMENT".equals(effectiveStage) && !"LIVE".equals(effectiveStage)) {
+            throw invalidFunctionStage(effectiveStage);
+        }
+        return effectiveStage;
+    }
+
+    private static AwsException invalidFunctionStage(String stage) {
+        return new AwsException("InvalidArgument",
+                "The parameter Stage must be DEVELOPMENT or LIVE: " + stage, 400);
+    }
+
+    private static CloudFrontFunction copyFunction(CloudFrontFunction source) {
+        CloudFrontFunction copy = new CloudFrontFunction();
+        copy.setName(source.getName());
+        copy.setStage(source.getStage());
+        copy.setStatus(source.getStatus());
+        copy.setFunctionCode(source.getFunctionCode());
+        copy.setRuntime(source.getRuntime());
+        copy.setComment(source.getComment());
+        copy.setEtag(source.getEtag());
+        copy.setCreatedTime(source.getCreatedTime());
+        copy.setLastModifiedTime(source.getLastModifiedTime());
+        return copy;
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────

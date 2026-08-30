@@ -176,7 +176,8 @@ class AslExecutorHttpInvokeTest {
             new JsonataEvaluator(objectMapper),
             mock(Instance.class),
             emulatorConfig,
-            vertx);
+            vertx,
+            null);
     }
 
     private void recordRequest(final RoutingContext ctx, String body) {

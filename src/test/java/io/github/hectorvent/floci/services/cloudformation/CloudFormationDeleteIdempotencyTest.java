@@ -1,14 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -29,15 +26,10 @@ class CloudFormationDeleteIdempotencyTest {
     void setUp() {
         dynamoDbService = mock(DynamoDbService.class);
         lambdaService = mock(LambdaService.class);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, dynamoDbService, lambdaService,
-                null, null, null, null, null,
-                null, null, null, null, null, null,
-                new ObjectMapper(),
-                null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null,
-                null, null,
-                new CloudFormationResourceRegistry(List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .dynamoDb(dynamoDbService)
+                .lambda(lambdaService)
+                .build();
     }
 
     @Test

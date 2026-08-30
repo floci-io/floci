@@ -117,7 +117,7 @@ class BuildV2ProxyEventJwtClaimsTest {
         JsonNode event = new ObjectMapper().readTree(json);
 
         assertFalse(event.get("requestContext").has("authorizer"),
-                "requestContext.authorizer must be absent for routes with no JWT authorizer claims (Auth: NONE or CUSTOM)");
+                "requestContext.authorizer must be absent for routes with no JWT claims and no Lambda authorizer context");
     }
 
     @Test

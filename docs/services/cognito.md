@@ -55,6 +55,14 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 | ListResourceServers | Lists resource servers for a user pool. |
 | DeleteResourceServer | Deletes a resource server from a user pool. |
 
+### User Pool Domains
+
+| Action | Description |
+|--------|-------------|
+| CreateUserPoolDomain | Creates a Cognito prefix domain, or a custom domain when `CustomDomainConfig.CertificateArn` is given. |
+| DescribeUserPoolDomain | Returns a domain's description, including `CloudFrontDistribution` for custom domains. |
+| DeleteUserPoolDomain | Deletes a domain from its user pool. |
+
 ### Admin User Management
 
 | Action | Description |

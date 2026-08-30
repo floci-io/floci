@@ -37,6 +37,21 @@ class ComprehendIntegrationTest {
             .body("SentimentScore.Mixed", notNullValue());
     }
     @Test
+    void detectSentiment_matchingMockConfig_returnsConfiguredResponse() {
+        // src/test/resources/fixtures/ai-mock-config.json maps this exact Text to POSITIVE.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Comprehend_20171127.DetectSentiment")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Text\":\"I absolutely love this product!\",\"LanguageCode\":\"en\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Sentiment", equalTo("POSITIVE"))
+            .body("SentimentScore.Positive", equalTo(0.98f));
+    }
+    @Test
     void detectSentiment_missingText_returns400() {
         given()
             .contentType(CONTENT_TYPE)

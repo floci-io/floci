@@ -151,11 +151,16 @@ public class OrganizationsService implements ScpProvider {
     private final AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses;
     private final AccountAwareStorageBackend<Handshake> handshakes;
     private final boolean scpEnforcementEnabled;
+    private final String managementAccountEmail;
 
     @Inject
     public OrganizationsService(StorageFactory storageFactory, ObjectMapper objectMapper,
                                 EmulatorConfig config) {
-        this.scpEnforcementEnabled = config.services().organizations().scpEnforcementEnabled();
+        EmulatorConfig.OrganizationsServiceConfig organizationsConfig = config.services().organizations();
+        this.scpEnforcementEnabled = organizationsConfig.scpEnforcementEnabled();
+        this.managementAccountEmail = organizationsConfig.managementAccountEmail()
+                .map(OrganizationsService::requireValidConfiguredEmail)
+                .orElse(null);
         this.objectMapper = objectMapper;
         this.organizations = storageFactory.create("organizations", "organizations-organizations.json",
                 new TypeReference<Map<String, Organization>>() {});
@@ -190,6 +195,19 @@ public class OrganizationsService implements ScpProvider {
                          AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
                          AccountAwareStorageBackend<Handshake> handshakes,
                          boolean scpEnforcementEnabled) {
+        this(objectMapper, organizations, accounts, organizationalUnits, policies,
+                createAccountStatuses, handshakes, scpEnforcementEnabled, null);
+    }
+
+    OrganizationsService(ObjectMapper objectMapper,
+                         AccountAwareStorageBackend<Organization> organizations,
+                         AccountAwareStorageBackend<OrganizationAccount> accounts,
+                         AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
+                         AccountAwareStorageBackend<OrganizationPolicy> policies,
+                         AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
+                         AccountAwareStorageBackend<Handshake> handshakes,
+                         boolean scpEnforcementEnabled,
+                         String managementAccountEmail) {
         this.objectMapper = objectMapper;
         this.organizations = organizations;
         this.accounts = accounts;
@@ -198,6 +216,9 @@ public class OrganizationsService implements ScpProvider {
         this.createAccountStatuses = createAccountStatuses;
         this.handshakes = handshakes;
         this.scpEnforcementEnabled = scpEnforcementEnabled;
+        this.managementAccountEmail = managementAccountEmail == null
+                ? null
+                : requireValidConfiguredEmail(managementAccountEmail);
     }
 
     /** A parent reference as returned by {@code ListParents}. */
@@ -244,7 +265,9 @@ public class OrganizationsService implements ScpProvider {
         organization.setFeatureSet(resolvedFeatureSet);
         organization.setMasterAccountId(callerAccountId);
         organization.setMasterAccountArn(arn(callerAccountId, "account/" + organizationId + "/" + callerAccountId));
-        organization.setMasterAccountEmail("master@" + callerAccountId + ".example.com");
+        organization.setMasterAccountEmail(managementAccountEmail != null
+                ? managementAccountEmail
+                : "master@" + callerAccountId + ".example.com");
         organization.setCreatedTimestamp(Instant.now());
 
         Root root = new Root();
@@ -1848,9 +1871,28 @@ public class OrganizationsService implements ScpProvider {
         if (email == null || email.isEmpty()) {
             throw invalidInput("Email is required.");
         }
-        if (email.length() < 6 || email.length() > 64 || !EMAIL_PATTERN.matcher(email).matches()) {
+        if (!isValidEmail(email)) {
             throw invalidInput("Email must be a valid address between 6 and 64 characters.");
         }
+    }
+
+    private static boolean isValidEmail(String email) {
+        return email.length() >= 6 && email.length() <= 64 && EMAIL_PATTERN.matcher(email).matches();
+    }
+
+    /**
+     * Applies the same rules as {@link #validateEmail} to the configured management-account
+     * email, but fails at startup rather than surfacing an operator misconfiguration to an
+     * API caller as {@code InvalidInputException}.
+     */
+    private static String requireValidConfiguredEmail(String email) {
+        if (!isValidEmail(email)) {
+            throw new IllegalArgumentException(
+                    "floci.services.organizations.management-account-email"
+                            + " (FLOCI_SERVICES_ORGANIZATIONS_MANAGEMENT_ACCOUNT_EMAIL) must be a valid"
+                            + " email address between 6 and 64 characters, got \"" + email + "\"");
+        }
+        return email;
     }
 
     private void validateServicePrincipal(String servicePrincipal) {

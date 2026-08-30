@@ -8,13 +8,13 @@
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `DescribeStacks` | Get stack status and outputs |
+| `DescribeStacks` | Get stack status, parameters, and outputs |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources |
 | `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
-| `DescribeChangeSet` | Get change set details (no computed diff/preview) |
+| `DescribeChangeSet` | Get change set details with a computed Add/Modify/Remove resource diff |
 | `ExecuteChangeSet` | Apply a change set |
 | `DeleteChangeSet` | Delete a change set |
 | `ListChangeSets` | List change sets for a stack |
@@ -49,31 +49,32 @@ the backing service and sets a real physical ID plus the `Ref` / `Fn::GetAtt` at
 cross-resource references.
 
 > Adding a type? See [Adding a CloudFormation Resource Type](../../CONTRIBUTING.md#adding-a-cloudformation-resource-type).
-> Types live in per-service provisioners under `services/cloudformation/provisioners/`; keep this
-> table in step with them.
+> Types live in per-service provisioners under `services/cloudformation/provisioners/`. This table
+> is generated from the provisioner inventory by `make docs-sync`; edit that, not the table.
 
+<!-- floci:cfn-types:start -->
 | Service | Resource types |
 |---|---|
 | S3 | `Bucket`, `BucketPolicy` (accepted; policy not enforced) |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription` |
 | DynamoDB | `Table`, `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `MicrovmImage`, `NetworkConnector`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
-| ECS | `Cluster`, `TaskDefinition`, `Service` |
+| ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EKS | `Cluster`, `Nodegroup` |
-| RDS | `DBInstance`, `DBCluster`, `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup` (DBInstance/DBCluster start real containers) |
-| EC2 | `VPC`, `Subnet`, `SecurityGroup` (including inline `SecurityGroupIngress`/`SecurityGroupEgress`), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
+| RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
+| EC2 | `VPC`, `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook` |
 | Route 53 | `HostedZone`, `RecordSet` |
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account` |
-| API Gateway v2 | `Api`, `Route`, `Integration`, `Stage`, `Deployment` |
+| API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment` |
 | Step Functions | `StateMachine` |
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
@@ -83,10 +84,14 @@ cross-resource references.
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
+| CloudFront | `Distribution` |
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |
-| CloudFormation | `Stack` (nested stacks), `CustomResource` and `Custom::*` (Lambda-backed) |
+| WAFv2 | `WebACL` |
+| Config | `ConfigRule` |
+| CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CDK | `CDK::Metadata` (accepted; no-op) |
+<!-- floci:cfn-types:end -->
 
 All other resource types are accepted without error and assigned a synthetic physical ID (with an
 `arn:aws:stub:::<logicalId>` ARN attribute), so templates with unsupported types still reach
@@ -193,6 +198,51 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace
 (determined from the request's access key — see [Multi-Account Isolation](../configuration/multi-account.md)).
 Deleting the stack removes them from that same account.
+
+Stacks, change sets, and **exports are scoped to the caller account**. `ListExports` returns only the
+exports created by that account's stacks, and `Fn::ImportValue` resolves against the same account's
+export table — so two accounts can each own an export with the same name without colliding, mirroring
+how CloudFormation isolates exports per account and region. This is what lets a multi-account LZA
+deployment reuse identical export names across its member accounts.
+
+## Template Parameters
+
+Parameters passed to `CreateStack` / `UpdateStack` (and echoed back by `DescribeStacks`) are resolved
+before provisioning:
+
+- **`String`, `Number`, `CommaDelimitedList`, and `List<...>`** parameter types are accepted and
+  substituted into resource properties via `Ref`.
+- **`AWS::SSM::Parameter::Value<String>`-typed parameters** are resolved at deploy time: the value the
+  caller supplies is treated as an SSM parameter *name*, and floci substitutes the current value of
+  that SSM parameter into the template. This is the pattern CDK uses to pull bootstrap values (image
+  tags, bucket names) from Parameter Store.
+- `AWS::SSM::Parameter::Value<List<String>>` and `AWS::SSM::Parameter::Name` typed parameters are
+  **not yet** resolved — they are passed through as their literal input.
+
+The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, and `Name` attributes through
+`Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
+
+## Conditions
+
+Template `Conditions` are evaluated before provisioning. A resource whose `Condition` evaluates to
+**false is skipped** — it is never provisioned, does not appear in `DescribeStackResources`, and its
+`Ref` / `Fn::GetAtt` are not required to resolve. This matches CloudFormation and is required for the
+condition-heavy templates CDK and LZA emit.
+
+## Custom Resources and the CDK Provider Framework
+
+`AWS::CloudFormation::CustomResource` and `Custom::*` resources are backed by their `ServiceToken`
+Lambda. floci supports two shapes:
+
+- **Direct custom resources** — floci invokes the handler Lambda with the CloudFormation custom-resource
+  event and waits for it to `PUT` its `SUCCESS`/`FAILED` result to the response URL. Inline `ZipFile`
+  handlers get the `cfn-response` / `cfnresponse` module bundled in (see the Lambda row in
+  [Supported Resource Types](#supported-resource-types)), so Solutions-style handlers work unmodified.
+- **CDK Provider framework** — when the `ServiceToken` points at a CDK `framework.onEvent` function,
+  floci drives the asynchronous provider protocol: `onEvent` starts the work and `framework.isComplete`
+  is polled (via Step Functions [`Retry`](step-functions.md)) until it reports done, at which point the
+  ResponseURL callback fires. The wait is bounded by an async custom-resource timeout (3 minutes by
+  default); a resource that never completes fails the stack rather than hanging.
 
 ## Deletion Policies
 

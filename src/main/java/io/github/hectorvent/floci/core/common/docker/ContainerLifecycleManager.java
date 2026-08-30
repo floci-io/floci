@@ -466,6 +466,66 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Reads the environment a container was created with. The {@link Container} summaries
+     * returned by {@link #findByName} carry no environment, so callers that must compare an
+     * adoption candidate's baked-in configuration against current settings have to inspect it.
+     *
+     * <p>An unreadable container is reported as {@link Optional#empty()} rather than as an empty
+     * environment: callers act destructively on what they find here, and "the container declares
+     * no variables" and "the runtime would not tell me" must not lead to the same decision.
+     *
+     * @param containerId the container ID to inspect
+     * @return the container's environment as {@code KEY=value} entries, or empty if it could
+     *     not be read at all
+     */
+    public Optional<List<String>> containerEnv(String containerId) {
+        try {
+            String[] env = dockerClient.inspectContainerCmd(containerId).exec().getConfig().getEnv();
+            return Optional.of(env == null ? List.of() : List.of(env));
+        } catch (Exception e) {
+            LOG.debugv("Could not read environment of container {0}: {1}", containerId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** Whether a container exists and is running — distinguishing "gone" from "cannot tell". */
+    public enum ContainerPresence {
+        /** The container exists and is running. */
+        RUNNING,
+        /** The container exists but has exited or has not been started. */
+        STOPPED,
+        /** The container no longer exists. */
+        ABSENT,
+        /** The container runtime could not be reached, so its state is unknown. */
+        UNKNOWN
+    }
+
+    /**
+     * Probes whether a container is still there. Callers use this to tell a sidecar that has
+     * genuinely vanished from one that is merely slow, so that recovery is triggered by the
+     * former and never by the latter.
+     *
+     * @param containerId the container ID to probe, may be null
+     * @return the container's presence, {@link ContainerPresence#UNKNOWN} if it could not be probed
+     */
+    public ContainerPresence presenceOf(String containerId) {
+        if (containerId == null) {
+            return ContainerPresence.ABSENT;
+        }
+        try {
+            InspectContainerResponse.ContainerState state =
+                    dockerClient.inspectContainerCmd(containerId).exec().getState();
+            boolean running = state != null && Boolean.TRUE.equals(state.getRunning());
+            return running ? ContainerPresence.RUNNING : ContainerPresence.STOPPED;
+        } catch (NotFoundException e) {
+            return ContainerPresence.ABSENT;
+        } catch (Exception e) {
+            LOG.debugv("Could not probe container {0}: {1}", containerId, e.getMessage());
+            return ContainerPresence.UNKNOWN;
+        }
+    }
+
+    /**
      * Adopts an existing container, starting it if stopped.
      * Useful for services like ECR that reuse containers across restarts.
      *

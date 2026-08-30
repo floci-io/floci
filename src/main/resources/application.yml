@@ -83,6 +83,8 @@ floci:
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
   default-account-id: "000000000000"
+  # Shared mock-response config for Textract/Comprehend/Rekognition. See AiMockConfigLoader.
+  ai-mock-config-file: ${AI_MOCK_CONFIG:}
   storage:
     # Supported modes: memory, persistent, hybrid, wal
     mode: memory
@@ -312,6 +314,10 @@ floci:
       proxy-base-port: 6400
       proxy-max-port: 6419
       default-image: "valkey/valkey:8"
+    redshift:
+      enabled: true
+      default-port: 5439
+      image-version: postgres:15-alpine
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
@@ -441,6 +447,9 @@ floci:
       container-name: floci-ui
       port: 4500
       keep-running-on-shutdown: false
+      # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
+      # Set an absolute http:// or https:// URL here only to override that derivation.
+      insecure-skip-tls-verify: false
     bedrock-runtime:
       enabled: true
       backend: stub
@@ -508,6 +517,8 @@ floci:
       enabled: true
     comprehend:
       enabled: true
+    rekognition:
+      enabled: true
     pricing:
       enabled: true
     transcribe:
@@ -556,6 +567,7 @@ floci:
       enabled: true
     organizations:
       enabled: true
+      # management-account-email: ""  # When set, overrides the management-account email reported by DescribeOrganization and account listings.
     rum:
       enabled: true
     networkfirewall:
@@ -571,6 +583,8 @@ floci:
     controltower:
       enabled: true
     route53resolver:
+      enabled: true
+    connect:
       enabled: true
     aps:
       enabled: true
@@ -595,4 +609,6 @@ floci:
     servicequotas:
       enabled: true
     ram:
+      enabled: true
+    codegurureviewer:
       enabled: true

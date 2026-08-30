@@ -38,12 +38,11 @@ class ApiGatewayV2CfnProvisionerTest {
     @BeforeEach
     void setUp() {
         apiGatewayV2Service = mock(ApiGatewayV2Service.class);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null, null, null, null, null, null,
-                null, apiGatewayV2Service, null, null, null, null, mapper,
-                null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null,
-                new CloudFormationResourceRegistry(java.util.List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .apiGatewayV2(apiGatewayV2Service)
+                .objectMapper(mapper)
+                .registry(new CloudFormationResourceRegistry(java.util.List.of()))
+                .build();
 
         Api api = new Api();
         api.setApiId(API_ID);
