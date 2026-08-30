@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -486,5 +487,58 @@ class FlociUiManagerTest {
         assertEquals(false, manager.status().started());
         assertTrue(manager.status().error() != null && manager.status().error().contains("Docker"),
                 "expected a captured error mentioning the Docker runtime, was: " + manager.status().error());
+    }
+
+    @Test
+    void endpointOverrideWithNoAuthorityFailsFast() {
+        // "http://" and "http:///path" both pass a bare prefix check but carry no host, so the
+        // sidecar would be started with an endpoint it can never connect to.
+        withUiConfig();
+        when(ui.endpoint()).thenReturn(Optional.of("http://"));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> newManager().resolveFlociEndpoint());
+        assertTrue(e.getMessage().contains("http://"), e.getMessage());
+    }
+
+    @Test
+    void endpointOverrideWithPathOnlyAndNoAuthorityFailsFast() {
+        withUiConfig();
+        when(ui.endpoint()).thenReturn(Optional.of("http:///path"));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> newManager().resolveFlociEndpoint());
+        assertTrue(e.getMessage().contains("http:///path"), e.getMessage());
+    }
+
+    @Test
+    void ensureStartedRecordsTheFailureFromAFreshStartWithNoExistingSidecarToAdopt() {
+        // findByName finds nothing, so replaceIfEndpointDrifted (which records its own message)
+        // never runs -- injectedEnv()/resolveFlociEndpoint() throws IllegalStateException
+        // directly out of the try block on a blank/malformed override, and that catch must
+        // still populate lastError instead of leaving status() reporting error=null forever.
+        withUiConfig();
+        when(ui.enabled()).thenReturn(true);
+        when(ui.containerName()).thenReturn("floci-ui");
+        when(ui.endpoint()).thenReturn(Optional.of("not-a-url"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.findByName("floci-ui")).thenReturn(Optional.empty());
+
+        FlociUiManager manager = new FlociUiManager(
+                mock(ContainerBuilder.class, RETURNS_DEEP_STUBS),
+                lifecycleManager,
+                mock(ContainerLogStreamer.class),
+                containerDetector,
+                mock(CurrentContainerNetworkResolver.class),
+                dockerHostResolver,
+                config,
+                regionResolver);
+
+        manager.ensureStarted();
+
+        assertEquals(false, manager.status().started());
+        assertTrue(manager.status().error() != null && manager.status().error().contains("http://"),
+                "expected a captured error mentioning the required http:// scheme, was: "
+                        + manager.status().error());
     }
 }

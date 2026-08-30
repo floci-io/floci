@@ -441,6 +441,9 @@ floci:
       container-name: floci-ui
       port: 4500
       keep-running-on-shutdown: false
+      # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
+      # Set an absolute http:// or https:// URL here only to override that derivation.
+      insecure-skip-tls-verify: false
     bedrock-runtime:
       enabled: true
       backend: stub

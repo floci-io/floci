@@ -148,8 +148,13 @@ public class FlociUiManager {
             LOG.infov("Started floci-ui sidecar {0} on host port {1}", name, String.valueOf(hostPort));
             attachLogStream();
         } catch (IllegalStateException e) {
-            // A misconfigured endpoint override already recorded its own specific message in
-            // replaceIfEndpointDrifted -- don't overwrite it with the generic one below.
+            // replaceIfEndpointDrifted() records its own specific message for a container with an
+            // existing sidecar to adopt, but a fresh start (no existing container) reaches this
+            // catch directly from injectedEnv()/resolveFlociEndpoint() with lastError still null --
+            // only fill it in when nothing more specific was already recorded.
+            if (this.lastError == null) {
+                this.lastError = e.getMessage();
+            }
             LOG.errorv(e, "Failed to start floci-ui sidecar: {0}", e.getMessage());
         } catch (Exception e) {
             this.lastError = describeStartFailure(image, e);
@@ -340,6 +345,17 @@ public class FlociUiManager {
                             + "endpoint automatically, or give it an absolute http:// or https:// URL.");
         }
         if (!value.startsWith("http://") && !value.startsWith("https://")) {
+            throw new IllegalStateException(
+                    "floci.services.ui.endpoint must be an absolute http:// or https:// URL, was: " + value);
+        }
+        String host;
+        try {
+            host = URI.create(value).getHost();
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                    "floci.services.ui.endpoint must be an absolute http:// or https:// URL, was: " + value);
+        }
+        if (host == null || host.isBlank()) {
             throw new IllegalStateException(
                     "floci.services.ui.endpoint must be an absolute http:// or https:// URL, was: " + value);
         }
