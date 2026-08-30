@@ -4417,6 +4417,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (resourceId.startsWith("sgr-")) {
             return "security-group-rule";
         }
+        if (resourceId.startsWith("eni-")) {
+            return "network-interface";
+        }
         if (resourceId.startsWith("sg-")) {
             return "security-group";
         }
@@ -4970,19 +4973,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Address> describeAddresses(String region, List<String> allocationIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        List<Address> matched = addresses.scan(k -> true).stream()
+        List<Address> candidates = addresses.scan(k -> true).stream()
                 .filter(a -> a.getRegion().equals(region))
                 .filter(a -> allocationIds.isEmpty() || allocationIds.contains(a.getAllocationId()))
-                // The filters parameter was previously accepted and never applied: every
-                // DescribeAddresses filter, including the generic tag: family that works
-                // against every other resource here, was a silent no-op.
-                .filter(a -> matchesFilters(a, filters, region))
                 .collect(Collectors.toList());
         // An EIP can be associated before its instance has a container, and Docker hands out a
         // different bridge IP after a stop/start, either of which would leave the association
-        // reporting an address that no longer answers. Re-resolve on read: this is the call
-        // Terraform refreshes public_ip from, so it is the last chance to be right.
-        for (Address addr : matched) {
+        // reporting an address that no longer answers. Re-resolve BEFORE filtering: a public-ip
+        // or association filter must be judged against the address the response will carry, not
+        // the one persisted before the restart. This is also the call Terraform refreshes
+        // public_ip from, so it is the last chance to be right.
+        for (Address addr : candidates) {
             if (addr.getInstanceId() != null) {
                 String before = addr.getPublicIp();
                 pointAddressAtInstance(addr, region, addr.getInstanceId());
@@ -4991,7 +4992,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 }
             }
         }
-        return matched;
+        // The filters parameter was previously accepted and never applied: every
+        // DescribeAddresses filter, including the generic tag: family that works
+        // against every other resource here, was a silent no-op.
+        return candidates.stream()
+                .filter(a -> matchesFilters(a, filters, region))
+                .collect(Collectors.toList());
     }
 
     // ─── Availability Zones & Regions ─────────────────────────────────────────

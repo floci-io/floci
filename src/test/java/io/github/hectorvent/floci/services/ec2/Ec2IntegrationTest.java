@@ -4755,6 +4755,21 @@ class Ec2IntegrationTest {
                     equalTo("eni-tagspec-interface"))
             .body(not(containsString("eni-tagspec-instance")));
 
+        // The launch-time interface tag must also surface through DescribeTags under its own
+        // resource type: eni- ids classify as network-interface, not as an unknown type the
+        // resource-type filter then drops.
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-type")
+            .formParam("Filter.1.Value.1", "network-interface")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'Name' && it.value == 'eni-tagspec-interface' }.resourceType",
+                    equalTo("network-interface"));
+
         given()
             .formParam("Action", "DescribeInstances")
             .formParam("InstanceId.1", taggedInstanceId)
