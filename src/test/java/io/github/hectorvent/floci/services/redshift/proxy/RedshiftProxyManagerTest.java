@@ -73,6 +73,12 @@ class RedshiftProxyManagerTest {
     }
 
     @Test
+    void stopProxyForUnknownKeyThrowsException() {
+        RedshiftProxyManager manager = newManager();
+        assertThrows(RuntimeException.class, () -> manager.stopProxy("missing"));
+    }
+
+    @Test
     void updateMasterPasswordForUnknownKeyIsANoOp() {
         RedshiftProxyManager manager = newManager();
         assertDoesNotThrow(() -> manager.updateMasterPassword("missing", "rotated"));

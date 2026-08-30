@@ -73,11 +73,12 @@ public class RedshiftProxyManager {
     }
 
     public synchronized void stopProxy(String relayKey) {
-        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        RedshiftAuthProxy proxy = proxies.remove(relayKey);
         if (proxy != null) {
             proxy.stop();
-            proxies.remove(relayKey, proxy);
             LOG.infov("Stopped Redshift proxy for cluster {0}", relayKey);
+        } else {
+            throw new RuntimeException("Proxy not found for cluster " + relayKey);
         }
     }
 
