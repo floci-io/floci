@@ -257,6 +257,48 @@ class AslExecutorTaskHistoryEventsTest {
         assertNull(started.getDetails());
     }
 
+    /**
+     * A Parallel branch and a Map iteration run states of their own whose events floci does not
+     * publish. The published history is still one unbroken chain: the ids of the events around them
+     * do not skip the numbers those states used.
+     */
+    @Test
+    void parallelAndMapPublishAnUnbrokenEventChain() throws Exception {
+        var history = new ArrayList<HistoryEvent>();
+        var execution = run("""
+                {
+                  "StartAt": "Fan",
+                  "States": {
+                    "Fan": {
+                      "Type": "Parallel",
+                      "Branches": [{
+                        "StartAt": "BranchStep",
+                        "States": {"BranchStep": {"Type": "Pass", "Next": "BranchTail"},
+                                   "BranchTail": {"Type": "Pass", "End": true}}
+                      }],
+                      "Next": "Iterate"
+                    },
+                    "Iterate": {
+                      "Type": "Map",
+                      "ItemsPath": "$[0].items",
+                      "ItemProcessor": {
+                        "StartAt": "ItemStep",
+                        "States": {"ItemStep": {"Type": "Pass", "End": true}}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """, "{\"items\": [1, 2]}", null, history);
+
+        assertEquals("SUCCEEDED", execution.getStatus(), "history: " + typesOf(history));
+        assertEquals(
+                List.of("ParallelStateEntered", "ParallelStateExited",
+                        "MapStateEntered", "MapStateExited", "ExecutionSucceeded"),
+                typesOf(history));
+        assertChain(history);
+    }
+
     private static List<String> typesOf(List<HistoryEvent> history) {
         return history.stream().map(HistoryEvent::getType).toList();
     }
