@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,9 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     @Inject
     CloudFormationService cloudFormationService;
 
+    @Inject
+    IamService iamService;
+
     private String iam(String action, String... kv) {
         var req = given()
             .contentType("application/x-www-form-urlencoded")
@@ -56,6 +60,25 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("Stack not found: " + stackName));
         stack.getResources().get(logicalId).getAttributes().remove("PolicyId");
+    }
+
+    @SuppressWarnings("unchecked")
+    private void markServiceLinked(String roleName) throws ReflectiveOperationException {
+        Object target = iamService instanceof io.quarkus.arc.ClientProxy proxy
+                ? proxy.arc_contextualInstance()
+                : iamService;
+        Field rolesField = IamService.class.getDeclaredField("roles");
+        rolesField.setAccessible(true);
+        io.github.hectorvent.floci.core.storage.StorageBackend<String,
+                io.github.hectorvent.floci.services.iam.model.IamRole> roles =
+                (io.github.hectorvent.floci.core.storage.StorageBackend<String,
+                        io.github.hectorvent.floci.services.iam.model.IamRole>) rolesField.get(target);
+        var role = roles.get(roleName).orElseThrow();
+        // isServiceLinkedRole() alone triggers the guard; the path must also look like a real
+        // service-linked path since the guard's error message parses the principal back out of it.
+        role.setPath("/aws-service-role/example.amazonaws.com/");
+        role.setServiceLinkedRole(true);
+        roles.put(roleName, role);
     }
 
     private static String managedPolicyTemplate(String policyName, String roleName, String action) {
@@ -401,5 +424,45 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString(policyArn(policyName)));
+    }
+
+    @Test
+    void nonNoSuchEntityDetachFailureDuringUpdateStillRestoresThePriorVersion()
+            throws ReflectiveOperationException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-detachfail-" + suffix;
+        String policyName = "mp-detachfail-" + suffix;
+        String oldRole = "mp-detachfail-old-" + suffix;
+
+        iam("CreateRole", "RoleName", oldRole, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+
+        createStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:GetObject", oldRole));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        // oldRole becomes unmodifiable between passes (e.g. adopted as a service-linked role by
+        // another process) — detachRolePolicy now fails with UnmodifiableEntity, not NoSuchEntity,
+        // and does so from the obsolete-role detach loop, which runs BEFORE the attach loop whose
+        // catch block performs the version/attachment restore.
+        markServiceLinked(oldRole);
+
+        // Drop oldRole from the template: the update path publishes the new default version, then
+        // tries to detach the now-obsolete oldRole and hits the non-NoSuchEntity failure above.
+        updateStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:PutObject"));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        // The default version reverted to the original document (v1), not left on the stray v2
+        // published before the detach failure escaped the version/attachment restore.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", policyArn(policyName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<DefaultVersionId>v1</DefaultVersionId>"));
     }
 }

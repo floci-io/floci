@@ -3268,8 +3268,14 @@ public class CloudFormationResourceProvisioner {
                             detachedObsoleteRoles.add(previousRole);
                         } catch (AwsException detachFailure) {
                             // Update is idempotent like the delete path: the attachment can
-                            // already be gone on a retry, but other failures must still surface.
+                            // already be gone on a retry, but other failures must still surface —
+                            // and must still restore the version/attachments this pass already
+                            // changed, the same as a failure in the attach loop below (this loop
+                            // runs first, so that loop's own catch never sees this failure).
                             if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
+                                restoreManagedPolicyOnUpdateFailure(detachFailure, r, existingArn,
+                                        false, Set.of(), detachedObsoleteRoles,
+                                        previousDefaultVersionId, createdVersionForRollback);
                                 throw detachFailure;
                             }
                         }
@@ -3305,54 +3311,74 @@ public class CloudFormationResourceProvisioner {
                 }
             }
         } catch (RuntimeException failure) {
-            List<String> rollbackRoles = new ArrayList<>(attachedRoleNames);
-            Collections.reverse(rollbackRoles);
-            boolean cleanupSucceeded = true;
-            for (String roleName : rollbackRoles) {
-                String cleanupDescription = "detach policy " + policyArn + " from role " + roleName;
-                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                        () -> iamService.detachRolePolicy(roleName, policyArn))) {
-                    cleanupSucceeded = false;
-                }
-            }
-            if (createdPolicy
-                    && !CfnRollback.attemptIamCleanup(failure, "delete policy " + policyArn,
-                            () -> iamService.deletePolicy(policyArn))) {
+            restoreManagedPolicyOnUpdateFailure(failure, r, policyArn, createdPolicy, attachedRoleNames,
+                    detachedObsoleteRoles, previousDefaultVersionId, createdVersionForRollback);
+            throw failure;
+        }
+    }
+
+    /**
+     * Undoes whatever this update attempt already did to a managed policy before it failed —
+     * shared by the attach loop above and the obsolete-role detach loop earlier in
+     * {@link #provisionIamManagedPolicy}, since a detach failure (e.g. a role that became
+     * unmodifiable between passes) can escape before the attach loop even runs, and must still
+     * restore the version/attachment state already changed in this pass.
+     */
+    private void restoreManagedPolicyOnUpdateFailure(
+            RuntimeException failure,
+            StackResource r,
+            String policyArn,
+            boolean createdPolicy,
+            Set<String> attachedRoleNames,
+            List<String> detachedObsoleteRoles,
+            String previousDefaultVersionId,
+            io.github.hectorvent.floci.services.iam.model.PolicyVersion createdVersionForRollback) {
+        List<String> rollbackRoles = new ArrayList<>(attachedRoleNames);
+        Collections.reverse(rollbackRoles);
+        boolean cleanupSucceeded = true;
+        for (String roleName : rollbackRoles) {
+            String cleanupDescription = "detach policy " + policyArn + " from role " + roleName;
+            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                    () -> iamService.detachRolePolicy(roleName, policyArn))) {
                 cleanupSucceeded = false;
             }
-            // An adopted update that fails here already replaced the default version and/or
-            // detached now-obsolete roles before this attach loop ran; undo both so the failed
-            // update doesn't leave the policy half-migrated under UPDATE_ROLLBACK_COMPLETE.
-            List<String> reattachRoles = new ArrayList<>(detachedObsoleteRoles);
-            Collections.reverse(reattachRoles);
-            for (String roleName : reattachRoles) {
-                String cleanupDescription = "reattach policy " + policyArn + " to role " + roleName;
-                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                        () -> iamService.attachRolePolicy(roleName, policyArn))) {
+        }
+        if (createdPolicy
+                && !CfnRollback.attemptIamCleanup(failure, "delete policy " + policyArn,
+                        () -> iamService.deletePolicy(policyArn))) {
+            cleanupSucceeded = false;
+        }
+        // An adopted update that fails here already replaced the default version and/or
+        // detached now-obsolete roles before this attach loop ran; undo both so the failed
+        // update doesn't leave the policy half-migrated under UPDATE_ROLLBACK_COMPLETE.
+        List<String> reattachRoles = new ArrayList<>(detachedObsoleteRoles);
+        Collections.reverse(reattachRoles);
+        for (String roleName : reattachRoles) {
+            String cleanupDescription = "reattach policy " + policyArn + " to role " + roleName;
+            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                    () -> iamService.attachRolePolicy(roleName, policyArn))) {
+                cleanupSucceeded = false;
+            }
+        }
+        if (previousDefaultVersionId != null) {
+            String restoredVersionId = previousDefaultVersionId;
+            String restoreDescription =
+                    "restore default policy version " + restoredVersionId + " on " + policyArn;
+            if (!CfnRollback.attemptIamCleanup(failure, restoreDescription,
+                    () -> iamService.setDefaultPolicyVersion(policyArn, restoredVersionId))) {
+                cleanupSucceeded = false;
+            }
+            if (createdVersionForRollback != null) {
+                String strayVersionId = createdVersionForRollback.getVersionId();
+                String pruneDescription = "delete stray policy version " + strayVersionId + " on " + policyArn;
+                if (!CfnRollback.attemptIamCleanup(failure, pruneDescription,
+                        () -> iamService.deletePolicyVersion(policyArn, strayVersionId))) {
                     cleanupSucceeded = false;
                 }
             }
-            if (previousDefaultVersionId != null) {
-                String restoredVersionId = previousDefaultVersionId;
-                String restoreDescription =
-                        "restore default policy version " + restoredVersionId + " on " + policyArn;
-                if (!CfnRollback.attemptIamCleanup(failure, restoreDescription,
-                        () -> iamService.setDefaultPolicyVersion(policyArn, restoredVersionId))) {
-                    cleanupSucceeded = false;
-                }
-                if (createdVersionForRollback != null) {
-                    String strayVersionId = createdVersionForRollback.getVersionId();
-                    String pruneDescription = "delete stray policy version " + strayVersionId + " on " + policyArn;
-                    if (!CfnRollback.attemptIamCleanup(failure, pruneDescription,
-                            () -> iamService.deletePolicyVersion(policyArn, strayVersionId))) {
-                        cleanupSucceeded = false;
-                    }
-                }
-            }
-            if (cleanupSucceeded && createdPolicy) {
-                r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-            }
-            throw failure;
+        }
+        if (cleanupSucceeded && createdPolicy) {
+            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
         }
     }
 
