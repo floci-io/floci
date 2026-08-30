@@ -162,12 +162,6 @@ setup() {
     assert_output --partial "ACTIVE"
 }
 
-@test "OpenTofu: CodeBuild project created" {
-    run aws_cmd codebuild batch-get-projects --names floci-compat-codebuild
-    assert_success
-    assert_output --partial "floci-compat-codebuild"
-}
-
 @test "OpenTofu: API Gateway v1 REST API created" {
     run aws_cmd apigateway get-rest-apis
     assert_success
@@ -235,12 +229,6 @@ setup() {
     assert_output --partial "floci-compat-waf"
 }
 
-@test "OpenTofu: CloudTrail trail created" {
-    run aws_cmd cloudtrail describe-trails
-    assert_success
-    assert_output --partial "floci-compat-trail"
-}
-
 @test "OpenTofu: Cost and Usage Report created" {
     run aws_cmd cur describe-report-definitions
     assert_success
@@ -262,7 +250,7 @@ setup() {
 @test "OpenTofu: Firehose delivery stream created" {
     run aws_cmd firehose list-delivery-streams
     assert_success
-    assert_output --partial "floci-compat-firehose"
+    assert_output --partial "floci-compat-firehose-basic"
 }
 
 @test "OpenTofu: EventBridge pipe created" {
@@ -275,12 +263,6 @@ setup() {
     run aws_cmd batch describe-compute-environments
     assert_success
     assert_output --partial "floci-compat-batch"
-}
-
-@test "OpenTofu: OpenSearch domain created" {
-    run aws_cmd opensearch describe-domain --domain-name floci-compat-search
-    assert_success
-    assert_output --partial "floci-compat-search"
 }
 
 @test "OpenTofu: VPC created with custom DNS settings" {

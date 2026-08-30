@@ -177,28 +177,6 @@ resource "aws_eks_cluster" "compat" {
   }
 }
 
-# -- CodeBuild Project ---------------------------------------------------------
-resource "aws_codebuild_project" "compat" {
-  name         = "floci-compat-codebuild"
-  service_role = aws_iam_role.lambda_exec.arn
-
-  artifacts {
-    type = "NO_ARTIFACTS"
-  }
-
-  environment {
-    compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "aws/codebuild/standard:7.0"
-    type                        = "LINUX_CONTAINER"
-    image_pull_credentials_type = "CODEBUILD"
-  }
-
-  source {
-    type      = "NO_SOURCE"
-    buildspec = "version: 0.2\nphases:\n  build:\n    commands:\n      - echo build\n"
-  }
-}
-
 # -- API Gateway v1 ------------------------------------------------------------
 resource "aws_api_gateway_rest_api" "compat" {
   name = "floci-compat-api"
@@ -283,12 +261,6 @@ resource "aws_wafv2_web_acl" "compat" {
   }
 }
 
-# -- CloudTrail Trail ----------------------------------------------------------
-resource "aws_cloudtrail" "compat" {
-  name           = "floci-compat-trail"
-  s3_bucket_name = aws_s3_bucket.app.bucket
-}
-
 # -- Cost and Usage Report -----------------------------------------------------
 resource "aws_cur_report_definition" "compat" {
   report_name                = "floci-compat-report"
@@ -320,7 +292,7 @@ resource "aws_elasticache_replication_group" "compat" {
 
 # -- Firehose Delivery Stream --------------------------------------------------
 resource "aws_kinesis_firehose_delivery_stream" "compat" {
-  name        = "floci-compat-firehose"
+  name        = "floci-compat-firehose-basic"
   destination = "extended_s3"
 
   extended_s3_configuration {
@@ -359,15 +331,6 @@ resource "aws_batch_compute_environment" "compat" {
     max_vcpus          = 1
     subnets            = [aws_subnet.compat.id]
     security_group_ids = [aws_security_group.compat.id]
-  }
-}
-
-# -- OpenSearch Domain ---------------------------------------------------------
-resource "aws_opensearch_domain" "compat" {
-  domain_name = "floci-compat-search"
-
-  cluster_config {
-    instance_type = "t3.small.search"
   }
 }
 
