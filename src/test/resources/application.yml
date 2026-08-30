@@ -167,6 +167,8 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      proxy-base-port: 7100
+      proxy-max-port: 7199
     rds:
       enabled: true
       mock: false

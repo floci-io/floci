@@ -318,6 +318,9 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      proxy-base-port: 7100
+      proxy-max-port: 7199
+      # endpoint-host: localhost                 # Hostname clients use; empty -> DockerHostResolver
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
