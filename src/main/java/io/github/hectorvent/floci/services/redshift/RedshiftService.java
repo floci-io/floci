@@ -185,8 +185,11 @@ public class RedshiftService {
         Cluster cluster = clusterOpt.get();
 
         // Tear down the auth proxy and return its port before stopping the container.
-        String accountId = clusters.accountId();
-        stopProxyAndReleasePortSafely(identifier, cluster.getProxyPort());
+        // If it fails, abort deletion so the metadata remains and the user can retry.
+        if (!stopProxyAndReleasePortSafely(identifier, cluster.getProxyPort())) {
+            throw new AwsException("InternalFailure",
+                    "Failed to stop auth proxy; cluster " + identifier + " was not deleted", 500);
+        }
 
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
@@ -807,7 +810,7 @@ public class RedshiftService {
                 "No available Redshift proxy ports in range " + base + "-" + max, 503);
     }
 
-    private void stopProxyAndReleasePortSafely(String identifier, int proxyPort) {
+    private boolean stopProxyAndReleasePortSafely(String identifier, int proxyPort) {
         boolean proxyStopped = false;
         try {
             proxyManager.stopProxy(relayKey(clusters.accountId(), identifier));
@@ -818,6 +821,7 @@ public class RedshiftService {
         if (proxyStopped) {
             releaseProxyPort(proxyPort);
         }
+        return proxyStopped;
     }
 
     private void releaseProxyPort(int port) {
