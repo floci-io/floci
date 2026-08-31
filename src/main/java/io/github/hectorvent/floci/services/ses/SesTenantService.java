@@ -219,9 +219,12 @@ public class SesTenantService {
         synchronized (tenantMutationLock) {
             Tenant current = findByTenantId(arn.tenantId(), region)
                     .orElseThrow(() -> tagArnTenantNotFound(arn));
-            List<Tag> tags = current.tags() == null ? List.of() : current.tags();
+            // The record's list may be a mutable one (Jackson-built); hand the callback an immutable
+            // copy so an in-place mutation can't reach the stored record, and store an immutable copy
+            // so the persisted list can't be aliased either.
+            List<Tag> tags = current.tags() == null ? List.of() : List.copyOf(current.tags());
             tenantStore.put(tenantKey(region, current.tenantName()),
-                    current.withTags(mutation.apply(tags)));
+                    current.withTags(List.copyOf(mutation.apply(tags))));
         }
     }
 

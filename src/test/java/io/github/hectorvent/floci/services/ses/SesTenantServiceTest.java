@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.security.SecureRandom;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -180,6 +181,22 @@ class SesTenantServiceTest {
         assertEquals("No Tenant present with name: acmewith tenantId: " + tenant.tenantId(),
                 e.getMessage());
         assertEquals(0, service.getTenant("acme", REGION).tags().size());
+    }
+
+    @Test
+    void mutateTags_shieldsTheStoredRecordFromCallbackMutation() {
+        Tenant tenant = service.createTenant("acme",
+                new ArrayList<>(List.of(new Tag("team", "floci"))), ACCOUNT, REGION);
+        // The callback gets an immutable copy — an in-place mutation fails fast instead of
+        // silently aliasing the stored record's list.
+        assertThrows(UnsupportedOperationException.class, () -> service.mutateTags(
+                "acme/" + tenant.tenantId(), REGION, tags -> {
+                    tags.add(new Tag("env", "dev"));
+                    return tags;
+                }));
+        List<Tag> tags = service.getTenant("acme", REGION).tags();
+        assertEquals(1, tags.size());
+        assertEquals("team", tags.get(0).key());
     }
 
     // ──────────────────────── Resource associations (Phase 2) ────────────────────────
