@@ -132,9 +132,10 @@ public class RedshiftAuthProxy {
     }
 
     private void handleConnection(Socket client) {
+        Socket backend = null;
         try {
             client.setTcpNoDelay(true);
-            Socket backend = new Socket(backendHost, backendPort);
+            backend = new Socket(backendHost, backendPort);
             backend.setTcpNoDelay(true);
             // iamEnabled = false: the SigV4 branch inside handleAuth is never taken.
             PostgresProtocolHandler.handleAuth(
@@ -142,7 +143,14 @@ public class RedshiftAuthProxy {
                     false, sigV4, tlsCertificates, passwordValidator::validate);
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
+        } finally {
+            // handleAuth's success path bridges then closes both sockets; every other path
+            // (early return on a bare probe, auth failure, thrown IOException) can leave the
+            // backend connection to Postgres open. Closing here is idempotent.
             closeQuietly(client);
+            if (backend != null) {
+                closeQuietly(backend);
+            }
         }
     }
 

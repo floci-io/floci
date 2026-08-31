@@ -100,6 +100,37 @@ class RedshiftAuthProxyTest {
     }
 
     @Test
+    void closesTheBackendConnectionWhenTheClientDropsMidHandshake() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        CountDownLatch backendClosed = new CountDownLatch(1);
+        Thread.ofVirtual().start(() -> {
+            try (Socket s = fakeBackend.accept()) {
+                // The proxy opens this before reading the client's startup packet; if the
+                // client vanishes, the proxy must close this too — surfaced here as EOF.
+                InputStream in = s.getInputStream();
+                while (in.read() != -1) {
+                    // drain until the proxy closes its end
+                }
+                backendClosed.countDown();
+            } catch (IOException e) {
+                backendClosed.countDown();
+            }
+        });
+
+        int proxyPort = freePort();
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true);
+        proxy.start(proxyPort);
+
+        // Connect, then drop without ever sending a startup packet.
+        new Socket("localhost", proxyPort).close();
+
+        assertTrue(backendClosed.await(5, TimeUnit.SECONDS),
+                "proxy leaked the backend connection after the client dropped");
+    }
+
+    @Test
     void startRetriesTheBindWhileThePortIsMomentarilyStillInUse() throws Exception {
         fakeBackend = new ServerSocket(0);
         int proxyPort = freePort();
