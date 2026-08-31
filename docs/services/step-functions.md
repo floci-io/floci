@@ -111,6 +111,37 @@ uniformly between zero and the computed delay, as on AWS. One deviation. The del
 between attempts is capped at 30 seconds, the same cap Floci applies to `Wait` states,
 so emulated runs stay fast.
 
+## Timeouts
+
+ASL carries two `TimeoutSeconds` fields and Floci enforces both, in the two terminal shapes
+AWS uses. The state machine's own field bounds every state; a `Task`'s own field only bounds
+one that waits for a task token — an activity, or a `.waitForTaskToken` integration. A Lambda
+or other SDK task that returns directly is not bound by it.
+
+The state machine's own `TimeoutSeconds` is the whole execution's budget. It is checked before
+every state and inside a `Wait`, so a `Wait` longer than what is left is cut rather than slept
+out. The execution ends `TIMED_OUT` with `stopDate` set and no `error` and no `cause` at all;
+`States.Timeout` is named only in the single `ExecutionTimedOut` event, whose `previousEventId`
+is `0`. The state that was cut gets no `*StateExited` event. A `Parallel` or `Map` branch runs
+on its own thread and is not cut mid-state: the budget is enforced again as soon as the branch
+returns.
+
+A `Task` that waits for a task token — an activity, or a `.waitForTaskToken` integration — has
+two independent bounds. `TimeoutSeconds` is the whole wait; `HeartbeatSeconds` is the longest gap
+allowed between two `SendTaskHeartbeat` calls, and every heartbeat pushes that gap forward, so a
+worker that reports as often as the definition asks runs until `TimeoutSeconds` runs out. Either
+clock ends the state the same way: an `ActivityTimedOut` event — `TaskTimedOut` for a
+`.waitForTaskToken` integration — carrying `States.Timeout` and no cause, then an execution that
+reads `FAILED` with that same error. A `Catch` on a heartbeat expiry matches under
+`States.HeartbeatTimeout` and under `States.Timeout` alike. Neither timeout carries a cause:
+`DescribeExecution` and the `ExecutionFailed` event both leave the key out, where every other
+failure reports one. A `Task` that declares no `TimeoutSeconds` waits 300 seconds, where AWS
+waits a year.
+
+One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
+it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
+when the task is scheduled.
+
 ## JSONata nulls
 
 An expression that evaluates to JSON `null` produces a value, not a missing one. It keeps its key

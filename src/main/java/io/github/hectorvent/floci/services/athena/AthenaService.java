@@ -25,6 +25,8 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class AthenaService {
@@ -34,6 +36,23 @@ public class AthenaService {
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
     private static final String DEFAULT_ENGINE_VERSION = "Athena engine version 3";
+    private static final Pattern CREATE_DATABASE_PATTERN = Pattern.compile(
+            "^\\s*CREATE\\s+(?:DATABASE|SCHEMA)\\s+"
+                    + "(IF\\s+NOT\\s+EXISTS\\s+)?"
+                    + "(?:`([^`]+)`|\\\"([^\\\"]+)\\\"|([a-zA-Z0-9_-]+))"
+                    + "(?:\\s+COMMENT\\s+'((?:''|[^'])*)')?"
+                    + "(?:\\s+LOCATION\\s+'((?:''|[^'])*)')?"
+                    + "(?:\\s+WITH\\s+DBPROPERTIES\\s*\\((.*?)\\))?"
+                    + "\\s*;?\\s*$",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern CREATE_DATABASE_PREFIX_PATTERN = Pattern.compile(
+            "^\\s*CREATE\\s+(?:DATABASE|SCHEMA)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern DATABASE_PROPERTY_PATTERN = Pattern.compile(
+            "\\s*'((?:''|[^'])*)'\\s*=\\s*'((?:''|[^'])*)'\\s*");
+    private static final Pattern RESULT_STATEMENT_PATTERN = Pattern.compile(
+            "^(?:SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN|VALUES)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private final StorageBackend<String, QueryExecution> queryStore;
     private final StorageBackend<String, WorkGroup> workGroupStore;
@@ -73,19 +92,40 @@ public class AthenaService {
             resolvedContext.setCatalog(DEFAULT_CATALOG);
         }
 
+        boolean createDatabaseStatement = CREATE_DATABASE_PREFIX_PATTERN.matcher(statementText(query)).find();
         // AWS reports the result CSV object itself as the OutputLocation, not a
         // directory prefix — the same key is written and returned to the client.
-        String outputLocation = resolveOutputLocation(resultConfiguration, id);
-        ResultConfiguration resolvedResult = new ResultConfiguration(outputLocation);
+        // Statements that do not return rows must not be wrapped in a result COPY.
+        String outputLocation = producesResultRows(query)
+                ? resolveOutputLocation(resultConfiguration, id)
+                : null;
+        ResultConfiguration resolvedResult = outputLocation != null
+                ? new ResultConfiguration(outputLocation)
+                : null;
 
         QueryExecution execution = new QueryExecution(id, query, workGroup, resolvedResult, resolvedContext);
+        if (createDatabaseStatement) {
+            execution.setStatementType("DDL");
+        }
         execution.getStatus().setState(QueryExecutionState.RUNNING);
         queryStore.put(id, execution);
 
+        if (createDatabaseStatement) {
+            try {
+                CreateDatabaseDdl createDatabaseDdl = parseCreateDatabase(query);
+                if (createDatabaseDdl == null) {
+                    throw new AwsException("InvalidRequestException", "Invalid CREATE DATABASE statement", 400);
+                }
+                createGlueDatabase(createDatabaseDdl);
+                markSucceeded(id, execution);
+            } catch (Exception e) {
+                markFailed(id, execution, e);
+            }
+            return id;
+        }
+
         if (config.services().athena().mock()) {
-            execution.getStatus().setState(QueryExecutionState.SUCCEEDED);
-            execution.getStatus().setCompletionDateTime(Instant.now());
-            queryStore.put(id, execution);
+            markSucceeded(id, execution);
             LOG.infov("Query {0} accepted (mock mode)", id);
             return id;
         }
@@ -93,18 +133,16 @@ public class AthenaService {
         // Submit async — caller gets the ID immediately while execution runs in background
         vertx.executeBlocking(() -> {
             String setupDdl = buildGlueDdl(database);
-            ensureOutputBucket(outputLocation);
+            if (outputLocation != null) {
+                ensureOutputBucket(outputLocation);
+            }
             duckClient.execute(query, setupDdl, outputLocation);
             return null;
         }).onSuccess(v -> {
-            execution.getStatus().setState(QueryExecutionState.SUCCEEDED);
-            execution.getStatus().setCompletionDateTime(Instant.now());
-            queryStore.put(id, execution);
+            markSucceeded(id, execution);
             LOG.infov("Query {0} succeeded", id);
         }).onFailure(e -> {
-            execution.getStatus().setState(QueryExecutionState.FAILED);
-            execution.getStatus().setStateChangeReason(e.getMessage());
-            queryStore.put(id, execution);
+            markFailed(id, execution, e);
             LOG.warnv("Query {0} failed: {1}", id, e.getMessage());
         });
 
@@ -219,6 +257,115 @@ public class AthenaService {
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
+
+    private CreateDatabaseDdl parseCreateDatabase(String query) {
+        Matcher matcher = CREATE_DATABASE_PATTERN.matcher(statementText(query));
+        if (!matcher.matches()) {
+            return null;
+        }
+        String name = firstNonNull(matcher.group(2), matcher.group(3), matcher.group(4));
+        return new CreateDatabaseDdl(
+                name,
+                matcher.group(1) != null,
+                unescapeSqlString(matcher.group(5)),
+                unescapeSqlString(matcher.group(6)),
+                parseDatabaseProperties(matcher.group(7)));
+    }
+
+    private void createGlueDatabase(CreateDatabaseDdl statement) {
+        Database database = new Database(statement.name());
+        database.setDescription(statement.comment());
+        database.setLocationUri(statement.location());
+        database.setParameters(statement.properties());
+        try {
+            glueService.createDatabase(database);
+        } catch (AwsException e) {
+            if (!statement.ifNotExists() || !"AlreadyExistsException".equals(e.getErrorCode())) {
+                throw e;
+            }
+        }
+    }
+
+    private static Map<String, String> parseDatabaseProperties(String clause) {
+        if (clause == null) {
+            return null;
+        }
+        Map<String, String> properties = new LinkedHashMap<>();
+        int cursor = 0;
+        while (cursor < clause.length()) {
+            Matcher matcher = DATABASE_PROPERTY_PATTERN.matcher(clause);
+            matcher.region(cursor, clause.length());
+            if (!matcher.lookingAt()) {
+                throw new AwsException("InvalidRequestException", "Invalid database properties", 400);
+            }
+            properties.put(unescapeSqlString(matcher.group(1)), unescapeSqlString(matcher.group(2)));
+            cursor = matcher.end();
+            if (cursor == clause.length()) {
+                break;
+            }
+            if (clause.charAt(cursor) != ',') {
+                throw new AwsException("InvalidRequestException", "Invalid database properties", 400);
+            }
+            cursor++;
+            if (clause.substring(cursor).isBlank()) {
+                throw new AwsException("InvalidRequestException", "Invalid database properties", 400);
+            }
+        }
+        return properties;
+    }
+
+    private static boolean producesResultRows(String query) {
+        return RESULT_STATEMENT_PATTERN.matcher(statementText(query)).find();
+    }
+
+    private static String statementText(String query) {
+        String statement = query == null ? "" : query.stripLeading();
+        while (true) {
+            if (statement.startsWith("--")) {
+                int lineEnd = statement.indexOf('\n');
+                statement = lineEnd >= 0 ? statement.substring(lineEnd + 1).stripLeading() : "";
+                continue;
+            }
+            if (statement.startsWith("/*")) {
+                int commentEnd = statement.indexOf("*/", 2);
+                if (commentEnd < 0) {
+                    return statement;
+                }
+                statement = statement.substring(commentEnd + 2).stripLeading();
+                continue;
+            }
+            return statement;
+        }
+    }
+
+    private static String firstNonNull(String... values) {
+        for (String value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static String unescapeSqlString(String value) {
+        return value == null ? null : value.replace("''", "'");
+    }
+
+    private void markSucceeded(String id, QueryExecution execution) {
+        execution.getStatus().setState(QueryExecutionState.SUCCEEDED);
+        execution.getStatus().setCompletionDateTime(Instant.now());
+        queryStore.put(id, execution);
+    }
+
+    private void markFailed(String id, QueryExecution execution, Throwable failure) {
+        execution.getStatus().setState(QueryExecutionState.FAILED);
+        execution.getStatus().setStateChangeReason(failure.getMessage());
+        queryStore.put(id, execution);
+    }
+
+    private record CreateDatabaseDdl(String name, boolean ifNotExists, String comment,
+                                     String location, Map<String, String> properties) {
+    }
 
     private String buildGlueDdl(String database) {
         StringBuilder sb = new StringBuilder();

@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.*;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -407,5 +409,111 @@ class AthenaIntegrationTest {
             .statusCode(200)
             .body("QueryExecution.ResultConfiguration.OutputLocation",
                     equalTo("s3://athena-location-test/out/" + id + ".csv"));
+    }
+
+    @Test
+    @Order(14)
+    void createDatabaseDdlUpdatesGlueCatalogWithoutResultOutput() {
+        String query = """
+                CREATE DATABASE IF NOT EXISTS workspace_dev_test
+                COMMENT 'Created through Athena'
+                LOCATION 's3://bucket/path'
+                WITH DBPROPERTIES ('owner'='integration-test')
+                """;
+        String id = given()
+            .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body(Map.of("QueryString", query))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("QueryExecutionId");
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + id + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueryExecution.Status.State", equalTo("SUCCEEDED"))
+            .body("QueryExecution.StatementType", equalTo("DDL"))
+            .body("QueryExecution.ResultConfiguration", nullValue());
+
+        given()
+            .header("X-Amz-Target", "AWSGlue.GetDatabase")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"Name\": \"workspace_dev_test\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Database.Name", equalTo("workspace_dev_test"))
+            .body("Database.Description", equalTo("Created through Athena"))
+            .body("Database.LocationUri", equalTo("s3://bucket/path"))
+            .body("Database.Parameters.owner", equalTo("integration-test"));
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryResults")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + id + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResultSet.Rows", empty())
+            .body("ResultSet.ResultSetMetadata.ColumnInfo", empty());
+
+        String repeatId = given()
+            .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body(Map.of("QueryString", query))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("QueryExecutionId");
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + repeatId + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueryExecution.Status.State", equalTo("SUCCEEDED"));
+    }
+
+    @Test
+    @Order(15)
+    void malformedCreateDatabaseDdlIsRecordedAsFailedExecution() {
+        String id = given()
+            .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body(Map.of("QueryString", """
+                    CREATE DATABASE invalid_properties_test
+                    WITH DBPROPERTIES ('owner'='integration-test', )
+                    """))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("QueryExecutionId");
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + id + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueryExecution.Status.State", equalTo("FAILED"))
+            .body("QueryExecution.Status.StateChangeReason", equalTo("Invalid database properties"))
+            .body("QueryExecution.StatementType", equalTo("DDL"))
+            .body("QueryExecution.ResultConfiguration", nullValue());
     }
 }

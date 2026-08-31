@@ -284,10 +284,59 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         assertEquals("Sfn.InvalidTokenException", describe.jsonPath().getString("error"));
     }
 
+    @Test
+    @Order(9)
+    void sendTaskSuccessOnATokenWhoseResourceInvocationThrewFailsAsInvalid() throws Exception {
+        // "Leak" registers a task token, then fails invoking its own (unsupported) resource before it
+        // ever waits on that token. The registration must not outlive the failure: the token is
+        // recovered from the TaskScheduled event it wrote on its way to failing, and a second
+        // execution's SendTaskSuccess on that same token must find nothing pending for it.
+        var leakArn = createStateMachine("aws-sdk-task-leaked-token", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Leak",
+                  "States": {
+                    "Leak": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::unsupported:doSomething.waitForTaskToken",
+                      "Arguments": {"token": "{% $states.context.Task.Token %}"},
+                      "End": true
+                    }
+                  }
+                }
+                """);
+
+        var leaked = waitForTerminalState(startExecution(leakArn, "{}"));
+        assertEquals("FAILED", leaked.jsonPath().getString("status"));
+        assertEquals("States.TaskFailed", leaked.jsonPath().getString("error"));
+        var taskToken = scheduledTaskToken(leaked.jsonPath().getString("executionArn"));
+
+        var senderArn = createStateMachine("aws-sdk-send-success-leaked-token", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Resume",
+                  "States": {
+                    "Resume": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:sfn:sendTaskSuccess",
+                      "Arguments": {"TaskToken": "{% $states.input.token %}", "Output": {}},
+                      "End": true
+                    }
+                  }
+                }
+                """);
+
+        var describe = waitForTerminalState(startExecution(senderArn, tokenInput(taskToken)));
+
+        assertEquals("FAILED", describe.jsonPath().getString("status"),
+                "Leak's token must be discarded once its resource invocation throws, not left pending");
+        assertEquals("Sfn.InvalidTokenException", describe.jsonPath().getString("error"));
+    }
+
     // ──────────────────────────── scheduler:createSchedule / updateSchedule ────────────────────────────
 
     @Test
-    @Order(9)
+    @Order(10)
     void createScheduleReturnsTheScheduleArnAndTheScheduleIsReadable() throws Exception {
         var result = mapper.readTree(succeedingOutputOf(
                 createStateMachine("aws-sdk-create-schedule", scheduleTask("createSchedule",
@@ -303,7 +352,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void updateScheduleKeepsTheArnAndChangesTheExpression() throws Exception {
         var result = mapper.readTree(succeedingOutputOf(
                 createStateMachine("aws-sdk-update-schedule", scheduleTask("updateSchedule",
@@ -317,7 +366,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void createScheduleOnANameAlreadyTakenFailsWithConflict() {
         var describe = waitForTerminalState(startExecution(
                 createStateMachine("aws-sdk-create-schedule-twice", scheduleTask("createSchedule",
@@ -328,7 +377,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void updateScheduleOnAScheduleThatDoesNotExistFailsWithResourceNotFound() {
         var describe = waitForTerminalState(startExecution(
                 createStateMachine("aws-sdk-update-missing-schedule", scheduleTask("updateSchedule",
@@ -339,7 +388,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void createScheduleWithIncompleteEventBridgeParametersIsCatchableAsAValidationException() throws Exception {
         var smArn = createStateMachine("aws-sdk-create-schedule-invalid-target", """
                 {
@@ -379,7 +428,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void createScheduleWithAMalformedListIsCatchableAsASerializationException() throws Exception {
         // A malformed EcsParameters list is refused before the conversion runs, so it reaches Catch
         // as the SDK exception AWS sends rather than as States.Runtime.
@@ -567,6 +616,29 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                         {"executionArn": "%s"}
                         """.formatted(execArn))
                 .when().post("/");
+    }
+
+    private static Response getExecutionHistory(String execArn) {
+        return given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("""
+                        {"executionArn": "%s"}
+                        """.formatted(execArn))
+                .when().post("/");
+    }
+
+    /** The token a Task registered for itself, recovered from its own TaskScheduled event. */
+    private static String scheduledTaskToken(String execArn) throws Exception {
+        var events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
+        for (var event : events) {
+            if ("TaskScheduled".equals(event.path("type").asText())) {
+                var parameters = event.path("taskScheduledEventDetails").path("parameters").asText();
+                return mapper.readTree(parameters).path("token").asText();
+            }
+        }
+        fail("no TaskScheduled event found in history: " + events);
+        return null;
     }
 
     private static Response waitForTerminalState(String execArn) {
