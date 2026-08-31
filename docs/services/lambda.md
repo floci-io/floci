@@ -763,6 +763,62 @@ use `ParallelizationFactor` instead, which is a separate field.
     at a time regardless). Real parallel dispatch capped by
     `MaximumConcurrency` is tracked as a follow-up.
 
+### FilterCriteria
+
+`CreateEventSourceMapping` and `UpdateEventSourceMapping` accept a
+`FilterCriteria` with up to 5 `Filters`, each carrying an event-pattern
+`Pattern`, using the same EventBridge pattern syntax as EventBridge Pipes.
+`GetEventSourceMapping` and `ListEventSourceMappings` echo it back when set and
+omit the field entirely when unset. Filters are **enforced** in the Kinesis,
+DynamoDB Streams, and SQS pollers: only matching records are delivered to the
+function.
+
+```bash
+aws lambda create-event-source-mapping \
+  --function-name my-function \
+  --event-source-arn $QUEUE_ARN \
+  --filter-criteria '{"Filters":[{"Pattern":"{\"body\":{\"type\":[\"order\"]}}"}]}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+A pattern addresses each record the way its source presents it, matching AWS:
+
+| Source | Filter key | Notes |
+|--------|-----------|-------|
+| SQS | `body` (+ `messageAttributes`, etc.) | A JSON body is matched structurally; a non-JSON body cannot satisfy an object pattern and is dropped. Other top-level record fields (e.g. `messageId`, `messageAttributes`) are also addressable. |
+| DynamoDB Streams | `dynamodb` (+ `eventName`, etc.) | Matches the AttributeValue-wrapped image directly. Numeric operators do not apply (AttributeValue numbers are JSON strings), matching AWS. |
+| Kinesis | `data` (+ `partitionKey`) | `data` is matched against the **base64-decoded** payload (the delivered event still carries `data` base64-encoded); `partitionKey` is the supported metadata key. |
+
+Non-matching records are consumed, not retried: Kinesis and DynamoDB Streams
+advance the shard iterator past them (a fully filtered batch still advances the
+checkpoint, so a shard never stalls), and SQS deletes filtered-out messages from
+the queue.
+
+Validation mirrors AWS and runs before the mapping is stored: each `Pattern`
+must be a JSON object whose field values are non-empty match arrays or nested
+objects, at most 5 `Filters`, and each `Pattern` at most 4096 characters —
+violations are rejected with `InvalidParameterValueException`. A `FilterCriteria`
+of `{}` or with an empty `Filters` array clears any existing filters.
+
+!!! note "Supported operators"
+    Filtering reuses Floci's shared EventBridge matcher (the same one EventBridge
+    Pipes uses). It supports exact match, `prefix`, `suffix`, `equals-ignore-case`,
+    `exists`, `anything-but` (string, array — including numeric arrays — or
+    `prefix`), and numeric operators. Known deviations from AWS, shared with Pipes:
+    boolean literals; event-value array intersection (matching when the record's
+    own field is itself an array and any element satisfies the pattern); and a
+    bare non-array numeric `anything-but` (wrap the number in an array —
+    `{"anything-but":[400]}` — to filter on it). Patterns using only the supported
+    operators behave as on AWS.
+
+!!! warning "Direct Lambda API only"
+    `FilterCriteria` is carried only by the direct Lambda
+    `CreateEventSourceMapping` / `UpdateEventSourceMapping` APIs (SDK, CLI,
+    Terraform). CloudFormation and SAM event-source-mapping resources do not yet
+    forward `FilterCriteria` (as they also do not forward `ScalingConfig` or
+    `DestinationConfig`); forwarding it through those paths is tracked as a
+    follow-up.
+
 ## Supported Runtimes
 
 Any runtime that has an official AWS Lambda container image works with Floci (e.g. `nodejs22.x`, `python3.13`, `java21`, `go1.x`, `provided.al2023`).
