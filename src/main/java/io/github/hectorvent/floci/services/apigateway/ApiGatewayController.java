@@ -1908,6 +1908,7 @@ public class ApiGatewayController {
         node.put("name", api.getName());
         if (api.getDescription() != null) node.put("description", api.getDescription());
         node.put("createdDate", api.getCreatedDate());
+        node.put("apiStatus", "AVAILABLE");
         if (api.getTags() != null && !api.getTags().isEmpty()) {
             ObjectNode tagsNode = objectMapper.createObjectNode();
             api.getTags().forEach(tagsNode::put);
