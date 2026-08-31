@@ -1,0 +1,115 @@
+package io.github.hectorvent.floci.services.redshift.proxy;
+
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Objects;
+
+/**
+ * Bo giai ma giao thuc PostgreSQL wire protocol cho cac thong diep tu frontend (client).
+ */
+public class PostgresWireDecoder {
+
+    private final InputStream in;
+
+    public PostgresWireDecoder(InputStream in) {
+        this.in = Objects.requireNonNull(in, "in must not be null");
+    }
+
+    /**
+     * Doc thong diep tiep theo tu stream.
+     *
+     * @return {@link FrontendMessage} hoac {@code null} neu stream dong sach (EOF).
+     * @throws EOFException neu gap EOF bat thuong o giua thong diep.
+     * @throws IOException neu co loi I/O hoac do dai goi tin khong hop le.
+     */
+    public FrontendMessage nextMessage() throws IOException {
+        int typeByte = in.read();
+        if (typeByte == -1) {
+            return null; // EOF sach giua cac thong diep
+        }
+        char type = (char) typeByte;
+
+        byte[] lengthBytes = in.readNBytes(4);
+        if (lengthBytes.length < 4) {
+            throw new EOFException("Unexpected EOF while reading message length");
+        }
+
+        int length = ((lengthBytes[0] & 0xFF) << 24)
+                | ((lengthBytes[1] & 0xFF) << 16)
+                | ((lengthBytes[2] & 0xFF) << 8)
+                | (lengthBytes[3] & 0xFF);
+
+        if (length < 4) {
+            throw new IOException("Invalid message length: " + length);
+        }
+
+        int bodyLength = length - 4;
+        byte[] body = in.readNBytes(bodyLength);
+        if (body.length < bodyLength) {
+            throw new EOFException("Unexpected EOF while reading message body (expected "
+                    + bodyLength + " bytes, got " + body.length + ")");
+        }
+
+        return new FrontendMessage(type, body);
+    }
+
+    /**
+     * Dong goi cau lenh SQL thanh goi tin wire protocol dang Simple Query ('Q').
+     */
+    public static byte[] encodeQuery(String sql) {
+        if (sql == null) {
+            sql = "";
+        }
+        byte[] sqlBytes = sql.getBytes(StandardCharsets.UTF_8);
+        int bodyLength = sqlBytes.length + 1; // null-terminated
+        int totalLength = 4 + bodyLength;
+
+        byte[] packet = new byte[1 + 4 + bodyLength];
+        packet[0] = 'Q';
+        packet[1] = (byte) ((totalLength >> 24) & 0xFF);
+        packet[2] = (byte) ((totalLength >> 16) & 0xFF);
+        packet[3] = (byte) ((totalLength >> 8) & 0xFF);
+        packet[4] = (byte) (totalLength & 0xFF);
+        System.arraycopy(sqlBytes, 0, packet, 5, sqlBytes.length);
+        packet[packet.length - 1] = 0x00;
+        return packet;
+    }
+
+    /**
+     * Bieu dien mot thong diep PostgreSQL wire tu client.
+     */
+    public record FrontendMessage(char type, byte[] body) {
+
+        public boolean isQuery() {
+            return type == 'Q';
+        }
+
+        public String getSql() {
+            if (type != 'Q' || body == null || body.length == 0) {
+                return null;
+            }
+            int len = body.length;
+            if (body[len - 1] == 0) {
+                len--; // Bo qua byte null o cuoi
+            }
+            return new String(body, 0, len, StandardCharsets.UTF_8);
+        }
+
+        public byte[] toPacketBytes() {
+            int bodyLen = (body != null) ? body.length : 0;
+            int lengthField = 4 + bodyLen;
+            byte[] packet = new byte[1 + 4 + bodyLen];
+            packet[0] = (byte) type;
+            packet[1] = (byte) ((lengthField >> 24) & 0xFF);
+            packet[2] = (byte) ((lengthField >> 16) & 0xFF);
+            packet[3] = (byte) ((lengthField >> 8) & 0xFF);
+            packet[4] = (byte) (lengthField & 0xFF);
+            if (bodyLen > 0) {
+                System.arraycopy(body, 0, packet, 5, bodyLen);
+            }
+            return packet;
+        }
+    }
+}
