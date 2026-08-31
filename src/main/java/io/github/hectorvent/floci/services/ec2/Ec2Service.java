@@ -4943,6 +4943,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // as that account, which AcceptVpcPeeringConnection would then let it self-authorize.
         Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> accepterVpcEntry =
                 findAnyVpcEntry(accepterRegion, peerVpcId);
+        if (accepterVpcEntry.isEmpty() && vpcKnownInSomeOtherRegion(peerVpcId)) {
+            // The peer VPC is real, but it does not live in the region the requester named. Trusting
+            // PeerOwnerId here would reopen the forgery the block above closes: a requester could
+            // name another account's VPC, point PeerRegion at a region that VPC is absent from, and
+            // have its own claimed ownership recorded unchallenged. Real AWS resolves the peer VPC
+            // globally and rejects the mismatch outright, so do the same.
+            throw new AwsException("InvalidVpcID.NotFound",
+                    "The vpc ID '" + peerVpcId + "' does not exist in region " + accepterRegion, 400);
+        }
         String accepterOwnerId = accepterVpcEntry.map(AccountAwareStorageBackend.OwnedEntry::account)
                 .orElseGet(() -> isSet(peerOwnerId) ? peerOwnerId : callerAccountId);
         Vpc accepterVpc = accepterVpcEntry.map(AccountAwareStorageBackend.OwnedEntry::value).orElse(null);
@@ -4994,6 +5003,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * peering connection by id — {@code vpcs} is otherwise scoped to the caller's own account,
      * so a plain {@code get} could never find a peer VPC that belongs to a different account.
      */
+    /**
+     * Reports whether a VPC id is stored under <em>any</em> region, in any account's partition.
+     * Only used to tell "this peer VPC is external and was never seeded here" — where trusting the
+     * requester's PeerOwnerId is the modelled behaviour — apart from "this peer VPC exists, but not
+     * in the region you named", which must not be trusted.
+     */
+    private boolean vpcKnownInSomeOtherRegion(String vpcId) {
+        String suffix = "::" + vpcId;
+        if (vpcs instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Vpc> accountAware = (AccountAwareStorageBackend<Vpc>) rawAccountAware;
+            return !accountAware.scanAllAccountEntries(k -> k.endsWith(suffix)).isEmpty();
+        }
+        return vpcs.keys().stream().anyMatch(k -> k.endsWith(suffix));
+    }
+
     private Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> findAnyVpcEntry(String region, String vpcId) {
         if (vpcs instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")

@@ -466,4 +466,68 @@ class Ec2VpcPeeringConnectionCrossAccountIntegrationTest {
             .statusCode(200)
             .body("AcceptVpcPeeringConnectionResponse.vpcPeeringConnection.status.code", equalTo("active"));
     }
+
+    /**
+     * The same forgery, hidden behind a mismatched PeerRegion: naming another account's real VPC
+     * but pointing PeerRegion at a region that VPC is absent from must not degrade into trusting
+     * the requester-supplied PeerOwnerId. Real AWS resolves the peer VPC globally and answers
+     * InvalidVpcID.NotFound, so nothing is created for the requester to then self-accept.
+     */
+    @Test
+    @Order(12)
+    void creationCannotForgeAccepterOwnershipByNamingTheWrongPeerRegion() {
+        String victimAccount = "000000000198";
+        String victimAuth =
+                "AWS4-HMAC-SHA256 Credential=" + victimAccount + "/20260215/us-east-1/ec2/aws4_request";
+
+        String victimVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.72.0.0/16")
+            .header("Authorization", victimAuth)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        String forgingVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.73.0.0/16")
+            .header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        // The victim's VPC is in us-east-1; PeerRegion names eu-west-1, where it does not exist.
+        given()
+            .formParam("Action", "CreateVpcPeeringConnection")
+            .formParam("VpcId", forgingVpcId)
+            .formParam("PeerVpcId", victimVpcId)
+            .formParam("PeerRegion", "eu-west-1")
+            .formParam("PeerOwnerId", OTHER_ACCOUNT)
+            .header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpcID.NotFound"));
+
+        // A genuinely external peer VPC — one this emulator has never seen in any region — is
+        // still accepted on the requester's word, as before.
+        given()
+            .formParam("Action", "CreateVpcPeeringConnection")
+            .formParam("VpcId", forgingVpcId)
+            .formParam("PeerVpcId", "vpc-0f00d0f00d0f00d00")
+            .formParam("PeerRegion", "eu-west-1")
+            .formParam("PeerOwnerId", "000000000197")
+            .header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateVpcPeeringConnectionResponse.vpcPeeringConnection.accepterVpcInfo.ownerId",
+                    equalTo("000000000197"));
+    }
 }
