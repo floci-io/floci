@@ -188,5 +188,6 @@ print(f"Status: {job['status']}")
 ## Current Scope & Limitations
 
 - **Batch Processing**: S3 JSON Lines input/output, manifest creation, and EventBridge notifications are fully supported.
+- **Record Limits**: Real AWS Bedrock enforces minimum record limits for certain models during batch inference; these minimum limits are not currently enforced in Floci.
 - **Model Customization & Fine-Tuning**: `CreateModelCustomizationJob`, `ListCustomModels`, and model evaluation endpoints are not yet emulated.
 - **Knowledge Bases & Agents**: For agent runtimes, gateways, and memory, see [Bedrock AgentCore](bedrock-agentcore.md).
