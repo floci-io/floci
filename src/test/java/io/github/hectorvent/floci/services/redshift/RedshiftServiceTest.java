@@ -406,6 +406,25 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void rebootClusterRemovesTheReplacementWhenItsStartupThrows() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123")))
+                .thenThrow(new RuntimeException("readiness timed out"));
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        // start() can create the container before throwing (readiness check); the
+        // original is already gone, so rollback removes anything under the name —
+        // once for the original teardown, once for the possible orphan.
+        verify(cm, times(2)).stop("111111111111", "c1");
+    }
+
+    @Test
     void testCreateSnapshot() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
