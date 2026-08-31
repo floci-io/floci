@@ -6150,7 +6150,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // already surfaced above — an ENI used as an instance's launch-time interface (e.g. via
         // RunInstances' NetworkInterface.1.NetworkInterfaceId, the override-default-eni pattern)
         // is represented on the instance and would otherwise be double-counted here.
-        for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
+        for (NetworkInterface standalone : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
+            NetworkInterface ni = releaseIfHostIsGone(region, standalone);
             if (foundIds.contains(ni.getNetworkInterfaceId())) {
                 continue;
             }
@@ -6388,9 +6389,35 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private NetworkInterface requireStandaloneNetworkInterface(String region, String networkInterfaceId) {
-        return networkInterfaces.get(key(region, networkInterfaceId)).orElseThrow(() ->
+        NetworkInterface ni = networkInterfaces.get(key(region, networkInterfaceId)).orElseThrow(() ->
                 new AwsException("InvalidNetworkInterfaceID.NotFound",
                         "The network interface ID '" + networkInterfaceId + "' does not exist", 400));
+        return releaseIfHostIsGone(region, ni);
+    }
+
+    /**
+     * Clears an attachment whose instance no longer exists. TerminateInstances is not the only way
+     * an instance reaches "terminated": a container-backed launch that fails or is cancelled ends
+     * there asynchronously, inside the container manager, which has no access to this store. An
+     * interface must not stay pinned to an instance that is gone — in AWS an ENI outlives its
+     * instance as "available", it does not outlive it stuck "in-use" and unusable. Reconciling on
+     * read covers every such path at once, rather than chasing each terminal transition.
+     */
+    private NetworkInterface releaseIfHostIsGone(String region, NetworkInterface ni) {
+        NetworkInterfaceAttachment attachment = ni.getAttachment();
+        if (attachment == null || attachment.getInstanceId() == null) {
+            return ni;
+        }
+        Instance host = instances.get(key(region, attachment.getInstanceId())).orElse(null);
+        boolean hostIsGone = host == null || host.getState() == null
+                || "terminated".equals(host.getState().getName());
+        if (!hostIsGone) {
+            return ni;
+        }
+        ni.setAttachment(null);
+        ni.setStatus("available");
+        networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        return ni;
     }
 
     /**

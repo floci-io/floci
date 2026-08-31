@@ -117,6 +117,46 @@ class Ec2ServiceTest {
         verify(containerManager).cancelLaunch(instance);
     }
 
+    /**
+     * A container-backed launch that fails or is cancelled terminates the instance inside the
+     * container manager, never passing through TerminateInstances — so an ENI the launch had
+     * already marked in-use would stay pinned to an instance that no longer runs, and could
+     * never be reused. The attachment is reconciled when the interface is next read instead.
+     */
+    @Test
+    void anInterfaceIsReleasedWhenItsInstanceDiedWithoutTerminateInstances() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null,
+                eni.getNetworkInterfaceId(), 0);
+        Instance instance = reservation.getInstances().getFirst();
+        assertEquals("in-use", service.describeNetworkInterfaces("us-east-1",
+                List.of(eni.getNetworkInterfaceId()), Map.of(), 0, null)
+                .networkInterfaces().getFirst().getStatus());
+
+        // What a failed launch leaves behind: terminated, with no TerminateInstances call.
+        instance.setState(InstanceState.terminated());
+
+        NetworkInterface afterFailure = service.describeNetworkInterfaces("us-east-1",
+                List.of(eni.getNetworkInterfaceId()), Map.of(), 0, null)
+                .networkInterfaces().getFirst();
+        assertEquals("available", afterFailure.getStatus());
+        assertNull(afterFailure.getAttachment());
+
+        // And it really is free: a second launch can take it, which the in-use check would refuse.
+        Reservation retry = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null,
+                eni.getNetworkInterfaceId(), 0);
+        assertEquals(1, retry.getInstances().size());
+    }
+
     @Test
     void runInstancesRequiresImageIdInsteadOfDefaulting() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
