@@ -154,15 +154,25 @@ public class RedshiftService {
             cluster.setEndpoint(endpoint);
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            stopProxyAndReleasePortSafely(identifier, proxyPort);
+            boolean proxyStopped = stopProxyAndReleasePortSafely(identifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
-            clusters.delete(identifier);
+            if (proxyStopped) {
+                clusters.delete(identifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(identifier, cluster);
+            }
             clusters.flush();
             throw e;
         } catch (Exception e) {
-            stopProxyAndReleasePortSafely(identifier, proxyPort);
+            boolean proxyStopped = stopProxyAndReleasePortSafely(identifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
-            clusters.delete(identifier);
+            if (proxyStopped) {
+                clusters.delete(identifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(identifier, cluster);
+            }
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
@@ -510,15 +520,25 @@ public class RedshiftService {
 
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
+            boolean proxyStopped = stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
-            clusters.delete(clusterIdentifier);
+            if (proxyStopped) {
+                clusters.delete(clusterIdentifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(clusterIdentifier, cluster);
+            }
             clusters.flush();
             throw e;
         } catch (Exception e) {
-            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
+            boolean proxyStopped = stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
-            clusters.delete(clusterIdentifier);
+            if (proxyStopped) {
+                clusters.delete(clusterIdentifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(clusterIdentifier, cluster);
+            }
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
