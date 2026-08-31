@@ -885,15 +885,27 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public S3Object getObject(String bucketName, String key, String versionId) {
-        S3Object obj = getObjectMetadata(bucketName, key, versionId);
+        Bucket bucket = resolveBucket(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        // Writers install metadata (objectStore) and data (writeFile) as two separate stores
+        // while holding the bucket monitor (storeObject). Pairing the two reads under the same
+        // monitor keeps a GET atomic against a concurrent overwrite: size/ETag/checksums and the
+        // body always describe the same version. Reading them unlocked can pair version N's
+        // metadata with version N+1's bytes, which on the wire becomes a body that disagrees
+        // with the declared Content-Length and corrupts the connection's HTTP framing. AWS S3
+        // gives a concurrent read exactly one complete version, never a mix.
+        synchronized (bucket) {
+            S3Object obj = getObjectMetadata(bucketName, key, versionId);
 
-        // Read from versioned file if available, otherwise from latest
-        if (versionId != null) {
-            obj.setData(readVersionedFile(bucketName, key, versionId));
-        } else {
-            obj.setData(readFile(bucketName, key));
+            // Read from versioned file if available, otherwise from latest
+            if (versionId != null) {
+                obj.setData(readVersionedFile(bucketName, key, versionId));
+            } else {
+                obj.setData(readFile(bucketName, key));
+            }
+            return obj;
         }
-        return obj;
     }
 
     public S3Object headObject(String bucketName, String key) {
@@ -1641,7 +1653,9 @@ public class S3Service implements Resettable, ResourceProvider {
             String indexKey = prefix.isEmpty() ? index : prefix + "/" + index;
             try {
                 authorizeGetObject(bucket, indexKey, null, authorization);
-                return new WebsiteResolution.ServeObject(indexKey, headObject(bucket, indexKey, null));
+                // getObject (not headObject): the controller serves the body from this snapshot,
+                // so it must carry the data that matches its metadata.
+                return new WebsiteResolution.ServeObject(indexKey, getObject(bucket, indexKey, null));
             } catch (AwsException e) {
                 if (!isWebsiteErrorDocumentTrigger(e)) {
                     throw e;

@@ -39,7 +39,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.io.StringReader;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -839,7 +838,10 @@ public class S3Controller {
                     return preconditionResponse;
                 }
             }
-            S3Object obj = s3Service.headObject(bucket, key, versionId);
+            // Fetch metadata and body as one atomic snapshot: resolving the body lazily at
+            // entity-write time (openObjectStream) races concurrent overwrites and can pair one
+            // version's Content-Length/checksum headers with another version's bytes.
+            S3Object obj = s3Service.getObject(bucket, key, versionId);
             S3Service.validateSseCustomerAccess(
                     obj,
                     httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -855,11 +857,11 @@ public class S3Controller {
 
             boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides, includeChecksum);
+                return handleRangeRequest(obj, rangeHeader, overrides, includeChecksum);
             }
 
             emitCloudTrailEvent("GetObject", bucket, key, 0L, obj.getSize(), null, null);
-            return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
+            return fullObjectResponse(obj, overrides, includeChecksum);
         } catch (AwsException e) {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             if (S3Service.isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders, uriInfo)) {
@@ -872,14 +874,10 @@ public class S3Controller {
         }
     }
 
-    private Response fullObjectResponse(String bucket, String key, String versionId,
-                                        S3Object obj, ResponseHeaderOverrides overrides,
+    private Response fullObjectResponse(S3Object obj, ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
-        StreamingOutput stream = output -> {
-            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
-                input.transferTo(output);
-            }
-        };
+        byte[] data = objectDataSnapshot(obj);
+        StreamingOutput stream = output -> output.write(data);
         var resp = Response.ok(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                 .header("Content-Length", obj.getSize())
@@ -893,8 +891,7 @@ public class S3Controller {
         return resp.build();
     }
 
-    private Response handleRangeRequest(String bucket, String key, String versionId,
-                                        S3Object obj, String rangeHeader,
+    private Response handleRangeRequest(S3Object obj, String rangeHeader,
                                         ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
         long totalSize = obj.getSize();
@@ -928,18 +925,15 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
+                return fullObjectResponse(obj, overrides, includeChecksum);
             }
             return invalidRangeResponse(totalSize);
         }
 
         long length = end - start + 1;
-        StreamingOutput stream = output -> {
-            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
-                input.skipNBytes(start);
-                transferLimited(input, output, length);
-            }
-        };
+        byte[] data = objectDataSnapshot(obj);
+        // start/length fit in int: they are bounded by the snapshot's length (a byte[]).
+        StreamingOutput stream = output -> output.write(data, (int) start, (int) length);
         var resp = Response.status(206)
                 .entity(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
@@ -956,18 +950,24 @@ public class S3Controller {
         return resp.build();
     }
 
-    private static void transferLimited(InputStream input, java.io.OutputStream output, long bytes)
-            throws java.io.IOException {
-        byte[] buffer = new byte[8192];
-        long remaining = bytes;
-        while (remaining > 0) {
-            int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
-            if (count < 0) {
-                throw new java.io.EOFException("Object stream ended before the requested range was fully written.");
-            }
-            output.write(buffer, 0, count);
-            remaining -= count;
+    /**
+     * Returns the body bytes captured together with {@code obj}'s metadata by
+     * {@link S3Service#getObject}. Serving the response from this snapshot (instead of re-reading
+     * the store at entity-write time) guarantees the body always matches the already-committed
+     * Content-Length/ETag/checksum headers, even when a concurrent PutObject overwrites the key.
+     */
+    private static byte[] objectDataSnapshot(S3Object obj) {
+        byte[] data = obj.getData();
+        if (data == null) {
+            throw new IllegalStateException("S3 object data snapshot is missing for "
+                    + obj.getBucketName() + "/" + obj.getKey());
         }
+        if (data.length != obj.getSize()) {
+            throw new IllegalStateException("S3 object data snapshot for " + obj.getBucketName()
+                    + "/" + obj.getKey() + " has " + data.length + " bytes but metadata declares "
+                    + obj.getSize() + "; serving it would corrupt the response framing");
+        }
+        return data;
     }
 
     private Response invalidRangeResponse(long totalSize) {
@@ -2386,7 +2386,7 @@ public class S3Controller {
             // A website endpoint serves the index document with no response-header overrides and no
             // checksum headers (no viewer sends response-* or x-amz-checksum-mode to a website endpoint).
             case S3Service.WebsiteResolution.ServeObject(String key, S3Object object) ->
-                    fullObjectResponse(bucket, key, null, object,
+                    fullObjectResponse(object,
                             new ResponseHeaderOverrides(null, null, null, null, null, null), false);
             // The query string is deliberately dropped: real S3 answers
             // GET /photos?code=abc&state=xyz with a bare "Location: /photos/" (verified against a
