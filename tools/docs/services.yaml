@@ -22,6 +22,10 @@ services:
     doc: docs/services/athena.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/athena/AthenaJsonHandler.java, mode: switch }
+  - service: bedrock
+    doc: docs/services/bedrock.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrock/BedrockController.java, mode: rest }
   - service: cloudformation
     doc: docs/services/cloudformation.md
     sources:
