@@ -267,7 +267,7 @@ public class RedshiftService {
 
         // Hoisted so a failure after the proxy is (re)started still tears it down and
         // returns the port, matching createCluster/restoreFromClusterSnapshot rollback.
-        int proxyPort = -1;
+        int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : -1;
         boolean originalTornDown = false; // original proxy + container already stopped
         boolean rebooted = false;
         try {
@@ -284,7 +284,9 @@ public class RedshiftService {
                     accountId, clusterIdentifier, cluster.getMasterUsername(), password);
 
             // Reuse the stored proxy port so the advertised endpoint is unchanged by a reboot.
-            proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
+            if (proxyPort < 0) {
+                proxyPort = allocateProxyPort();
+            }
             usedPorts.add(proxyPort);
             Endpoint endpoint = proxyEndpoint(proxyPort);
             cluster.setProxyPort(proxyPort);

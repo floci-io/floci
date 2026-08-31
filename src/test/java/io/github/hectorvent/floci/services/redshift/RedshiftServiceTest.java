@@ -500,6 +500,30 @@ class RedshiftServiceTest {
         // original is already gone, so rollback removes anything under the name —
         // once for the original teardown, once for the possible orphan.
         verify(cm, times(2)).stop("111111111111", "c1");
+        
+        // Proxy port must be cleared from the failed cluster's metadata to prevent
+        // double-release when the cluster is eventually deleted.
+        assertEquals(0, cluster.getProxyPort());
+    }
+
+    @Test
+    void rebootClusterKeepsProxyPortWhenRollbackStopFails() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123")))
+                .thenThrow(new RuntimeException("readiness timed out"));
+        
+        // The first call stops the proxy during takeSnapshot; the second call happens in rollback.
+        doNothing().doThrow(new RuntimeException("stop failed")).when(proxyManager).stopProxy(anyString());
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        assertEquals(7107, cluster.getProxyPort());
     }
 
     @Test
