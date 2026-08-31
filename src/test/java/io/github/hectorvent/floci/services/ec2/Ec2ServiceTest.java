@@ -2844,6 +2844,33 @@ class Ec2ServiceTest {
         assertEquals("192.168.215.42", refreshed.getPublicIp());
     }
 
+    /**
+     * The re-resolution must run BEFORE the filter pass: a public-ip filter is judged against
+     * the address the response will carry, not the one persisted before the restart. A
+     * regression back to filter-before-refresh makes the current IP miss and the stale IP hit.
+     */
+    @Test
+    void describeAddressesFiltersOnTheRefreshedAssociationState() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.9");
+        Ec2Service service = eipService(containerManager);
+        String instanceId = launchOne(service);
+        Address allocated = service.allocateAddress("us-east-1");
+        service.associateAddress("us-east-1", allocated.getAllocationId(), instanceId);
+
+        // The container restarts and Docker hands the instance a different bridge IP.
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.42");
+
+        List<Address> byCurrentIp = service.describeAddresses("us-east-1", List.of(),
+                Map.of("public-ip", List.of("192.168.215.42")));
+        assertEquals(1, byCurrentIp.size());
+        assertEquals(allocated.getAllocationId(), byCurrentIp.getFirst().getAllocationId());
+        assertEquals("192.168.215.42", byCurrentIp.getFirst().getPublicIp());
+
+        assertTrue(service.describeAddresses("us-east-1", List.of(),
+                Map.of("public-ip", List.of("192.168.215.9"))).isEmpty());
+    }
+
     /** With no instance behind it there is nothing reachable left, so the allocation is restored. */
     @Test
     void disassociateAddressRestoresTheAllocatedAddress() {

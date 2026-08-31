@@ -169,4 +169,40 @@ class AthenaTest {
 
         glue.close();
     }
+
+    @Test
+    @Order(8)
+    @DisplayName("CREATE DATABASE through Athena updates the Glue catalog")
+    void createDatabaseDdlUsesGlueCatalog() throws InterruptedException {
+        String dbName = "athena_ddl_test_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String location = "s3://test-bucket/" + dbName + "/";
+
+        try (GlueClient glue = TestFixtures.glueClient()) {
+            StartQueryExecutionResponse started = athena.startQueryExecution(
+                    StartQueryExecutionRequest.builder()
+                            .queryString("CREATE DATABASE IF NOT EXISTS " + dbName
+                                    + " LOCATION '" + location + "'")
+                            .workGroup("primary")
+                            .build());
+
+            QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                    athena, started.queryExecutionId(), Duration.ofSeconds(60));
+            assertThat(status.state())
+                    .as("Athena DDL did not succeed: %s", status.stateChangeReason())
+                    .isEqualTo(QueryExecutionState.SUCCEEDED);
+
+            QueryExecution execution = athena.getQueryExecution(r -> r
+                    .queryExecutionId(started.queryExecutionId())).queryExecution();
+            assertThat(execution.statementType()).isEqualTo(StatementType.DDL);
+            assertThat(execution.resultConfiguration()).isNull();
+
+            GetQueryResultsResponse results = athena.getQueryResults(r -> r
+                    .queryExecutionId(started.queryExecutionId()));
+            assertThat(results.resultSet().rows()).isEmpty();
+            assertThat(results.resultSet().resultSetMetadata().columnInfo()).isEmpty();
+
+            assertThat(glue.getDatabase(r -> r.name(dbName)).database().locationUri())
+                    .isEqualTo(location);
+        }
+    }
 }

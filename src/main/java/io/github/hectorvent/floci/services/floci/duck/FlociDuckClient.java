@@ -61,7 +61,8 @@ public class FlociDuckClient {
      *
      * @param sql         the SQL to run (FROM clauses reference s3:// paths)
      * @param setupDdl    optional DDL to run before the query (e.g. CREATE VIEW)
-     * @param outputS3Path the S3 path where the result CSV will be written
+     * @param outputS3Path the S3 path where the result CSV will be written,
+     *                     or {@code null} to execute without exporting results
      */
     public void execute(String sql, String setupDdl, String outputS3Path) {
         execute(sql, setupDdl, outputS3Path, null);
@@ -79,7 +80,9 @@ public class FlociDuckClient {
         String duckUrl = duckManager.ensureReady();
 
         Map<String, Object> body = buildBaseBody(sql, setupDdl, accessKeyId);
-        body.put("output_s3_path", outputS3Path);
+        if (outputS3Path != null) {
+            body.put("output_s3_path", outputS3Path);
+        }
 
         post(duckUrl + "/execute", body, "execute");
     }

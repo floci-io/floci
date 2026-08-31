@@ -139,7 +139,7 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_CODE_IDENTITY_ATTR = "FlociLambdaCodeIdentity";
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
-    static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
+    static final String UPDATE_ROLLBACK_RESTORED_ATTR = CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR;
     static final String UPDATE_ROLLBACK_FAILURE_ATTR = "__FlociUpdateRollbackFailure";
     private static final String INLINE_CLEANUP_POLICY_NAME_ATTR = "__FlociInlineCleanupPolicyName";
     private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
@@ -158,7 +158,6 @@ public class CloudFormationResourceProvisioner {
     private static final String NAME_MODE_GENERATED = "generated";
     private static final int GENERATED_NAME_SUFFIX_LENGTH = 12;
     private static final int STEP_FUNCTIONS_NAME_MAX_LENGTH = 80;
-    private static final String LOG_GROUP_NAME_MODE_ATTR = "FlociLogGroupNameMode";
     private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
     private static final String SECRET_TARGET_OWNER_ATTR = "__FlociSecretTargetOwner";
     private static final String DDB_REPLICA_TABLE_NAME_ATTR = "TableName";
@@ -226,7 +225,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::Batch::JobQueue",
             "AWS::CloudFormation::CustomResource",
             "AWS::CloudFront::Distribution",
-            "AWS::CloudWatch::Alarm",
             "AWS::Cognito::UserPool",
             "AWS::Cognito::UserPoolClient",
             "AWS::DynamoDB::GlobalTable",
@@ -257,11 +255,9 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy",
             "AWS::IAM::User",
-            "AWS::Kinesis::Stream",
             "AWS::Lambda::EventSourceMapping",
             "AWS::Lambda::Function",
             "AWS::Lambda::LayerVersion",
-            "AWS::Logs::LogGroup",
             "AWS::RDS::DBCluster",
             "AWS::RDS::DBClusterParameterGroup",
             "AWS::RDS::DBInstance",
@@ -271,8 +267,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::RDS::DBSubnetGroup",
             "AWS::Route53::HostedZone",
             "AWS::Route53::RecordSet",
-            "AWS::S3::Bucket",
-            "AWS::S3::BucketPolicy",
             "AWS::SNS::Subscription",
             "AWS::SNS::Topic",
             "AWS::SecretsManager::Secret",
@@ -311,9 +305,6 @@ public class CloudFormationResourceProvisioner {
     private final Ec2Service ec2Service;
     private final RdsService rdsService;
     private final EksService eksService;
-    private final CloudWatchLogsService logsService;
-    private final KinesisService kinesisService;
-    private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
     private final DocDbService docDbService;
     private final CloudFrontService cloudFrontService;
@@ -379,9 +370,6 @@ public class CloudFormationResourceProvisioner {
         this.ec2Service = ec2Service;
         this.rdsService = rdsService;
         this.eksService = eksService;
-        this.logsService = logsService;
-        this.kinesisService = kinesisService;
-        this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
         this.docDbService = docDbService;
         this.cloudFrontService = cloudFrontService;
@@ -425,7 +413,6 @@ public class CloudFormationResourceProvisioner {
                 return resource;
             }
             switch (resourceType) {
-                case "AWS::S3::Bucket" -> provisionS3Bucket(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SNS::Topic" -> provisionSnsTopic(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SNS::Subscription" -> provisionSnsSubscription(resource, properties, engine, region);
                 case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" ->
@@ -442,7 +429,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SecretsManager::SecretTargetAttachment" ->
                         provisionSecretTargetAttachment(resource, properties, engine, region, stackName);
-                case "AWS::S3::BucketPolicy" -> provisionS3BucketPolicy(resource, properties, engine);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
                 case "AWS::Events::EventBus" -> provisionEventBridgeEventBus(resource, properties, engine, region);
@@ -520,11 +506,6 @@ public class CloudFormationResourceProvisioner {
                         provisionDbProxyTargetGroup(resource, properties, engine, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
-                case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
-                case "AWS::Kinesis::Stream" ->
-                        provisionKinesisStream(resource, properties, engine, region, stackName);
-                case "AWS::CloudWatch::Alarm" ->
-                        provisionCloudWatchAlarm(resource, properties, engine, region, stackName);
                 case "AWS::AutoScaling::LaunchConfiguration" ->
                         provisionLaunchConfiguration(resource, properties, engine, region, stackName);
                 case "AWS::AutoScaling::AutoScalingGroup" ->
@@ -712,7 +693,6 @@ public class CloudFormationResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case "AWS::S3::Bucket" -> s3Service.deleteBucket(physicalId);
             case "AWS::SNS::Topic" -> snsService.deleteTopic(physicalId, region);
             case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
             case "AWS::DynamoDB::Table" -> deleteDynamoTableSafe(physicalId, region);
@@ -759,10 +739,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::RDS::DBClusterParameterGroup" ->
                     rdsService.deleteDbClusterParameterGroup(physicalId, region);
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
-            case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
-            case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
-            case "AWS::CloudWatch::Alarm" ->
-                    cloudWatchMetricsService.deleteAlarms(List.of(physicalId), region);
             case "AWS::AutoScaling::LaunchConfiguration" ->
                     autoScalingService.deleteLaunchConfiguration(region, physicalId);
             case "AWS::AutoScaling::AutoScalingGroup" ->
@@ -774,23 +750,6 @@ public class CloudFormationResourceProvisioner {
 
     // ── S3 ────────────────────────────────────────────────────────────────────
 
-    private void provisionS3Bucket(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                   String region, String accountId, String stackName) {
-        String bucketName = resolveOptional(props, "BucketName", engine);
-        if (bucketName == null || bucketName.isBlank()) {
-            bucketName = generatePhysicalName(stackName, r.getLogicalId(), 63, true);
-        }
-        s3Service.createBucket(bucketName, region);
-        applyBucketCorsConfiguration(bucketName, props, engine);
-        applyBucketVersioningConfiguration(bucketName, props, engine);
-        r.setPhysicalId(bucketName);
-        r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
-        r.getAttributes().put("DomainName", bucketName + ".s3.amazonaws.com");
-        r.getAttributes().put("RegionalDomainName", bucketName + ".s3." + region + ".amazonaws.com");
-        r.getAttributes().put("WebsiteURL", "http://" + bucketName + ".s3-website." + region + ".amazonaws.com");
-        r.getAttributes().put("BucketName", bucketName);
-    }
-
     /**
      * Applies the optional {@code CorsConfiguration} property of {@code AWS::S3::Bucket} by translating
      * the CloudFormation {@code CorsRules} list into the S3 CORS XML document the bucket stores and
@@ -800,61 +759,6 @@ public class CloudFormationResourceProvisioner {
      * absent or has no rules, any existing CORS configuration is cleared so the bucket matches the
      * template. Clearing is a harmless no-op on create since a freshly created bucket has none.
      */
-    private void applyBucketCorsConfiguration(String bucketName, JsonNode props,
-                                              CloudFormationTemplateEngine engine) {
-        JsonNode corsRules = null;
-        if (props != null && props.has("CorsConfiguration") && !props.get("CorsConfiguration").isNull()) {
-            corsRules = props.get("CorsConfiguration").get("CorsRules");
-        }
-        if (corsRules == null || !corsRules.isArray() || corsRules.isEmpty()) {
-            s3Service.deleteBucketCors(bucketName);
-            return;
-        }
-        XmlBuilder xml = new XmlBuilder().start("CORSConfiguration", AwsNamespaces.S3);
-        for (JsonNode rule : corsRules) {
-            xml.start("CORSRule");
-            xml.elem("ID", resolveOptional(rule, "Id", engine));
-            appendCorsRuleElements(xml, rule.get("AllowedHeaders"), "AllowedHeader", engine);
-            appendCorsRuleElements(xml, rule.get("AllowedMethods"), "AllowedMethod", engine);
-            appendCorsRuleElements(xml, rule.get("AllowedOrigins"), "AllowedOrigin", engine);
-            appendCorsRuleElements(xml, rule.get("ExposedHeaders"), "ExposeHeader", engine);
-            String maxAge = resolveOptional(rule, "MaxAge", engine);
-            if (maxAge != null && !maxAge.isBlank()) {
-                xml.elem("MaxAgeSeconds", maxAge);
-            }
-            xml.end("CORSRule");
-        }
-        xml.end("CORSConfiguration");
-        s3Service.putBucketCors(bucketName, xml.build());
-    }
-
-    private void applyBucketVersioningConfiguration(String bucketName, JsonNode props,
-                                                     CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("VersioningConfiguration")
-                || props.get("VersioningConfiguration").isNull()) {
-            return;
-        }
-        String status = resolveOptional(props.get("VersioningConfiguration"), "Status", engine);
-        if (status != null && !status.isBlank()) {
-            s3Service.putBucketVersioning(bucketName, status);
-        }
-    }
-
-    private void appendCorsRuleElements(XmlBuilder xml, JsonNode values, String elementName,
-                                        CloudFormationTemplateEngine engine) {
-        if (values == null || !values.isArray()) {
-            return;
-        }
-        for (JsonNode value : values) {
-            if (value != null && !value.isNull()) {
-                String resolved = engine.resolve(value);
-                if (resolved != null && !resolved.isBlank()) {
-                    xml.elem(elementName, resolved);
-                }
-            }
-        }
-    }
-
 
     // ── EC2 networking ─────────────────────────────────────────────────────────
     // Each method delegates to Ec2Service so the resource really exists (describe-subnets,
@@ -966,89 +870,6 @@ public class CloudFormationResourceProvisioner {
 
     // ── CloudWatch Logs ─────────────────────────────────────────────────────────
 
-    private void provisionLogGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                   String region, String accountId, String stackName) {
-        String explicitName = resolveOptional(props, "LogGroupName", engine);
-        boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
-        String previousNameMode = r.getAttributes().get(LOG_GROUP_NAME_MODE_ATTR);
-        if (previousNameMode == null && r.getPhysicalId() != null) {
-            // Stacks persisted before FlociLogGroupNameMode existed have no recorded mode, but an
-            // auto-generated name always has the deterministic shape generatePhysicalName produces,
-            // so anything else must have been explicit.
-            previousNameMode = isGeneratedName(r.getPhysicalId(), stackName, r.getLogicalId(), 512)
-                    ? NAME_MODE_GENERATED
-                    : NAME_MODE_EXPLICIT;
-        }
-        // Going from an explicit name to none is itself a replacement-worthy change on real AWS, not
-        // something to silently keep reconciling under the old explicit name (mirrors the same check
-        // for Lambda's FunctionName above).
-        boolean explicitNameRemoved = r.getPhysicalId() != null && !hasExplicitName
-                && NAME_MODE_EXPLICIT.equals(previousNameMode);
-
-        String name;
-        if (hasExplicitName) {
-            name = explicitName;
-        } else if (r.getPhysicalId() != null && !explicitNameRemoved) {
-            // No explicit name and the prior name was itself auto-generated: keep it across updates
-            // instead of generating a fresh random one each time, so the log group is reconciled in
-            // place rather than replaced on every no-op update.
-            name = r.getPhysicalId();
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 512, false);
-        }
-        Integer retentionInDays = null;
-        String retention = resolveOptional(props, "RetentionInDays", engine);
-        if (retention != null && !retention.isBlank()) {
-            try {
-                retentionInDays = Integer.valueOf(retention.trim());
-            } catch (NumberFormatException ignored) {
-                // leave unset
-            }
-        }
-        Map<String, String> tags = new HashMap<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.put(key, engine.resolve(tag.path("Value")));
-                }
-            }
-        }
-
-        // LogGroupName isn't updatable in place on real AWS (a change replaces the resource), so only
-        // reconcile in place when the name is unchanged and the group is still there; otherwise this is
-        // either a first create or a rename, both of which need a fresh createLogGroup call. On a rename,
-        // create the new group before deleting the old one: if the new name collides with something else
-        // and createLogGroup throws, the update rolls back without touching the old group, since rollback
-        // does not restore a resource this method already deleted.
-        String priorPhysicalId = r.getPhysicalId();
-        if (priorPhysicalId != null && priorPhysicalId.equals(name) && logsService.logGroupExists(name, region)) {
-            reconcileLogGroup(name, retentionInDays, tags, region);
-        } else {
-            boolean preservedPriorGroup = priorPhysicalId != null
-                    && !priorPhysicalId.equals(name)
-                    && logsService.logGroupExists(priorPhysicalId, region);
-            try {
-                logsService.createLogGroup(name, retentionInDays, tags, region);
-            } catch (RuntimeException failure) {
-                if (preservedPriorGroup) {
-                    r.getAttributes().put(UPDATE_ROLLBACK_RESTORED_ATTR, "true");
-                }
-                throw failure;
-            }
-            if (preservedPriorGroup) {
-                logsService.deleteLogGroup(priorPhysicalId, region);
-            }
-        }
-
-        // Ref returns the log group name; GetAtt Arn is arn:aws:logs:<region>:<account>:log-group:<name>:*
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn",
-                AwsArnUtils.Arn.of("logs", region, accountId, "log-group:" + name + ":*").toString());
-        r.getAttributes().put(LOG_GROUP_NAME_MODE_ATTR,
-                hasExplicitName ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
-    }
-
     /**
      * Whether {@code physicalId} matches the exact shape {@link #generatePhysicalName} produces for
      * this stack/logical id/maxLength: its base-and-truncation logic (minus the random suffix itself)
@@ -1093,179 +914,9 @@ public class CloudFormationResourceProvisioner {
         return prefix;
     }
 
-    private void reconcileLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
-        if (retentionInDays != null) {
-            logsService.putRetentionPolicy(name, retentionInDays, region);
-        } else {
-            logsService.deleteRetentionPolicy(name, region);
-        }
-        Map<String, String> existingTags = logsService.listTagsLogGroup(name, region);
-        List<String> tagsToRemove = existingTags.keySet().stream()
-                .filter(key -> !tags.containsKey(key))
-                .toList();
-        if (!tagsToRemove.isEmpty()) {
-            logsService.untagLogGroup(name, tagsToRemove, region);
-        }
-        if (!tags.isEmpty()) {
-            logsService.tagLogGroup(name, tags, region);
-        }
-    }
-
     // ── Kinesis ─────────────────────────────────────────────────────────────────
 
-    private void provisionKinesisStream(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                        String region, String stackName) {
-        String explicitName = resolveOptional(props, "Name", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-        String streamMode = null;
-        if (props != null && props.has("StreamModeDetails")) {
-            streamMode = engine.resolve(props.get("StreamModeDetails").path("StreamMode"));
-            if (streamMode != null && streamMode.isBlank()) {
-                streamMode = null;
-            }
-        }
-        // ShardCount is required for PROVISIONED streams; default to 1 when unset (ON_DEMAND ignores it).
-        int shardCount = 1;
-        String shards = resolveOptional(props, "ShardCount", engine);
-        if (shards != null && !shards.isBlank()) {
-            try {
-                shardCount = Integer.parseInt(shards.trim());
-            } catch (NumberFormatException ignored) {
-                // keep default
-            }
-        }
-        Integer retention = null;
-        String retentionProp = resolveOptional(props, "RetentionPeriodHours", engine);
-        if (retentionProp != null && !retentionProp.isBlank()) {
-            try {
-                retention = Integer.parseInt(retentionProp.trim());
-            } catch (NumberFormatException ignored) {
-                // leave default
-            }
-        }
-        Map<String, String> tags = new LinkedHashMap<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.put(key, engine.resolve(tag.path("Value")));
-                }
-            }
-        }
-
-        // provision() re-runs on every UpdateStack, so a same-named stream already on file must be
-        // reconciled instead of re-created (createStream throws ResourceInUseException). ShardCount
-        // changes aren't reconciled here: KinesisService has no UpdateShardCount support to call into.
-        KinesisStream stream =
-                sameNameExistingResource(priorPhysicalId, name, n -> kinesisService.describeStream(n, region));
-        if (stream != null) {
-            kinesisService.updateStreamMode(name, streamMode != null ? streamMode : "PROVISIONED", region);
-            if (retention != null) {
-                if (retention > stream.getRetentionPeriodHours()) {
-                    kinesisService.increaseStreamRetentionPeriod(name, retention, region);
-                } else if (retention < stream.getRetentionPeriodHours()) {
-                    kinesisService.decreaseStreamRetentionPeriod(name, retention, region);
-                }
-            }
-            Map<String, String> existingTags = kinesisService.listTagsForStream(name, region);
-            List<String> tagsToRemove = existingTags.keySet().stream()
-                    .filter(key -> !tags.containsKey(key))
-                    .toList();
-            if (!tagsToRemove.isEmpty()) {
-                kinesisService.removeTagsFromStream(name, tagsToRemove, region);
-            }
-            if (!tags.isEmpty()) {
-                kinesisService.addTagsToStream(name, tags, region);
-            }
-            stream = kinesisService.describeStream(name, region);
-        } else {
-            stream = kinesisService.createStream(name, shardCount, streamMode, region);
-            if (retention != null) {
-                stream.setRetentionPeriodHours(retention);
-            }
-            if (!tags.isEmpty()) {
-                stream.getTags().putAll(tags);
-            }
-            deleteRenamedResource(priorPhysicalId, name, id -> kinesisService.deleteStream(id, region),
-                    "Kinesis stream");
-        }
-
-        // Ref returns the stream name; Fn::GetAtt Arn returns the stream ARN.
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", stream.getStreamArn());
-    }
-
     // ── CloudWatch ──────────────────────────────────────────────────────────────
-
-    private void provisionCloudWatchAlarm(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                          String region, String stackName) {
-        String name = resolveOptional(props, "AlarmName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
-
-        MetricAlarm alarm = new MetricAlarm();
-        alarm.setAlarmName(name);
-        alarm.setAlarmDescription(resolveOptional(props, "AlarmDescription", engine));
-        alarm.setMetricName(resolveOptional(props, "MetricName", engine));
-        alarm.setNamespace(resolveOptional(props, "Namespace", engine));
-        alarm.setStatistic(resolveOptional(props, "Statistic", engine));
-        alarm.setUnit(resolveOptional(props, "Unit", engine));
-        alarm.setComparisonOperator(resolveOptional(props, "ComparisonOperator", engine));
-        alarm.setPeriod(parseIntProp(props, "Period", engine, 60));
-        alarm.setEvaluationPeriods(parseIntProp(props, "EvaluationPeriods", engine, 1));
-        alarm.setDatapointsToAlarm(parseIntProp(props, "DatapointsToAlarm", engine, alarm.getEvaluationPeriods()));
-        String threshold = resolveOptional(props, "Threshold", engine);
-        if (threshold != null && !threshold.isBlank()) {
-            try {
-                alarm.setThreshold(Double.parseDouble(threshold.trim()));
-            } catch (NumberFormatException ignored) {
-                // leave default
-            }
-        }
-        String treatMissing = resolveOptional(props, "TreatMissingData", engine);
-        if (treatMissing != null && !treatMissing.isBlank()) {
-            alarm.setTreatMissingData(treatMissing);
-        }
-        String actionsEnabled = resolveOptional(props, "ActionsEnabled", engine);
-        alarm.setActionsEnabled(actionsEnabled == null || Boolean.parseBoolean(actionsEnabled));
-
-        if (props != null && props.has("Dimensions") && props.get("Dimensions").isArray()) {
-            List<Dimension> dimensions = new ArrayList<>();
-            for (JsonNode dim : props.get("Dimensions")) {
-                dimensions.add(new Dimension(engine.resolve(dim.path("Name")), engine.resolve(dim.path("Value"))));
-            }
-            alarm.setDimensions(dimensions);
-        }
-        addAlarmActions(props, "AlarmActions", engine, alarm.getAlarmActions());
-        addAlarmActions(props, "OKActions", engine, alarm.getOkActions());
-        addAlarmActions(props, "InsufficientDataActions", engine, alarm.getInsufficientDataActions());
-
-        cloudWatchMetricsService.putMetricAlarm(alarm, region);
-        // Ref returns the alarm name; Fn::GetAtt Arn returns the alarm ARN.
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", alarm.getAlarmArn());
-    }
-
-    private void addAlarmActions(JsonNode props, String field, CloudFormationTemplateEngine engine,
-                                 List<String> target) {
-        if (props != null && props.has(field) && props.get(field).isArray()) {
-            for (JsonNode action : props.get(field)) {
-                String resolved = engine.resolve(action);
-                if (resolved != null && !resolved.isBlank()) {
-                    target.add(resolved);
-                }
-            }
-        }
-    }
 
     // ── Auto Scaling ────────────────────────────────────────────────────────────
 
@@ -5127,10 +4778,6 @@ public class CloudFormationResourceProvisioner {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private void provisionS3BucketPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
-        r.setPhysicalId("bucket-policy-" + UUID.randomUUID().toString().substring(0, 8));
-    }
 
 
     private void provisionIamUser(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,

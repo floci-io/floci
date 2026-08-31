@@ -46,9 +46,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, Execution> executionStore;
     private final StorageBackend<String, Activity> activityStore;
     private final StorageBackend<String, MapRun> mapRunStore;
-    private final Map<String, List<HistoryEvent>> historyCache = new ConcurrentHashMap<>();
+    private final Map<String, ExecutionHistory> historyCache = new ConcurrentHashMap<>();
     private final Map<String, BlockingQueue<ActivityTask>> activityQueues = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<JsonNode>> pendingTaskTokens = new ConcurrentHashMap<>();
+    // When each pending token last showed progress, so a Task's HeartbeatSeconds can bound the gap
+    // between heartbeats instead of the whole wait.
+    private final Map<String, Long> taskHeartbeatNanos = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
     private final AslExecutor aslExecutor;
     private final ObjectMapper objectMapper;
@@ -104,6 +107,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         activityQueues.clear();
         pendingTaskTokens.values().forEach(f -> f.completeExceptionally(new RuntimeException("StepFunctionsService cleared")));
         pendingTaskTokens.clear();
+        taskHeartbeatNanos.clear();
     }
 
     @Override
@@ -524,7 +528,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
         executionStore.put(arn, exec);
 
-        var history = new ArrayList<HistoryEvent>();
+        var history = new ExecutionHistory();
         var startEvent = new HistoryEvent();
         startEvent.setId(1L);
         startEvent.setPreviousEventId(0L);
@@ -537,9 +541,10 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
         LOG.infov("Started execution: {0}", arn);
 
+        // The executor appends to this same history, so the cache entry put above is already the
+        // finished history by the time this runs.
         aslExecutor.executeAsync(sm, exec, history, mockedTestCase, (updatedExec, updatedHistory) -> {
             executionStore.put(updatedExec.getExecutionArn(), updatedExec);
-            historyCache.put(updatedExec.getExecutionArn(), updatedHistory);
             LOG.infov("Execution {0} completed with status {1}", updatedExec.getExecutionArn(), updatedExec.getStatus());
         });
 
@@ -660,30 +665,80 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                 .map(e -> e.getStateMachineArn().equals(stateMachineArn)).orElse(false));
     }
 
+    /**
+     * Aborts a running execution. The caller's {@code error} and {@code cause} land on the
+     * Execution itself, not only on the history event, so DescribeExecution reports them.
+     *
+     * <p>The worker thread may still be inside a state when this runs. It shares this Execution
+     * instance and reads the status it publishes here, so the writes are made under the same
+     * monitor the worker's terminal write takes: ABORTED is the status that stands.
+     *
+     * <p>ExecutionAborted seals the history for the same reason: the worker still has the state it
+     * is inside left to record, and those events belong to an execution the caller has already
+     * been told is finished.
+     */
     public void stopExecution(String arn, String cause, String error) {
         Execution exec = describeExecution(arn);
-        if (!"RUNNING".equals(exec.getStatus())) {
-            return;
+        synchronized (exec) {
+            if (!"RUNNING".equals(exec.getStatus())) {
+                return;
+            }
+            exec.setError(error);
+            exec.setCause(cause);
+            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStatus("ABORTED");
         }
-        exec.setStopDate(System.currentTimeMillis() / 1000.0);
-        exec.setStatus("ABORTED");
         executionStore.put(arn, exec);
 
-        List<HistoryEvent> history = historyCache.getOrDefault(arn, new ArrayList<>());
-        HistoryEvent event = new HistoryEvent();
-        event.setId(history.size() + 1L);
-        event.setPreviousEventId((long) history.size());
-        event.setType("ExecutionAborted");
         Map<String, Object> details = new HashMap<>();
         if (error != null) details.put("error", error);
         if (cause != null) details.put("cause", cause);
-        event.setDetails(details);
-        history.add(event);
+        // An execution can outlive its history: the executions are stored, the histories are held in
+        // memory only, so a restart in persistent mode brings a RUNNING execution back with nothing
+        // behind it. The abort still gets recorded, against a history that starts here.
+        historyCache.computeIfAbsent(arn, key -> new ExecutionHistory())
+                .sealWith("ExecutionAborted", details);
     }
 
     public List<HistoryEvent> getExecutionHistory(String arn) {
         describeExecution(arn);
-        return historyCache.getOrDefault(arn, Collections.emptyList());
+        ExecutionHistory history = historyCache.get(arn);
+        return history != null ? history : Collections.emptyList();
+    }
+
+    /**
+     * The history of one execution, appended to by the worker thread running the state machine and
+     * by the thread serving StopExecution. Sealing it with the terminal event is what makes that
+     * event the last one: the worker is still inside a state when the abort lands, and the events
+     * it has left to record belong to an execution the caller has already been told is finished.
+     *
+     * <p>The seal is enforced in {@link #add}, the one way the worker appends. {@code addAll} does
+     * not route through it, so a bulk append would write past the seal; nothing does one today.
+     */
+    static final class ExecutionHistory extends ArrayList<HistoryEvent> {
+
+        private static final long serialVersionUID = 1L;
+
+        private boolean sealed;
+
+        @Override
+        public synchronized boolean add(HistoryEvent event) {
+            if (sealed) {
+                return false;
+            }
+            return super.add(event);
+        }
+
+        /** Appends the terminal event, numbered from the end of the history, and takes no more. */
+        synchronized void sealWith(String terminalEventType, Map<String, Object> details) {
+            HistoryEvent terminalEvent = new HistoryEvent();
+            terminalEvent.setId(size() + 1L);
+            terminalEvent.setPreviousEventId((long) size());
+            terminalEvent.setType(terminalEventType);
+            terminalEvent.setDetails(details);
+            add(terminalEvent);
+            sealed = true;
+        }
     }
 
     // ──────────────────────────── Activities ────────────────────────────
@@ -744,7 +799,30 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     public CompletableFuture<JsonNode> registerPendingToken(String token) {
         CompletableFuture<JsonNode> future = new CompletableFuture<>();
         pendingTaskTokens.put(token, future);
+        taskHeartbeatNanos.put(token, System.nanoTime());
         return future;
+    }
+
+    /**
+     * When the token last showed progress: the moment its task was scheduled, then every
+     * SendTaskHeartbeat that named it. A token that is no longer pending reads as having just
+     * reported, so a task whose result already arrived is never failed on a heartbeat gap.
+     */
+    public long lastTaskHeartbeatNanos(String taskToken) {
+        Long reportedAt = taskToken != null ? taskHeartbeatNanos.get(taskToken) : null;
+        return reportedAt != null ? reportedAt : System.nanoTime();
+    }
+
+    /**
+     * Forgets a token the waiting task has stopped listening for, so a later SendTaskSuccess,
+     * SendTaskFailure or SendTaskHeartbeat naming it reports no pending task.
+     */
+    public void discardPendingToken(String taskToken) {
+        if (taskToken == null) {
+            return;
+        }
+        pendingTaskTokens.remove(taskToken);
+        taskHeartbeatNanos.remove(taskToken);
     }
 
     // ──────────────────────────── Tasks ────────────────────────────
@@ -782,8 +860,16 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return true;
     }
 
+    /**
+     * Resets the gap a Task's {@code HeartbeatSeconds} allows. A heartbeat for a token nobody is
+     * waiting for is logged and changes nothing, as in {@link #sendTaskSuccess(String, String)}.
+     */
     public void sendTaskHeartbeat(String taskToken) {
-        LOG.debugv("Task heartbeat for token {0}", taskToken);
+        if (taskToken == null || !pendingTaskTokens.containsKey(taskToken)) {
+            LOG.warnv("SendTaskHeartbeat: no pending task for token {0}", taskToken);
+            return;
+        }
+        taskHeartbeatNanos.put(taskToken, System.nanoTime());
     }
 
     // ──────────────────────────── Map runs ────────────────────────────

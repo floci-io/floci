@@ -19,6 +19,15 @@ public final class CfnRollback {
      */
     public static final String ROLLBACK_OWNED_ATTR = "__FlociRollbackOwned";
 
+    /**
+     * Marks a resource whose prior physical entity is still intact after a failed update, so the
+     * rollback must not try to restore it. Set by a provisioner that creates the replacement before
+     * deleting the original; read by {@code CloudFormationService} when deciding what a rollback
+     * owes. Lives here rather than on {@code CloudFormationResourceProvisioner} so extracted
+     * provisioners in this package can set it.
+     */
+    public static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
+
     private CfnRollback() {
     }
 
