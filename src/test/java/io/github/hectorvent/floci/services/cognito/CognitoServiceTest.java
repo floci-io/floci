@@ -214,6 +214,35 @@ class CognitoServiceTest {
     }
 
     @Test
+    void adminResetUserPasswordDoesNotShortenTheHistoryWindow() {
+        // A reset clears the current password without replacing it, so the freed slot must go
+        // to history, not be dropped: with PasswordHistorySize 2, Pass1 -> Pass2 -> Pass3 already
+        // ages Pass1 out (only Pass3 + Pass2 are within the window) -- a reset right after must
+        // not additionally age Pass2 out just because the current slot is temporarily empty.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "ResetHistoryWindowPool",
+                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 2))
+        ), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Pass1word!");
+        service.adminSetUserPassword(pool.getId(), "alice", "Pass2word!", true);
+        service.adminSetUserPassword(pool.getId(), "alice", "Pass3word!", true);
+
+        service.adminResetUserPassword(pool.getId(), "alice");
+
+        // Both passwords still within the window (Pass3 was current, Pass2 was the one prior)
+        // must still be blocked immediately after the reset, before any new password is set.
+        assertEquals("PasswordHistoryPolicyViolationException", assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "Pass3word!", true)).getErrorCode());
+        assertEquals("PasswordHistoryPolicyViolationException", assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "Pass2word!", true)).getErrorCode());
+
+        // Setting a new password re-occupies the current slot, so the window shrinks back to
+        // n-1 in history and Pass2 (now two changes back) is free to reuse again.
+        service.adminSetUserPassword(pool.getId(), "alice", "Pass4word!", true);
+        assertDoesNotThrow(() -> service.adminSetUserPassword(pool.getId(), "alice", "Pass2word!", true));
+    }
+
+    @Test
     void createUserPoolDefaultsAnUnsetMinimumLengthToEight() {
         // A policy present but silent on MinimumLength gets AWS's default (8), not policyInt's
         // fallback of 0 for an absent key — and the unset RequireUppercase/Lowercase/Numbers

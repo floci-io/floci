@@ -1052,13 +1052,17 @@ public class CognitoService {
 
     public void adminResetUserPassword(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
-        // Archive the outgoing password before clearing it, the same way an ordinary password
-        // update does, so a reset cannot be used to bypass PasswordHistorySize.
-        updatePasswordHistory(describeUserPool(userPoolId), user, user.getPasswordHash());
+        UserPool pool = describeUserPool(userPoolId);
+        String outgoingPasswordHash = user.getPasswordHash();
         user.setUserStatus("RESET_REQUIRED");
         user.setPasswordHash(null);
         user.setSrpVerifier(null);
         user.setSrpSalt(null);
+        // Archive the outgoing password now that the current slot is actually clear, so
+        // updatePasswordHistory retains a full PasswordHistorySize entries rather than n-1 --
+        // otherwise the reset would itself age the oldest still-protected password out of the
+        // window. A reset cannot be used to bypass PasswordHistorySize this way.
+        updatePasswordHistory(pool, user, outgoingPasswordHash);
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
         LOG.infov("Reset password for user {0} in pool {1}", user.getUsername(), userPoolId);
@@ -2418,9 +2422,13 @@ public class CognitoService {
         // n-1 additional prior passwords are blocked alongside it: "users can't set a password
         // that matches any of n previous passwords, where n is PasswordHistorySize" together
         // with the documented max of "current password or any of up to 23 additional previous
-        // passwords, for a maximum total of 24" (PasswordHistorySize's max value is 24).
+        // passwords, for a maximum total of 24" (PasswordHistorySize's max value is 24). This
+        // runs before any mutation, so a null current here means a prior admin reset left no
+        // password occupying that slot — the full n entries in history are then still live,
+        // not n-1 (mirrors the same condition in updatePasswordHistory).
+        long historyCheckLimit = user.getPasswordHash() == null ? historySize : historySize - 1L;
         boolean reused = historySize > 0 && (passwordHash.equals(user.getPasswordHash())
-                || user.getPasswordHistory().stream().limit(historySize - 1L).anyMatch(passwordHash::equals));
+                || user.getPasswordHistory().stream().limit(historyCheckLimit).anyMatch(passwordHash::equals));
 
         if (reused) {
             throw new AwsException(
@@ -2440,16 +2448,21 @@ public class CognitoService {
         }
 
         int historySize = policyInt((Map<String, Object>) rawPolicy, "PasswordHistorySize");
-        if (historySize <= 0 || previousPasswordHash == null) {
+        if (historySize <= 0) {
             return;
         }
 
-        List<String> history = new ArrayList<>();
-        history.add(previousPasswordHash);
-        history.addAll(user.getPasswordHistory());
-        // Retain only n-1 entries: the current password (set by the caller after this returns)
-        // is the nth, per the counting fixed in validatePasswordAgainstPolicy.
-        user.setPasswordHistory(history.stream().limit(historySize - 1L).toList());
+        List<String> history = new ArrayList<>(user.getPasswordHistory());
+        if (previousPasswordHash != null) {
+            history.add(0, previousPasswordHash);
+        }
+        // Callers set the user's new current password hash (or null, for an admin reset that
+        // clears it) before calling this, so the state read here already reflects it. A current
+        // password occupies one of the n slots, leaving n-1 for history; a reset leaves none
+        // occupied, so the freed slot goes to history until a new password takes it — otherwise
+        // the outgoing password would fall out of the window a reset alone should not shrink.
+        long retain = user.getPasswordHash() == null ? historySize : historySize - 1L;
+        user.setPasswordHistory(history.stream().limit(Math.max(0, retain)).toList());
     }
 
     private int policyInt(Map<String, Object> policy, String key) {
