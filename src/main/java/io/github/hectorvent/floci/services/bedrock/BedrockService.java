@@ -47,6 +47,7 @@ import java.util.stream.Collectors;
 public class BedrockService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(BedrockService.class);
+    private static final int MAX_PAGE = 1000;
     private static final String CHARACTERS = "0123456789abcdefghijklmnopqrstuvwxyz";
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -251,10 +252,15 @@ public class BedrockService implements Resettable {
                 ModelInvocationJobSummary::jobArn,
                 maxResults,
                 nextToken,
-                10,
-                1000,
+                MAX_PAGE,
                 "ValidationException"
         );
+    }
+
+    private boolean isJobStopped(ModelInvocationJob job) {
+        return jobStore.get(job.getJobArn())
+                .map(j -> j.getStatus() == ModelInvocationJobStatus.STOPPED)
+                .orElse(false);
     }
 
     private void executeBatchJob(ModelInvocationJob job, String region, String accountId) {
@@ -264,17 +270,23 @@ public class BedrockService implements Resettable {
         jobStore.put(job.getJobArn(), job);
         emitStateChangeEvent(job, region, accountId);
 
+        if (isJobStopped(job)) return;
+
         // Scheduled
         job.setStatus(ModelInvocationJobStatus.SCHEDULED);
         job.setLastModifiedTime(Instant.now());
         jobStore.put(job.getJobArn(), job);
         emitStateChangeEvent(job, region, accountId);
 
+        if (isJobStopped(job)) return;
+
         // Transition to InProgress
         job.setStatus(ModelInvocationJobStatus.IN_PROGRESS);
         job.setLastModifiedTime(Instant.now());
         jobStore.put(job.getJobArn(), job);
         emitStateChangeEvent(job, region, accountId);
+
+        if (isJobStopped(job)) return;
 
         String inputS3Uri = job.getInputDataConfig().s3InputDataConfig().s3Uri();
         S3Location inputLoc = parseS3Uri(inputS3Uri);
@@ -288,11 +300,13 @@ public class BedrockService implements Resettable {
         try {
             S3Object s3Obj = s3Service.getObject(inputLoc.bucket(), inputLoc.key());
             if (s3Obj == null || s3Obj.getData() == null) {
+                if (isJobStopped(job)) return;
                 failJob(job, "Input S3 file is empty or not found: " + inputS3Uri, region, accountId);
                 return;
             }
             inputBytes = s3Obj.getData();
         } catch (Exception e) {
+            if (isJobStopped(job)) return;
             LOG.warnv(e, "Failed to read S3 input file: {0}", inputS3Uri);
             failJob(job, "Failed to read input S3 file: " + e.getMessage(), region, accountId);
             return;

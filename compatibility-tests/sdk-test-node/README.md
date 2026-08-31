@@ -24,6 +24,7 @@ Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the *
 | `cognito`               | User pools, clients, AdminCreateUser, InitiateAuth, GetUser                                        |
 | `cognito-oauth`         | Resource server CRUD, confidential clients, `/oauth2/token`, OIDC discovery, JWKS/JWT verification |
 | `apigatewayv2`          | HTTP & WebSocket API lifecycle, routes, integrations, authorizers, stages, deployments, route responses, models, tagging |
+| `bedrock`               | Batch model invocation jobs (create, get, list, stop, S3 execution)                                |
 
 ## Requirements
 

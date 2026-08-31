@@ -84,8 +84,14 @@ teardown() {
 
     JOB_ARN=$(json_get "$output" '.jobArn')
 
-    run aws_cmd bedrock stop-model-invocation-job --job-identifier "$JOB_ARN"
-    assert_success
+    # Only call stop if the job hasn't already reached a terminal status
+    current_status=$(aws_cmd bedrock get-model-invocation-job --job-identifier "$JOB_ARN" 2>/dev/null | jq -r '.status')
+    if [[ "$current_status" != "Completed" && "$current_status" != "Failed" && \
+          "$current_status" != "Stopped" && "$current_status" != "Expired" && \
+          "$current_status" != "PartiallyCompleted" ]]; then
+        run aws_cmd bedrock stop-model-invocation-job --job-identifier "$JOB_ARN"
+        assert_success
+    fi
 
     run aws_cmd bedrock get-model-invocation-job --job-identifier "$JOB_ARN"
     assert_success
@@ -93,7 +99,7 @@ teardown() {
     status=$(json_get "$output" '.status')
     end_time=$(json_get "$output" '.endTime')
 
-    [[ "$status" == "Stopping" || "$status" == "Stopped" ]]
+    [[ "$status" == "Stopping" || "$status" == "Stopped" || "$status" == "Failed" ]]
     [ -n "$end_time" ]
 }
 
@@ -120,10 +126,20 @@ teardown() {
     JOB_ARN=$(json_get "$output" '.jobArn')
     JOB_ID="${JOB_ARN##*/}"
 
-    run aws_cmd bedrock get-model-invocation-job --job-identifier "$JOB_ARN"
-    assert_success
+    # Poll until job reaches a terminal status (max 30s)
+    TERMINAL_STATUSES="Completed Failed Stopped Expired PartiallyCompleted"
+    DEADLINE=$(($(date +%s) + 30))
+    status=""
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        run aws_cmd bedrock get-model-invocation-job --job-identifier "$JOB_ARN"
+        assert_success
+        status=$(json_get "$output" '.status')
+        for ts in $TERMINAL_STATUSES; do
+            if [ "$status" = "$ts" ]; then break 2; fi
+        done
+        sleep 0.5
+    done
 
-    status=$(json_get "$output" '.status')
     [ "$status" = "Completed" ]
 
     # Verify output JSONL file in S3

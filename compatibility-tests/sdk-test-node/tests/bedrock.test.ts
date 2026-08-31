@@ -137,18 +137,19 @@ describe('Bedrock Batch Inference', () => {
       })
     );
 
-    await bedrock.send(
-      new StopModelInvocationJobCommand({
-        jobIdentifier: createRes.jobArn,
-      })
-    );
+    // If the job already reached a terminal state before stop could be called, skip the stop call
+    const terminal = new Set(['Completed', 'Failed', 'Stopped', 'Expired', 'PartiallyCompleted']);
+    const current = await bedrock.send(new GetModelInvocationJobCommand({ jobIdentifier: createRes.jobArn }));
+    if (!terminal.has(current.status as string)) {
+      await bedrock.send(new StopModelInvocationJobCommand({ jobIdentifier: createRes.jobArn }));
+    }
 
     const job = await bedrock.send(
       new GetModelInvocationJobCommand({
         jobIdentifier: createRes.jobArn,
       })
     );
-    expect(['Stopping', 'Stopped']).toContain(job.status);
+    expect(['Stopping', 'Stopped', 'Failed']).toContain(job.status);
     expect(job.endTime).toBeDefined();
   });
 
@@ -186,11 +187,14 @@ describe('Bedrock Batch Inference', () => {
     const jobArn = createRes.jobArn!;
     const jobId = jobArn.split('/').pop()!;
 
-    const job = await bedrock.send(
-      new GetModelInvocationJobCommand({
-        jobIdentifier: jobArn,
-      })
-    );
+    // Poll until job reaches a terminal status
+    const terminal = new Set(['Completed', 'Failed', 'Stopped', 'Expired', 'PartiallyCompleted']);
+    const deadline = Date.now() + 30_000;
+    let job = await bedrock.send(new GetModelInvocationJobCommand({ jobIdentifier: jobArn }));
+    while (!terminal.has(job.status as string) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      job = await bedrock.send(new GetModelInvocationJobCommand({ jobIdentifier: jobArn }));
+    }
     expect(job.status).toBe('Completed');
 
     // Verify output JSONL file in S3

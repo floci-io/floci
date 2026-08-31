@@ -22,6 +22,7 @@ Compatibility tests for [Floci](https://github.com/hectorvent/floci) using **bot
 | `cloudwatch-metrics`    | PutMetricData, ListMetrics, GetMetricStatistics, alarms                  |
 | `cloudformation-naming` | Auto physical name generation, explicit name precedence, cross-reference |
 | `cognito`               | User pools, clients, AdminCreateUser, InitiateAuth, GetUser              |
+| `bedrock`               | Batch model invocation jobs (create, get, list, stop, S3 execution)      |
 
 ## Requirements
 

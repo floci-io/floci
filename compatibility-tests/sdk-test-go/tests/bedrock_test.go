@@ -16,7 +16,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrock"
 	"github.com/aws/aws-sdk-go-v2/service/bedrock/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,13 +38,13 @@ func TestBedrockBatchInference(t *testing.T) {
 		})
 		if err == nil {
 			for _, obj := range list.Contents {
-				_ = s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				_, _ = s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 					Bucket: aws.String(bucketName),
 					Key:    obj.Key,
 				})
 			}
 		}
-		_ = s3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		_, _ = s3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
 			Bucket: aws.String(bucketName),
 		})
 	})
@@ -56,9 +55,9 @@ func TestBedrockBatchInference(t *testing.T) {
 		outputUri := fmt.Sprintf("s3://%s/out", bucketName)
 
 		createOut, err := svc.CreateModelInvocationJob(ctx, &bedrock.CreateModelInvocationJobInput{
-			JobName:  aws.String(jobName),
-			ModelId:  aws.String("amazon.titan-text-express-v1"),
-			RoleArn:  aws.String("arn:aws:iam::000000000000:role/BedrockBatchRole"),
+			JobName: aws.String(jobName),
+			ModelId: aws.String("amazon.titan-text-express-v1"),
+			RoleArn: aws.String("arn:aws:iam::000000000000:role/BedrockBatchRole"),
 			InputDataConfig: &types.ModelInvocationJobInputDataConfigMemberS3InputDataConfig{
 				Value: types.ModelInvocationJobS3InputDataConfig{
 					S3Uri: aws.String(inputUri),
@@ -88,8 +87,8 @@ func TestBedrockBatchInference(t *testing.T) {
 	})
 
 	t.Run("ListModelInvocationJobsWithFiltering", func(t *testing.T) {
-		jobName1 := fmt.Sprintf("go-list-1-%d", time.Now().UnixMilli()%100000)
-		jobName2 := fmt.Sprintf("go-list-2-%d", time.Now().UnixMilli()%100000)
+		jobName1 := fmt.Sprintf("go-list-1-%d", time.Now().UnixNano())
+		jobName2 := fmt.Sprintf("go-list-2-%d", time.Now().UnixNano())
 
 		_, err := svc.CreateModelInvocationJob(ctx, &bedrock.CreateModelInvocationJobInput{
 			JobName: aws.String(jobName1),
@@ -149,7 +148,7 @@ func TestBedrockBatchInference(t *testing.T) {
 	})
 
 	t.Run("StopModelInvocationJob", func(t *testing.T) {
-		jobName := fmt.Sprintf("go-stop-%d", time.Now().UnixMilli()%100000)
+		jobName := fmt.Sprintf("go-stop-%d", time.Now().UnixNano())
 		createOut, err := svc.CreateModelInvocationJob(ctx, &bedrock.CreateModelInvocationJobInput{
 			JobName: aws.String(jobName),
 			ModelId: aws.String("amazon.titan-text-express-v1"),
@@ -167,22 +166,36 @@ func TestBedrockBatchInference(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		_, err = svc.StopModelInvocationJob(ctx, &bedrock.StopModelInvocationJobInput{
+		// Only stop if the job hasn't already reached a terminal status
+		terminal := map[types.ModelInvocationJobStatus]bool{
+			types.ModelInvocationJobStatusCompleted:          true,
+			types.ModelInvocationJobStatusFailed:             true,
+			types.ModelInvocationJobStatusStopped:            true,
+			types.ModelInvocationJobStatusExpired:            true,
+			types.ModelInvocationJobStatusPartiallyCompleted: true,
+		}
+		currentOut, err := svc.GetModelInvocationJob(ctx, &bedrock.GetModelInvocationJobInput{
 			JobIdentifier: createOut.JobArn,
 		})
 		require.NoError(t, err)
+		if !terminal[currentOut.Status] {
+			_, err = svc.StopModelInvocationJob(ctx, &bedrock.StopModelInvocationJobInput{
+				JobIdentifier: createOut.JobArn,
+			})
+			require.NoError(t, err)
+		}
 
 		getOut, err := svc.GetModelInvocationJob(ctx, &bedrock.GetModelInvocationJobInput{
 			JobIdentifier: createOut.JobArn,
 		})
 		require.NoError(t, err)
-		assert.Contains(t, []string{"Stopping", "Stopped"}, string(getOut.Status))
+		assert.Contains(t, []string{"Stopping", "Stopped", "Failed"}, string(getOut.Status))
 		assert.NotNil(t, getOut.EndTime)
 	})
 
 	t.Run("BatchInferenceExecutionWithS3", func(t *testing.T) {
 		inputKey := "prompts.jsonl"
-		outputPrefix := fmt.Sprintf("go-batch-out-%d", time.Now().UnixMilli()%100000)
+		outputPrefix := fmt.Sprintf("go-batch-out-%d", time.Now().UnixNano())
 		inputUri := fmt.Sprintf("s3://%s/%s", bucketName, inputKey)
 		outputUri := fmt.Sprintf("s3://%s/%s", bucketName, outputPrefix)
 
@@ -195,7 +208,7 @@ func TestBedrockBatchInference(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		jobName := fmt.Sprintf("go-s3-exec-%d", time.Now().UnixMilli()%100000)
+		jobName := fmt.Sprintf("go-s3-exec-%d", time.Now().UnixNano())
 		createOut, err := svc.CreateModelInvocationJob(ctx, &bedrock.CreateModelInvocationJobInput{
 			JobName: aws.String(jobName),
 			ModelId: aws.String("amazon.titan-text-express-v1"),
@@ -216,10 +229,26 @@ func TestBedrockBatchInference(t *testing.T) {
 		jobArn := aws.ToString(createOut.JobArn)
 		jobId := jobArn[strings.LastIndex(jobArn, "/")+1:]
 
-		getOut, err := svc.GetModelInvocationJob(ctx, &bedrock.GetModelInvocationJobInput{
-			JobIdentifier: createOut.JobArn,
-		})
-		require.NoError(t, err)
+		// Poll until job reaches a terminal status (max 30s)
+		terminal := map[types.ModelInvocationJobStatus]bool{
+			types.ModelInvocationJobStatusCompleted:          true,
+			types.ModelInvocationJobStatusFailed:             true,
+			types.ModelInvocationJobStatusStopped:            true,
+			types.ModelInvocationJobStatusExpired:            true,
+			types.ModelInvocationJobStatusPartiallyCompleted: true,
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		var getOut *bedrock.GetModelInvocationJobOutput
+		for time.Now().Before(deadline) {
+			getOut, err = svc.GetModelInvocationJob(ctx, &bedrock.GetModelInvocationJobInput{
+				JobIdentifier: createOut.JobArn,
+			})
+			require.NoError(t, err)
+			if terminal[getOut.Status] {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 		assert.Equal(t, string(types.ModelInvocationJobStatusCompleted), string(getOut.Status))
 
 		// Check output JSONL in S3

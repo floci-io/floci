@@ -26,6 +26,7 @@ Runs 352 tests across 17 test classes against a live Floci instance — no mocks
 | `Ec2Tests`                       | EC2 instances, VPCs, security groups, subnets            |
 | `AppSyncTest`                    | GraphQL API CRUDL, data sources, resolvers, functions, types, API keys, tags, schema validation |
 | `EcsTests`                       | ECS clusters, task definitions, services                 |
+| `BedrockBatchInferenceTest`      | Bedrock batch model invocation jobs (create, get, list, stop, S3 execution) |
 
 ## Adding a New Test
 

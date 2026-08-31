@@ -24,6 +24,8 @@ just test-all
 just test-python
 just test-typescript
 just test-awscli
+just test-java
+just test-go
 ```
 
 ## Test Runners
@@ -93,6 +95,12 @@ just test-typescript
 
 # AWS CLI (bats-core)
 just test-awscli
+
+# Java (JUnit 5)
+just test-java
+
+# Go (go test)
+just test-go
 ```
 
 ### IaC tools

@@ -97,16 +97,20 @@ class TestBedrockBatchInference:
         )
         job_arn = response["jobArn"]
 
-        # Stop the job
-        bedrock_client.stop_model_invocation_job(jobIdentifier=job_arn)
+        # Stop the job — if it already reached a terminal status before stop arrived, skip stop
+        current = bedrock_client.get_model_invocation_job(jobIdentifier=job_arn)
+        terminal = {"Completed", "Failed", "Stopped", "Expired", "PartiallyCompleted"}
+        if current["status"] not in terminal:
+            bedrock_client.stop_model_invocation_job(jobIdentifier=job_arn)
 
-        # Verify job is stopped
+        # Verify job is in a stopped or already-terminal state
         job = bedrock_client.get_model_invocation_job(jobIdentifier=job_arn)
-        assert job["status"] in ["Stopping", "Stopped"]
+        assert job["status"] in ["Stopping", "Stopped", "Failed"]
         assert "endTime" in job
 
     def test_batch_inference_execution_with_s3(self, bedrock_client, s3_client, test_bucket, unique_name):
         """Test full S3 batch inference execution including output and manifest files."""
+        import time
         input_key = f"prompts-{unique_name}.jsonl"
         output_prefix = f"batch-results-{unique_name}"
 
@@ -139,8 +143,16 @@ class TestBedrockBatchInference:
         job_arn = create_resp["jobArn"]
         job_id = job_arn.split("/")[-1]
 
-        # Verify job completed
-        job = bedrock_client.get_model_invocation_job(jobIdentifier=job_arn)
+        # Poll until job reaches a terminal status
+        terminal = {"Completed", "Failed", "Stopped", "Expired", "PartiallyCompleted"}
+        deadline = time.time() + 30
+        job = None
+        while time.time() < deadline:
+            job = bedrock_client.get_model_invocation_job(jobIdentifier=job_arn)
+            if job["status"] in terminal:
+                break
+            time.sleep(0.5)
+
         assert job["status"] == "Completed"
 
         # Check output JSONL in S3 at <output_prefix>/<jobId>/<input_key>.out

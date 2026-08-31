@@ -20,6 +20,7 @@ Tests are plain bash scripts that call `aws` CLI commands with `--endpoint-url` 
 | `kms`              | Keys, aliases, encrypt/decrypt                       |
 | `cognito`          | User pools, clients                                  |
 | `s3-notifications` | S3 → SQS event notifications                         |
+| `bedrock`          | Batch model invocation jobs (create, get, list, stop) |
 
 ## Requirements
 

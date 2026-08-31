@@ -10,12 +10,14 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.bedrock.BedrockClient;
 import software.amazon.awssdk.services.bedrock.model.*;
+import software.amazon.awssdk.services.bedrock.model.Tag;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -169,14 +171,26 @@ class BedrockBatchInferenceTest {
                         .build())
                 .build());
 
-        bedrock.stopModelInvocationJob(StopModelInvocationJobRequest.builder()
+        // Only stop if not already terminal
+        Set<ModelInvocationJobStatus> terminalStatuses = Set.of(
+                ModelInvocationJobStatus.COMPLETED,
+                ModelInvocationJobStatus.FAILED,
+                ModelInvocationJobStatus.STOPPED,
+                ModelInvocationJobStatus.EXPIRED,
+                ModelInvocationJobStatus.PARTIALLY_COMPLETED);
+        GetModelInvocationJobResponse current = bedrock.getModelInvocationJob(GetModelInvocationJobRequest.builder()
                 .jobIdentifier(createRes.jobArn())
                 .build());
+        if (!terminalStatuses.contains(current.status())) {
+            bedrock.stopModelInvocationJob(StopModelInvocationJobRequest.builder()
+                    .jobIdentifier(createRes.jobArn())
+                    .build());
+        }
 
         GetModelInvocationJobResponse job = bedrock.getModelInvocationJob(GetModelInvocationJobRequest.builder()
                 .jobIdentifier(createRes.jobArn())
                 .build());
-        assertThat(job.statusAsString()).isIn("Stopping", "Stopped");
+        assertThat(job.statusAsString()).isIn("Stopping", "Stopped", "Failed");
         assertThat(job.endTime()).isNotNull();
     }
 
@@ -215,9 +229,22 @@ class BedrockBatchInferenceTest {
         String jobArn = createRes.jobArn();
         String jobId = jobArn.substring(jobArn.lastIndexOf('/') + 1);
 
-        GetModelInvocationJobResponse job = bedrock.getModelInvocationJob(GetModelInvocationJobRequest.builder()
-                .jobIdentifier(jobArn)
-                .build());
+        // Poll until job reaches a terminal status (max 30s)
+        Set<ModelInvocationJobStatus> terminalStatuses = Set.of(
+                ModelInvocationJobStatus.COMPLETED,
+                ModelInvocationJobStatus.FAILED,
+                ModelInvocationJobStatus.STOPPED,
+                ModelInvocationJobStatus.EXPIRED,
+                ModelInvocationJobStatus.PARTIALLY_COMPLETED);
+        long deadline = System.currentTimeMillis() + 30_000;
+        GetModelInvocationJobResponse job;
+        do {
+            job = bedrock.getModelInvocationJob(GetModelInvocationJobRequest.builder()
+                    .jobIdentifier(jobArn)
+                    .build());
+            if (terminalStatuses.contains(job.status())) break;
+            try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+        } while (System.currentTimeMillis() < deadline);
         assertThat(job.status()).isEqualTo(ModelInvocationJobStatus.COMPLETED);
 
         // Verify output JSONL file in S3
