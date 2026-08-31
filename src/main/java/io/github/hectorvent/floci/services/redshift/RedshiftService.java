@@ -116,7 +116,9 @@ public class RedshiftService {
         return createCluster(identifier, nodeType, username, password, null, List.of());
     }
 
-    public Cluster createCluster(String identifier, String nodeType, String username, String password,
+    // synchronized like modify/reboot: the container + proxy + port steps must not
+    // interleave with another admin call on the same cluster.
+    public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
                                   String clusterSubnetGroupName, List<String> vpcSecurityGroupIds) {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
@@ -177,7 +179,7 @@ public class RedshiftService {
         return clusters.scan(k -> true);
     }
 
-    public Cluster deleteCluster(String identifier) {
+    public synchronized Cluster deleteCluster(String identifier) {
         Optional<Cluster> clusterOpt = clusters.get(identifier);
         if (clusterOpt.isEmpty()) {
             throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
@@ -430,7 +432,7 @@ public class RedshiftService {
         return restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, null);
     }
 
-    public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
+    public synchronized Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
         if (clusters.get(clusterIdentifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + clusterIdentifier + " already exists", 400);
         }
