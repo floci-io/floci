@@ -124,12 +124,16 @@ public class GlueService {
     }
 
     public Database getDatabase(String name) {
-        return databaseStore.get(normalizeName(name))
+        Database database = databaseStore.get(normalizeName(name))
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Database not found: " + name, 400));
+        database.setCatalogId(regionResolver.getAccountId());
+        return database;
     }
 
     public List<Database> getDatabases() {
-        return databaseStore.scan(k -> true);
+        List<Database> databases = databaseStore.scan(k -> true);
+        databases.forEach(database -> database.setCatalogId(regionResolver.getAccountId()));
+        return databases;
     }
 
     public void updateDatabase(String name, Database database) {
