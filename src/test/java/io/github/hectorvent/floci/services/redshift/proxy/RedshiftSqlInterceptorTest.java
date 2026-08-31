@@ -1,0 +1,146 @@
+package io.github.hectorvent.floci.services.redshift.proxy;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class RedshiftSqlInterceptorTest {
+
+    @Test
+    void shouldReturnNullAndEmptyAsIs() {
+        assertNull(RedshiftSqlInterceptor.rewrite(null));
+        assertEquals("", RedshiftSqlInterceptor.rewrite(""));
+    }
+
+    @Test
+    void shouldReturnSameInstanceWhenNoMatchOccursFastPath() {
+        String sql = "SELECT * FROM my_table WHERE id = 1";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertSame(sql, rewritten, "Fast-path must return the identical string reference");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ALL", "EVEN", "KEY", "AUTO", "all", "even", "key", "auto"})
+    void shouldRemoveDiststyle(String style) {
+        String sql = "CREATE TABLE users (id INT, name VARCHAR(50)) DISTSTYLE " + style + ";";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertTrue(!rewritten.contains("DISTSTYLE") && !rewritten.contains("diststyle"),
+                "Rewritten SQL should not contain DISTSTYLE: " + rewritten);
+    }
+
+    @Test
+    void shouldRemoveDistkeyParenAndIdent() {
+        String sql1 = "CREATE TABLE t (id INT) DISTKEY (id);";
+        String rewritten1 = RedshiftSqlInterceptor.rewrite(sql1);
+        assertTrue(!rewritten1.contains("DISTKEY"), "Should remove DISTKEY (col): " + rewritten1);
+
+        String sql2 = "CREATE TABLE t (id INT) DISTKEY id;";
+        String rewritten2 = RedshiftSqlInterceptor.rewrite(sql2);
+        assertTrue(!rewritten2.contains("DISTKEY"), "Should remove DISTKEY col: " + rewritten2);
+
+        String sql3 = "CREATE TABLE t (id INT) DISTKEY \"id\";";
+        String rewritten3 = RedshiftSqlInterceptor.rewrite(sql3);
+        assertTrue(!rewritten3.contains("DISTKEY"), "Should remove quoted DISTKEY \"col\": " + rewritten3);
+
+        String sql4 = "CREATE TABLE t (id INT DISTKEY, name VARCHAR(50));";
+        String rewritten4 = RedshiftSqlInterceptor.rewrite(sql4);
+        assertTrue(!rewritten4.contains("DISTKEY"), "Should remove column-level DISTKEY: " + rewritten4);
+    }
+
+    @Test
+    void shouldRemoveSortkeyVariants() {
+        String sql1 = "CREATE TABLE t (id INT, created_at TIMESTAMP) SORTKEY (created_at);";
+        String rewritten1 = RedshiftSqlInterceptor.rewrite(sql1);
+        assertTrue(!rewritten1.contains("SORTKEY"), "Should remove SORTKEY (col): " + rewritten1);
+
+        String sql2 = "CREATE TABLE t (id INT, c1 INT, c2 INT) COMPOUND SORTKEY (c1, c2);";
+        String rewritten2 = RedshiftSqlInterceptor.rewrite(sql2);
+        assertTrue(!rewritten2.contains("SORTKEY") && !rewritten2.contains("COMPOUND"),
+                "Should remove COMPOUND SORTKEY (c1, c2): " + rewritten2);
+
+        String sql3 = "CREATE TABLE t (id INT, c1 INT, c2 INT) INTERLEAVED SORTKEY (c1, c2);";
+        String rewritten3 = RedshiftSqlInterceptor.rewrite(sql3);
+        assertTrue(!rewritten3.contains("SORTKEY") && !rewritten3.contains("INTERLEAVED"),
+                "Should remove INTERLEAVED SORTKEY (c1, c2): " + rewritten3);
+
+        String sql4 = "CREATE TABLE t (id INT) SORTKEY id;";
+        String rewritten4 = RedshiftSqlInterceptor.rewrite(sql4);
+        assertTrue(!rewritten4.contains("SORTKEY"), "Should remove SORTKEY col: " + rewritten4);
+
+        String sql5 = "CREATE TABLE t (id INT SORTKEY, name VARCHAR(50));";
+        String rewritten5 = RedshiftSqlInterceptor.rewrite(sql5);
+        assertTrue(!rewritten5.contains("SORTKEY"), "Should remove column-level SORTKEY: " + rewritten5);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"zstd", "az64", "RAW", "raw", "lzo", "delta", "mostly8", "text255", "text32k"})
+    void shouldRemoveEncode(String codec) {
+        String sql = "CREATE TABLE t (id INT ENCODE " + codec + ", name VARCHAR(50) ENCODE " + codec + ");";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertTrue(!rewritten.contains("ENCODE") && !rewritten.contains("encode"),
+                "Should remove ENCODE " + codec + ": " + rewritten);
+    }
+
+    @Test
+    void shouldCleanOrphanedAndDoubleCommas() {
+        String sqlWithTrailingComma = "CREATE TABLE t (\n  id INT,\n  name VARCHAR(50),\n  DISTKEY (id)\n);";
+        String rewritten1 = RedshiftSqlInterceptor.rewrite(sqlWithTrailingComma);
+        assertTrue(!rewritten1.contains(",\n)") && !rewritten1.contains(", )") && !rewritten1.contains(",\n  )"),
+                "Should remove comma before closing parenthesis: " + rewritten1);
+
+        String sqlWithDoubleComma = "CREATE TABLE t (\n  id INT,\n  DISTKEY (id),\n  name VARCHAR(50)\n);";
+        String rewritten2 = RedshiftSqlInterceptor.rewrite(sqlWithDoubleComma);
+        assertTrue(!rewritten2.contains(",\n  ,") && !rewritten2.contains(", ,"),
+                "Should clean double commas: " + rewritten2);
+    }
+
+    @Test
+    void shouldBeIdempotent() {
+        String complexSql = """
+                CREATE TABLE sales (
+                    sale_id INT ENCODE az64,
+                    cust_id INT ENCODE zstd,
+                    sale_date DATE ENCODE raw,
+                    amount NUMERIC(10,2) ENCODE az64
+                )
+                DISTSTYLE KEY
+                DISTKEY (cust_id)
+                COMPOUND SORTKEY (sale_date, cust_id);
+                """;
+
+        String once = RedshiftSqlInterceptor.rewrite(complexSql);
+        String twice = RedshiftSqlInterceptor.rewrite(once);
+
+        assertEquals(once, twice, "Subsequent rewrite must produce identical result");
+    }
+
+    @Test
+    void shouldHandleComprehensiveComplexDdl() {
+        String complexSql = """
+                CREATE TABLE public.orders (
+                    order_id BIGINT NOT NULL ENCODE az64,
+                    customer_id INT NOT NULL ENCODE zstd,
+                    order_status VARCHAR(20) ENCODE lzo,
+                    order_date TIMESTAMP WITHOUT TIME ZONE NOT NULL ENCODE raw,
+                    total_amount NUMERIC(12, 4) ENCODE az64,
+                    PRIMARY KEY (order_id)
+                )
+                DISTSTYLE AUTO
+                DISTKEY (customer_id)
+                INTERLEAVED SORTKEY (order_date, customer_id);
+                """;
+
+        String rewritten = RedshiftSqlInterceptor.rewrite(complexSql);
+        assertTrue(!rewritten.contains("ENCODE"), "Should not contain ENCODE: " + rewritten);
+        assertTrue(!rewritten.contains("DISTSTYLE"), "Should not contain DISTSTYLE: " + rewritten);
+        assertTrue(!rewritten.contains("DISTKEY"), "Should not contain DISTKEY: " + rewritten);
+        assertTrue(!rewritten.contains("SORTKEY"), "Should not contain SORTKEY: " + rewritten);
+        assertTrue(!rewritten.contains("INTERLEAVED"), "Should not contain INTERLEAVED: " + rewritten);
+        assertTrue(!rewritten.contains(",\n)"), "Should not contain trailing comma before parenthesis: " + rewritten);
+    }
+}
