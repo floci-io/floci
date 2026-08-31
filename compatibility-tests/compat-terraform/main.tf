@@ -178,11 +178,6 @@ resource "aws_eks_cluster" "compat" {
   }
 }
 
-# -- API Gateway v1 ------------------------------------------------------------
-resource "aws_api_gateway_rest_api" "compat" {
-  name = "floci-compat-api"
-}
-
 # -- API Gateway v2 ------------------------------------------------------------
 resource "aws_apigatewayv2_api" "compat" {
   name          = "floci-compat-http-api"

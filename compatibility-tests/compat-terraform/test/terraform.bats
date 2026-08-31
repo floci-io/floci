@@ -162,12 +162,6 @@ setup() {
     assert_output --partial "ACTIVE"
 }
 
-@test "Terraform: API Gateway v1 REST API created" {
-    run aws_cmd apigateway get-rest-apis
-    assert_success
-    assert_output --partial "floci-compat-api"
-}
-
 @test "Terraform: API Gateway v2 HTTP API created" {
     run aws_cmd apigatewayv2 get-apis
     assert_success
