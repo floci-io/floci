@@ -120,6 +120,69 @@ class RedshiftSqlInterceptorTest {
     }
 
     @Test
+    void shouldNotTouchNonTableDdlEvenIfItMentionsKeywords() {
+        // A query that merely contains the words distkey/sortkey/encode must pass through untouched.
+        String select = "SELECT distkey, sortkey FROM catalog WHERE encode = 'az64' ORDER BY distkey";
+        assertSame(select, RedshiftSqlInterceptor.rewrite(select));
+
+        String insert = "INSERT INTO audit (action) VALUES ('ran UNLOAD with ENCODE zstd')";
+        assertSame(insert, RedshiftSqlInterceptor.rewrite(insert));
+    }
+
+    @Test
+    void shouldKeepColumnNamedLikeAKeyword() {
+        // 'sortkey' / 'distkey' as real column names (followed by a type) survive;
+        // only the trailing table-level clause is stripped.
+        String sql = "CREATE TABLE t (id INT, sortkey VARCHAR(20), distkey INT) DISTKEY (id) SORTKEY (sortkey);";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertTrue(rewritten.contains("sortkey VARCHAR(20)"), "column 'sortkey' must survive: " + rewritten);
+        assertTrue(rewritten.contains("distkey INT"), "column 'distkey' must survive: " + rewritten);
+        assertTrue(!rewritten.contains("DISTKEY (") && !rewritten.contains("SORTKEY ("),
+                "table-level key clauses must be gone: " + rewritten);
+    }
+
+    @Test
+    void shouldNotStripEncodeWhenFollowedByAnOrdinaryType() {
+        // A column literally named 'encode' of type varchar is not a Redshift ENCODE clause.
+        String sql = "CREATE TABLE t (id INT, encode VARCHAR(50));";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertTrue(rewritten.contains("encode VARCHAR(50)"), "column 'encode' must survive: " + rewritten);
+    }
+
+    @Test
+    void shouldRemoveEncodeAuto() {
+        String col = RedshiftSqlInterceptor.rewrite("CREATE TABLE t (a int ENCODE AUTO, b text);");
+        assertTrue(!col.contains("ENCODE"), "column-level ENCODE AUTO must be stripped: " + col);
+        String table = RedshiftSqlInterceptor.rewrite("CREATE TABLE t (a int) ENCODE AUTO;");
+        assertTrue(!table.contains("ENCODE"), "table-level ENCODE AUTO must be stripped: " + table);
+    }
+
+    @Test
+    void shouldStripDistkeyRegardlessOfColumnAttributeOrder() {
+        String sql = "CREATE TABLE t (id INT DISTKEY ENCODE az64, d date);";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertTrue(!rewritten.contains("DISTKEY") && !rewritten.contains("ENCODE"),
+                "both column attributes must be stripped regardless of order: " + rewritten);
+        assertEquals(rewritten, RedshiftSqlInterceptor.rewrite(rewritten), "must be idempotent");
+    }
+
+    @Test
+    void shouldNotMangleStringLiteralsInsideDdl() {
+        String sql = "CREATE TABLE t (a text DEFAULT 'x,)' CHECK (a <> 'SORTKEY'), b int) DISTKEY (b);";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertTrue(rewritten.contains("DEFAULT 'x,)'"), "string default must be intact: " + rewritten);
+        assertTrue(rewritten.contains("'SORTKEY'"), "string literal must be intact: " + rewritten);
+        assertTrue(!rewritten.contains("DISTKEY (b)"), "table-level DISTKEY clause must be gone: " + rewritten);
+    }
+
+    @Test
+    void shouldNotTouchSecondStatementOfAMultiStatementBatch() {
+        // The batch starts with CREATE TABLE, but the INSERT's string literal must survive verbatim.
+        String sql = "CREATE TABLE a (x int); INSERT INTO log VALUES ('DISTKEY (y)');";
+        assertSame(sql, RedshiftSqlInterceptor.rewrite(sql));
+    }
+
+    @Test
     void shouldHandleComprehensiveComplexDdl() {
         String complexSql = """
                 CREATE TABLE public.orders (
