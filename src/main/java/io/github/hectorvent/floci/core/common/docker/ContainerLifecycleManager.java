@@ -8,6 +8,7 @@ import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesResponse;
+import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.exception.NotModifiedException;
@@ -31,6 +32,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -42,6 +44,13 @@ import java.util.concurrent.TimeUnit;
 public class ContainerLifecycleManager {
 
     private static final Logger LOG = Logger.getLogger(ContainerLifecycleManager.class);
+
+    /**
+     * Label carrying a fresh id per {@code create()} invocation, used to tell this call's own
+     * replayed create apart from a genuinely concurrent caller's — see
+     * {@link #createWithConflictRecovery}.
+     */
+    static final String CREATE_ATTEMPT_LABEL = "floci.create-attempt-id";
 
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
@@ -128,12 +137,73 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
-        createCmd.withLabels(mergedLabels(spec.labels()));
+        // A fresh id per create() call, not per spec: two calls can carry identical image, name,
+        // and labels (a second, genuinely concurrent caller racing on the same fixed name), and
+        // matchesSpec must be able to tell that apart from a replay of THIS call's own create
+        // hitting a lost-response conflict — see createWithConflictRecovery.
+        String createAttemptId = UUID.randomUUID().toString();
+        Map<String, String> labels = mergedLabels(spec.labels());
+        labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
+        createCmd.withLabels(labels);
 
-        CreateContainerResponse response = createCmd.exec();
-        String containerId = response.getId();
+        String containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
+    }
+
+    /**
+     * Executes the create, recovering the container when a replay of it lost the race with its own
+     * earlier attempt.
+     *
+     * <p>{@link RetryingDockerHttpClient} replays {@code POST /containers/create} — it has a
+     * {@code bodyBytes} body, no hijacked input, and no {@code /exec} in its path, so it is
+     * replayable by that decorator's rules. That replay is what makes this recovery necessary: a
+     * create is not idempotent, so if the daemon accepts a named create but the response is lost to
+     * a transient socket drop, the replay hits a 409 name conflict instead of the transient error
+     * the retry exists to absorb. {@code DockerRetry} correctly classifies that 409 as
+     * non-transient and rethrows it immediately, so without this it surfaces as a spurious build
+     * failure — and leaks the container the first attempt actually created, untracked.
+     *
+     * <p>Recovery only fires for a named spec, and only adopts a candidate whose image, labels, and
+     * this exact call's {@link #CREATE_ATTEMPT_LABEL} all match. Image and labels alone cannot tell
+     * this call's own lost-response replay apart from a second, genuinely concurrent
+     * {@code create()} racing on the same fixed name/image/labels, which would otherwise be adopted
+     * as if it were this invocation's container.
+     */
+    private String createWithConflictRecovery(CreateContainerCmd createCmd, ContainerSpec spec,
+                                              String createAttemptId) {
+        try {
+            return createCmd.exec().getId();
+        } catch (ConflictException e) {
+            if (spec.name() != null) {
+                Optional<Container> existing = findByName(spec.name());
+                if (existing.isPresent() && matchesSpec(existing.get(), spec, createAttemptId)) {
+                    LOG.infov("Create for {0} hit a name conflict; an earlier attempt's response "
+                            + "was lost but the container exists, adopting {1}",
+                            spec.name(), existing.get().getId());
+                    return existing.get().getId();
+                }
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Confirms a name-conflicting container is the one THIS create() call produced — not a stale or
+     * differently-owned container, and not one from a genuinely concurrent create() sharing the same
+     * fixed name, image, and spec labels. Its image must match, it must carry every label this call
+     * would have applied, AND its {@link #CREATE_ATTEMPT_LABEL} must equal this call's
+     * {@code createAttemptId}: the one part of the label set a different concurrent call could never
+     * coincidentally reproduce.
+     */
+    private boolean matchesSpec(Container existing, ContainerSpec spec, String createAttemptId) {
+        if (!spec.image().equals(existing.getImage())) {
+            return false;
+        }
+        Map<String, String> expectedLabels = mergedLabels(spec.labels());
+        expectedLabels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
+        Map<String, String> actualLabels = existing.getLabels();
+        return actualLabels != null && actualLabels.entrySet().containsAll(expectedLabels.entrySet());
     }
 
     /**
