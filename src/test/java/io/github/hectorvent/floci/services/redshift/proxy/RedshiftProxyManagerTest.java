@@ -152,38 +152,74 @@ class RedshiftProxyManagerTest {
     }
 
     @Test
-    void stopProxyRefusesWhenStartupCleanupWasKnownToLeakTheListener() throws Exception {
+    void stopProxyRefusesWhileAFailedStartupListenerStillCannotBeClosed() throws Exception {
         RedshiftProxyManager manager = newManager();
-        failedCleanups(manager).add("k");
+        RedshiftAuthProxy stuck = mock(RedshiftAuthProxy.class);
+        doThrow(new RuntimeException("close failed")).when(stuck).stop();
+        unclosable(manager).put("k", stuck);
 
-        RuntimeException ex = assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
-        assertTrue(ex.getMessage().contains("cleanup previously failed"));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+
+        // Reference retained so the next attempt can retry the close.
+        assertSame(stuck, unclosable(manager).get("k"));
     }
 
     @Test
-    void stopProxyKeepsRefusingOnEveryRetryAfterALeakedStartup() throws Exception {
+    void stopProxyKeepsRetryingTheSameUnclosableListenerOnEveryCall() throws Exception {
         RedshiftProxyManager manager = newManager();
-        failedCleanups(manager).add("k");
+        RedshiftAuthProxy stuck = mock(RedshiftAuthProxy.class);
+        doThrow(new RuntimeException("close failed")).when(stuck).stop();
+        unclosable(manager).put("k", stuck);
 
-        // Marker is retained, not consumed: each retry keeps leaking the port rather
-        // than pretending the listener was cleaned up.
         assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
         assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
-        assertTrue(failedCleanups(manager).contains("k"));
+
+        verify(stuck, times(2)).stop();
+        assertTrue(unclosable(manager).containsKey("k"));
     }
 
     @Test
-    void startProxyClearsAStaleLeakMarkerForTheSameKey() throws Exception {
+    void stopProxyRecoversTheUnclosableEntryOnceTheListenerFinallyCloses() throws Exception {
         RedshiftProxyManager manager = newManager();
-        failedCleanups(manager).add("k");
+        RedshiftAuthProxy recovering = mock(RedshiftAuthProxy.class);
+        doThrow(new RuntimeException("close failed")).doNothing().when(recovering).stop();
+        unclosable(manager).put("k", recovering);
+
+        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertDoesNotThrow(() -> manager.stopProxy("k"));
+
+        assertFalse(unclosable(manager).containsKey("k"));
+    }
+
+    @Test
+    void startProxyLeavesAnUnclosableEntryInPlace() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        RedshiftAuthProxy stuck = mock(RedshiftAuthProxy.class);
+        doThrow(new RuntimeException("close failed")).when(stuck).stop();
+        unclosable(manager).put("k", stuck);
         int port = availablePort();
         try {
+            // A fresh start for the same key must not silently drop the leaked listener.
             start(manager, "k", port);
-            // A fresh, clean start must not inherit the previous run's leak marker.
-            assertDoesNotThrow(() -> manager.stopProxy("k"));
+            assertSame(stuck, unclosable(manager).get("k"));
         } finally {
             manager.stopAll();
         }
+    }
+
+    @Test
+    void stopAllAlsoDrainsUnclosableProxies() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        RedshiftAuthProxy recovered = mock(RedshiftAuthProxy.class);
+        RedshiftAuthProxy stillStuck = mock(RedshiftAuthProxy.class);
+        doThrow(new RuntimeException("close failed")).when(stillStuck).stop();
+        unclosable(manager).put("a", recovered);
+        unclosable(manager).put("b", stillStuck);
+
+        manager.stopAll();
+
+        assertFalse(unclosable(manager).containsKey("a"));
+        assertTrue(unclosable(manager).containsKey("b"));
     }
 
     // --- reflection + port helpers copied from RdsProxyManagerTest ---
@@ -197,10 +233,11 @@ class RedshiftProxyManagerTest {
     }
 
     @SuppressWarnings("unchecked")
-    private static java.util.Set<String> failedCleanups(RedshiftProxyManager manager) throws Exception {
-        Field field = RedshiftProxyManager.class.getDeclaredField("failedCleanups");
+    private static ConcurrentHashMap<String, RedshiftAuthProxy> unclosable(RedshiftProxyManager manager)
+            throws Exception {
+        Field field = RedshiftProxyManager.class.getDeclaredField("unclosableProxies");
         field.setAccessible(true);
-        return (java.util.Set<String>) field.get(manager);
+        return (ConcurrentHashMap<String, RedshiftAuthProxy>) field.get(manager);
     }
 
     private static String masterPassword(RedshiftAuthProxy proxy) throws Exception {
