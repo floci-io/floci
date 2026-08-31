@@ -136,4 +136,24 @@ class DockerRetryTest {
         assertEquals(1, calls.get());
         assertSame(expected, thrown);
     }
+
+    @Test
+    void rejectsMaxAttemptsBelowOne() {
+        AtomicInteger calls = new AtomicInteger();
+        assertThrows(IllegalArgumentException.class,
+                () -> DockerRetry.run(0, 0L, calls::incrementAndGet));
+        assertThrows(IllegalArgumentException.class,
+                () -> DockerRetry.run(-1, 0L, calls::incrementAndGet));
+        // The misconfiguration must fail loudly, not silently skip the call entirely.
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    void brokenPipeMatchesRegardlessOfCase() {
+        // The daemon's capitalisation is not a contract, and the default locale must not decide
+        // whether a transient drop is recognised.
+        assertTrue(DockerRetry.isTransientIo(new RuntimeException("broken pipe")));
+        assertTrue(DockerRetry.isTransientIo(new RuntimeException("BROKEN PIPE")));
+        assertTrue(DockerRetry.isTransientIo(new RuntimeException("Broken Pipe")));
+    }
 }

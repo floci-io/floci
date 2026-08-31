@@ -4,6 +4,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.util.Locale;
 
 /**
  * Retry policy for docker daemon calls. Every docker command travels over the single shared
@@ -86,9 +87,15 @@ public final class DockerRetry {
                 return true;
             }
             String m = c.getMessage();
-            if (m != null && (m.contains("Broken pipe")
-                    || m.toLowerCase().contains("connection reset"))) {
-                return true;
+            if (m != null) {
+                // Locale.ROOT: the default locale lowercases per the host's language, and a
+                // Turkish default turns "I" into a dotless i, so "Broken pipe" stops matching on
+                // exactly the hosts least likely to be tested. Matching both messages
+                // case-insensitively also covers daemons that vary the capitalisation.
+                String lower = m.toLowerCase(Locale.ROOT);
+                if (lower.contains("broken pipe") || lower.contains("connection reset")) {
+                    return true;
+                }
             }
             if (c.getCause() == c) {
                 break;
@@ -104,6 +111,11 @@ public final class DockerRetry {
      * immediately. A {@link RuntimeException} is rethrown as-is; a checked exception is wrapped.
      */
     public static <T> T call(int maxAttempts, long backoffMillis, DockerCall<T> call) {
+        if (maxAttempts < 1) {
+            // Zero or negative would run the call zero times and fall out of the loop returning
+            // nothing, turning a misconfiguration into a silent no-op rather than a failure.
+            throw new IllegalArgumentException("maxAttempts must be >= 1, got " + maxAttempts);
+        }
         int attempt = 0;
         while (true) {
             attempt++;
