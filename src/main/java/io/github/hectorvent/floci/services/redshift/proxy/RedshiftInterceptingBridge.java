@@ -87,13 +87,15 @@ public class RedshiftInterceptingBridge {
             PostgresWireDecoder.FrontendMessage msg;
             while ((msg = decoder.nextMessage()) != null) {
                 if (!msg.isQuery()) {
+                    // Count BEFORE forwarding: a fast backend could answer and the pump could
+                    // decrement before a later increment, stranding the counter above zero.
+                    if (msg.type() == 'S') { // Sync — its response ends with ReadyForQuery
+                        outstandingResponses.incrementAndGet();
+                    }
                     backendOut.write(msg.toPacketBytes());
                     backendOut.flush();
                     if (msg.type() == 'X') { // Terminate
                         break;
-                    }
-                    if (msg.type() == 'S') { // Sync — its response ends with ReadyForQuery
-                        outstandingResponses.incrementAndGet();
                     }
                     continue;
                 }
@@ -133,9 +135,9 @@ public class RedshiftInterceptingBridge {
                         toBackend = msg.toPacketBytes();
                     }
                 }
+                outstandingResponses.incrementAndGet(); // before the write — see the Sync note above
                 backendOut.write(toBackend);
                 backendOut.flush();
-                outstandingResponses.incrementAndGet();
                 // Response flows back over the untouched pump.
             }
         } catch (IOException e) {

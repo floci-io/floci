@@ -87,6 +87,46 @@ public class S3CopySimulatorTest {
     }
 
     @Test
+    public void testRunCopyFrom_SkipsLeadingAsyncNotice() throws Exception {
+        Socket client = mock(Socket.class);
+        Socket backend = mock(Socket.class);
+        S3Service s3 = mock(S3Service.class);
+
+        ByteArrayOutputStream clientOut = new ByteArrayOutputStream();
+        when(client.getOutputStream()).thenReturn(clientOut);
+        when(backend.getOutputStream()).thenReturn(new ByteArrayOutputStream());
+        when(s3.objectExists("bucket", "file.csv")).thenReturn(true);
+        when(s3.openObjectStream(eq("bucket"), eq("file.csv"), isNull()))
+                .thenReturn(new ByteArrayInputStream("data".getBytes(StandardCharsets.UTF_8)));
+
+        // Backend leads with a NoticeResponse ('N') before the CopyInResponse ('G').
+        byte[] backendResponse = new byte[] {
+                'N', 0, 0, 0, 4,
+                'G', 0, 0, 0, 4,
+                'C', 0, 0, 0, 4,
+                'Z', 0, 0, 0, 5, 'I'
+        };
+        when(backend.getInputStream()).thenReturn(new ByteArrayInputStream(backendResponse));
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "table", List.of(), "bucket", "file.csv", ",", false, false, null);
+
+        S3CopySimulator.runCopyFrom(client, backend, spec, s3);
+
+        byte[] cout = clientOut.toByteArray();
+        assertEquals('N', cout[0], "the async notice must be forwarded, not consumed as the COPY response");
+        // ...and the COPY still completes: a CommandComplete follows later in the stream.
+        boolean sawCommandComplete = false;
+        for (int i = 0; i < cout.length; i++) {
+            if (cout[i] == 'C') {
+                sawCommandComplete = true;
+                break;
+            }
+        }
+        assertTrue(sawCommandComplete, "COPY should complete after the async notice");
+    }
+
+    @Test
     public void testRunCopyFrom_S3AccessDenied() throws Exception {
         Socket client = mock(Socket.class);
         Socket backend = mock(Socket.class);

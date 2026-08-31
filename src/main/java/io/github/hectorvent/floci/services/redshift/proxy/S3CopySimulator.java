@@ -106,7 +106,7 @@ public class S3CopySimulator {
         sendQuery(backend, sql.toString());
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
-        PostgresWireDecoder.FrontendMessage copyInResp = backendDecoder.nextMessage();
+        PostgresWireDecoder.FrontendMessage copyInResp = nextNonAsync(backendDecoder, client);
         if (copyInResp == null) {
             client.close();
             return;
@@ -194,7 +194,7 @@ public class S3CopySimulator {
         sendQuery(backend, sql.toString());
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
-        PostgresWireDecoder.FrontendMessage copyOutResp = backendDecoder.nextMessage();
+        PostgresWireDecoder.FrontendMessage copyOutResp = nextNonAsync(backendDecoder, client);
         if (copyOutResp == null) {
             client.close();
             return;
@@ -246,6 +246,9 @@ public class S3CopySimulator {
                     forwardMessage(client, msg);
                     drainToReadyForQuery(backendDecoder, client);
                     return;
+                } else if (isAsync(msg.type())) {
+                    // NoticeResponse / NotificationResponse / ParameterStatus can arrive mid-stream.
+                    forwardMessage(client, msg);
                 }
             }
         } catch (IOException e) {
@@ -294,6 +297,32 @@ public class S3CopySimulator {
             }
         }
         sendReadyForQuery(client);
+    }
+
+    /**
+     * A backend message that PostgreSQL may deliver at any time, unrelated to the injected
+     * query: {@code 'N'} NoticeResponse, {@code 'A'} NotificationResponse (LISTEN/NOTIFY),
+     * {@code 'S'} ParameterStatus.
+     */
+    private static boolean isAsync(char type) {
+        return type == 'N' || type == 'A' || type == 'S';
+    }
+
+    /**
+     * Read the next backend message, transparently forwarding any leading async messages to the
+     * client so they are not mistaken for the injected query's first response.
+     */
+    private static PostgresWireDecoder.FrontendMessage nextNonAsync(
+            PostgresWireDecoder backendDecoder, Socket client) throws IOException {
+        PostgresWireDecoder.FrontendMessage m;
+        while ((m = backendDecoder.nextMessage()) != null) {
+            if (isAsync(m.type())) {
+                forwardMessage(client, m);
+                continue;
+            }
+            return m;
+        }
+        return null;
     }
 
     private static String escapeSqlString(String s) {
