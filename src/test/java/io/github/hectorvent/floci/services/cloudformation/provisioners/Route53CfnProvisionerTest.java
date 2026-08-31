@@ -322,6 +322,10 @@ class Route53CfnProvisionerTest {
 
         assertEquals(associateFailure, thrown);
         verify(service).deleteHostedZone("Z987654321");
+        assertTrue("true".equals(resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR)),
+                "once the replacement zone is deleted, physical state matches pre-update reality "
+                        + "(tracked zone missing), so the generic rollback walker must treat this "
+                        + "resource as restored instead of failing rollback as unimplemented");
     }
 
     @Test
@@ -357,5 +361,9 @@ class Route53CfnProvisionerTest {
 
         assertEquals(tagFailure, thrown);
         verify(service).deleteHostedZone("Z987654321");
+        assertTrue("true".equals(resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR)),
+                "once the replacement zone is deleted, physical state matches pre-update reality "
+                        + "(tracked zone missing), so the generic rollback walker must treat this "
+                        + "resource as restored instead of failing rollback as unimplemented");
     }
 }

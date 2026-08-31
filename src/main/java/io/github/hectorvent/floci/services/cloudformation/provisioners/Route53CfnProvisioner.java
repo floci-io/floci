@@ -77,7 +77,13 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
                 // zone's ID - orphaning it, so the next retry reuses the same caller reference
                 // and fails with HostedZoneAlreadyExists. Since we own this zone (we just
                 // created it), clean it up ourselves rather than depend on that path.
+                // Once cleanup succeeds, physical state matches what it was before this update
+                // started (tracked zone missing), so tell the generic rollback walker this
+                // resource is restored - otherwise it falls through to "rollback is not
+                // implemented" and strands the stack in UPDATE_ROLLBACK_FAILED for a resource
+                // there is nothing left to reconcile.
                 route53Service.deleteHostedZone(id);
+                resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
                 throw e;
             }
         } else {
@@ -98,6 +104,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             } catch (RuntimeException e) {
                 if ("true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR))) {
                     route53Service.deleteHostedZone(id);
+                    resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
                 }
                 throw e;
             }
