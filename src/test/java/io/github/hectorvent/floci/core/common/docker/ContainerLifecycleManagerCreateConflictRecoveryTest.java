@@ -75,7 +75,6 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("winning-container-id");
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
-        when(existing.getImage()).thenReturn("busybox:stable");
         when(existing.getLabels()).thenAnswer(inv -> labelsCaptor.getValue());
 
         ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
@@ -110,7 +109,6 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
 
         Container existing = mock(Container.class);
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
-        when(existing.getImage()).thenReturn("busybox:stable");
         // Same image and default/spec labels as this call would apply, but a different
         // create() invocation's attempt id — simulating a genuinely concurrent racing caller,
         // not this call's own lost-response retry.
@@ -131,15 +129,34 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         assertThrows(ConflictException.class, () -> manager().create(spec));
     }
 
+    /**
+     * The list API reports {@code Container.getImage()} as an image ID/digest rather than the tag
+     * whenever the tag has been re-pulled, retagged, or removed since the container was created —
+     * routine on a long-lived host. Comparing it against the spec's tag would then reject the
+     * container THIS call just created, rethrow the conflict, and leak that container untracked:
+     * exactly the failure conflict recovery exists to prevent, and only under the daemon churn that
+     * makes a lost create response likely in the first place. The per-call attempt id is already
+     * proof of ownership no other call can reproduce, so adoption must not hinge on the image
+     * string.
+     */
     @Test
-    void createRethrowsConflictWhenExistingContainerImageDoesNotMatch() {
+    void createAdoptsOwnContainerWhenListApiReportsImageAsADigest() {
         CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
         when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<java.util.Map<String, String>> labelsCaptor =
+                org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+        when(createCmd.withLabels(labelsCaptor.capture())).thenReturn(createCmd);
         when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
 
         Container existing = mock(Container.class);
+        when(existing.getId()).thenReturn("winning-container-id");
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
-        when(existing.getImage()).thenReturn("some-other-image:latest");
+        // lenient: matchesSpec must NOT read the image at all. Stubbing it anyway is the regression
+        // guard — reintroduce a tag comparison and this digest makes the adoption fail.
+        org.mockito.Mockito.lenient().when(existing.getImage()).thenReturn(
+                "sha256:1f2e3d4c5b6a798877665544332211009988776655443322110099887766554433");
+        when(existing.getLabels()).thenAnswer(inv -> labelsCaptor.getValue());
 
         ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
         when(dockerClient.listContainersCmd()).thenReturn(listCmd);
@@ -150,7 +167,7 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
                 List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
                 List.of(), null, null, List.of());
 
-        assertThrows(ConflictException.class, () -> manager().create(spec));
+        assertEquals("winning-container-id", manager().create(spec));
     }
 
     @Test
@@ -161,7 +178,6 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
 
         Container existing = mock(Container.class);
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
-        when(existing.getImage()).thenReturn("busybox:stable");
         when(existing.getLabels()).thenReturn(
                 java.util.Map.of("floci", "true", "floci_emulator", "floci-lambda"));
 

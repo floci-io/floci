@@ -8,12 +8,14 @@ been fixed and is recorded as such rather than re-filed.
 None are introduced by this PR, which only adds create-conflict adoption and two `DockerRetry` argument/locale
 fixes. Filing rather than fixing inline to keep this PR scoped.
 
-## Already fixed — not re-filed
-`ensureSharedVolume` / `initSharedVolumeRoot` previously swallowed an init failure, logged at WARN, and proceeded
-against a volume root still root:root 0755. It now throws so the caller leaves the volume unmemoised and retries on
-the next launch. Recorded here only so a future reviewer doesn't resurrect the stale finding.
-
 ## ContainerLifecycleManager.java (severity 3 — MEDIUM, verified present)
+
+- **`ensureSharedVolume` still fails open for the current launch.** `initSharedVolumeRoot` does now throw on a
+  non-zero init status, but `ensureSharedVolume` wraps it in `computeIfAbsent` and catches the `RuntimeException`,
+  logs at WARN, and returns `null`. Leaving the volume unmemoised does mean the *next* launch retries — but the
+  launch that requested ownership init proceeds and mounts a volume still root:root 0755, so a non-root workload
+  fails later with an opaque EACCES instead of a clear init failure. Fixing only the inner method looks like a fix
+  and isn't one; the fail-open lives at the caller.
 
 - **`stopAndRemove` leaks the log stream on double failure.** The `Closeable` is closed only when
   `stoppedOrMissing || removedOrMissing`. If the daemon errors on *both* stop and remove, neither flag is set and
@@ -34,5 +36,28 @@ the next launch. Recorded here only so a future reviewer doesn't resurrect the s
 - **Host ports are never returned to `PortAllocator`.** `buildHostConfig` allocates dynamic host ports and no path
   releases them on a later create/start failure (there is no release call anywhere in the class), so repeated
   failures under daemon overload can exhaust the pool.
+
+- **Unguarded parse in the native-mode `resolveEndpoint` path.** It calls
+  `Integer.parseInt(binding[0].getHostPortSpec())` with no null or `NumberFormatException` guard, unlike the sibling
+  `readPublishedHostPort` which guards both. Podman and some daemon versions emit null/non-numeric specs, and the
+  throw escapes `startCreated` — turning a container that started fine into a launch failure, and via
+  `createAndStart`'s catch, into a removal of that healthy container.
+
+- **`stopAndRemoveStrict` closes the log stream before stopping.** `stopAndRemove` deliberately closes it *after*
+  stop/remove so the terminal callback can drain the final tail; the strict variant closes first, so the final tail
+  is lost on every strict-cleanup path.
+
+- **`initSharedVolumeRoot` never closes its `WaitContainerResultCallback`.** It is `Closeable`; on the 60s timeout
+  path the wait connection stays open until GC, a slow leak across repeated init failures.
+
+- **Shared-volume init is memoised on volume name alone.** Two callers requesting the same volume with different
+  `ownerUid`/`ownerGid`/`rootPermissions` silently get the first caller's ownership, with no warning.
+
+## DockerRetry.java (severity 3 — MEDIUM, pre-existing)
+
+- **Cause-chain cycle detection only handles self-loops.** Both loops in `isTransientIo` walk `getCause()` and break
+  only on `c.getCause() == c`. A cycle of length >= 2 (A->B->A, constructible via `initCause`) spins forever, hanging
+  the calling thread inside what is supposed to be a fast classification. A visited-set or a bounded depth counter
+  fixes it. Pre-existing; this PR only touched the message-matching and argument-validation lines in that method.
 
 Worth a dedicated hardening pass over this class. Each is independently actionable and none blocks this PR.

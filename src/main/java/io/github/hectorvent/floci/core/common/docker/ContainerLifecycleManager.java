@@ -191,15 +191,18 @@ public class ContainerLifecycleManager {
     /**
      * Confirms a name-conflicting container is the one THIS create() call produced — not a stale or
      * differently-owned container, and not one from a genuinely concurrent create() sharing the same
-     * fixed name, image, and spec labels. Its image must match, it must carry every label this call
-     * would have applied, AND its {@link #CREATE_ATTEMPT_LABEL} must equal this call's
-     * {@code createAttemptId}: the one part of the label set a different concurrent call could never
-     * coincidentally reproduce.
+     * fixed name, image, and spec labels. It must carry every label this call would have applied,
+     * including a {@link #CREATE_ATTEMPT_LABEL} equal to this call's {@code createAttemptId}: the
+     * one part of the label set a different concurrent call could never coincidentally reproduce,
+     * and on its own sufficient proof of ownership.
+     *
+     * <p>Deliberately does NOT compare the image. The list API reports {@code getImage()} as an
+     * image ID/digest rather than the tag once that tag has been re-pulled, retagged, or removed, so
+     * a tag comparison would reject this call's own container and leak it untracked — the failure
+     * this recovery exists to prevent, arising precisely under the daemon churn that makes a lost
+     * create response likely. The attempt-id match already excludes every foreign container.
      */
     private boolean matchesSpec(Container existing, ContainerSpec spec, String createAttemptId) {
-        if (!spec.image().equals(existing.getImage())) {
-            return false;
-        }
         Map<String, String> expectedLabels = mergedLabels(spec.labels());
         expectedLabels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
         Map<String, String> actualLabels = existing.getLabels();
