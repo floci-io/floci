@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -51,13 +52,52 @@ public class RedshiftAuthProxy {
     }
 
     public void start(int proxyPort) throws IOException {
-        serverSocket = new ServerSocket();
-        serverSocket.setReuseAddress(true);
-        serverSocket.bind(new InetSocketAddress(proxyPort));
+        serverSocket = bindListener(proxyPort);
         running = true;
         Thread.ofVirtual().name("redshift-proxy-accept-" + clusterKey).start(this::acceptLoop);
         LOG.infov("Redshift proxy started for cluster {0} on port {1} -> {2}:{3}",
                 clusterKey, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    /**
+     * Bind the listener, retrying briefly on {@link BindException}. A reboot keeps the
+     * cluster's proxy port fixed so the advertised endpoint is stable, which means the
+     * old listener is closed and the same port rebound milliseconds later; under load
+     * the kernel may not have released it yet and {@code SO_REUSEADDR} does not help
+     * while the previous accept loop is still tearing down. ~1s of retry absorbs that
+     * window; any other {@link IOException} propagates immediately.
+     */
+    private ServerSocket bindListener(int proxyPort) throws IOException {
+        BindException lastFailure = null;
+        for (int attempt = 0; attempt < 40; attempt++) {
+            ServerSocket socket = new ServerSocket();
+            try {
+                socket.setReuseAddress(true);
+                socket.bind(new InetSocketAddress(proxyPort));
+                return socket;
+            } catch (BindException e) {
+                closeQuietly(socket);
+                lastFailure = e;
+            } catch (IOException e) {
+                closeQuietly(socket);
+                throw e;
+            }
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while binding Redshift proxy port " + proxyPort, e);
+            }
+        }
+        throw lastFailure;
+    }
+
+    private static void closeQuietly(ServerSocket s) {
+        try {
+            s.close();
+        } catch (IOException e) {
+            LOG.debugv(e, "Error closing a discarded Redshift proxy listener socket");
+        }
     }
 
     /** Swap the master-password snapshot after a rotation; new connections authenticate against it. */

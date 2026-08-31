@@ -100,6 +100,32 @@ class RedshiftAuthProxyTest {
     }
 
     @Test
+    void startRetriesTheBindWhileThePortIsMomentarilyStillInUse() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        int proxyPort = freePort();
+
+        // Hold the port, mimicking a just-closed predecessor the kernel has not released
+        // yet; free it shortly after so the retrying bind can finally take it.
+        ServerSocket squatter = new ServerSocket();
+        squatter.setReuseAddress(true);
+        squatter.bind(new java.net.InetSocketAddress(proxyPort));
+        Thread.ofVirtual().start(() -> {
+            try {
+                Thread.sleep(200);
+                squatter.close();
+            } catch (Exception ignored) {
+            }
+        });
+
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true);
+        proxy.start(proxyPort); // must not throw despite the port being busy at first
+
+        assertTrue(portAccepts(proxyPort), "proxy never bound the port after the squatter released it");
+    }
+
+    @Test
     void updateMasterPasswordSwapsTheSnapshotUsedForNewConnections() throws Exception {
         fakeBackend = new ServerSocket(0);
         int proxyPort = freePort();
@@ -128,5 +154,21 @@ class RedshiftAuthProxyTest {
         try (ServerSocket s = new ServerSocket(0)) {
             return s.getLocalPort();
         }
+    }
+
+    private static boolean portAccepts(int port) {
+        for (int attempt = 0; attempt < 50; attempt++) {
+            try (Socket ignored = new Socket("localhost", port)) {
+                return true;
+            } catch (IOException e) {
+                try {
+                    Thread.sleep(20);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+        }
+        return false;
     }
 }
