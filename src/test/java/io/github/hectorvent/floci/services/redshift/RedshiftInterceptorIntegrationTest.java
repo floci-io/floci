@@ -46,7 +46,10 @@ class RedshiftInterceptorIntegrationTest {
     }
 
     private static String jdbcUrl(Cluster c) {
-        return "jdbc:postgresql://127.0.0.1:" + c.getEndpoint().getPort() + "/dev";
+        // preferQueryMode=simple forces pgjdbc onto the Simple Query ('Q') protocol,
+        // which is the only protocol the interceptor inspects; with the driver default
+        // (extended) a Statement is sent as Parse/Bind/Execute and never intercepted.
+        return "jdbc:postgresql://127.0.0.1:" + c.getEndpoint().getPort() + "/dev?preferQueryMode=simple";
     }
 
     private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
