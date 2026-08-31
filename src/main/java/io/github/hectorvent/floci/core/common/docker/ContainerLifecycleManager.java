@@ -50,7 +50,7 @@ public class ContainerLifecycleManager {
      * replayed create apart from a genuinely concurrent caller's — see
      * {@link #createWithConflictRecovery}.
      */
-    static final String CREATE_ATTEMPT_LABEL = "floci.create-attempt-id";
+    static final String CREATE_ATTEMPT_LABEL = "floci_create_attempt_id";
 
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
