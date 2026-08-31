@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/acm"
+	"github.com/aws/aws-sdk-go-v2/service/bedrock"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -167,6 +168,11 @@ func RDSClient() *rds.Client {
 // NeptuneClient returns a new Neptune client.
 func NeptuneClient() *neptune.Client {
 	return neptune.NewFromConfig(Config())
+}
+
+// BedrockClient returns a new Bedrock client.
+func BedrockClient() *bedrock.Client {
+	return bedrock.NewFromConfig(Config())
 }
 
 // CognitoClient returns a new Cognito Identity Provider client.
