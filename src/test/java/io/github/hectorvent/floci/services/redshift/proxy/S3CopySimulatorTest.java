@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -83,5 +84,50 @@ public class S3CopySimulatorTest {
         byte[] cout = clientOut.toByteArray();
         assertTrue(cout.length > 0);
         assertEquals('C', cout[0]);
+    }
+
+    @Test
+    public void testRunCopyFrom_S3AccessDenied() throws Exception {
+        Socket client = mock(Socket.class);
+        Socket backend = mock(Socket.class);
+        S3Service s3 = mock(S3Service.class);
+
+        ByteArrayOutputStream clientOut = new ByteArrayOutputStream();
+        when(client.getOutputStream()).thenReturn(clientOut);
+        Mockito.doThrow(new AwsException("AccessDenied", "Access Denied", 403))
+                .when(s3).authorizeAnonymousListBucket("secret");
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "secret", "x.csv", ",", false, false, null);
+
+        S3CopySimulator.runCopyFrom(client, backend, spec, s3);
+
+        byte[] out = clientOut.toByteArray();
+        assertEquals('E', out[0], "denied access must surface as a Postgres ErrorResponse");
+        assertTrue(new String(out, StandardCharsets.UTF_8).contains("42501"),
+                "error should carry the insufficient_privilege SQLSTATE");
+        verify(s3, Mockito.never()).openObjectStream(anyString(), anyString(), any());
+    }
+
+    @Test
+    public void testRunUnload_S3AccessDenied() throws Exception {
+        Socket client = mock(Socket.class);
+        Socket backend = mock(Socket.class);
+        S3Service s3 = mock(S3Service.class);
+
+        ByteArrayOutputStream clientOut = new ByteArrayOutputStream();
+        when(client.getOutputStream()).thenReturn(clientOut);
+        Mockito.doThrow(new AwsException("AccessDenied", "Access Denied", 403))
+                .when(s3).authorizeAnonymousPutObject(eq("secret"), anyString());
+
+        CopyStatementParser.S3Unload spec = new CopyStatementParser.S3Unload(
+                "SELECT 1", "secret", "out/", ",", false, false, true, false, null, false);
+
+        S3CopySimulator.runUnload(client, backend, spec, s3);
+
+        byte[] out = clientOut.toByteArray();
+        assertEquals('E', out[0], "denied write must surface as a Postgres ErrorResponse");
+        verify(backend, Mockito.never()).getOutputStream();
+        verify(s3, Mockito.never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 }

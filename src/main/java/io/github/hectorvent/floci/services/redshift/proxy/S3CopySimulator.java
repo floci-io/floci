@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
@@ -19,8 +20,25 @@ public class S3CopySimulator {
     private static final Logger LOG = Logger.getLogger(S3CopySimulator.class);
 
     private static final long UNLOAD_BUFFER_WARN_BYTES = 256L * 1024 * 1024;
+    /** Hard cap on an in-memory UNLOAD result; past this the operation is aborted, not just logged. */
+    private static final long UNLOAD_BUFFER_MAX_BYTES = 512L * 1024 * 1024;
+
+    /** Postgres SQLSTATE for insufficient_privilege — surfaced to the client when S3 authorization denies. */
+    private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
 
     public static void runCopyFrom(Socket client, Socket backend, CopyStatementParser.S3CopyFrom spec, S3Service s3) throws IOException {
+        // Authorize S3 access with an unsigned identity — a Postgres session carries no AWS
+        // principal. With enforceAuth off this is a no-op; with it on, bucket policy / public
+        // access config decides, exactly as an unauthenticated S3 request would be judged.
+        try {
+            s3.authorizeAnonymousListBucket(spec.bucket());
+        } catch (AwsException e) {
+            sendErrorResponse(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix());
+            sendReadyForQuery(client);
+            return;
+        }
+
         List<String> objectKeys = new ArrayList<>();
         // Exact key first; if it is not an object, treat the value as a prefix and
         // concatenate every object under it in key order. objectExists() never throws
@@ -35,6 +53,17 @@ public class S3CopySimulator {
                     objectKeys.add(obj.getKey());
                 }
             }
+        }
+
+        try {
+            for (String key : objectKeys) {
+                s3.authorizeAnonymousGetObject(spec.bucket(), key);
+            }
+        } catch (AwsException e) {
+            sendErrorResponse(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix());
+            sendReadyForQuery(client);
+            return;
         }
 
         if (objectKeys.isEmpty()) {
@@ -101,6 +130,16 @@ public class S3CopySimulator {
     }
 
     public static void runUnload(Socket client, Socket backend, CopyStatementParser.S3Unload spec, S3Service s3) throws IOException {
+        // Reject before running the SELECT if the target is not writable (see runCopyFrom).
+        try {
+            s3.authorizeAnonymousPutObject(spec.bucket(), spec.prefix() + "000");
+        } catch (AwsException e) {
+            sendErrorResponse(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.prefix());
+            sendReadyForQuery(client);
+            return;
+        }
+
         StringBuilder sql = new StringBuilder("COPY (");
         sql.append(spec.selectQuery());
         sql.append(") TO STDOUT WITH (FORMAT csv");
@@ -144,6 +183,17 @@ public class S3CopySimulator {
                     warnedOversize = true;
                     LOG.warnv("UNLOAD result set exceeded {0} bytes and is buffered fully in memory "
                             + "(bucket={1}, prefix={2})", UNLOAD_BUFFER_WARN_BYTES, spec.bucket(), spec.prefix());
+                }
+                if (baos.size() > UNLOAD_BUFFER_MAX_BYTES) {
+                    // Bound heap use: abandon the transfer rather than risk exhausting the shared
+                    // process. The backend is still mid-CopyOut, so drain it to ReadyForQuery.
+                    LOG.warnv("UNLOAD aborted: result exceeded the {0}-byte in-memory limit (bucket={1}, prefix={2})",
+                            UNLOAD_BUFFER_MAX_BYTES, spec.bucket(), spec.prefix());
+                    baos = null; // release the buffer for GC before we block on drain
+                    sendErrorResponse(client, "54000",
+                            "UNLOAD result exceeds the " + UNLOAD_BUFFER_MAX_BYTES + "-byte emulator limit");
+                    drainToReadyForQuery(backendDecoder, client);
+                    return;
                 }
             } else if (msg.type() == 'c') {
                 // CopyDone
