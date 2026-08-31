@@ -398,6 +398,11 @@ entry, `Return` and `Throw` together, `Throw` without `Error`) as a structured 4
 at `StartExecution`. Step Functions Local instead returns a plain HTTP 500 for most of
 these and starts the execution only to fail it with `States.Runtime` for the last two.
 
+A mocked response with no attempt entries (`{}`) is not rejected. As in Step Functions
+Local, the execution starts and fails with `States.Runtime` only if the state that names
+it is entered. This keeps a generated mock file usable when the collection it was built
+from is empty and the state is never reached.
+
 ## Configuration
 
 | Variable | Default | Description |
