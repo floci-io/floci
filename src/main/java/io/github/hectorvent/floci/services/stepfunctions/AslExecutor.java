@@ -67,12 +67,16 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -127,6 +131,14 @@ public class AslExecutor {
     // ecs:runTask.sync polling — wait up to ~60s for the task to reach STOPPED.
     private static final int ECS_SYNC_POLL_ATTEMPTS = 600;
     private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
+
+    // AWS caps the string input of States.Base64Encode/Base64Decode/Hash at 10,000 characters
+    // (measured here in Unicode code points).
+    private static final int INTRINSIC_MAX_INPUT_LENGTH = 10_000;
+    // Must mirror the identical private set in JsonataEvaluator ($hash): both query languages
+    // expose exactly these five algorithms, case-sensitively.
+    private static final Set<String> HASH_ALGORITHMS =
+            Set.of("MD5", "SHA-1", "SHA-256", "SHA-384", "SHA-512");
 
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
     private static final String AWS_SDK_SFN_PREFIX = "arn:aws:states:::aws-sdk:sfn:";
@@ -3379,7 +3391,9 @@ public class AslExecutor {
     /**
      * Evaluate a JSONPath-mode intrinsic function (States.*).
      * Supports: States.StringToJson, States.JsonToString, States.Format,
-     *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID.
+     *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID,
+     *           States.JsonMerge, States.Base64Encode, States.Base64Decode, States.StringSplit,
+     *           States.ArrayGetItem, States.Hash.
      * Throws FailStateException("States.Runtime") for unrecognized functions.
      *
      * <p>An argument that matches nothing fails the execution, and the cause names the whole
@@ -3527,6 +3541,165 @@ public class AslExecutor {
                 a.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
                 b.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
                 yield merged;
+            }
+            case "States.Base64Encode" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 1 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Encode requires exactly 1 argument");
+                }
+                JsonNode dataArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                if (!dataArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Encode requires a string argument");
+                }
+                String data = dataArg.asText();
+                if (data.codePointCount(0, data.length()) > INTRINSIC_MAX_INPUT_LENGTH) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Encode input exceeds " + INTRINSIC_MAX_INPUT_LENGTH + " characters");
+                }
+                // Basic (RFC 4648) encoder: AWS documents "MIME" but its real output is unwrapped;
+                // Java's MIME encoder would insert CRLF line breaks every 76 characters.
+                yield objectMapper.getNodeFactory().textNode(
+                        Base64.getEncoder().encodeToString(data.getBytes(StandardCharsets.UTF_8)));
+            }
+            case "States.Base64Decode" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 1 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode requires exactly 1 argument");
+                }
+                JsonNode encodedArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                if (!encodedArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode requires a string argument");
+                }
+                String encoded = encodedArg.asText();
+                if (encoded.codePointCount(0, encoded.length()) > INTRINSIC_MAX_INPUT_LENGTH) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode input exceeds " + INTRINSIC_MAX_INPUT_LENGTH + " characters");
+                }
+                byte[] decoded;
+                try {
+                    // Basic decoder, deliberately not MIME: the MIME decoder silently ignores
+                    // non-alphabet characters, which would turn invalid input into garbage output
+                    // instead of the required States.IntrinsicFailure.
+                    decoded = Base64.getDecoder().decode(encoded);
+                } catch (IllegalArgumentException e) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode input is not valid base64");
+                }
+                // Bytes that are not valid UTF-8 become U+FFFD replacement characters.
+                yield objectMapper.getNodeFactory().textNode(new String(decoded, StandardCharsets.UTF_8));
+            }
+            case "States.StringSplit" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.StringSplit requires exactly 2 arguments");
+                }
+                JsonNode valueArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode delimitersArg = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                if (!valueArg.isTextual() || !delimitersArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.StringSplit requires two string arguments");
+                }
+                String delimiters = delimitersArg.asText();
+                if (delimiters.isEmpty()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.StringSplit delimiter must not be empty");
+                }
+                // The second argument is a set of splitting characters. Membership is tested by
+                // Unicode code point so a supplementary delimiter (e.g. an emoji) never matches the
+                // lone surrogate halves of a different supplementary character in the input.
+                Set<Integer> delimiterCodePoints = delimiters.codePoints().boxed().collect(Collectors.toSet());
+                String value = valueArg.asText();
+                ArrayNode result = objectMapper.createArrayNode();
+                StringBuilder current = new StringBuilder();
+                for (int i = 0; i < value.length(); ) {
+                    int codePoint = value.codePointAt(i);
+                    if (delimiterCodePoints.contains(codePoint)) {
+                        if (!current.isEmpty()) {
+                            // Empty segments (consecutive/leading/trailing delimiters) are omitted.
+                            result.add(objectMapper.getNodeFactory().textNode(current.toString()));
+                            current.setLength(0);
+                        }
+                    } else {
+                        current.appendCodePoint(codePoint);
+                    }
+                    i += Character.charCount(codePoint);
+                }
+                if (!current.isEmpty()) {
+                    result.add(objectMapper.getNodeFactory().textNode(current.toString()));
+                }
+                yield result;
+            }
+            case "States.ArrayGetItem" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem requires exactly 2 arguments");
+                }
+                JsonNode array = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode indexNode = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                if (!array.isArray()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem first argument must be an array");
+                }
+                // isIntegralNumber rejects non-numbers and floating point; canConvertToInt rejects
+                // integral values outside int range (a path-supplied BigInteger whose asInt() would
+                // otherwise silently wrap and return the wrong element).
+                if (!indexNode.isIntegralNumber() || !indexNode.canConvertToInt()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem index must be a non-negative integer");
+                }
+                int index = indexNode.asInt();
+                if (index < 0 || index >= array.size()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem index " + index + " is out of bounds for length " + array.size());
+                }
+                yield array.get(index);
+            }
+            case "States.Hash" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash requires exactly 2 arguments");
+                }
+                JsonNode dataArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                if (!dataArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash first argument must be a string");
+                }
+                JsonNode algorithmArg = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                if (!algorithmArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash second argument must be a string");
+                }
+                String data = dataArg.asText();
+                if (data.codePointCount(0, data.length()) > INTRINSIC_MAX_INPUT_LENGTH) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash input exceeds " + INTRINSIC_MAX_INPUT_LENGTH + " characters");
+                }
+                String algorithm = algorithmArg.asText();
+                // Explicit allow-list checked before getInstance: never a silent default, and the
+                // caller's string is never passed to MessageDigest for an algorithm AWS rejects.
+                if (!HASH_ALGORITHMS.contains(algorithm)) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash algorithm '" + algorithm
+                                    + "' must be one of MD5, SHA-1, SHA-256, SHA-384, SHA-512");
+                }
+                try {
+                    MessageDigest digest = MessageDigest.getInstance(algorithm);
+                    // HexFormat: lowercase, fixed-width (preserves leading zeros, unlike BigInteger).
+                    yield objectMapper.getNodeFactory().textNode(
+                            HexFormat.of().formatHex(digest.digest(data.getBytes(StandardCharsets.UTF_8))));
+                } catch (NoSuchAlgorithmException e) {
+                    // Unreachable after the allow-list check; defensive so a JDK regression could
+                    // never escape as an uncatchable States.Runtime.
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash algorithm '" + algorithm + "' is not available");
+                }
             }
             default -> throw new FailStateException("States.Runtime",
                     "Unsupported intrinsic function: " + fnName);
