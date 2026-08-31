@@ -402,6 +402,20 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
+
+        // SSEType is validated before CreateTable runs, so the table must not exist at all --
+        // a real DynamoDB rejects the whole request rather than leaving a table behind.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "InvalidSseTypeTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -436,6 +450,20 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
+
+        // SSEType is validated before UpdateTable applies anything, so the table must still
+        // show no SSEDescription at all -- the failed request must not have partially applied.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "UpdateInvalidSseTypeTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription", nullValue());
 
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
