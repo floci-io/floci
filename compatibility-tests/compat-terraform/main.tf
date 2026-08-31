@@ -101,11 +101,6 @@ resource "aws_ecr_repository" "app" {
 # -- ECS Cluster ---------------------------------------------------------------
 resource "aws_ecs_cluster" "app" {
   name = "floci-compat-cluster"
-
-  setting {
-    name  = "containerInsights"
-    value = "disabled"
-  }
 }
 
 # -- KMS Key -------------------------------------------------------------------
