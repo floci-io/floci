@@ -32,6 +32,7 @@ public class RedshiftAuthProxy {
     private final RdsSigV4Validator sigV4;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final RdsAuthProxy.PasswordValidator passwordValidator;
+    private final io.github.hectorvent.floci.services.s3.S3Service s3Service;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -39,7 +40,8 @@ public class RedshiftAuthProxy {
     public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
                              String masterUsername, String masterPassword, String dbName,
                              RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
-                             RdsAuthProxy.PasswordValidator passwordValidator) {
+                             RdsAuthProxy.PasswordValidator passwordValidator,
+                             io.github.hectorvent.floci.services.s3.S3Service s3Service) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -49,6 +51,7 @@ public class RedshiftAuthProxy {
         this.sigV4 = sigV4;
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
+        this.s3Service = s3Service;
     }
 
     public void start(int proxyPort) throws IOException {
@@ -142,7 +145,7 @@ public class RedshiftAuthProxy {
                     client, backend, masterUsername, masterPassword, dbName,
                     false, sigV4, tlsCertificates, passwordValidator::validate);
             if (activeClient != null) {
-                PostgresProtocolHandler.bridge(activeClient, backend);
+                new RedshiftInterceptingBridge(activeClient, backend, s3Service).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
