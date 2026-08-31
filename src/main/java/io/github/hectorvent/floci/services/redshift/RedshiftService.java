@@ -249,6 +249,9 @@ public class RedshiftService {
             throw new AwsException("InternalFailure", "Failed to prepare reboot dump file: " + e.getMessage(), 500);
         }
 
+        // Hoisted so a failure after the proxy is (re)started still tears it down and
+        // returns the port, matching createCluster/restoreFromClusterSnapshot rollback.
+        int proxyPort = -1;
         try {
             String accountId = clusters.accountId();
             String key = relayKey(accountId, clusterIdentifier);
@@ -262,7 +265,7 @@ public class RedshiftService {
                     accountId, clusterIdentifier, cluster.getMasterUsername(), password);
 
             // Reuse the stored proxy port so the advertised endpoint is unchanged by a reboot.
-            int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
+            proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
             usedPorts.add(proxyPort);
             Endpoint endpoint = proxyEndpoint(proxyPort);
             cluster.setProxyPort(proxyPort);
@@ -276,10 +279,12 @@ public class RedshiftService {
             containerManager.restoreSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
+            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw e;
         } catch (Exception e) {
+            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);

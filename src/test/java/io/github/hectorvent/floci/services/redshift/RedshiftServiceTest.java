@@ -361,6 +361,30 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void rebootClusterTearsDownTheProxyWhenRestoreFails() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.11");
+        when(handle.getPort()).thenReturn(32820);
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+        doThrow(new RuntimeException("restore boom"))
+                .when(cm).restoreSnapshot(eq("111111111111"), eq("c1"), eq("admin"), any(Path.class));
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        // The proxy started during the reboot must be stopped again on failure: once
+        // before the container restart, once during rollback.
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
+                any(), any(), any(), any(), any());
+        verify(proxyManager, times(2)).stopProxy("111111111111:c1");
+    }
+
+    @Test
     void testCreateSnapshot() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
