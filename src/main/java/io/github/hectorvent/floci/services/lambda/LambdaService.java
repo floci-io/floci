@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -98,6 +101,7 @@ public class LambdaService implements ResourceProvider {
     private final Ec2Service ec2Service;
     /** Null in the constructors tests use, exactly as the other optional collaborators above are. */
     private final CustomResourceLiveness customResourceLiveness;
+    private final ObjectMapper objectMapper;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     /**
@@ -169,6 +173,7 @@ public class LambdaService implements ResourceProvider {
         this.layerService = null;
         this.ec2Service = null;
         this.customResourceLiveness = null;
+        this.objectMapper = new ObjectMapper();
     }
 
     @Inject
@@ -190,7 +195,8 @@ public class LambdaService implements ResourceProvider {
                           StorageFactory storageFactory,
                           LambdaLayerService layerService,
                           Ec2Service ec2Service,
-                          CustomResourceLiveness customResourceLiveness) {
+                          CustomResourceLiveness customResourceLiveness,
+                          ObjectMapper objectMapper) {
         this.customResourceLiveness = customResourceLiveness;
         this.functionStore = functionStore;
         this.executorService = executorService;
@@ -210,6 +216,7 @@ public class LambdaService implements ResourceProvider {
         this.storageFactory = storageFactory;
         this.layerService = layerService;
         this.ec2Service = ec2Service;
+        this.objectMapper = objectMapper;
     }
 
     // Real AWS validates a function's Layers eagerly at CreateFunction/UpdateFunctionConfiguration
@@ -1088,6 +1095,8 @@ public class LambdaService implements ResourceProvider {
 
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
+        EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
+
         StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn);
 
         String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
@@ -1107,6 +1116,7 @@ public class LambdaService implements ResourceProvider {
         esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
         esm.setDestinationConfig(destinationConfig);
+        esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
         esm.setStartingPositionTimestamp(startingPosition.timestampMillis());
         esm.setLastModified(System.currentTimeMillis());
@@ -1149,6 +1159,105 @@ public class LambdaService implements ResourceProvider {
         EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
         destinationConfig.setOnFailure(onFailure);
         return destinationConfig;
+    }
+
+    /**
+     * Parses and validates {@code FilterCriteria} from a create/update request. Mirrors
+     * {@link #parseDestinationConfig} in shape and error behavior; static (with the mapper passed in) so the
+     * validation can be unit-tested without constructing the service.
+     *
+     * <p>AWS rejects invalid filter patterns at create/update time. Because the pollers silently drop — and
+     * checkpoint past (Kinesis/DynamoDB) or delete (SQS) — any record a pattern fails to match, an unvalidated
+     * malformed pattern would become silent data loss. Patterns are therefore validated to be well-formed JSON
+     * objects here, before persistence. Returns {@code null} (filtering off) when {@code FilterCriteria} is
+     * absent, an empty object, or has an empty {@code Filters} array — AWS treats an empty object as the
+     * removal operation.
+     */
+    static EventSourceMapping.FilterCriteria parseFilterCriteria(Map<String, Object> request, ObjectMapper objectMapper) {
+        Object raw = request.get("FilterCriteria");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map<?, ?> criteriaMap)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FilterCriteria must be a JSON object", 400);
+        }
+        Object rawFilters = criteriaMap.get("Filters");
+        if (rawFilters == null) {
+            return null;
+        }
+        if (!(rawFilters instanceof List<?> filterList)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FilterCriteria.Filters must be a JSON array", 400);
+        }
+        if (filterList.isEmpty()) {
+            return null;
+        }
+        if (filterList.size() > 5) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FilterCriteria.Filters may contain a maximum of 5 filters", 400);
+        }
+        List<EventSourceMapping.Filter> filters = new ArrayList<>();
+        for (Object rawFilter : filterList) {
+            if (!(rawFilter instanceof Map<?, ?> filterMap)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Each FilterCriteria.Filters entry must be a JSON object", 400);
+            }
+            Object rawPattern = filterMap.get("Pattern");
+            if (!(rawPattern instanceof String pattern) || pattern.isBlank()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Each filter must have a non-empty Pattern string", 400);
+            }
+            if (pattern.length() > 4096) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern must not exceed 4096 characters", 400);
+            }
+            JsonNode patternNode;
+            try {
+                patternNode = objectMapper.readTree(pattern);
+            } catch (JsonProcessingException e) {
+                // Only a JSON parse failure is client error (400). An unexpected runtime failure
+                // (e.g. a misconfigured mapper) must surface as a server error, not a misleading 400.
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern is not valid JSON", 400);
+            }
+            if (!patternNode.isObject()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern must be a JSON object", 400);
+            }
+            validatePatternStructure(patternNode);
+            EventSourceMapping.Filter filter = new EventSourceMapping.Filter();
+            filter.setPattern(pattern);
+            filters.add(filter);
+        }
+        EventSourceMapping.FilterCriteria criteria = new EventSourceMapping.FilterCriteria();
+        criteria.setFilters(filters);
+        return criteria;
+    }
+
+    /**
+     * Validates the recursive shape of an EventBridge filter pattern: every field value must be either a
+     * non-empty match array (a leaf) or a nested object (recursed into). A scalar or empty-array value is a
+     * pattern the matcher can never satisfy, so — with enforcement active — it would silently drop every
+     * record; reject it at create/update instead. Operator names inside a match array are intentionally not
+     * allowlisted here: that would couple this validator to {@code PipesFilterMatcher}'s operator set, and an
+     * unknown operator is a documented deviation rather than a create-time rejection.
+     */
+    private static void validatePatternStructure(JsonNode node) {
+        for (Map.Entry<String, JsonNode> entry : node.properties()) {
+            JsonNode value = entry.getValue();
+            if (value.isArray()) {
+                if (value.isEmpty()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Filter Pattern field '" + entry.getKey() + "' must have a non-empty match array", 400);
+                }
+            } else if (value.isObject()) {
+                validatePatternStructure(value);
+            } else {
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern field '" + entry.getKey() + "' must be an array or object", 400);
+            }
+        }
     }
 
     /** A validated {@code StartingPosition} plus, for {@code AT_TIMESTAMP}, its epoch-millis instant. */
@@ -1309,6 +1418,12 @@ public class LambdaService implements ResourceProvider {
 
         if (request.containsKey("DestinationConfig")) {
             esm.setDestinationConfig(parseDestinationConfig(request));
+        }
+
+        if (request.containsKey("FilterCriteria")) {
+            // AWS: passing FilterCriteria replaces the whole set; an empty object or an empty
+            // Filters array clears all filters.
+            esm.setFilterCriteria(parseFilterCriteria(request, objectMapper));
         }
 
         esm.setLastModified(System.currentTimeMillis());

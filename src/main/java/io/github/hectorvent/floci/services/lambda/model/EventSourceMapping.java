@@ -31,6 +31,7 @@ public class EventSourceMapping {
     private ScalingConfig scalingConfig;
     private Boolean bisectBatchOnFunctionError;
     private DestinationConfig destinationConfig;
+    private FilterCriteria filterCriteria;
 
     public EventSourceMapping() {
     }
@@ -115,6 +116,14 @@ public class EventSourceMapping {
         this.destinationConfig = destinationConfig;
     }
 
+    public FilterCriteria getFilterCriteria() {
+        return filterCriteria;
+    }
+
+    public void setFilterCriteria(FilterCriteria filterCriteria) {
+        this.filterCriteria = filterCriteria;
+    }
+
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class DestinationConfig {
@@ -146,6 +155,40 @@ public class EventSourceMapping {
 
         public void setDestination(String destination) {
             this.destination = destination;
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class FilterCriteria {
+        private List<Filter> filters = new ArrayList<>();
+
+        public FilterCriteria() {
+        }
+
+        public List<Filter> getFilters() {
+            return filters;
+        }
+
+        public void setFilters(List<Filter> filters) {
+            this.filters = filters != null ? filters : new ArrayList<>();
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Filter {
+        private String pattern;
+
+        public Filter() {
+        }
+
+        public String getPattern() {
+            return pattern;
+        }
+
+        public void setPattern(String pattern) {
+            this.pattern = pattern;
         }
     }
 }
