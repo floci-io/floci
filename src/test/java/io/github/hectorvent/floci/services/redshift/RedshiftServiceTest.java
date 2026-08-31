@@ -243,6 +243,42 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void createClusterRemovesMetadataOnFailure() {
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
+                .thenThrow(new RuntimeException("startup failed"));
+
+        assertThrows(AwsException.class, () ->
+                service.createCluster("c1", "dc2.large", "admin", "password123"));
+
+        verify(clusterBackend).delete("c1");
+        verify(clusterBackend, atLeastOnce()).flush();
+    }
+
+    @Test
+    void restoreFromClusterSnapshotRemovesMetadataOnFailure() {
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier("snap-1");
+        snapshot.setClusterIdentifier("source-c1");
+        snapshot.setMasterUsername("admin");
+        snapshot.setMasterPassword("password123");
+        snapshot.setSqlDump(null);
+
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
+                .thenThrow(new RuntimeException("startup failed"));
+
+        assertThrows(AwsException.class, () ->
+                service.restoreFromClusterSnapshot("c1", "snap-1"));
+
+        verify(clusterBackend).delete("c1");
+        verify(clusterBackend, atLeastOnce()).flush();
+    }
+
+    @Test
     void testDescribeClusters() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");

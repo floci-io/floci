@@ -156,10 +156,14 @@ public class RedshiftService {
         } catch (AwsException e) {
             stopProxyAndReleasePortSafely(identifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
+            clusters.delete(identifier);
+            clusters.flush();
             throw e;
         } catch (Exception e) {
             stopProxyAndReleasePortSafely(identifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
+            clusters.delete(identifier);
+            clusters.flush();
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
 
@@ -508,10 +512,14 @@ public class RedshiftService {
         } catch (AwsException e) {
             stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
+            clusters.delete(clusterIdentifier);
+            clusters.flush();
             throw e;
         } catch (Exception e) {
             stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
+            clusters.delete(clusterIdentifier);
+            clusters.flush();
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
 
