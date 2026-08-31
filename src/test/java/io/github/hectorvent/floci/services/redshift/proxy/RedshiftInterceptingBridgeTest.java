@@ -126,6 +126,72 @@ class RedshiftInterceptingBridgeTest {
         bridge.join(TimeUnit.SECONDS.toMillis(2));
     }
 
+    @Test
+    void interceptionWaitsForAnEarlierPipelinedQueryToFinish() throws Exception {
+        SocketPair clientPair = SocketPair.create(open);
+        SocketPair backendPair = SocketPair.create(open);
+
+        S3Service s3 = mock(S3Service.class);
+        when(s3.objectExists("bkt", "k.csv")).thenReturn(true);
+        when(s3.openObjectStream(eq("bkt"), eq("k.csv"), any())).thenReturn(
+                new ByteArrayInputStream("1,2\n".getBytes(StandardCharsets.UTF_8)));
+
+        Thread bridge = Thread.ofVirtual().start(() ->
+                new RedshiftInterceptingBridge(clientPair.near, backendPair.near, s3).run());
+
+        // Fake backend: first sees the ordinary Q1, answers it slowly; only then should it
+        // see the fabricated COPY. If the bridge injected early, the first frame it reads
+        // would be the COPY query, not "SELECT 1".
+        Thread fakeBackend = Thread.ofVirtual().start(() -> {
+            try {
+                InputStream in = backendPair.far.getInputStream();
+                OutputStream out = backendPair.far.getOutputStream();
+
+                Frame q1 = Frame.read(in);
+                assertEquals("SELECT 1", new String(q1.body, 0, q1.body.length - 1, StandardCharsets.UTF_8),
+                        "backend must receive the ordinary query first");
+                Thread.sleep(300); // Q1 is slow to answer
+                out.write(Frame.of('C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8)));
+                out.write(Frame.of('Z', new byte[]{'I'}));
+                out.flush();
+
+                Frame injected = Frame.read(in);
+                String sql = new String(injected.body, 0, injected.body.length - 1, StandardCharsets.UTF_8);
+                assertTrue(sql.contains("FROM STDIN"), "expected the synthesized STDIN copy, got: " + sql);
+                out.write(Frame.of('G', new byte[]{0, 0, 0}));
+                out.flush();
+                Frame f;
+                do {
+                    f = Frame.read(in);
+                } while (f.type != 'c');
+                out.write(Frame.of('C', "COPY 1\0".getBytes(StandardCharsets.UTF_8)));
+                out.write(Frame.of('Z', new byte[]{'I'}));
+                out.flush();
+            } catch (IOException | InterruptedException ignored) {
+            }
+        });
+
+        // Pipeline Q1 then the COPY in one write, before Q1 is answered.
+        OutputStream toClient = clientPair.far.getOutputStream();
+        toClient.write(PostgresWireDecoder.encodeQuery("SELECT 1"));
+        toClient.write(PostgresWireDecoder.encodeQuery("COPY t FROM 's3://bkt/k.csv' CSV"));
+        toClient.flush();
+
+        // Client must see Q1's C+Z, then the COPY's C+Z — no stray 'G', no interleaving.
+        Frame a = Frame.read(clientPair.far.getInputStream());
+        Frame b = Frame.read(clientPair.far.getInputStream());
+        Frame c = Frame.read(clientPair.far.getInputStream());
+        Frame d = Frame.read(clientPair.far.getInputStream());
+        assertEquals('C', a.type);
+        assertEquals('Z', b.type);
+        assertEquals('C', c.type, "client must not receive the backend's CopyInResponse 'G'");
+        assertEquals('Z', d.type);
+
+        fakeBackend.join(TimeUnit.SECONDS.toMillis(3));
+        clientPair.far.close();
+        bridge.join(TimeUnit.SECONDS.toMillis(3));
+    }
+
     // --- tiny wire-frame helpers -------------------------------------------------
 
     private record Frame(char type, byte[] body) {

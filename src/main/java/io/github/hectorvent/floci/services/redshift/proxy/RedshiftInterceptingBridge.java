@@ -9,6 +9,7 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -25,18 +26,25 @@ import java.util.concurrent.locks.ReentrantLock;
  * {@link S3CopySimulator}, anything else is run through
  * {@link RedshiftSqlInterceptor#rewrite} and forwarded.
  *
- * <p><b>Backend ownership.</b> {@link S3CopySimulator} drives a fabricated
- * request/response exchange and reads the backend socket directly, so it must
- * not run while the pump is also reading. Both guard every backend read with
- * {@link #backendLock}: the pump takes and releases it once per {@code read()}
- * (bounded by {@link #PUMP_READ_TIMEOUT_MS}), and the client loop takes it for
- * the whole COPY/UNLOAD exchange. The client loop only proceeds once
- * {@link #pumpBetweenMessages} shows the pump last stopped on a PostgreSQL
- * message boundary, so the simulator's decoder never starts mid-frame — even if
- * a client pipelines a {@code 'Q'} behind an unfinished response. If a boundary
- * is not reached within {@link #PUMP_PARK_WAIT_MS}, the COPY/UNLOAD is
- * <em>not</em> intercepted: the original {@code 'Q'} is forwarded and PostgreSQL
- * returns its own error rather than the session hanging.
+ * <p><b>Backend ownership.</b> {@link S3CopySimulator} injects a fabricated query
+ * and reads its response directly, so it must own the backend exclusively and
+ * only run when the backend has no earlier request still in flight. Two things
+ * gate it:
+ * <ul>
+ *   <li>{@link #backendLock} — held by the pump once per {@code read()} and by
+ *       the client loop for the whole exchange, so the two never read
+ *       concurrently.</li>
+ *   <li>{@link #outstandingResponses} / {@link #pumpBetweenMessages} — the
+ *       exchange starts only when every {@code 'Q'} / {@code Sync} the client
+ *       already sent has been answered through its {@code ReadyForQuery} and the
+ *       pump is on a message boundary. Otherwise the injected query would queue
+ *       behind an unfinished one and the simulator would read the wrong
+ *       response.</li>
+ * </ul>
+ * If those conditions are not met within {@link #PUMP_PARK_WAIT_MS} (a client
+ * that pipelines raw {@code 'Q'} messages, or a slow prior query), the
+ * COPY/UNLOAD is <em>not</em> intercepted: the original {@code 'Q'} is forwarded
+ * and PostgreSQL returns its own error rather than the session hanging.
  */
 public class RedshiftInterceptingBridge {
 
@@ -44,7 +52,7 @@ public class RedshiftInterceptingBridge {
 
     /** How long a pump {@code read()} blocks (holding {@link #backendLock}) before looping. */
     private static final int PUMP_READ_TIMEOUT_MS = 200;
-    /** Upper bound on how long the client loop waits to take the backend stream at a boundary. */
+    /** Upper bound on how long the client loop waits for the backend to be idle at a boundary. */
     private static final long PUMP_PARK_WAIT_MS = 2_000L;
 
     private final Socket client;
@@ -55,6 +63,8 @@ public class RedshiftInterceptingBridge {
     private final ReentrantLock backendLock = new ReentrantLock(true);
     /** True when the pump's last read left the stream on a wire-message boundary. */
     private volatile boolean pumpBetweenMessages = true;
+    /** Client {@code 'Q'}/{@code Sync} messages forwarded, minus backend {@code ReadyForQuery} messages seen. */
+    private final AtomicInteger outstandingResponses = new AtomicInteger(0);
     private volatile boolean pumpFinished = false;
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service) {
@@ -81,6 +91,9 @@ public class RedshiftInterceptingBridge {
                     backendOut.flush();
                     if (msg.type() == 'X') { // Terminate
                         break;
+                    }
+                    if (msg.type() == 'S') { // Sync — its response ends with ReadyForQuery
+                        outstandingResponses.incrementAndGet();
                     }
                     continue;
                 }
@@ -122,6 +135,7 @@ public class RedshiftInterceptingBridge {
                 }
                 backendOut.write(toBackend);
                 backendOut.flush();
+                outstandingResponses.incrementAndGet();
                 // Response flows back over the untouched pump.
             }
         } catch (IOException e) {
@@ -140,11 +154,11 @@ public class RedshiftInterceptingBridge {
     }
 
     /**
-     * Take exclusive ownership of the backend stream at a wire-message boundary, run
+     * Take exclusive ownership of an idle backend at a wire-message boundary, run
      * {@code exchange}, then release it.
      *
      * @return {@code true} if ownership was taken and {@code exchange} ran; {@code false} if the
-     *         pump could not be caught at a boundary in time — the caller must then forward the
+     *         backend could not be caught idle in time — the caller must then forward the
      *         original {@code 'Q'} unmodified (fail-open).
      */
     private boolean runWithBackendOwned(CopyExchange exchange) throws IOException {
@@ -168,10 +182,11 @@ public class RedshiftInterceptingBridge {
                 continue;
             }
             try {
-                if (!pumpBetweenMessages && !pumpFinished) {
-                    // The pump stopped mid-message; release so it can finish, then retry.
+                boolean backendBusy = !pumpBetweenMessages || outstandingResponses.get() > 0;
+                if (backendBusy && !pumpFinished) {
+                    // A prior query is still being answered; release so the pump can drain it, then retry.
                     if (System.nanoTime() >= deadlineNanos) {
-                        LOG.warn("backend never reached a message boundary in time; forwarding the COPY/UNLOAD unintercepted");
+                        LOG.warn("backend did not go idle in time; forwarding the COPY/UNLOAD unintercepted");
                         return false;
                     }
                     continue;
@@ -194,7 +209,8 @@ public class RedshiftInterceptingBridge {
     }
 
     private void pumpBackendToClient() {
-        WireFrameTracker tracker = new WireFrameTracker();
+        WireFrameTracker tracker = new WireFrameTracker(
+                () -> outstandingResponses.updateAndGet(v -> Math.max(0, v - 1)));
         try {
             InputStream backendIn = backend.getInputStream();
             OutputStream clientOut = client.getOutputStream();
@@ -243,12 +259,19 @@ public class RedshiftInterceptingBridge {
     /**
      * Tracks PostgreSQL wire-message boundaries in a byte stream without buffering it.
      * Every backend message is {@code type(1) · length(int32, includes itself) · body}.
-     * {@link #betweenMessages()} is true exactly when the next byte would begin a new message.
+     * {@link #betweenMessages()} is true exactly when the next byte would begin a new message;
+     * {@code onReadyForQuery} fires once per completed {@code 'Z'} message.
      */
     private static final class WireFrameTracker {
+        private final Runnable onReadyForQuery;
         private int headerBytesSeen = 0;
         private final byte[] header = new byte[5];
         private long bodyRemaining = 0;
+        private char pendingType = 0;
+
+        WireFrameTracker(Runnable onReadyForQuery) {
+            this.onReadyForQuery = onReadyForQuery;
+        }
 
         boolean betweenMessages() {
             return headerBytesSeen == 0 && bodyRemaining == 0;
@@ -258,14 +281,21 @@ public class RedshiftInterceptingBridge {
             for (int i = off; i < off + len; i++) {
                 if (bodyRemaining > 0) {
                     bodyRemaining--;
+                    if (bodyRemaining == 0 && pendingType == 'Z') {
+                        onReadyForQuery.run();
+                    }
                     continue;
                 }
                 header[headerBytesSeen++] = buf[i];
                 if (headerBytesSeen == 5) {
                     long msgLen = ((header[1] & 0xFFL) << 24) | ((header[2] & 0xFFL) << 16)
                             | ((header[3] & 0xFFL) << 8) | (header[4] & 0xFFL);
+                    pendingType = (char) (header[0] & 0xFF);
                     bodyRemaining = Math.max(0, msgLen - 4);
                     headerBytesSeen = 0;
+                    if (bodyRemaining == 0 && pendingType == 'Z') {
+                        onReadyForQuery.run();
+                    }
                 }
             }
         }
