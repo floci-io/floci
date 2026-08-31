@@ -679,16 +679,36 @@ class BedrockProxyIntegrationTest {
     }
 
     @Test
-    void invokeModel_notSupportedByProxyBackend_returns400() {
+    void invokeModel_translatesToOpenAiAndFormatsBedrockResponse() {
+        nextResponseBody.set("""
+            {
+              "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello from invokeModel proxy!"}
+              }],
+              "usage": {"prompt_tokens": 10, "completion_tokens": 12, "total_tokens": 22}
+            }
+            """);
+
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
-            .body("{}")
+            .body("""
+                {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 100,
+                  "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]
+                }
+                """)
         .when()
             .post("/model/" + MAPPED_MODEL_ID + "/invoke")
         .then()
-            .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .statusCode(200)
+            .body("type", equalTo("message"))
+            .body("role", equalTo("assistant"))
+            .body("content[0].text", equalTo("Hello from invokeModel proxy!"))
+            .body("usage.input_tokens", equalTo(10))
+            .body("usage.output_tokens", equalTo(12));
     }
 
     @Test

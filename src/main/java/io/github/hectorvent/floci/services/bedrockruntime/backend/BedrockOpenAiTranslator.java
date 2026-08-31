@@ -6,18 +6,21 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Translates between the Bedrock Runtime Converse wire shape and the OpenAI
+ * Translates between the Bedrock Runtime Converse/Invoke wire shape and the OpenAI
  * Chat Completions wire shape used by Ollama, OpenRouter, LiteLLM, vLLM, etc.
  */
-final class BedrockOpenAiTranslator {
+public final class BedrockOpenAiTranslator {
 
     private static final Logger LOG = Logger.getLogger(BedrockOpenAiTranslator.class);
 
     private BedrockOpenAiTranslator() {
     }
 
-    static ObjectNode toOpenAiRequest(ObjectMapper mapper, ObjectNode bedrockRequest, String resolvedModel) {
+    public static ObjectNode toOpenAiRequest(ObjectMapper mapper, ObjectNode bedrockRequest, String resolvedModel) {
         ObjectNode openAi = mapper.createObjectNode();
         openAi.put("model", resolvedModel);
         openAi.put("stream", false);
@@ -26,13 +29,17 @@ final class BedrockOpenAiTranslator {
         JsonNode system = bedrockRequest.path("system");
         if (system.isArray()) {
             for (JsonNode block : system) {
-                String text = block.path("text").asText(null);
+                String text = block.isTextual() ? block.asText() : block.path("text").asText(null);
                 if (text != null) {
                     ObjectNode msg = openAiMessages.addObject();
                     msg.put("role", "system");
                     msg.put("content", text);
                 }
             }
+        } else if (system.isTextual()) {
+            ObjectNode msg = openAiMessages.addObject();
+            msg.put("role", "system");
+            msg.put("content", system.asText());
         }
 
         JsonNode messages = bedrockRequest.path("messages");
@@ -102,15 +109,24 @@ final class BedrockOpenAiTranslator {
 
     /**
      * A Bedrock message's content[] blocks map to OpenAI in three different ways:
-     * plain text accumulates into the message's content string, toolUse blocks become
-     * entries in that same message's tool_calls[], and toolResult blocks become their
+     * plain text accumulates into the message's content string (or content parts array if images are present),
+     * toolUse blocks become entries in that same message's tool_calls[], and toolResult blocks become their
      * own standalone OpenAI message with role=tool — so one Bedrock message can expand
      * into zero, one, or several OpenAI messages.
      */
     private static void translateMessage(ObjectMapper mapper, ArrayNode openAiMessages, JsonNode message) {
         String role = message.path("role").asText("user");
         JsonNode content = message.path("content");
-        StringBuilder text = new StringBuilder();
+
+        if (content.isTextual()) {
+            ObjectNode msg = openAiMessages.addObject();
+            msg.put("role", role);
+            msg.put("content", content.asText());
+            return;
+        }
+
+        List<JsonNode> imageBlocks = new ArrayList<>();
+        List<String> textBlocks = new ArrayList<>();
         ArrayNode toolCalls = null;
 
         if (content.isArray()) {
@@ -136,30 +152,68 @@ final class BedrockOpenAiTranslator {
                     function.put("arguments", toJsonString(mapper, toolUse.path("input")));
                     continue;
                 }
-                String blockText = block.path("text").asText(null);
+                if (block.has("image")) {
+                    imageBlocks.add(block.path("image"));
+                    continue;
+                }
+                if ("image".equalsIgnoreCase(block.path("type").asText())) {
+                    imageBlocks.add(block);
+                    continue;
+                }
+                String blockText = block.isTextual() ? block.asText() : block.path("text").asText(null);
                 if (blockText != null) {
-                    if (text.length() > 0) {
-                        text.append('\n');
-                    }
-                    text.append(blockText);
+                    textBlocks.add(blockText);
                 }
             }
         }
 
-        if (text.length() > 0 || toolCalls != null) {
+        if (!textBlocks.isEmpty() || !imageBlocks.isEmpty() || toolCalls != null) {
             ObjectNode msg = openAiMessages.addObject();
             msg.put("role", role);
-            if (text.length() > 0) {
-                msg.put("content", text.toString());
+
+            if (!imageBlocks.isEmpty()) {
+                ArrayNode contentArray = msg.putArray("content");
+                for (String text : textBlocks) {
+                    ObjectNode textNode = contentArray.addObject();
+                    textNode.put("type", "text");
+                    textNode.put("text", text);
+                }
+                for (JsonNode imageNode : imageBlocks) {
+                    ObjectNode imagePart = contentArray.addObject();
+                    imagePart.put("type", "image_url");
+                    ObjectNode imageUrl = imagePart.putObject("image_url");
+                    imageUrl.put("url", extractImageUrl(imageNode));
+                }
+            } else if (!textBlocks.isEmpty()) {
+                msg.put("content", String.join("\n", textBlocks));
             } else {
-                // OpenAI's spec treats content as optional when tool_calls is present; some
-                // strict backends reject an empty string here instead of null.
                 msg.putNull("content");
             }
+
             if (toolCalls != null) {
                 msg.set("tool_calls", toolCalls);
             }
         }
+    }
+
+    private static String extractImageUrl(JsonNode imageNode) {
+        if (imageNode.has("source")) {
+            JsonNode source = imageNode.path("source");
+            if (source.has("bytes")) {
+                String format = imageNode.path("format").asText("png");
+                String bytes = source.path("bytes").asText();
+                return "data:image/" + format + ";base64," + bytes;
+            }
+            if (source.has("data")) {
+                String mediaType = source.path("media_type").asText("image/png");
+                String data = source.path("data").asText();
+                return "data:" + mediaType + ";base64," + data;
+            }
+        }
+        if (imageNode.has("image_url")) {
+            return imageNode.path("image_url").path("url").asText();
+        }
+        return "";
     }
 
     private static String extractToolResultText(JsonNode toolResultContent) {
@@ -191,7 +245,7 @@ final class BedrockOpenAiTranslator {
         }
     }
 
-    static ObjectNode toBedrockResponse(ObjectMapper mapper, JsonNode openAiResponse, long latencyMs) {
+    public static ObjectNode toBedrockResponse(ObjectMapper mapper, JsonNode openAiResponse, long latencyMs) {
         JsonNode choice = openAiResponse.path("choices").path(0);
         JsonNode message = choice.path("message");
         String finishReason = choice.path("finish_reason").asText("stop");
@@ -205,9 +259,6 @@ final class BedrockOpenAiTranslator {
         ArrayNode content = outMessage.putArray("content");
 
         if (hasToolCalls) {
-            // Some OpenAI-compatible backends emit assistant text alongside tool_calls (e.g. a
-            // preamble like "Let me check that for you") — preserve it as a leading text block
-            // instead of dropping it.
             String leadingText = extractMessageText(message);
             if (!leadingText.isBlank()) {
                 content.addObject().put("text", leadingText);
@@ -223,10 +274,6 @@ final class BedrockOpenAiTranslator {
             content.addObject().put("text", extractMessageText(message));
         }
 
-        // stopReason is derived from whether we actually emitted toolUse content, not from
-        // finish_reason alone: a backend can report finish_reason=tool_calls without a usable
-        // tool_calls array, which must not produce a Converse response claiming tool_use with
-        // no toolUse blocks in it.
         root.put("stopReason", hasToolCalls ? "tool_use" : mapFinishReason(finishReason));
 
         JsonNode usage = openAiResponse.path("usage");
@@ -240,7 +287,7 @@ final class BedrockOpenAiTranslator {
         return root;
     }
 
-    private static String extractMessageText(JsonNode message) {
+    public static String extractMessageText(JsonNode message) {
         JsonNode content = message.path("content");
         if (content.isTextual()) {
             return content.asText("");
@@ -248,7 +295,7 @@ final class BedrockOpenAiTranslator {
         if (content.isArray()) {
             StringBuilder sb = new StringBuilder();
             for (JsonNode part : content) {
-                String text = part.path("text").asText(null);
+                String text = part.isTextual() ? part.asText() : part.path("text").asText(null);
                 if (text != null) {
                     if (sb.length() > 0) {
                         sb.append('\n');

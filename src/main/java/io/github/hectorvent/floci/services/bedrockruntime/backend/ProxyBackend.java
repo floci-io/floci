@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.bedrockruntime.backend;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -17,11 +18,11 @@ import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * Forwards Bedrock Converse requests to any OpenAI-compatible {@code /chat/completions}
- * endpoint (Ollama, OpenRouter, LiteLLM, vLLM, ...). InvokeModel is not yet supported and
- * fails fast rather than returning a fabricated response.
+ * Forwards Bedrock Converse and InvokeModel requests to any OpenAI-compatible {@code /chat/completions}
+ * endpoint (Ollama, OpenRouter, LiteLLM, vLLM, ...).
  */
 @ApplicationScoped
 public class ProxyBackend implements BedrockBackend {
@@ -32,7 +33,7 @@ public class ProxyBackend implements BedrockBackend {
     private final EmulatorConfig config;
 
     // Config is immutable for the process's lifetime, so the mapping string is parsed
-    // once here rather than on every Converse request.
+    // once here rather than on every Converse/Invoke request.
     private final Map<String, String> modelMapping;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -51,12 +52,241 @@ public class ProxyBackend implements BedrockBackend {
     public ObjectNode converse(String modelId, ObjectNode bedrockRequest) {
         EmulatorConfig.BedrockProxyConfig proxyConfig = config.services().bedrockRuntime().proxy();
         String resolvedModel = resolveModel(modelId, proxyConfig);
+        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel);
+
+        CallResult result = callOpenAiChatCompletions(modelId, openAiRequest, proxyConfig);
+        return BedrockOpenAiTranslator.toBedrockResponse(objectMapper, result.responseJson, result.latencyMs);
+    }
+
+    @Override
+    public byte[] invokeModel(String modelId, byte[] body) {
+        EmulatorConfig.BedrockProxyConfig proxyConfig = config.services().bedrockRuntime().proxy();
+        String resolvedModel = resolveModel(modelId, proxyConfig);
+
+        JsonNode inputJson;
+        try {
+            inputJson = objectMapper.readTree(body != null && body.length > 0 ? body : new byte[]{'{', '}'});
+        } catch (Exception e) {
+            throw new AwsException("ValidationException", "Malformed JSON body for InvokeModel: " + e.getMessage(), 400);
+        }
+
+        ObjectNode openAiRequest = buildOpenAiRequestFromInvokeModel(inputJson, resolvedModel);
+        CallResult result = callOpenAiChatCompletions(modelId, openAiRequest, proxyConfig);
+
+        ObjectNode bedrockInvokeResponse = formatBedrockInvokeResponse(modelId, inputJson, result.responseJson);
+        try {
+            return objectMapper.writeValueAsBytes(bedrockInvokeResponse);
+        } catch (Exception e) {
+            throw new AwsException("InternalServerException", "Failed to serialize InvokeModel response: " + e.getMessage(), 500);
+        }
+    }
+
+    private ObjectNode buildOpenAiRequestFromInvokeModel(JsonNode inputJson, String resolvedModel) {
+        if (inputJson.has("messages") && inputJson.path("messages").isArray()) {
+            if (inputJson.isObject()) {
+                return BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, (ObjectNode) inputJson, resolvedModel);
+            }
+        }
+
+        ObjectNode openAi = objectMapper.createObjectNode();
+        openAi.put("model", resolvedModel);
+        openAi.put("stream", false);
+        ArrayNode openAiMessages = openAi.putArray("messages");
+
+        if (inputJson.hasNonNull("system")) {
+            JsonNode sys = inputJson.get("system");
+            if (sys.isTextual()) {
+                openAiMessages.addObject().put("role", "system").put("content", sys.asText());
+            } else if (sys.isArray()) {
+                for (JsonNode b : sys) {
+                    String t = b.isTextual() ? b.asText() : b.path("text").asText(null);
+                    if (t != null) {
+                        openAiMessages.addObject().put("role", "system").put("content", t);
+                    }
+                }
+            }
+        }
+
+        if (inputJson.hasNonNull("inputText")) {
+            openAiMessages.addObject().put("role", "user").put("content", inputJson.get("inputText").asText());
+        } else if (inputJson.hasNonNull("prompt")) {
+            String prompt = inputJson.get("prompt").asText();
+            openAiMessages.addObject().put("role", "user").put("content", prompt);
+        } else if (inputJson.hasNonNull("messages") && inputJson.get("messages").isArray()) {
+            for (JsonNode msg : inputJson.get("messages")) {
+                String role = msg.path("role").asText("user");
+                JsonNode content = msg.path("content");
+                if (content.isTextual()) {
+                    openAiMessages.addObject().put("role", role).put("content", content.asText());
+                } else if (content.isArray()) {
+                    ObjectNode openAiMsg = openAiMessages.addObject();
+                    openAiMsg.put("role", role);
+                    ArrayNode contentArray = openAiMsg.putArray("content");
+                    for (JsonNode part : content) {
+                        if (part.hasNonNull("text")) {
+                            contentArray.addObject().put("type", "text").put("text", part.path("text").asText());
+                        } else if (part.has("image") || "image".equalsIgnoreCase(part.path("type").asText())) {
+                            JsonNode imgNode = part.has("image") ? part.path("image") : part;
+                            String imgUrl = extractImageUrl(imgNode);
+                            if (!imgUrl.isBlank()) {
+                                ObjectNode partObj = contentArray.addObject();
+                                partObj.put("type", "image_url");
+                                partObj.putObject("image_url").put("url", imgUrl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (inputJson.hasNonNull("textGenerationConfig")) {
+            JsonNode cfg = inputJson.get("textGenerationConfig");
+            if (cfg.hasNonNull("maxTokenCount")) {
+                openAi.put("max_tokens", cfg.get("maxTokenCount").asInt());
+            }
+            if (cfg.hasNonNull("temperature")) {
+                openAi.put("temperature", cfg.get("temperature").asDouble());
+            }
+            if (cfg.hasNonNull("topP")) {
+                openAi.put("top_p", cfg.get("topP").asDouble());
+            }
+            if (cfg.hasNonNull("stopSequences") && cfg.get("stopSequences").isArray()) {
+                openAi.set("stop", cfg.get("stopSequences").deepCopy());
+            }
+        }
+
+        if (inputJson.hasNonNull("max_tokens")) {
+            openAi.put("max_tokens", inputJson.get("max_tokens").asInt());
+        } else if (inputJson.hasNonNull("max_tokens_to_sample")) {
+            openAi.put("max_tokens", inputJson.get("max_tokens_to_sample").asInt());
+        } else if (inputJson.hasNonNull("max_gen_len")) {
+            openAi.put("max_tokens", inputJson.get("max_gen_len").asInt());
+        }
+
+        if (inputJson.hasNonNull("temperature")) {
+            openAi.put("temperature", inputJson.get("temperature").asDouble());
+        }
+        if (inputJson.hasNonNull("top_p")) {
+            openAi.put("top_p", inputJson.get("top_p").asDouble());
+        } else if (inputJson.hasNonNull("topP")) {
+            openAi.put("top_p", inputJson.get("topP").asDouble());
+        }
+
+        if (inputJson.hasNonNull("stop_sequences") && inputJson.get("stop_sequences").isArray()) {
+            openAi.set("stop", inputJson.get("stop_sequences").deepCopy());
+        } else if (inputJson.hasNonNull("stop") && inputJson.get("stop").isArray()) {
+            openAi.set("stop", inputJson.get("stop").deepCopy());
+        }
+
+        return openAi;
+    }
+
+    private static String extractImageUrl(JsonNode imageNode) {
+        if (imageNode.has("source")) {
+            JsonNode source = imageNode.path("source");
+            if (source.has("bytes")) {
+                String format = imageNode.path("format").asText("png");
+                String bytes = source.path("bytes").asText();
+                return "data:image/" + format + ";base64," + bytes;
+            }
+            if (source.has("data")) {
+                String mediaType = source.path("media_type").asText("image/png");
+                String data = source.path("data").asText();
+                return "data:" + mediaType + ";base64," + data;
+            }
+        }
+        if (imageNode.has("image_url")) {
+            return imageNode.path("image_url").path("url").asText();
+        }
+        return "";
+    }
+
+    private ObjectNode formatBedrockInvokeResponse(String modelId, JsonNode inputJson, JsonNode openAiResponse) {
+        JsonNode choice = openAiResponse.path("choices").path(0);
+        JsonNode message = choice.path("message");
+        String contentText = BedrockOpenAiTranslator.extractMessageText(message);
+
+        JsonNode usage = openAiResponse.path("usage");
+        int promptTokens = usage.path("prompt_tokens").asInt(10);
+        int completionTokens = usage.path("completion_tokens").asInt(12);
+        int totalTokens = usage.path("total_tokens").asInt(promptTokens + completionTokens);
+
+        String lowerModel = modelId == null ? "" : modelId.toLowerCase();
+        ObjectNode root = objectMapper.createObjectNode();
+
+        if (lowerModel.startsWith("anthropic.") || lowerModel.contains(".anthropic.")
+                || inputJson.hasNonNull("anthropic_version")) {
+            if (inputJson.hasNonNull("max_tokens_to_sample") && !inputJson.hasNonNull("messages")) {
+                root.put("completion", contentText);
+                root.put("stop_reason", "stop_sequence");
+                root.putNull("stop");
+            } else {
+                root.put("id", "msg_" + UUID.randomUUID().toString().replace("-", ""));
+                root.put("type", "message");
+                root.put("role", "assistant");
+                root.put("model", modelId);
+                ArrayNode content = root.putArray("content");
+                ObjectNode textBlock = content.addObject();
+                textBlock.put("type", "text");
+                textBlock.put("text", contentText);
+                root.put("stop_reason", "end_turn");
+                root.putNull("stop_sequence");
+                ObjectNode usageOut = root.putObject("usage");
+                usageOut.put("input_tokens", promptTokens);
+                usageOut.put("output_tokens", completionTokens);
+            }
+            return root;
+        }
+
+        if (lowerModel.startsWith("amazon.titan") || inputJson.hasNonNull("inputText")) {
+            root.put("inputTextTokenCount", promptTokens);
+            ArrayNode results = root.putArray("results");
+            ObjectNode res = results.addObject();
+            res.put("tokenCount", completionTokens);
+            res.put("outputText", contentText);
+            res.put("completionReason", "FINISH");
+            return root;
+        }
+
+        if (lowerModel.startsWith("meta.llama") || inputJson.hasNonNull("max_gen_len")) {
+            root.put("generation", contentText);
+            root.put("prompt_token_count", promptTokens);
+            root.put("generation_token_count", completionTokens);
+            root.put("stop_reason", "stop");
+            return root;
+        }
+
+        if (lowerModel.startsWith("cohere.")) {
+            ArrayNode generations = root.putArray("generations");
+            ObjectNode gen = generations.addObject();
+            gen.put("text", contentText);
+            gen.put("finish_reason", "COMPLETE");
+            return root;
+        }
+
+        // Generic fallback with outputs / outputText / results
+        root.put("outputText", contentText);
+        root.put("generation", contentText);
+        ArrayNode outputs = root.putArray("outputs");
+        outputs.addObject().put("text", contentText);
+        ArrayNode results = root.putArray("results");
+        ObjectNode res = results.addObject();
+        res.put("tokenCount", completionTokens);
+        res.put("outputText", contentText);
+        res.put("completionReason", "FINISH");
+        ObjectNode usageOut = root.putObject("usage");
+        usageOut.put("inputTokens", promptTokens);
+        usageOut.put("outputTokens", completionTokens);
+        usageOut.put("totalTokens", totalTokens);
+
+        return root;
+    }
+
+    private CallResult callOpenAiChatCompletions(String modelId, ObjectNode openAiRequest, EmulatorConfig.BedrockProxyConfig proxyConfig) {
         String baseUrl = proxyConfig.url()
                 .filter(url -> !url.isBlank())
                 .orElseThrow(() -> new AwsException("ValidationException",
                         "floci.services.bedrock-runtime.proxy.url is required when backend=proxy.", 400));
-
-        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel);
 
         URI uri;
         HttpRequest.Builder builder;
@@ -109,14 +339,10 @@ public class ProxyBackend implements BedrockBackend {
             throw new AwsException("ModelErrorException", "Proxy backend returned malformed JSON: " + e.getMessage(), 424);
         }
 
-        return BedrockOpenAiTranslator.toBedrockResponse(objectMapper, openAiResponse, latencyMs);
+        return new CallResult(openAiResponse, latencyMs);
     }
 
-    @Override
-    public byte[] invokeModel(String modelId, byte[] body) {
-        throw new AwsException("ValidationException",
-                "InvokeModel is not supported by the bedrock-runtime proxy backend; use Converse.", 400);
-    }
+    private record CallResult(JsonNode responseJson, long latencyMs) {}
 
     String resolveModel(String bedrockModelId, EmulatorConfig.BedrockProxyConfig proxyConfig) {
         String mapped = modelMapping.get(bedrockModelId);
