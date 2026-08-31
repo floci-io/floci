@@ -41,6 +41,11 @@ public class CopyStatementParser {
             "(?si)^\\s*COPY\\s+([^\\s(]+)(?:\\s*\\(([^)]+)\\))?\\s+FROM\\s*['\"]s3://([^/'\"\\s]+)(?:/([^'\"\\s]*))?['\"]\\s*(.*)$"
     );
 
+    /** A schema-qualified SQL identifier: unquoted {@code foo} / {@code foo.bar}, or {@code "quoted"} parts. */
+    private static final Pattern QUALIFIED_NAME = Pattern.compile(
+            "(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\")(?:\\.(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\"))?");
+    private static final Pattern SIMPLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\"");
+
     private static final Pattern DELIMITER_PATTERN = Pattern.compile(
             "(?i)\\bDELIMITER\\s+(?:AS\\s+)?(?:'([^']*)'|\"([^\"]*)\"|([^\\s;,]+))"
     );
@@ -82,8 +87,15 @@ public class CopyStatementParser {
         return null;
     }
 
-    private static S3Unload parseUnload(Matcher matcher) {
+    private static S3Statement parseUnload(Matcher matcher) {
         String selectQuery = matcher.group(1).trim();
+        // The select is spliced verbatim into `COPY (<select>) TO STDOUT`. Refuse anything that
+        // could break out of the parenthesised subquery: it must be a single SELECT/WITH with
+        // no statement separator. A rejected UNLOAD falls through to PostgreSQL, which errors.
+        if (selectQuery.indexOf(';') >= 0 || selectQuery.indexOf('\0') >= 0
+                || !(startsWithKeyword(selectQuery, "SELECT") || startsWithKeyword(selectQuery, "WITH"))) {
+            return null;
+        }
         String bucket = matcher.group(2);
         String prefix = matcher.group(3) != null ? matcher.group(3) : "";
         String options = matcher.group(4);
@@ -110,12 +122,18 @@ public class CopyStatementParser {
         );
     }
 
-    private static S3CopyFrom parseCopy(Matcher matcher) {
+    private static S3Statement parseCopy(Matcher matcher) {
         String targetTable = matcher.group(1).trim();
         String columnsStr = matcher.group(2);
         String bucket = matcher.group(3);
         String keyOrPrefix = matcher.group(4) != null ? matcher.group(4) : "";
         String options = matcher.group(5);
+
+        // targetTable and column names are spliced into the fabricated `COPY <t> (<cols>) FROM
+        // STDIN`; only accept plain / quoted identifiers so nothing else can be injected there.
+        if (!QUALIFIED_NAME.matcher(targetTable).matches()) {
+            return null;
+        }
 
         List<String> columns = List.of();
         if (columnsStr != null && !columnsStr.isBlank()) {
@@ -123,6 +141,9 @@ public class CopyStatementParser {
                     .map(String::trim)
                     .filter(s -> !s.isEmpty())
                     .toList();
+            if (columns.stream().anyMatch(c -> !SIMPLE_NAME.matcher(c).matches())) {
+                return null;
+            }
         }
 
         boolean csv = CSV_PATTERN.matcher(options).find();
@@ -192,5 +213,18 @@ public class CopyStatementParser {
             }
         }
         return current;
+    }
+
+    /** True if {@code s}, after leading whitespace, begins with {@code keyword} followed by a non-identifier char. */
+    private static boolean startsWithKeyword(String s, String keyword) {
+        String t = s.stripLeading();
+        if (!t.regionMatches(true, 0, keyword, 0, keyword.length())) {
+            return false;
+        }
+        if (t.length() == keyword.length()) {
+            return true;
+        }
+        char next = t.charAt(keyword.length());
+        return !(Character.isLetterOrDigit(next) || next == '_' || next == '$');
     }
 }

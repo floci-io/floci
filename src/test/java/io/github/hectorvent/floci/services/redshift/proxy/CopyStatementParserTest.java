@@ -220,4 +220,45 @@ class CopyStatementParserTest {
     void testNullReturnsNull() {
         assertNull(CopyStatementParser.parse(null));
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "UNLOAD ('SELECT 1); DROP TABLE users --') TO 's3://b/k'",
+        "UNLOAD ('SELECT 1) TO STDOUT; DELETE FROM t --') TO 's3://b/k'",
+        "UNLOAD ('DROP TABLE users') TO 's3://b/k'",
+        "UNLOAD ('  DELETE FROM users') TO 's3://b/k'",
+        "UNLOAD ('SELECT 1; SELECT 2') TO 's3://b/k'"
+    })
+    @DisplayName("UNLOAD whose select could break out of the subquery is not intercepted")
+    void testUnloadInjectionRejected(String sql) {
+        assertNull(CopyStatementParser.parse(sql));
+    }
+
+    @Test
+    @DisplayName("UNLOAD with a leading CTE is still accepted")
+    void testUnloadWithCteAccepted() {
+        S3Statement s = CopyStatementParser.parse(
+                "UNLOAD ('WITH x AS (SELECT 1) SELECT * FROM x') TO 's3://b/k'");
+        assertInstanceOf(S3Unload.class, s);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "COPY t) FROM 's3://b/k'",
+        "COPY t;x FROM 's3://b/k'",
+        "COPY sales (id, name); DROP TABLE x --) FROM 's3://b/k'",
+        "COPY sales (id, 1=1) FROM 's3://b/k'"
+    })
+    @DisplayName("COPY with a non-identifier target or column is not intercepted")
+    void testCopyIdentifierInjectionRejected(String sql) {
+        assertNull(CopyStatementParser.parse(sql));
+    }
+
+    @Test
+    @DisplayName("COPY into a schema-qualified table is still accepted")
+    void testCopySchemaQualifiedAccepted() {
+        S3Statement s = CopyStatementParser.parse("COPY public.sales FROM 's3://b/k'");
+        assertInstanceOf(S3CopyFrom.class, s);
+        assertEquals("public.sales", ((S3CopyFrom) s).targetTable());
+    }
 }
