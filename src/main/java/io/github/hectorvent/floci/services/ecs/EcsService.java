@@ -221,6 +221,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     }
 
     public EcsCluster createCluster(String clusterName, Map<String, String> tags, String region) {
+        return createCluster(clusterName, tags, null, region);
+    }
+
+    /**
+     * Creates a cluster, applying any {@code settings} the request carried.
+     *
+     * <p>Real AWS accepts {@code settings} (containerInsights and friends) on CreateCluster itself,
+     * not only through UpdateClusterSettings. Dropping them here meant a client that configured the
+     * cluster at creation, such as terraform-provider-aws's {@code setting} block, saw
+     * DescribeClusters come back without them and proposed the same change on every subsequent
+     * plan, forever (issue #2806).
+     */
+    public EcsCluster createCluster(String clusterName, Map<String, String> tags,
+                                    List<ClusterSetting> settings, String region) {
         String name = (clusterName == null || clusterName.isBlank()) ? DEFAULT_CLUSTER : clusterName;
         String key = clusterKey(region, name);
         if (clusters.containsKey(key)) {
@@ -232,6 +246,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         cluster.setStatus("ACTIVE");
         if (tags != null && !tags.isEmpty()) {
             cluster.setTags(new LinkedHashMap<>(tags));
+        }
+        if (settings != null && !settings.isEmpty()) {
+            cluster.setSettings(new ArrayList<>(settings));
         }
         clusters.put(key, cluster);
         LOG.infov("Created ECS cluster: {0} in {1}", name, region);
