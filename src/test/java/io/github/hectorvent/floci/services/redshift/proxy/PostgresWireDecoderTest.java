@@ -34,13 +34,13 @@ class PostgresWireDecoderTest {
         assertEquals("SELECT 1", msg.getSql());
         assertArrayEquals(packet, msg.toPacketBytes());
 
-        // EOF sau thong diep dau tien
+        // EOF after the first message
         assertNull(decoder.nextMessage());
     }
 
     @Test
     void testDecodeNonQMessages() throws IOException {
-        // Thong diep 'X' (Terminate) voi length = 4 (body rong)
+        // 'X' (Terminate) message with length = 4 (empty body)
         byte[] terminatePacket = new byte[]{'X', 0, 0, 0, 4};
         ByteArrayInputStream in = new ByteArrayInputStream(terminatePacket);
         PostgresWireDecoder decoder = new PostgresWireDecoder(in);
@@ -54,7 +54,7 @@ class PostgresWireDecoderTest {
         assertArrayEquals(terminatePacket, msg.toPacketBytes());
         assertNull(decoder.nextMessage());
 
-        // Thong diep 'P' (Parse) voi payload
+        // 'P' (Parse) message with a payload
         byte[] parsePayload = "stmt1\0SELECT * FROM test WHERE id = $1\0\0\0".getBytes(StandardCharsets.UTF_8);
         int length = 4 + parsePayload.length;
         byte[] parsePacket = new byte[1 + length];
@@ -106,7 +106,7 @@ class PostgresWireDecoderTest {
     void testChunkedStream() throws IOException {
         byte[] packet = PostgresWireDecoder.encodeQuery("SELECT * FROM users WHERE active = true");
 
-        // InputStream gia lap doc tung byte mot de kiem tra xu ly chunked read
+        // Fake InputStream that yields only a couple of bytes per call, to exercise chunked reads
         InputStream chunkedIn = new InputStream() {
             private int index = 0;
 
@@ -123,7 +123,7 @@ class PostgresWireDecoderTest {
                 if (index >= packet.length) {
                     return -1;
                 }
-                // Chi tra ve toi da 2 bytes moi lan goi
+                // Return at most 2 bytes per call
                 int toRead = Math.min(Math.min(len, 2), packet.length - index);
                 System.arraycopy(packet, index, b, off, toRead);
                 index += toRead;
@@ -164,7 +164,7 @@ class PostgresWireDecoderTest {
 
     @Test
     void testInvalidLength() {
-        // Length nho hon 4 la khong hop le theo PostgreSQL wire protocol
+        // A length below 4 is invalid per the PostgreSQL wire protocol
         byte[] invalid = new byte[]{'Q', 0, 0, 0, 2};
         PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(invalid));
         assertThrows(IOException.class, decoder::nextMessage);

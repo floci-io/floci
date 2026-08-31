@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 /**
- * Bo giai ma giao thuc PostgreSQL wire protocol cho cac thong diep tu frontend (client).
+ * Decoder for PostgreSQL wire-protocol messages sent by the frontend (client).
  */
 public class PostgresWireDecoder {
 
@@ -18,16 +18,16 @@ public class PostgresWireDecoder {
     }
 
     /**
-     * Doc thong diep tiep theo tu stream.
+     * Read the next message from the stream.
      *
-     * @return {@link FrontendMessage} hoac {@code null} neu stream dong sach (EOF).
-     * @throws EOFException neu gap EOF bat thuong o giua thong diep.
-     * @throws IOException neu co loi I/O hoac do dai goi tin khong hop le.
+     * @return the {@link FrontendMessage}, or {@code null} on a clean end-of-stream (EOF).
+     * @throws EOFException if EOF is hit unexpectedly in the middle of a message.
+     * @throws IOException on an I/O error or an invalid packet length.
      */
     public FrontendMessage nextMessage() throws IOException {
         int typeByte = in.read();
         if (typeByte == -1) {
-            return null; // EOF sach giua cac thong diep
+            return null; // clean EOF between messages
         }
         char type = (char) typeByte;
 
@@ -56,7 +56,7 @@ public class PostgresWireDecoder {
     }
 
     /**
-     * Dong goi cau lenh SQL thanh goi tin wire protocol dang Simple Query ('Q').
+     * Encode an SQL string as a Simple Query ('Q') wire-protocol packet.
      */
     public static byte[] encodeQuery(String sql) {
         if (sql == null) {
@@ -78,7 +78,7 @@ public class PostgresWireDecoder {
     }
 
     /**
-     * Bieu dien mot thong diep PostgreSQL wire tu client.
+     * A single PostgreSQL wire message from the client.
      */
     public record FrontendMessage(char type, byte[] body) {
 
@@ -92,7 +92,7 @@ public class PostgresWireDecoder {
             }
             int len = body.length;
             if (body[len - 1] == 0) {
-                len--; // Bo qua byte null o cuoi
+                len--; // drop the trailing null terminator
             }
             return new String(body, 0, len, StandardCharsets.UTF_8);
         }
