@@ -265,7 +265,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::RDS::DBProxy",
             "AWS::RDS::DBProxyTargetGroup",
             "AWS::RDS::DBSubnetGroup",
-            "AWS::Route53::HostedZone",
             "AWS::Route53::RecordSet",
             "AWS::SNS::Subscription",
             "AWS::SNS::Topic",

@@ -96,7 +96,7 @@ AWS::RDS::DBParameterGroup	LEGACY_SWITCH
 AWS::RDS::DBProxy	LEGACY_SWITCH
 AWS::RDS::DBProxyTargetGroup	LEGACY_SWITCH
 AWS::RDS::DBSubnetGroup	LEGACY_SWITCH
-AWS::Route53::HostedZone	LEGACY_SWITCH
+AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	LEGACY_SWITCH
 AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
