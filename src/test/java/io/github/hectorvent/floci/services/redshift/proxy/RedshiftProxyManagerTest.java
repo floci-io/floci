@@ -13,10 +13,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class RedshiftProxyManagerTest {
 
@@ -119,6 +124,68 @@ class RedshiftProxyManagerTest {
         }
     }
 
+    @Test
+    void stopProxyRetainsTheProxyWhenItsListenerCloseFails() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        RedshiftAuthProxy badProxy = mock(RedshiftAuthProxy.class);
+        doThrow(new RuntimeException("close failed")).when(badProxy).stop();
+        registry(manager).put("k", badProxy);
+
+        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+
+        // Proxy stays registered so a later cleanup attempt can still reach it and retry.
+        assertSame(badProxy, registry(manager).get("k"));
+    }
+
+    @Test
+    void stopProxyRetryClosesTheSameProxyAndThenDeregistersIt() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        RedshiftAuthProxy proxy = mock(RedshiftAuthProxy.class);
+        doThrow(new RuntimeException("close failed")).doNothing().when(proxy).stop();
+        registry(manager).put("k", proxy);
+
+        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertDoesNotThrow(() -> manager.stopProxy("k"));
+
+        assertFalse(registry(manager).containsKey("k"));
+        verify(proxy, times(2)).stop();
+    }
+
+    @Test
+    void stopProxyRefusesWhenStartupCleanupWasKnownToLeakTheListener() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        failedCleanups(manager).add("k");
+
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertTrue(ex.getMessage().contains("cleanup previously failed"));
+    }
+
+    @Test
+    void stopProxyKeepsRefusingOnEveryRetryAfterALeakedStartup() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        failedCleanups(manager).add("k");
+
+        // Marker is retained, not consumed: each retry keeps leaking the port rather
+        // than pretending the listener was cleaned up.
+        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertTrue(failedCleanups(manager).contains("k"));
+    }
+
+    @Test
+    void startProxyClearsAStaleLeakMarkerForTheSameKey() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        failedCleanups(manager).add("k");
+        int port = availablePort();
+        try {
+            start(manager, "k", port);
+            // A fresh, clean start must not inherit the previous run's leak marker.
+            assertDoesNotThrow(() -> manager.stopProxy("k"));
+        } finally {
+            manager.stopAll();
+        }
+    }
+
     // --- reflection + port helpers copied from RdsProxyManagerTest ---
 
     @SuppressWarnings("unchecked")
@@ -127,6 +194,13 @@ class RedshiftProxyManagerTest {
         Field field = RedshiftProxyManager.class.getDeclaredField("proxies");
         field.setAccessible(true);
         return (ConcurrentHashMap<String, RedshiftAuthProxy>) field.get(manager);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.Set<String> failedCleanups(RedshiftProxyManager manager) throws Exception {
+        Field field = RedshiftProxyManager.class.getDeclaredField("failedCleanups");
+        field.setAccessible(true);
+        return (java.util.Set<String>) field.get(manager);
     }
 
     private static String masterPassword(RedshiftAuthProxy proxy) throws Exception {

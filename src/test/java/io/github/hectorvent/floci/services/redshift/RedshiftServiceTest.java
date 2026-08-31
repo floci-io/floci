@@ -266,6 +266,41 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void deleteClusterAbortsAndKeepsMetadataWhenTheProxyWontStop() {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier("test-c");
+        c.setProxyPort(7107);
+        when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
+        doThrow(new RuntimeException("listener close failed"))
+                .when(proxyManager).stopProxy("111111111111:test-c");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteCluster("test-c"));
+        assertEquals("InternalFailure", ex.getErrorCode());
+
+        // Container and metadata are left intact so the deletion can be retried.
+        verify(cm, never()).stop(anyString(), anyString());
+        verify(clusterBackend, never()).delete(anyString());
+    }
+
+    @Test
+    void deleteClusterRetrySucceedsOnceTheProxyStops() {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier("test-c");
+        c.setProxyPort(7107);
+        when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
+        doThrow(new RuntimeException("listener close failed"))
+                .doNothing()
+                .when(proxyManager).stopProxy("111111111111:test-c");
+
+        assertThrows(AwsException.class, () -> service.deleteCluster("test-c"));
+        Cluster deleted = service.deleteCluster("test-c");
+
+        assertEquals("deleting", deleted.getClusterStatus());
+        verify(cm).stop("111111111111", "test-c");
+        verify(clusterBackend).delete("test-c");
+    }
+
+    @Test
     void testRebootClusterDumpsAndRestoresData() throws Exception {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
