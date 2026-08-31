@@ -304,6 +304,7 @@ public interface EmulatorConfig {
 
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
+        BedrockStorageConfig bedrock();
     }
 
     interface ApsStorageConfig {
@@ -592,6 +593,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface BedrockStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -653,6 +661,7 @@ public interface EmulatorConfig {
         AppConfigDataServiceConfig appconfigdata();
         EcrServiceConfig ecr();
         ResourceGroupsTaggingServiceConfig tagging();
+        BedrockServiceConfig bedrock();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
         MwaaServiceConfig mwaa();
@@ -1531,6 +1540,11 @@ public interface EmulatorConfig {
     }
 
     interface ResourceGroupsTaggingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BedrockServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

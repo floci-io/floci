@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.backup.BackupController;
 import io.github.hectorvent.floci.services.resourceexplorer2.ResourceExplorer2Controller;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataController;
 import io.github.hectorvent.floci.services.batch.BatchController;
+import io.github.hectorvent.floci.services.bedrock.BedrockController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
@@ -293,6 +294,14 @@ public class ResolvedServiceCatalog {
                         config.storage().services().tagging().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("ResourceGroupsTaggingAPI_20170126."), Set.of("tagging"), Set.of(), Set.of()),
+                descriptor("bedrock", "bedrock", config.services().bedrock().enabled(), true,
+                        "bedrock", storageMode(config.storage().services().bedrock().mode(), config.storage().mode()),
+                        config.storage().services().bedrock().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(),
+                        Set.of("bedrock"),
+                        Set.of(),
+                        Set.of(BedrockController.class)),
                 descriptor("bedrock-runtime", "bedrock-runtime",
                         config.services().bedrockRuntime().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.REST_JSON,
