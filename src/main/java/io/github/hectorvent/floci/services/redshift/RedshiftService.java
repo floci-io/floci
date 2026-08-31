@@ -254,6 +254,7 @@ public class RedshiftService {
         // Hoisted so a failure after the proxy is (re)started still tears it down and
         // returns the port, matching createCluster/restoreFromClusterSnapshot rollback.
         int proxyPort = -1;
+        boolean rebooted = false;
         try {
             String accountId = clusters.accountId();
             String key = relayKey(accountId, clusterIdentifier);
@@ -280,21 +281,29 @@ public class RedshiftService {
 
             containerManager.restoreSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
             cluster.setClusterStatus("available");
+            rebooted = true;
         } catch (AwsException e) {
-            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
+            rollbackReboot(clusterIdentifier, proxyPort);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw e;
         } catch (Exception e) {
-            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
+            rollbackReboot(clusterIdentifier, proxyPort);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
         } finally {
-            try {
-                Files.deleteIfExists(tempDump);
-            } catch (IOException ex) {
-                LOG.warnv(ex, "Failed to clean up temporary dump file {0} after rebooting cluster {1}", tempDump, clusterIdentifier);
+            if (rebooted) {
+                try {
+                    Files.deleteIfExists(tempDump);
+                } catch (IOException ex) {
+                    LOG.warnv(ex, "Failed to clean up temporary dump file {0} after rebooting cluster {1}", tempDump, clusterIdentifier);
+                }
+            } else {
+                // The original container is already gone and holds no volume, so this dump is
+                // the only surviving copy of the cluster's data — keep it for manual recovery.
+                LOG.warnv("Reboot of cluster {0} did not complete; retained pre-reboot data dump at {1}",
+                        clusterIdentifier, tempDump);
             }
         }
 
@@ -829,6 +838,21 @@ public class RedshiftService {
             releaseProxyPort(proxyPort);
         }
         return proxyStopped;
+    }
+
+    /**
+     * Undo a failed reboot: tear down the auth proxy and return its port, then stop the
+     * replacement container so it is not left running behind a "failed" cluster (mirrors
+     * createCluster/restoreFromClusterSnapshot rollback). The pre-reboot data dump is
+     * kept by the caller.
+     */
+    private void rollbackReboot(String identifier, int proxyPort) {
+        stopProxyAndReleasePortSafely(identifier, proxyPort);
+        try {
+            containerManager.stop(clusters.accountId(), identifier);
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to stop replacement container during rollback of reboot for cluster {0}", identifier);
+        }
     }
 
     private void releaseProxyPort(int port) {

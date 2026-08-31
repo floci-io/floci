@@ -377,11 +377,13 @@ class RedshiftServiceTest {
 
         assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
 
-        // The proxy started during the reboot must be stopped again on failure: once
-        // before the container restart, once during rollback.
+        // The proxy started during the reboot must be stopped again on failure, and the
+        // replacement container must be stopped too — once before the restart, once in
+        // rollback — so it is not left running behind a "failed" cluster.
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
                 any(), any(), any(), any(), any());
         verify(proxyManager, times(2)).stopProxy("111111111111:c1");
+        verify(cm, times(2)).stop("111111111111", "c1");
     }
 
     @Test
