@@ -124,9 +124,6 @@ public class ImageCacheService {
             return true;
         } catch (com.github.dockerjava.api.exception.NotFoundException e) {
             return false;
-        } catch (Exception e) {
-            LOG.debugv("Could not check local image presence for {0}: {1}", imageUri, e.getMessage());
-            return false;
         }
     }
 

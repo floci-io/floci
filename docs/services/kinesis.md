@@ -35,7 +35,20 @@
 | `EnableEnhancedMonitoring` | - |
 | `DisableEnhancedMonitoring` | - |
 | `UpdateStreamMode` | - |
+| `UpdateMaxRecordSize` | - |
 <!-- floci:actions:end -->
+
+## Local Inspection Endpoints
+
+These endpoints are Floci-local read-only helpers for the UI and tests. AWS SDK
+traffic should continue to use the JSON 1.1 Kinesis API on `/`.
+
+| Endpoint | Description |
+|---|---|
+| `GET /_aws/kinesis/streams` | List streams in the resolved region with shard, mode, tag, and record counts |
+| `GET /_aws/kinesis/records?StreamName=<name>` | Peek up to 100 stream records with shard attribution without consuming them |
+| `GET /_aws/kinesis/records?StreamName=<name>&Limit=<n>` | Peek up to `n` records, capped at 1000 |
+| `GET /_aws/kinesis/records?StreamName=<name>&ShardId=<id>` | Peek records for one shard |
 
 ## Stream Addressing
 
@@ -49,13 +62,17 @@ aws kinesis describe-stream --stream-name events --endpoint-url $AWS_ENDPOINT_UR
 aws kinesis describe-stream --stream-arn arn:aws:kinesis:us-east-1:000000000000:stream/events --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+## Shard Iterators
+
+`GetShardIterator` supports all five iterator types: `TRIM_HORIZON`, `LATEST`, `AT_SEQUENCE_NUMBER`, `AFTER_SEQUENCE_NUMBER`, `AT_TIMESTAMP`.
+
+A `LATEST` iterator is positioned at the shard tip at the moment the iterator is created, matching AWS: records written after the iterator was obtained are returned, records written before are not. This supports the standard tailing pattern — obtain a `LATEST` iterator, trigger the action that produces the record, then poll `GetRecords` following `NextShardIterator`.
+
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_KINESIS_ENABLED` | `true` | Enable or disable the service |
-
-## Examples
 
 ## Enhanced Fan-Out (EFO)
 

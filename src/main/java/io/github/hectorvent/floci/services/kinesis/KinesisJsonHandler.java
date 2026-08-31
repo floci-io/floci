@@ -15,6 +15,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -64,6 +67,7 @@ public class KinesisJsonHandler {
             case "EnableEnhancedMonitoring" -> handleEnableEnhancedMonitoring(request, region);
             case "DisableEnhancedMonitoring" -> handleDisableEnhancedMonitoring(request, region);
             case "UpdateStreamMode" -> handleUpdateStreamMode(request, region);
+            case "UpdateMaxRecordSize" -> handleUpdateMaxRecordSize(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -110,7 +114,16 @@ public class KinesisJsonHandler {
                 streamMode = mode;
             }
         }
-        service.createStream(streamName, shardCount, streamMode, region);
+        service.createStream(streamName, shardCount, streamMode,
+                optionalMaxRecordSize(request), region);
+        // CreateStream's optional Tags member was being dropped. That is invisible to a
+        // hand-written script but not to Terraform: aws_kinesis_stream sets tags at create
+        // time and then reads them back with ListTagsForStream, so an empty read produces a
+        // permanent "tags will be updated in-place" diff on an unchanged configuration.
+        Map<String, String> tags = parseTags(request);
+        if (!tags.isEmpty()) {
+            service.addTagsToStream(streamName, tags, region);
+        }
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -130,6 +143,36 @@ public class KinesisJsonHandler {
         }
         String streamName = extractStreamNameFromArn(streamArn);
         service.updateStreamMode(streamName, streamMode, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * MaxRecordSizeInKiB is modelled as an integer, so a float or a value outside int range is a
+     * type error rather than something to truncate into the range check.
+     */
+    private Integer optionalMaxRecordSize(JsonNode request) {
+        JsonNode size = request.path("MaxRecordSizeInKiB");
+        if (size.isMissingNode() || size.isNull()) {
+            return null;
+        }
+        if (!size.isIntegralNumber() || !size.canConvertToInt()) {
+            throw new AwsException("InvalidArgumentException",
+                    "MaxRecordSizeInKiB must be an integer", 400);
+        }
+        return size.intValue();
+    }
+
+    private Response handleUpdateMaxRecordSize(JsonNode request, String region) {
+        // UpdateMaxRecordSize identifies the stream by StreamARN only per the AWS API; StreamName is not valid.
+        String streamArn = request.path("StreamARN").asText(null);
+        if (streamArn == null || streamArn.isBlank()) {
+            throw new AwsException("InvalidArgumentException", "StreamARN is required", 400);
+        }
+        Integer size = optionalMaxRecordSize(request);
+        if (size == null) {
+            throw new AwsException("InvalidArgumentException", "MaxRecordSizeInKiB is required", 400);
+        }
+        service.updateMaxRecordSize(extractStreamNameFromArn(streamArn), size, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -168,7 +211,7 @@ public class KinesisJsonHandler {
         desc.put("StreamStatus", stream.getStreamStatus());
         desc.put("HasMoreShards", false);
         desc.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
-        desc.put("StreamCreationTimestamp", stream.getStreamCreationTimestamp().toEpochMilli() / 1000.0);
+        desc.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
         desc.put("EncryptionType", stream.getEncryptionType());
         if (stream.getKeyId() != null) {
             desc.put("KeyId", stream.getKeyId());
@@ -209,9 +252,10 @@ public class KinesisJsonHandler {
         summary.put("StreamARN", stream.getStreamArn());
         summary.put("StreamStatus", stream.getStreamStatus());
         summary.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
-        summary.put("StreamCreationTimestamp", stream.getStreamCreationTimestamp().toEpochMilli() / 1000.0);
+        summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
         summary.put("OpenShardCount", (int) stream.getShards().stream().filter(s -> !s.isClosed()).count());
         summary.put("EncryptionType", stream.getEncryptionType());
+        summary.put("MaxRecordSizeInKiB", stream.getMaxRecordSizeInKiB());
         if (stream.getKeyId() != null) {
             summary.put("KeyId", stream.getKeyId());
         }
@@ -229,6 +273,10 @@ public class KinesisJsonHandler {
 
     private void addStreamModeDetailsNode(ObjectNode parent, KinesisStream stream) {
         parent.putObject("StreamModeDetails").put("StreamMode", stream.getStreamMode());
+    }
+
+    private BigDecimal epochSeconds(Instant timestamp) {
+        return BigDecimal.valueOf(timestamp.toEpochMilli(), 3);
     }
 
     private Response handleRegisterStreamConsumer(JsonNode request, String region) {
@@ -348,9 +396,7 @@ public class KinesisJsonHandler {
 
     private Response handleAddTagsToStream(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        Map<String, String> tags = new HashMap<>();
-        request.path("Tags").fields().forEachRemaining(entry -> tags.put(entry.getKey(), entry.getValue().asText()));
-        service.addTagsToStream(streamName, tags, region);
+        service.addTagsToStream(streamName, parseTags(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -374,6 +420,17 @@ public class KinesisJsonHandler {
         });
         response.put("HasMoreTags", false);
         return Response.ok(response).build();
+    }
+
+    // Shared by CreateStream and AddTagsToStream so the two paths cannot drift: the same
+    // request shape has to produce the same stored tags whichever operation carries it.
+    // A missing or non-object Tags member yields an empty map rather than an error, which
+    // is what AddTagsToStream already did before CreateStream started calling this.
+    private Map<String, String> parseTags(JsonNode request) {
+        Map<String, String> tags = new HashMap<>();
+        request.path("Tags").fields()
+                .forEachRemaining(entry -> tags.put(entry.getKey(), entry.getValue().asText()));
+        return tags;
     }
 
     private Response handleStartStreamEncryption(JsonNode request, String region) {
@@ -408,7 +465,18 @@ public class KinesisJsonHandler {
 
     private Response handlePutRecord(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        byte[] data = Base64.getDecoder().decode(request.path("Data").asText());
+        JsonNode dataNode = request.path("Data");
+        // The CBOR transports (the AWS SDK for Java's default for Kinesis) decode Data
+        // as a binary node rather than base64 text, so both blob shapes are accepted.
+        if (!dataNode.isTextual() && !dataNode.isBinary()) {
+            throw new AwsException("SerializationException", "Data must be a base64-encoded string.", 400);
+        }
+        byte[] data;
+        try {
+            data = Base64.getDecoder().decode(dataNode.asText());
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("SerializationException", "Data is not valid base64.", 400);
+        }
         String partitionKey = request.path("PartitionKey").asText();
 
         KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);
@@ -421,15 +489,61 @@ public class KinesisJsonHandler {
 
     private Response handlePutRecords(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
+        KinesisStream stream = service.describeStream(streamName, region);
         JsonNode recordsNode = request.path("Records");
+        service.validateRecordCount(recordsNode.size());
+
+        // An oversized record fails the whole request before anything is
+        // written — per-record ErrorCode is reserved for throughput/internal
+        // failures. Successful decodes are kept for the write loop; a Data
+        // that is not a decodable blob is left null and fails per-record
+        // there, with its partition key still counted by the record-size
+        // check. The count cap is checked upfront and the byte cap as the
+        // loop goes, so neither an over-long batch nor an oversized one is
+        // fully decoded before it is rejected.
+        record Entry(JsonNode node, byte[] data) {}
+        List<Entry> entries = new ArrayList<>();
+        long totalBytes = 0;
+        for (JsonNode node : recordsNode) {
+            JsonNode dataNode = node.path("Data");
+            byte[] data = null;
+            if (dataNode.isTextual() || dataNode.isBinary()) {
+                try {
+                    data = Base64.getDecoder().decode(dataNode.asText());
+                } catch (IllegalArgumentException e) {
+                    data = null;
+                }
+            }
+            String partitionKey = node.path("PartitionKey").asText();
+            service.validateRecordSize(stream, data, partitionKey);
+            // Data that did not decode still travelled in the request, so it counts toward the
+            // request cap at the bytes the caller sent rather than as nothing — otherwise a batch
+            // of undecodable records could carry any payload past the limit. A Data that is
+            // neither text nor binary is measured the same way, since it is not a blob AWS
+            // would have accepted either.
+            totalBytes += KinesisService.recordSize(
+                    data != null ? data.length
+                            : dataNode.toString().getBytes(StandardCharsets.UTF_8).length,
+                    partitionKey);
+            service.validateRequestSize(totalBytes);
+            entries.add(new Entry(node, data));
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode results = response.putArray("Records");
         int failed = 0;
 
-        for (JsonNode node : recordsNode) {
+        for (Entry entry : entries) {
             try {
-                byte[] data = Base64.getDecoder().decode(node.path("Data").asText());
-                String partitionKey = node.path("PartitionKey").asText();
+                byte[] data = entry.data();
+                if (data == null) {
+                    JsonNode dataNode = entry.node().path("Data");
+                    if (!dataNode.isTextual() && !dataNode.isBinary()) {
+                        throw new IllegalArgumentException("Data must be a base64-encoded string.");
+                    }
+                    data = Base64.getDecoder().decode(dataNode.asText());
+                }
+                String partitionKey = entry.node().path("PartitionKey").asText();
                 KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);
                 results.addObject()
                         .put("SequenceNumber", result.sequenceNumber())

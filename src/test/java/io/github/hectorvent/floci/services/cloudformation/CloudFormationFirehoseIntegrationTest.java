@@ -1,13 +1,13 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
-import io.restassured.config.EncoderConfig;
-import io.restassured.http.ContentType;
+import static org.hamcrest.Matchers.containsString;
 import org.junit.jupiter.api.Test;
 
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
+import io.restassured.config.EncoderConfig;
+import io.restassured.http.ContentType;
 
 /**
  * End-to-end check that CloudFormation provisions an AWS::KinesisFirehose::DeliveryStream for real
@@ -39,7 +39,8 @@ class CloudFormationFirehoseIntegrationTest {
                         "S3DestinationConfiguration": {
                           "BucketARN": "arn:aws:s3:::my-firehose-bucket",
                           "RoleARN": "arn:aws:iam::000000000000:role/firehose-role",
-                          "Prefix": "logs/"
+                          "Prefix": "logs/",
+                          "CompressionFormat": "GZIP"
                         }
                       }
                     }
@@ -86,6 +87,7 @@ class CloudFormationFirehoseIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString(streamName));
+            .body(containsString(streamName))
+            .body(containsString("GZIP"));
     }
 }

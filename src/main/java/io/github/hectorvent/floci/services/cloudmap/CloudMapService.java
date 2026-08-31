@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.cloudmap.model.Namespace;
 import io.github.hectorvent.floci.services.cloudmap.model.Operation;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -69,6 +70,13 @@ public class CloudMapService {
                     return t;
                 })
                 : null;
+    }
+
+    @PreDestroy
+    void stop() {
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+        }
     }
 
     // ──────────────────────────── Namespaces ────────────────────────────

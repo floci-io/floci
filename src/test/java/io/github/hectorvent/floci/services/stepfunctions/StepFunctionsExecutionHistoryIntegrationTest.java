@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -7,19 +8,26 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 @QuarkusTest
 class StepFunctionsExecutionHistoryIntegrationTest {
 
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
+    private static final String SQS_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/test-role";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -84,7 +92,7 @@ class StepFunctionsExecutionHistoryIntegrationTest {
     }
 
     @Test
-    void getExecutionHistory_omitsExecutionSucceededEventDetailsWhenIncludeExecutionDataIsFalse() throws Exception {
+    void getExecutionHistory_omitsExecutionDataWhenIncludeExecutionDataIsFalse() throws Exception {
         String definition = """
                 {
                   "StartAt": "Set Output",
@@ -117,10 +125,125 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(200)
-                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails", nullValue())
-                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails", nullValue())
-                .body("events.find { it.type == 'ExecutionSucceeded' }.type", equalTo("ExecutionSucceeded"))
-                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails", nullValue());
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.name",
+                        equalTo("Set Output"))
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.input", nullValue())
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.inputDetails",
+                        nullValue())
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.name",
+                        equalTo("Set Output"))
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.output", nullValue())
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.outputDetails",
+                        nullValue())
+                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails",
+                        notNullValue())
+                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails.output",
+                        nullValue());
+    }
+
+    @Test
+    void getExecutionHistory_emitsTaskScheduledStartedSucceededWithChainedPreviousEventId() throws Exception {
+        var queueUrl = createQueue("execution-history-sqs-queue");
+        try {
+            var definition = """
+                    {
+                      "StartAt": "Send",
+                      "States": {
+                        "Send": {
+                          "Type": "Task",
+                          "Resource": "arn:aws:states:::sqs:sendMessage",
+                          "Parameters": {
+                            "QueueUrl": "%s",
+                            "MessageBody": "hello"
+                          },
+                          "End": true
+                        }
+                      }
+                    }
+                    """.formatted(queueUrl);
+
+            var stateMachineArn = createStateMachine("execution-history-task-events-test", definition);
+            var executionArn = startExecution(stateMachineArn);
+            waitForExecution(executionArn);
+
+            var response = given()
+                    .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                    .contentType(SFN_CONTENT_TYPE)
+                    .body(String.format("""
+                            {
+                                "executionArn": "%s",
+                                "includeExecutionData": true
+                            }
+                            """, executionArn))
+                    .when()
+                    .post("/");
+            response.then().statusCode(200);
+
+            var events = MAPPER.readTree(response.body().asString()).path("events");
+            var types = new ArrayList<String>();
+            events.forEach(event -> types.add(event.path("type").asText()));
+            assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "TaskScheduled", "TaskStarted",
+                    "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
+
+            var expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L);
+            for (var i = 0; i < events.size(); i++) {
+                var event = events.get(i);
+                assertEquals(i + 1L, event.path("id").asLong());
+                assertEquals(expectedPreviousEventIds.get(i), event.path("previousEventId").asLong());
+            }
+
+            var scheduled = events.get(2).path("taskScheduledEventDetails");
+            assertFalse(scheduled.has("inputDetails"));
+            assertEquals("sqs", scheduled.path("resourceType").asText());
+            assertEquals("sendMessage", scheduled.path("resource").asText());
+            assertEquals(stateMachineArn.split(":")[3], scheduled.path("region").asText());
+            var parameters = MAPPER.readTree(scheduled.path("parameters").asText());
+            assertEquals(queueUrl, parameters.path("QueueUrl").asText());
+            assertEquals("hello", parameters.path("MessageBody").asText());
+
+            var started = events.get(3).path("taskStartedEventDetails");
+            assertEquals("sqs", started.path("resourceType").asText());
+            assertEquals("sendMessage", started.path("resource").asText());
+
+            var succeeded = events.get(4).path("taskSucceededEventDetails");
+            var succeededOutputDetails = succeeded.path("outputDetails");
+            assertTrue(succeededOutputDetails.isObject());
+            assertFalse(succeededOutputDetails.path("truncated").asBoolean(true));
+            assertTrue(succeeded.path("output").asText().contains("MessageId"));
+
+            var entered = events.get(1).path("stateEnteredEventDetails");
+            var enteredInputDetails = entered.path("inputDetails");
+            assertTrue(enteredInputDetails.isObject());
+            assertFalse(enteredInputDetails.path("truncated").asBoolean(true));
+        } finally {
+            deleteQueue(queueUrl);
+        }
+    }
+
+    private static String createQueue(String queueName) {
+        var response = given()
+                .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+                .contentType(SQS_CONTENT_TYPE)
+                .body("""
+                        {"QueueName":"%s"}
+                        """.formatted(queueName))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response.jsonPath().getString("QueueUrl");
+    }
+
+    private static void deleteQueue(String queueUrl) {
+        given()
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .contentType(SQS_CONTENT_TYPE)
+                .body("""
+                        {"QueueUrl":"%s"}
+                        """.formatted(queueUrl))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
     }
 
     private String createStateMachine(String name, String definition) {

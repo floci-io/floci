@@ -19,9 +19,16 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
-public class ElbV2Service {
+public class ElbV2Service implements ResourceProvider {
 
     @Inject
     ElbV2DataPlane dataPlane;
@@ -101,6 +108,13 @@ public class ElbV2Service {
         }
     }
 
+    /**
+     * Rebuilds the in-memory indexes from the storage-backed maps. Pure and in-process on purpose:
+     * nothing reachable from {@link #initializeStorage()} may call an injected collaborator, because
+     * {@link ElbV2DataPlane} calls back into this service and CDI has not registered the instance in
+     * the ApplicationScoped context yet — re-entering bean creation instead (issue #1913). Runtime
+     * side effects belong in {@link #restorePersistedRuntime()}.
+     */
     private void rebuildIndexes()
     {
         lbToListeners.clear();
@@ -123,7 +137,20 @@ public class ElbV2Service {
             for (TargetGroup targetGroup : regionEntry.getValue().values()) {
                 tgToLbs.computeIfAbsent(targetGroup.getTargetGroupArn(), k -> ConcurrentHashMap.newKeySet())
                         .addAll(targetGroup.getLoadBalancerArns());
-                if (healthChecker != null) {
+            }
+        }
+    }
+
+    /**
+     * Brings the data plane and health checks back up for state restored from disk. Invoked from
+     * {@code EmulatorLifecycle} once the bean is fully constructed, alongside the other services that
+     * restore persisted runtime after {@code storageFactory.loadAll()}.
+     */
+    public void restorePersistedRuntime()
+    {
+        if (healthChecker != null) {
+            for (Map<String, TargetGroup> regionTargetGroups : targetGroups.values()) {
+                for (TargetGroup targetGroup : regionTargetGroups.values()) {
                     healthChecker.startMonitoring(targetGroup);
                     if (!targetGroup.getTargets().isEmpty()) {
                         healthChecker.addTargets(targetGroup.getTargetGroupArn(), targetGroup.getTargets(), targetGroup);
@@ -131,10 +158,10 @@ public class ElbV2Service {
                 }
             }
         }
-        for (Map.Entry<String, Map<String, Listener>> regionEntry : listeners.entrySet()) {
-            String region = regionEntry.getKey();
-            for (Listener listener : regionEntry.getValue().values()) {
-                if (dataPlane != null) {
+        if (dataPlane != null) {
+            for (Map.Entry<String, Map<String, Listener>> regionEntry : listeners.entrySet()) {
+                String region = regionEntry.getKey();
+                for (Listener listener : regionEntry.getValue().values()) {
                     dataPlane.startListener(listener, region, getListenerRules(region, listener.getListenerArn()));
                 }
             }
@@ -1124,5 +1151,44 @@ public class ElbV2Service {
                 out.add(t.getTargetGroupArn());
             }
         }
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Map<String, LoadBalancer> regionLoadBalancers : loadBalancers.values()) {
+            for (LoadBalancer loadBalancer : regionLoadBalancers.values()) {
+                addExplorerResource(resources, loadBalancer.getLoadBalancerArn(),
+                        "elasticloadbalancing:loadbalancer", loadBalancer.getCreatedTime());
+            }
+        }
+        for (Map<String, TargetGroup> regionTargetGroups : targetGroups.values()) {
+            for (TargetGroup targetGroup : regionTargetGroups.values()) {
+                addExplorerResource(resources, targetGroup.getTargetGroupArn(),
+                        "elasticloadbalancing:targetgroup", null);
+            }
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("elasticloadbalancing:loadbalancer", "elasticloadbalancing", true),
+                new SupportedResourceType("elasticloadbalancing:targetgroup", "elasticloadbalancing", true));
+    }
+
+    private void addExplorerResource(List<ExplorerResource> out, String arn, String resourceType,
+                                     Instant createdAt) {
+        if (arn == null) {
+            return;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        out.add(new ExplorerResource(arn, resourceType, "elasticloadbalancing",
+                parsed.region(), parsed.accountId(),
+                createdAt != null ? createdAt : Instant.now(),
+                tags.getOrDefault(arn, Map.of())));
     }
 }

@@ -70,21 +70,37 @@ public class ElastiCacheContainerManager {
     }
 
     public ElastiCacheContainerHandle start(String groupId, String image) {
+        return start(groupId, image, List.of());
+    }
+
+    /**
+     * Starts a backend container for the given resource id, appending {@code extraServerFlags}
+     * to the Valkey server command line (via the image's {@code VALKEY_EXTRA_FLAGS} hook).
+     * Cluster-mode nodes use this to pass {@code --cluster-enabled} and announce settings.
+     */
+    public ElastiCacheContainerHandle start(String groupId, String image, List<String> extraServerFlags) {
         LOG.infov("Starting ElastiCache backend container for group: {0}", groupId);
 
-        String containerName = ContainerStorageHelper.resourceName(config, "valkey", null, groupId);
+        String containerName = containerName(groupId);
 
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);
+
+        StringBuilder serverFlags = new StringBuilder("--loglevel verbose");
+        for (String flag : extraServerFlags) {
+            serverFlags.append(' ').append(flag);
+        }
 
         // Build container spec. Only publish the backend port to the host in
         // native mode — in Docker mode the JVM reaches the container via its
         // network IP, no host binding needed.
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
-                .withEnv("VALKEY_EXTRA_FLAGS", "--loglevel verbose")
+                .withEnv("VALKEY_EXTRA_FLAGS", serverFlags.toString())
                 .withDockerNetwork(config.services().elasticache().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "elasticache", groupId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
@@ -102,6 +118,13 @@ public class ElastiCacheContainerManager {
 
         ElastiCacheContainerHandle handle = new ElastiCacheContainerHandle(
                 info.containerId(), groupId, endpoint.host(), endpoint.port());
+        try {
+            handle.setNetworkIp(lifecycleManager.resolveContainerNetworkIp(
+                    info.containerId(), config.services().elasticache().dockerNetwork().orElse(null)));
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not resolve network IP for ElastiCache container {0}: {1}",
+                    info.containerId(), e.getMessage());
+        }
         activeContainers.put(groupId, handle);
 
         // Attach log streaming
@@ -182,6 +205,28 @@ public class ElastiCacheContainerManager {
         }
         activeContainers.remove(handle.getGroupId());
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+    }
+
+    /**
+     * Stops and removes the backend container for a group by id, if one exists.
+     * Used by the service's provisioning rollback: {@link #start} registers the container in
+     * {@code activeContainers} <em>before</em> {@link #waitForBackendReady}, so a readiness
+     * timeout throws without ever returning the handle to the caller. In that case rollback
+     * can't go through {@link #stop} (it has no handle), so it cleans up by id instead. Falls
+     * back to the deterministic container name to catch a container that failed before it was
+     * registered. Idempotent — a no-op when nothing is running for the id.
+     */
+    public void stopByGroupId(String groupId) {
+        ElastiCacheContainerHandle handle = activeContainers.get(groupId);
+        if (handle != null) {
+            stop(handle);
+            return;
+        }
+        lifecycleManager.removeIfExists(containerName(groupId));
+    }
+
+    private String containerName(String groupId) {
+        return ContainerStorageHelper.resourceName(config, "valkey", null, groupId);
     }
 
     public void stopAll() {

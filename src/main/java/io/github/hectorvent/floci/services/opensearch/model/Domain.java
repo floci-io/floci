@@ -26,6 +26,9 @@ public class Domain {
     @JsonProperty("EngineVersion")
     private String engineVersion;
 
+    @JsonProperty("AccessPolicies")
+    private String accessPolicies;
+
     @JsonProperty("Processing")
     private boolean processing = false;
 
@@ -104,6 +107,14 @@ public class Domain {
 
     public void setEngineVersion(String engineVersion) {
         this.engineVersion = engineVersion;
+    }
+
+    public String getAccessPolicies() {
+        return accessPolicies;
+    }
+
+    public void setAccessPolicies(String accessPolicies) {
+        this.accessPolicies = accessPolicies;
     }
 
     public boolean isProcessing() {

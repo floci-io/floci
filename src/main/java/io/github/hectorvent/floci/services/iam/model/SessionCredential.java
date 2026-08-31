@@ -20,6 +20,8 @@ public class SessionCredential {
      * temporary credentials that carry no role ARN (e.g. GetSessionToken) back to the caller.
      */
     private String originAccountId;
+    /** True when this session belongs to a Floci-launched Lambda container. */
+    private boolean lambdaExecutionRole;
 
     public SessionCredential() {}
 
@@ -72,4 +74,7 @@ public class SessionCredential {
 
     public String getOriginAccountId() { return originAccountId; }
     public void setOriginAccountId(String originAccountId) { this.originAccountId = originAccountId; }
+
+    public boolean isLambdaExecutionRole() { return lambdaExecutionRole; }
+    public void setLambdaExecutionRole(boolean lambdaExecutionRole) { this.lambdaExecutionRole = lambdaExecutionRole; }
 }

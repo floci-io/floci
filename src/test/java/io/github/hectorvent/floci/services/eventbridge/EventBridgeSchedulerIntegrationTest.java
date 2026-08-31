@@ -48,6 +48,7 @@ class EventBridgeSchedulerIntegrationTest {
         eventBridgeService = new EventBridgeService(
                 busStore, ruleStore, targetStore,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
                 new ObjectMapper(), scheduler, invoker, replayDispatcher,
                 new ResourceGroupsTaggingService(null));
@@ -299,6 +300,8 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public String ecrBaseUri() { return ""; }
             @Override
+            public Optional<String> aiMockConfigFile() { return Optional.empty(); }
+            @Override
             public StorageConfig storage() { return null; }
             @Override
             public DnsConfig dns() {
@@ -322,7 +325,12 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public EmulatorConfig.InitHooksConfig initHooks() { return null; }
             @Override
-            public ProtocolsConfig protocols() { return () -> false; }
+            public ProtocolsConfig protocols() {
+                return new ProtocolsConfig() {
+                    @Override public boolean strictClaiming() { return false; }
+                    @Override public boolean rejectUnknownServiceScope() { return true; }
+                };
+            }
             @Override
             public TlsConfig tls() {
                 return new TlsConfig() {

@@ -73,6 +73,29 @@ services:
 !!! note "No port mapping needed for k3s ports"
     k3s containers bind their API server port (6500–6599) directly on the host via Docker — no `ports:` entry is required in `docker-compose.yml`. See [Ports Reference](../configuration/ports.md#ports-65006599-eks-real-mode) for the full explanation.
 
+#### Clusters survive a restart
+
+With a persistent [storage mode](../configuration/storage.md) (the default), clusters recorded in
+`eks-clusters.json` are **re-latched to their k3s containers when Floci starts**:
+
+- A surviving container (for example after a Docker Desktop / daemon reboot) is adopted and
+  started in place, keeping its published API server port and data volume — deployments come
+  back as they were.
+- A missing container is recreated. Its named k3s data volume (`floci-eks-<name>`; for a
+  [non-default account](../configuration/multi-account.md), `floci-eks-<account>.<name>`) is
+  reused if it survived; volumes follow the global prune policy
+  (`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`, default `false`), so they are retained when the
+  container is stopped or the cluster deleted, except in `memory` storage mode.
+- A non-default-account cluster created before account-qualified naming keeps its historical
+  `floci-eks-<name>` container and volume: restoration adopts the surviving container when its
+  `io.floci.account` label matches the owning account, so pre-upgrade workloads are not
+  orphaned.
+
+A restored cluster reports `CREATING` until its API server answers again, then returns to
+`ACTIVE` with a freshly extracted certificate authority. If the container cannot be brought
+back (for example Docker is unavailable), the cluster is marked `FAILED` instead of appearing
+`ACTIVE` while unreachable.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -145,6 +168,93 @@ services:
     environment:
       FLOCI_SERVICES_EKS_MOCK: "true"
 ```
+
+## IRSA (IAM Roles for Service Accounts)
+
+Every cluster gets an OIDC identity provider, so the full IRSA flow (trust policy, service-account token, `sts:AssumeRoleWithWebIdentity`) works end to end without mocked or hardcoded tokens.
+
+`CreateCluster` generates an RSA-2048 signing keypair and an AWS-shaped issuer URL, returned by `DescribeCluster`:
+
+```json
+{
+  "cluster": {
+    "name": "my-cluster",
+    "identity": { "oidc": { "issuer": "https://oidc.eks.us-east-1.amazonaws.com/id/3F8A…" } }
+  }
+}
+```
+
+The issuer URL is a faithful string for building trust policies, but it is not fetched: Floci's STS resolves the signing key in-process. The private key is held in storage separate from the cluster model and is never returned by any API.
+
+### Minting a service-account token
+
+Real EKS has the kubelet project a token into the pod. Floci has no kubelet, so a local-dev harness requests one and writes it to the file named by `AWS_WEB_IDENTITY_TOKEN_FILE`. Signing happens server-side, so the private key never leaves Floci.
+
+```bash
+curl -sX POST http://localhost:4566/_floci/eks/clusters/my-cluster/oidc-token \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace":"my-namespace","serviceAccount":"my-service-account"}'
+```
+
+```json
+{
+  "token": "eyJhbGciOiJSUzI1NiIs…",
+  "issuer": "https://oidc.eks.us-east-1.amazonaws.com/id/3F8A…",
+  "subject": "system:serviceaccount:my-namespace:my-service-account",
+  "audience": "sts.amazonaws.com"
+}
+```
+
+`audience` (default `sts.amazonaws.com`) and `expirySeconds` (default 24h, max 7d) are optional.
+This is Floci plumbing under `_floci/…`, not an AWS API.
+
+### Trust policy
+
+Note that the OIDC provider ARN and the condition keys use the issuer with the scheme stripped `oidc.eks.<region>.amazonaws.com/id/<id>`, which is how the AWS console, `eksctl`, and Terraform all render it.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::000000000000:oidc-provider/<oidcProvider>"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "<oidcProvider>:sub": "system:serviceaccount:<namespace>:<serviceAccount>",
+        "<oidcProvider>:aud": "sts.amazonaws.com"
+      }
+    }
+  }]
+}
+```
+
+### What STS validates
+
+When `sts:AssumeRoleWithWebIdentity` receives a token whose `iss` names an issuer Floci hosts, it enforces all of:
+
+- the RS256 signature, against that cluster's public key
+- `iss` matches the cluster's issuer exactly
+- `aud` contains `sts.amazonaws.com`
+- `exp` / `nbf`, with 60s of clock-skew tolerance
+- the role's trust policy: `Principal.Federated` and the `Condition` block, comparing `oidc:sub` / `oidc:aud` with exact, case-sensitive equality
+
+The response then carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. Failures return `InvalidIdentityToken` (400) for a bad token or `AccessDenied` (403) when the trust policy does not permit the subject.
+
+A token whose issuer Floci does not host is treated as opaque and accepted, since Floci cannot adjudicate a third-party provider. Validation is therefore automatic for Floci-issued tokens and requires no configuration flag.
+
+### OIDC discovery endpoints
+
+Served for fidelity and debugging, nothing in the IRSA flow dereferences them:
+
+| Route | Description |
+|---|---|
+| `GET /_floci/eks/clusters/<name>/oidc/.well-known/openid-configuration` | OIDC discovery document |
+| `GET /_floci/eks/clusters/<name>/oidc/keys` | JWKS containing the cluster's public key |
+
+These live under `_floci/…` rather than at the AWS-shaped issuer path, which Floci's embedded DNS does not resolve and which would collide with S3's path-style routing.
 
 ## ARN Format
 

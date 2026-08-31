@@ -140,8 +140,12 @@ class AcmPaginationTest {
     @Test
     @Order(5)
     void emptyListReturnsNoNextToken() {
-        // List with a filter that matches nothing
-        given()
+        // Filter by a status none of this class's own certificates ever have. Can't assert the
+        // whole result is empty -- other test classes in the shared full-suite JVM (e.g.
+        // AcmIntegrationTest) revoke certificates of their own, and that state persists across
+        // classes. What this test actually verifies -- filtering excludes non-matching
+        // certificates and a small result page carries no NextToken -- holds regardless.
+        Response response = given()
             .header("X-Amz-Target", "CertificateManager.ListCertificates")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
@@ -153,8 +157,12 @@ class AcmPaginationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("CertificateSummaryList", empty())
-            .body("NextToken", nullValue());
+            .extract().response();
+
+        List<String> revokedArns = response.jsonPath().getList("CertificateSummaryList.CertificateArn");
+        assertTrue(createdArns.stream().noneMatch(revokedArns::contains),
+                "none of this class's own (always-ISSUED) certificates should appear under a REVOKED filter");
+        assertNull(response.jsonPath().get("NextToken"));
     }
 
     @Test

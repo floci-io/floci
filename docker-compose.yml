@@ -20,6 +20,9 @@ services:
       # If you were using this env var for persistence, migrate: docker volume ls -f label=floci=true
       FLOCI_HOSTNAME: floci
       FLOCI_BASE_URL: http://floci:4566
+      # localhost.floci.io resolves everywhere: public DNS -> 127.0.0.1 on the host
+      # (reaching the published proxy ports), the network alias below inside Compose.
+      FLOCI_SERVICES_ELASTICACHE_CLUSTER_ANNOUNCE_HOSTNAME: localhost.floci.io
       FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED: "true"
       # Match the compatibility workflow (.github/workflows/compatibility.yml) so the
       # local Docker test run exercises the same Floci configuration as CI.

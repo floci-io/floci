@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
+import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
+import jakarta.inject.Inject;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.MethodOrderer;
@@ -7,12 +11,21 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayV2IntegrationTest {
+
+    @Inject
+    ApiGatewayV2Service apiGatewayV2Service;
 
     private static String apiId;
     private static String routeId;
@@ -154,6 +167,60 @@ class ApiGatewayV2IntegrationTest {
                 .body("items.routeId", hasItem(routeId));
     }
 
+    @Test @Order(23)
+    void duplicateRouteKeyIsRejected() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"routeKey":"GET /users","target":"integrations/%s"}
+                        """.formatted(integrationId))
+                .when().post("/v2/apis/" + apiId + "/routes")
+                .then()
+                .statusCode(409);
+    }
+
+    @Test @Order(24)
+    void restoringRouteRemovesAConflictingReplacement() {
+        Route oldRoute = new Route();
+        oldRoute.setRouteId("restored-route");
+        oldRoute.setRouteKey("GET /users");
+        oldRoute.setAuthorizationType("NONE");
+        oldRoute.setAuthorizationScopes(List.of("read:users"));
+        oldRoute.setTarget("integrations/" + integrationId);
+
+        String replacementRouteId = routeId;
+        apiGatewayV2Service.restoreRoute("us-east-1", apiId, oldRoute, Set.of(replacementRouteId));
+
+        assertEquals(1, apiGatewayV2Service.getRoutes("us-east-1", apiId).stream()
+                .filter(route -> "GET /users".equals(route.getRouteKey()))
+                .count());
+        assertEquals("restored-route",
+                apiGatewayV2Service.findRouteByKey("us-east-1", apiId, "GET /users").getRouteId());
+        assertEquals(List.of("read:users"),
+                apiGatewayV2Service.getRoute("us-east-1", apiId, "restored-route").getAuthorizationScopes());
+        assertThrows(AwsException.class,
+                () -> apiGatewayV2Service.getRoute("us-east-1", apiId, replacementRouteId));
+        routeId = oldRoute.getRouteId();
+    }
+
+    @Test @Order(25)
+    void restoringRouteDoesNotDeleteAnIndependentConflict() {
+        Route independent = apiGatewayV2Service.createRoute("us-east-1", apiId,
+                Map.of("routeKey", "GET /independent"));
+        Route snapshot = new Route();
+        snapshot.setRouteId("rollback-snapshot");
+        snapshot.setRouteKey("GET /independent");
+
+        assertThrows(AwsException.class,
+                () -> apiGatewayV2Service.restoreRoute("us-east-1", apiId, snapshot, Set.of("other-route")));
+        assertEquals(independent.getRouteId(), apiGatewayV2Service
+                .findRouteByKey("us-east-1", apiId, "GET /independent").getRouteId());
+        assertThrows(AwsException.class,
+                () -> apiGatewayV2Service.getRoute("us-east-1", apiId, snapshot.getRouteId()));
+
+        apiGatewayV2Service.deleteRoute("us-east-1", apiId, independent.getRouteId());
+    }
+
     // ──────────────────────────── Authorizers ────────────────────────────
 
     @Test @Order(30)
@@ -196,6 +263,19 @@ class ApiGatewayV2IntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("items.authorizerId", hasItem(authorizerId));
+    }
+
+    @Test @Order(33)
+    void restoreAuthorizerPreservesEnforcementConfiguration() {
+        Authorizer snapshot = apiGatewayV2Service.getAuthorizer("us-east-1", apiId, authorizerId);
+        apiGatewayV2Service.deleteAuthorizer("us-east-1", apiId, authorizerId);
+        apiGatewayV2Service.restoreAuthorizer("us-east-1", apiId, snapshot);
+
+        Authorizer restored = apiGatewayV2Service.getAuthorizer("us-east-1", apiId, authorizerId);
+        assertEquals("JWT", restored.getAuthorizerType());
+        assertEquals(List.of("$request.header.Authorization"), restored.getIdentitySource());
+        assertEquals("https://example.com", restored.getJwtConfiguration().issuer());
+        assertEquals(List.of("api"), restored.getJwtConfiguration().audience());
     }
 
     // ──────────────────────────── Deployments ────────────────────────────
@@ -243,14 +323,17 @@ class ApiGatewayV2IntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"stageName":"prod","deploymentId":"%s","autoDeploy":false}
+                        {"stageName":"prod","deploymentId":"%s","autoDeploy":false,"tags":{"environment":"test","owner":"platform","floci:internal":"hidden"}}
                         """.formatted(deploymentId))
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then()
                 .statusCode(201)
                 .body("stageName", equalTo("prod"))
                 .body("autoDeploy", equalTo(false))
-                .body("deploymentId", equalTo(deploymentId));
+                .body("deploymentId", equalTo(deploymentId))
+                .body("tags.environment", equalTo("test"))
+                .body("tags.owner", equalTo("platform"))
+                .body("tags", not(hasKey("floci:internal")));
     }
 
     @Test @Order(51)
@@ -261,7 +344,9 @@ class ApiGatewayV2IntegrationTest {
                 .statusCode(200)
                 .body("stageName", equalTo("prod"))
                 .body("deploymentId", equalTo(deploymentId))
-                .body("autoDeploy", equalTo(false));
+                .body("autoDeploy", equalTo(false))
+                .body("tags.environment", equalTo("test"))
+                .body("tags.owner", equalTo("platform"));
     }
 
     @Test @Order(52)
@@ -270,7 +355,24 @@ class ApiGatewayV2IntegrationTest {
                 .when().get("/v2/apis/" + apiId + "/stages")
                 .then()
                 .statusCode(200)
-                .body("items.stageName", hasItem("prod"));
+                .body("items.stageName", hasItem("prod"))
+                .body("items.find { it.stageName == 'prod' }.tags.environment", equalTo("test"))
+                .body("items.find { it.stageName == 'prod' }.tags.owner", equalTo("platform"));
+    }
+
+    @Test @Order(53)
+    void updateStageReturnsTags() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"autoDeploy":true}
+                        """)
+                .when().patch("/v2/apis/" + apiId + "/stages/prod")
+                .then()
+                .statusCode(200)
+                .body("autoDeploy", equalTo(true))
+                .body("tags.environment", equalTo("test"))
+                .body("tags.owner", equalTo("platform"));
     }
 
     // ──────────────────────────── Cleanup ────────────────────────────
@@ -329,5 +431,105 @@ class ApiGatewayV2IntegrationTest {
                 .when().get("/v2/apis/" + apiId)
                 .then()
                 .statusCode(404);
+    }
+
+    // ──────────────────────────── Override IDs ────────────────────────────
+
+    @Test @Order(100)
+    void createApi_deprecatedCustomIdTag_usesTagValueAsApiId() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"custom-id-api","protocolType":"HTTP","tags":{"_custom_id_":"MYV2CUSTOM","env":"test"}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("apiId", equalTo("MYV2CUSTOM"))
+                .body("tags._custom_id_", nullValue())
+                .body("tags.env", equalTo("test"));
+    }
+
+    @Test @Order(101)
+    void createApi_flociOverrideIdTag_usesTagValueAsApiId() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"override-id-api","protocolType":"HTTP","tags":{"floci:override-id":"MYV2OVERRIDE"}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("apiId", equalTo("MYV2OVERRIDE"))
+                .body("tags.'floci:override-id'", nullValue());
+    }
+
+    @Test @Order(102)
+    void createApi_blankOverrideId_isRejected() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"blank-override","protocolType":"HTTP","tags":{"floci:override-id":"  "}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test @Order(103)
+    void createApi_duplicateOverrideId_isRejectedWithConflict() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"duplicate-override","protocolType":"HTTP","tags":{"floci:override-id":"MYV2OVERRIDE"}}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(409)
+                .body("message", containsString("already exists"));
+        given()
+                .when().get("/v2/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("override-id-api"));
+    }
+
+    @Test @Order(104)
+    void getApi_overrideId_resolvesById() {
+        given()
+                .when().get("/v2/apis/MYV2CUSTOM")
+                .then()
+                .statusCode(200)
+                .body("apiId", equalTo("MYV2CUSTOM"));
+    }
+
+    @Test @Order(105)
+    void tagApi_withOverrideKey_isRejectedAfterCreation() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"floci:override-id":"TOOLATE"}}
+                        """)
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test @Order(106)
+    void tagApi_withDeprecatedCustomIdKey_isRejectedAfterCreation() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"_custom_id_":"TOOLATE"}}
+                        """)
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test @Order(107)
+    void deleteApis_customAndOverrideId() {
+        given().when().delete("/v2/apis/MYV2CUSTOM").then().statusCode(204);
+        given().when().delete("/v2/apis/MYV2OVERRIDE").then().statusCode(204);
     }
 }

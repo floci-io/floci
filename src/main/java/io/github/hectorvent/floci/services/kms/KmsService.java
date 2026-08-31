@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.kms;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
@@ -58,7 +62,7 @@ import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.DIGES
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 
 @ApplicationScoped
-public class KmsService {
+public class KmsService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(KmsService.class);
 
@@ -227,6 +231,13 @@ public class KmsService {
         return spec != null && spec.getKeyType() == KmsKeySpec.KeyType.HMAC;
     }
 
+    // AWS UpdateAlias only requires the current and new key to be "the same type (both
+    // symmetric or both asymmetric or both HMAC)" - not an exact KeySpec match, so e.g.
+    // RSA_2048 and ECC_NIST_P256 are compatible, but SYMMETRIC_DEFAULT and RSA_2048 are not.
+    private static boolean sameKeyFamily(KmsKeySpec a, KmsKeySpec b) {
+        return isHmac(a) == isHmac(b) && (a == KmsKeySpec.SYMMETRIC_DEFAULT) == (b == KmsKeySpec.SYMMETRIC_DEFAULT);
+    }
+
     private static void validateKeyUsageForSpec(KmsKeyUsage keyUsage, KmsKeySpec spec) {
         if (isHmac(spec) && KmsKeyUsage.GENERATE_VERIFY_MAC != keyUsage) {
             throw new AwsException("ValidationException",
@@ -261,12 +272,79 @@ public class KmsService {
         return keyStore.scan(k -> k.startsWith(prefix));
     }
 
+    /** GrantOperation enum from the KMS model (kms/2014-11-01/service-2.json). */
+    private static final Set<String> GRANT_OPERATIONS = new LinkedHashSet<>(List.of(
+            "Decrypt", "Encrypt", "GenerateDataKey", "GenerateDataKeyWithoutPlaintext",
+            "ReEncryptFrom", "ReEncryptTo", "Sign", "Verify", "GetPublicKey", "CreateGrant",
+            "RetireGrant", "DescribeKey", "GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext",
+            "GenerateMac", "VerifyMac", "DeriveSharedSecret"));
+
+    /** GrantNameType pattern/length from the KMS model (kms/2014-11-01/service-2.json). */
+    private static final java.util.regex.Pattern GRANT_NAME_PATTERN =
+            java.util.regex.Pattern.compile("^[a-zA-Z0-9:/_-]+$");
+
+    /** GrantConstraintSourceArnType pattern from the KMS model (kms/2014-11-01/service-2.json). */
+    private static final java.util.regex.Pattern GRANT_CONSTRAINT_SOURCE_ARN_PATTERN =
+            java.util.regex.Pattern.compile("^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$");
+
+    private static final Set<String> GRANT_CONSTRAINT_MEMBERS =
+            Set.of("EncryptionContextSubset", "EncryptionContextEquals", "SourceArn");
+
+    /** Validates a CreateGrant Constraints map against the modeled GrantConstraints shape. */
+    private void validateGrantConstraints(Map<String, Object> constraints) {
+        if (constraints == null) {
+            return;
+        }
+        for (String member : constraints.keySet()) {
+            if (!GRANT_CONSTRAINT_MEMBERS.contains(member)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Unknown parameter in 'constraints': \"" + member
+                                + "\", must be one of: " + String.join(", ", GRANT_CONSTRAINT_MEMBERS), 400);
+            }
+        }
+        for (String encryptionContextMember : List.of("EncryptionContextSubset", "EncryptionContextEquals")) {
+            Object value = constraints.get(encryptionContextMember);
+            if (value == null) {
+                continue;
+            }
+            if (!(value instanceof Map<?, ?> map)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'constraints." + encryptionContextMember
+                                + "' failed to satisfy constraint: Member must be a map of string to string", 400);
+            }
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String) || !(entry.getValue() instanceof String)) {
+                    throw new AwsException("ValidationException",
+                            "1 validation error detected: Value at 'constraints." + encryptionContextMember
+                                    + "' failed to satisfy constraint: Member must be a map of string to string", 400);
+                }
+            }
+        }
+        Object sourceArn = constraints.get("SourceArn");
+        if (sourceArn != null) {
+            if (!(sourceArn instanceof String sourceArnValue)
+                    || sourceArnValue.length() < 20 || sourceArnValue.length() > 512
+                    || !GRANT_CONSTRAINT_SOURCE_ARN_PATTERN.matcher(sourceArnValue).matches()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'constraints.sourceArn' failed to satisfy "
+                                + "constraint: Member must satisfy regular expression pattern: "
+                                + "^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$", 400);
+            }
+        }
+    }
+
     public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations, String region) {
-        return createGrant(keyId, granteePrincipal, operations, null, region);
+        return createGrant(keyId, granteePrincipal, operations, null, null, null, region);
     }
 
     public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations,
                                 String retiringPrincipal, String region) {
+        return createGrant(keyId, granteePrincipal, operations, retiringPrincipal, null, null, region);
+    }
+
+    public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations,
+                                String retiringPrincipal, String name, Map<String, Object> constraints,
+                                String region) {
         if (keyId == null || keyId.isBlank()) {
             throw new AwsException("ValidationException", "KeyId is required", 400);
         }
@@ -276,6 +354,33 @@ public class KmsService {
         if (operations == null || operations.isEmpty()) {
             throw new AwsException("ValidationException", "Operations is required", 400);
         }
+        for (String operation : operations) {
+            if (!GRANT_OPERATIONS.contains(operation)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + operation + "' at 'operations' failed to satisfy "
+                                + "constraint: Member must satisfy enum value set: ["
+                                + String.join(", ", GRANT_OPERATIONS) + "]", 400);
+            }
+        }
+        if (name != null) {
+            if (name.isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1", 400);
+            }
+            if (name.length() > 256) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must have length less than or equal to 256", 400);
+            }
+            if (!GRANT_NAME_PATTERN.matcher(name).matches()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must satisfy regular expression pattern: "
+                                + "^[a-zA-Z0-9:/_-]+$", 400);
+            }
+        }
+        validateGrantConstraints(constraints);
 
         KmsKey key = resolveKey(keyId, region);
         String grantId = UUID.randomUUID().toString();
@@ -285,11 +390,13 @@ public class KmsService {
         KmsGrant grant = new KmsGrant();
         grant.setGrantId(grantId);
         grant.setGrantToken(Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes));
+        grant.setName(name);
         grant.setKeyId(key.getKeyId());
         grant.setKeyArn(key.getArn());
         grant.setGranteePrincipal(granteePrincipal);
         grant.setRetiringPrincipal(retiringPrincipal);
         grant.setOperations(new ArrayList<>(operations));
+        grant.setConstraints(constraints == null ? null : new HashMap<>(constraints));
 
         grantStore.put(region + "::" + grantId, grant);
         LOG.infov("Created KMS grant: {0} for key {1} in {2}", grantId, key.getKeyId(), region);
@@ -454,6 +561,12 @@ public class KmsService {
         result.put("GranteePrincipal", grant.getGranteePrincipal());
         result.put("Operations", grant.getOperations());
         result.put("CreationDate", grant.getCreationDate());
+        if (grant.getName() != null) {
+            result.put("Name", grant.getName());
+        }
+        if (grant.getConstraints() != null) {
+            result.put("Constraints", grant.getConstraints());
+        }
         if (grant.getRetiringPrincipal() != null) {
             result.put("RetiringPrincipal", grant.getRetiringPrincipal());
         }
@@ -487,6 +600,27 @@ public class KmsService {
         key.setPolicy(policy);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
+    /**
+     * Lists the policy names attached to a key. KMS supports exactly one key policy, named
+     * {@code default}, so the result can never be truncated: {@code Truncated} is always false and
+     * {@code NextMarker} is omitted.
+     *
+     * <p>{@code Limit} and {@code Marker} are accepted at the wire and ignored: the handler simply
+     * never reads them, which is exactly what moto's KMS does for this operation. A single policy
+     * name fits inside any limit, so the values cannot change the response. Real AWS rejects an
+     * out-of-range {@code Limit} server-side (the model bounds LimitType to [1..1000], but SDKs do
+     * not fully enforce that client-side — botocore checks only the minimum); not re-validating it
+     * here is deliberate leniency, consistent with the emulator's general posture.
+     */
+    public Map<String, Object> listKeyPolicies(String keyId, String region) {
+        String policyName = (String) getKeyPolicy(keyId, region).get("PolicyName");
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("PolicyNames", List.of(policyName));
+        result.put("Truncated", false);
+        return result;
     }
 
     public void updateKeyDescription(String keyId, String description, String region) {
@@ -584,6 +718,30 @@ public class KmsService {
         LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());
     }
 
+    public void updateAlias(String aliasName, String targetKeyId, String region) {
+        String storageKey = region + "::" + aliasName;
+        KmsAlias existing = aliasStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 404));
+
+        KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
+        KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+
+        if ("PendingDeletion".equals(newKey.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
+        }
+        if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
+            throw new AwsException("ValidationException",
+                    "The replacement KMS key must have the same key usage and key type "
+                            + "(symmetric, asymmetric, or HMAC) as the alias's current target key.",
+                    400);
+        }
+
+        existing.setTargetKeyId(newKey.getKeyId());
+        aliasStore.put(storageKey, existing);
+        LOG.infov("Updated KMS alias: {0} -> {1}", aliasName, newKey.getKeyId());
+    }
+
     public void deleteAlias(String aliasName, String region) {
         String key = region + "::" + aliasName;
         if (aliasStore.get(key).isEmpty()) {
@@ -628,6 +786,7 @@ public class KmsService {
 
     public byte[] encrypt(String keyId, byte[] plaintext, Map<String, String> encryptionContext, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
+        validateKeyIsUsableForCryptoOperations(kmsKey);
 
         byte[] nonceBytes = new byte[NONCE_BYTES];
         SECURE_RANDOM.nextBytes(nonceBytes);
@@ -665,19 +824,43 @@ public class KmsService {
      * Single-pass decrypt + source-key-ARN resolution. {@link #decrypt} and
      * {@link #decryptToKeyArn} remain independent primitives — neither delegates here.
      */
-    public DecryptResult decryptAndResolveKey(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
+    public DecryptResult decryptAndResolveKey(
+            byte[] ciphertext,
+            Map<String, String> encryptionContext,
+            String region,
+            String requestKeyId
+    ) {
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
             throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
         }
         byte[] plaintext = Base64.getDecoder().decode(parsed.payload);
-        String keyArn;
-        try {
-            keyArn = resolveKey(parsed.keyId, region).getArn();
-        } catch (AwsException e) {
-            keyArn = null;
+
+        if (requestKeyId != null && !requestKeyId.isBlank()) {
+            KmsKey requestKey = resolveKey(requestKeyId, region);
+            if (!requestKey.getKeyId().equals(parsed.keyId)) {
+                throw new AwsException(
+                        "IncorrectKeyException",
+                        "The request was rejected because the specified KMS key cannot decrypt the data.",
+                        400
+                );
+            }
+            validateKeyIsUsableForCryptoOperations(requestKey);
+
+            return new DecryptResult(plaintext, requestKey.getArn());
         }
-        return new DecryptResult(plaintext, keyArn);
+
+        KmsKey key;
+        try {
+            key = resolveKey(parsed.keyId, region);
+        } catch (AwsException e) {
+            key = null;
+        }
+        if (key == null) {
+            return new DecryptResult(plaintext, null);
+        }
+        validateKeyIsUsableForCryptoOperations(key);
+        return new DecryptResult(plaintext, key.getArn());
     }
 
     public record DecryptResult(byte[] plaintext, String keyArn) {}
@@ -1069,5 +1252,45 @@ public class KmsService {
         // Key id
         return keyStore.get(region + "::" + id)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
+    }
+
+    private static void validateKeyIsUsableForCryptoOperations(KmsKey key) {
+        if ("PendingDeletion".equals(key.getKeyState())) {
+            throw new AwsException(
+                    "KMSInvalidStateException",
+                    "KMS key " + key.getKeyId() + " is pending deletion.",
+                    400
+            );
+        }
+        if (!key.isEnabled()) {
+            throw new AwsException(
+                    "DisabledException",
+                    "The request was rejected because the specified KMS key is not enabled.",
+                    400
+            );
+        }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (KmsKey key : keyStore.scan(k -> true)) {
+            String arn = key.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "kms:key", "kms",
+                    parsed.region(), parsed.accountId(),
+                    key.getCreationDate() > 0 ? Instant.ofEpochSecond(key.getCreationDate()) : Instant.now(),
+                    key.getTags() != null ? key.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("kms:key", "kms", true));
     }
 }

@@ -5,7 +5,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
+import io.github.hectorvent.floci.services.docdb.model.DocDbClusterSettings;
+import io.github.hectorvent.floci.services.docdb.model.DocDbInstanceSettings;
 import io.github.hectorvent.floci.services.docdb.model.DocDbInstance;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -13,7 +16,11 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class DocDbQueryHandler {
@@ -36,12 +43,16 @@ public class DocDbQueryHandler {
                 case "CreateDBCluster"    -> handleCreateDbCluster(params);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
+                case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
                 case "DeleteDBCluster"    -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster"    -> handleModifyDbCluster(params);
                 case "CreateDBInstance"   -> handleCreateDbInstance(params);
                 case "DescribeDBInstances"-> handleDescribeDbInstances(params);
                 case "DeleteDBInstance"   -> handleDeleteDbInstance(params);
                 case "ModifyDBInstance"   -> handleModifyDbInstance(params);
+                case "ListTagsForResource" -> handleListTagsForResource(params);
+                case "AddTagsToResource"   -> handleAddTagsToResource(params);
+                case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by DocDB.", AwsNamespaces.RDS, 400);
             };
@@ -68,21 +79,25 @@ public class DocDbQueryHandler {
         String masterPassword = params.getFirst("MasterUserPassword");
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
 
+        // Tags given at create are readable back on a live account; they go in with the record.
         DocDbCluster cluster = service.createDbCluster(id, engineVersion,
-                masterUsername, masterPassword, iamEnabled);
+                masterUsername, masterPassword, iamEnabled, clusterSettings(params, true), parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS,
                 clusterXml(cluster))).build();
     }
 
     private Response handleDescribeDbClusters(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBClusterIdentifier");
+        String identifier = params.getFirst("DBClusterIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-cluster-id");
         }
 
-        // When a specific cluster ID is requested, AWS returns 404 if not found
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbCluster(filterId); // throws DBClusterNotFoundFault if absent
+        // AWS parity: the DBClusterIdentifier parameter faults with
+        // DBClusterNotFoundFault when no cluster matches, while the
+        // db-cluster-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbCluster(identifier); // throws DBClusterNotFoundFault if absent
         }
 
         Collection<DocDbCluster> result = service.listDbClusters(filterId);
@@ -93,6 +108,55 @@ public class DocDbQueryHandler {
         }
         xml.end("DBClusters").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    /**
+     * The rows the list form of DescribeDBClusters would return, for the RDS-family listing that
+     * {@code RdsQueryHandler} assembles: a live account lists DocumentDB clusters from the RDS
+     * endpoint and the DocumentDB endpoint alike.
+     */
+    public List<String> clusterRowsXml(String filterId) {
+        return service.listDbClusters(filterId).stream().map(this::clusterInnerXml).toList();
+    }
+
+    public List<String> instanceRowsXml(String filterId) {
+        return service.listDbInstances(filterId).stream().map(this::instanceInnerXml).toList();
+    }
+
+    private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
+        // Global clusters are not modeled; an empty list is what completes the provider's read.
+        // Real SDKs sign DocumentDB with the "rds" scope and land on RdsQueryHandler instead;
+        // this serves the "docdb" scope Floci also accepts, and must answer the same way.
+        // MaxRecords is rejected before the identifier is looked up, and a marker after it —
+        // the order a live account applies them in.
+        String maxRecords = params.getFirst("MaxRecords");
+        if (maxRecords != null && !maxRecords.isBlank()) {
+            int max = -1;
+            try {
+                max = Integer.parseInt(maxRecords.trim());
+            } catch (NumberFormatException e) {
+                LOG.debugv("Non-numeric MaxRecords {0} on DescribeGlobalClusters", maxRecords);
+            }
+            if (max < 20 || max > 100) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid value " + maxRecords + " for MaxRecords. Must be between 20 and 100", 400);
+            }
+        }
+        String identifier = params.getFirst("GlobalClusterIdentifier");
+        if (identifier != null && !identifier.isBlank()) {
+            // Naming one is a different question from listing none, and AWS errors on it.
+            throw new AwsException("GlobalClusterNotFoundFault",
+                    "Global cluster '" + identifier + "' not found", 404);
+        }
+        // No page is ever handed out, so any marker a caller presents came from somewhere else.
+        String marker = params.getFirst("Marker");
+        if (marker != null && !marker.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The request token is invalid.", 400);
+        }
+        // Filters are not validated: the answer is empty for every name AWS accepts, and a partial
+        // list of accepted names would reject filters a live account allows.
+        XmlBuilder xml = new XmlBuilder().start("GlobalClusters").end("GlobalClusters");
+        return Response.ok(AwsQueryResponse.envelope("DescribeGlobalClusters", AwsNamespaces.RDS, xml.build())).build();
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
@@ -125,7 +189,7 @@ public class DocDbQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
 
-        DocDbCluster cluster = service.modifyDbCluster(id, engineVersion, iamEnabled);
+        DocDbCluster cluster = service.modifyDbCluster(id, engineVersion, iamEnabled, clusterSettings(params, false));
         return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS,
                 clusterXml(cluster))).build();
     }
@@ -148,19 +212,23 @@ public class DocDbQueryHandler {
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
 
         DocDbInstance instance = service.createDbInstance(id, dbClusterIdentifier,
-                dbInstanceClass, engineVersion, iamEnabled);
+                dbInstanceClass, engineVersion, iamEnabled, instanceSettings(params), parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS,
                 instanceXml(instance))).build();
     }
 
     private Response handleDescribeDbInstances(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBInstanceIdentifier");
+        String identifier = params.getFirst("DBInstanceIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-instance-id");
         }
 
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbInstance(filterId); // throws DBInstanceNotFound if absent
+        // AWS parity: the DBInstanceIdentifier parameter faults with
+        // DBInstanceNotFound when no instance matches, while the
+        // db-instance-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbInstance(identifier); // throws DBInstanceNotFound if absent
         }
 
         Collection<DocDbInstance> result = service.listDbInstances(filterId);
@@ -195,9 +263,66 @@ public class DocDbQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
 
-        DocDbInstance instance = service.modifyDbInstance(id, dbInstanceClass, iamEnabled);
+        DocDbInstance instance = service.modifyDbInstance(id, dbInstanceClass, iamEnabled, instanceSettings(params));
         return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS,
                 instanceXml(instance))).build();
+    }
+
+    /**
+     * The cluster settings a request carries. DBSubnetGroupName, StorageEncrypted and KmsKeyId are
+     * fixed at create and not in the ModifyDBCluster shape, so a modify reads the rest only. Port
+     * is not taken from the request: the port a cluster reports is the one it is reachable on.
+     */
+    private static DocDbClusterSettings clusterSettings(MultivaluedMap<String, String> params, boolean create) {
+        List<String> securityGroups = memberList(params, "VpcSecurityGroupIds.VpcSecurityGroupId.");
+        return new DocDbClusterSettings(
+                create ? params.getFirst("DBSubnetGroupName") : null,
+                params.getFirst("DBClusterParameterGroupName"),
+                securityGroups.isEmpty() ? null : securityGroups,
+                create ? optionalBoolean(params.getFirst("StorageEncrypted")) : null,
+                create ? params.getFirst("KmsKeyId") : null,
+                optionalInt(params.getFirst("BackupRetentionPeriod")),
+                params.getFirst("PreferredBackupWindow"),
+                params.getFirst("PreferredMaintenanceWindow"),
+                optionalBoolean(params.getFirst("DeletionProtection")));
+    }
+
+    private static DocDbInstanceSettings instanceSettings(MultivaluedMap<String, String> params) {
+        return new DocDbInstanceSettings(
+                optionalBoolean(params.getFirst("AutoMinorVersionUpgrade")),
+                params.getFirst("PreferredMaintenanceWindow"),
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                optionalInt(params.getFirst("PromotionTier")));
+    }
+
+    private static List<String> memberList(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = new java.util.ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = params.getFirst(prefix + i);
+            if (value == null) {
+                break;
+            }
+            if (!value.isBlank()) {
+                values.add(value);
+            }
+        }
+        return values;
+    }
+
+    /** A live account reads any Query boolean that is not "false" as true. */
+    private static Boolean optionalBoolean(String value) {
+        return value == null ? null : !"false".equalsIgnoreCase(value.trim());
+    }
+
+    private static Integer optionalInt(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", "Value " + value + " is not a valid integer.", 400);
+        }
     }
 
     // ── XML builders ──────────────────────────────────────────────────────────
@@ -218,11 +343,32 @@ public class DocDbQueryHandler {
                 .elem("MasterUsername", c.getMasterUsername())
                 .elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
                 .elem("MultiAZ", false)
-                .elem("StorageEncrypted", true)
+                .elem("StorageEncrypted", c.isStorageEncrypted())
                 .elem("AvailabilityZone", config.defaultAvailabilityZone())
+                .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
+                .elem("DBClusterParameterGroup", c.getDbClusterParameterGroupName() != null
+                        ? c.getDbClusterParameterGroupName()
+                        : "default." + DocDbService.parameterGroupFamily(c.getEngineVersion()))
+                .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
+                .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                        ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
+                .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                        ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+                .elem("DeletionProtection", c.isDeletionProtection())
                 .elem("DbClusterResourceId", c.getDbClusterResourceId())
-                .elem("DBClusterArn", c.getDbClusterArn())
-                .start("DBClusterMembers");
+                .elem("DBClusterArn", c.getDbClusterArn());
+        if (c.getKmsKeyId() != null && !c.getKmsKeyId().isBlank()) {
+            xml.elem("KmsKeyId", c.getKmsKeyId());
+        }
+        xml.start("VpcSecurityGroups");
+        for (String groupId : c.getVpcSecurityGroupIds()) {
+            xml.start("VpcSecurityGroupMembership")
+               .elem("VpcSecurityGroupId", groupId)
+               .elem("Status", "active")
+               .end("VpcSecurityGroupMembership");
+        }
+        xml.end("VpcSecurityGroups")
+           .start("DBClusterMembers");
         if (c.getDbClusterMembers() != null) {
             for (String memberId : c.getDbClusterMembers()) {
                 xml.start("member")
@@ -253,11 +399,25 @@ public class DocDbQueryHandler {
                 .end("Endpoint")
                 .elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
                 .elem("MultiAZ", false)
-                .elem("StorageEncrypted", true)
+                .elem("StorageEncrypted", storageEncryptedOf(i))
                 .elem("AvailabilityZone", config.defaultAvailabilityZone())
+                .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
+                .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
+                        ? i.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+                .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
+                .elem("PromotionTier", i.getPromotionTier())
                 .elem("DbiResourceId", i.getDbiResourceId())
                 .elem("DBInstanceArn", i.getDbInstanceArn())
                 .build();
+    }
+
+    /** An instance's encryption is its cluster's; a member of a cluster that is gone reads unencrypted. */
+    private boolean storageEncryptedOf(DocDbInstance i) {
+        try {
+            return service.getDbCluster(i.getDbClusterIdentifier()).isStorageEncrypted();
+        } catch (AwsException e) {
+            return false;
+        }
     }
 
     private static String extractFilterValue(MultivaluedMap<String, String> params, String filterName) {
@@ -271,5 +431,65 @@ public class DocDbQueryHandler {
             }
         }
         return null;
+    }
+
+    // ── Tags ──────────────────────────────────────────────────────────────────
+
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+        // Filters are accepted without validation: a live account rejects an unrecognised filter
+        // name, but Floci carries no list of the names it accepts, and the tags of one named
+        // resource are the same answer either way.
+        Map<String, String> tags = service.listTagsForResource(params.getFirst("ResourceName"));
+        XmlBuilder xml = new XmlBuilder().start("TagList");
+        tags.forEach((key, value) -> xml.start("Tag")
+                .elem("Key", key)
+                .elem("Value", value == null ? "" : value)
+                .end("Tag"));
+        xml.end("TagList");
+        return Response.ok(AwsQueryResponse.envelope("ListTagsForResource",
+                AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleAddTagsToResource(MultivaluedMap<String, String> params) {
+        service.addTagsToResource(params.getFirst("ResourceName"), parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("AddTagsToResource", AwsNamespaces.RDS, "")).build();
+    }
+
+    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params) {
+        service.removeTagsFromResource(params.getFirst("ResourceName"), tagKeys(params));
+        return Response.ok(AwsQueryResponse.envelope("RemoveTagsFromResource",
+                AwsNamespaces.RDS, "")).build();
+    }
+
+    /** Every spelling the SDKs and the CLI use for a tag list, as RdsQueryHandler reads them. */
+    private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (String prefix : List.of("Tags.member", "Tags.Tag", "Tag")) {
+            for (int i = 1; ; i++) {
+                String key = params.getFirst(prefix + "." + i + ".Key");
+                if (key == null) {
+                    break;
+                }
+                // A key given without a value is stored as an empty value, as AWS stores it —
+                // a null would also break the immutable copy the read hands back.
+                String value = params.getFirst(prefix + "." + i + ".Value");
+                tags.put(key, value == null ? "" : value);
+            }
+        }
+        return tags;
+    }
+
+    private static List<String> tagKeys(MultivaluedMap<String, String> params) {
+        List<String> keys = new ArrayList<>();
+        for (String prefix : List.of("TagKeys.member", "TagKeys.TagKey", "TagKeys")) {
+            for (int i = 1; ; i++) {
+                String key = params.getFirst(prefix + "." + i);
+                if (key == null) {
+                    break;
+                }
+                keys.add(key);
+            }
+        }
+        return keys;
     }
 }

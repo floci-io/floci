@@ -6,6 +6,8 @@
 
 Floci manages real graph-database Docker containers and proxies connections to them, providing an API-compatible Neptune emulation for local development and testing.
 
+As on AWS, the list form of `DescribeDBClusters` / `DescribeDBInstances` on the `rds`, `docdb` and `neptune` endpoints returns Neptune records together with RDS and DocumentDB ones; the `engine` filter (`neptune`) narrows it.
+
 ## Backend engine (`db-type`)
 
 Neptune supports multiple query languages. Floci backs each one with a different container and proxies the matching wire protocol, selected globally via `FLOCI_SERVICES_NEPTUNE_DB_TYPE` (mirroring LocalStack's `NEPTUNE_DB_TYPE`):

@@ -1,0 +1,17 @@
+# Adds links to the "New issue" chooser alongside the bug/feature templates.
+# Keeps the Slack invite visible before someone files, without adding boilerplate
+# to every issue body.
+blank_issues_enabled: true
+
+contact_links:
+  - name: 💬 Floci Community on Slack
+    url: https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw
+    about: Ask a question, talk through AWS behaviour or a design tradeoff, or get help before filing.
+
+  - name: 🗣️ GitHub Discussions
+    url: https://github.com/orgs/floci-io/discussions
+    about: Longer-form proposals, ideas, and open-ended questions.
+
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/floci-io/floci/security/advisories/new
+    about: Please do not open a public issue for security problems — report them privately here.

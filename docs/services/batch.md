@@ -12,6 +12,8 @@ Floci Batch implements the AWS Batch control plane for local integration tests. 
 | `CreateComputeEnvironment` | `POST /v1/createcomputeenvironment` | Store a local compute environment and return its ARN |
 | `DescribeComputeEnvironments` | `POST /v1/describecomputeenvironments` | Describe all or selected compute environments |
 | `CreateJobQueue` | `POST /v1/createjobqueue` | Store a local job queue attached to compute environments |
+| `UpdateJobQueue` | `POST /v1/updatejobqueue` | Update a job queue's state, priority, and compute environment order |
+| `DeleteJobQueue` | `POST /v1/deletejobqueue` | Delete a `DISABLED` job queue; deleting a missing queue is a no-op |
 | `DescribeJobQueues` | `POST /v1/describejobqueues` | Describe all or selected job queues |
 | `RegisterJobDefinition` | `POST /v1/registerjobdefinition` | Register a revisioned container job definition |
 | `DeregisterJobDefinition` | `POST /v1/deregisterjobdefinition` | Mark a job definition revision inactive |

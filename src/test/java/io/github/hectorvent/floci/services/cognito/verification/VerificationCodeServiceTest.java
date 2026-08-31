@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.cognito.verification;
 
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,7 +30,7 @@ class VerificationCodeServiceTest {
     void setUp() {
         clock = new MutableClock(Instant.parse("2026-05-15T12:00:00Z"));
         StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         service = new VerificationCodeService(storageFactory, clock);
     }
 

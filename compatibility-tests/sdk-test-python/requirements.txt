@@ -1,5 +1,5 @@
-boto3==1.37.1
-botocore==1.37.1
+boto3==1.43.69
+botocore==1.43.69
 cryptography>=42.0.0
 pytest>=8.0.0
 pytest-timeout>=2.3.0

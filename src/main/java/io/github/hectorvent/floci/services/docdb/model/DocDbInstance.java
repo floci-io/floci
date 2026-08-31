@@ -2,10 +2,13 @@ package io.github.hectorvent.floci.services.docdb.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 @RegisterForReflection
 public class DocDbInstance {
 
     private String dbInstanceIdentifier;
+    private Map<String, String> tags = new LinkedHashMap<>();
     private String dbClusterIdentifier;
     private String dbInstanceClass;
     private String engineVersion;
@@ -14,6 +17,11 @@ public class DocDbInstance {
     private int port;
     private boolean iamDatabaseAuthenticationEnabled;
     private String dbInstanceArn;
+    // AWS defaults minor-version upgrades to on when CreateDBInstance omits the flag
+    private boolean autoMinorVersionUpgrade = true;
+    private String preferredMaintenanceWindow;
+    private boolean copyTagsToSnapshot;
+    private int promotionTier = 1;
     private String dbiResourceId;
     private Instant createdAt;
 
@@ -45,6 +53,15 @@ public class DocDbInstance {
         this.iamDatabaseAuthenticationEnabled = iamDatabaseAuthenticationEnabled;
     }
 
+    public boolean isAutoMinorVersionUpgrade() { return autoMinorVersionUpgrade; }
+    public void setAutoMinorVersionUpgrade(boolean autoMinorVersionUpgrade) { this.autoMinorVersionUpgrade = autoMinorVersionUpgrade; }
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) { this.preferredMaintenanceWindow = preferredMaintenanceWindow; }
+    public boolean isCopyTagsToSnapshot() { return copyTagsToSnapshot; }
+    public void setCopyTagsToSnapshot(boolean copyTagsToSnapshot) { this.copyTagsToSnapshot = copyTagsToSnapshot; }
+    public int getPromotionTier() { return promotionTier; }
+    public void setPromotionTier(int promotionTier) { this.promotionTier = promotionTier; }
+
     public String getDbInstanceArn() { return dbInstanceArn; }
     public void setDbInstanceArn(String dbInstanceArn) { this.dbInstanceArn = dbInstanceArn; }
 
@@ -55,4 +72,11 @@ public class DocDbInstance {
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 
 
+
+    public Map<String, String> getTags() { return tags; }
+
+    /** Normalizes null: a record persisted before tags were stored deserializes without them. */
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+    }
 }

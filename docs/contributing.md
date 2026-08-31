@@ -2,6 +2,8 @@
 
 Floci is MIT licensed and welcomes contributions of all kinds.
 
+**Join us on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw)** — the fastest way to reach maintainers for questions, design tradeoffs, or feedback on an approach before you build it.
+
 ## Ways to Help 
 
 - **Bug reports** — open a [GitHub issue](https://github.com/floci-io/floci/issues/new?template=bug_report.md) with a minimal reproduction
@@ -97,6 +99,8 @@ Quick summary:
 - [ ] `mvn test` passes
 - [ ] New or updated integration test added
 - [ ] Commit messages follow Conventional Commits
+
+Please keep at most **5 open PRs** at a time — a bot leaves an advisory note (label `over-pr-limit`) on PRs opened beyond that. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-guidelines) for details.
 
 ## Reporting Security Issues
 

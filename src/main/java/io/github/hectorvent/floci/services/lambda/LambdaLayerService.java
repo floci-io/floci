@@ -25,6 +25,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Business logic for Lambda Layer management.
@@ -33,6 +34,18 @@ import java.util.Map;
 public class LambdaLayerService {
 
     private static final Logger LOG = Logger.getLogger(LambdaLayerService.class);
+
+    /**
+     * Arn constraint GetLayerVersionByArn enforces. Taken from the live service's own
+     * ValidationException rather than the API reference, which publishes a laxer pattern and
+     * omits the AWS-managed {@code awslayer} form entirely.
+     */
+    private static final String LAYER_VERSION_ARN_PATTERN =
+            "((arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}"
+                    + ":\\d{12}:layer:[a-zA-Z0-9-_]+:[0-9]+)"
+                    + "|(arn:[a-zA-Z0-9-]+:lambda:::awslayer:[a-zA-Z0-9-_]+))";
+    private static final Pattern LAYER_VERSION_ARN = Pattern.compile(LAYER_VERSION_ARN_PATTERN);
+    private static final int MAX_LAYER_VERSION_ARN_LENGTH = 140;
 
     private final LambdaLayerStore layerStore;
     private final ZipExtractor zipExtractor;
@@ -112,9 +125,31 @@ public class LambdaLayerService {
         layerVersion.setCodeSha256(codeSha256);
         layerVersion.setCodeLocalPath(layerPath.toAbsolutePath().normalize().toString());
 
+        // Store the archive before persisting the version so a load-bearing store failure
+        // (kubernetes executor) fails the publish instead of leaving a version pods cannot use.
+        boolean stored = storeLayerArchive(region, accountId, layerName, nextVersion, zipBytes);
+        if (!stored && LambdaService.requiresStoredTasksObject(config)) {
+            throw new AwsException("ServiceException",
+                    "Could not store the layer archive for '" + layerName + "' v" + nextVersion
+                            + " in Floci's S3, which the kubernetes Lambda executor needs. The "
+                            + "layer version was not published.", 500);
+        }
+        layerVersion.setArchiveStored(stored);
         layerStore.save(region, layerVersion);
         LOG.infov("Published layer version: {0} v{1} in region {2}", layerName, nextVersion, region);
         return layerVersion;
+    }
+
+    /**
+     * Keeps the exact layer archive in Floci's S3 so GetLayerVersion can serve a real
+     * Content.Location and the kubernetes executor's init container can download it.
+     * Best-effort unless the active Lambda executor requires stored tasks-bucket objects.
+     */
+    private boolean storeLayerArchive(String region, String accountId, String layerName,
+                                      long version, byte[] zipBytes) {
+        return LambdaService.putTasksObjectQuietly(s3Service, region,
+                LambdaService.layerObjectKey(accountId, layerName, version), zipBytes,
+                "layer archive for " + layerName + " v" + version);
     }
 
     /**
@@ -157,7 +192,66 @@ public class LambdaLayerService {
         }
 
         layerStore.delete(region, layerName, versionNumber);
+        deleteLayerArchive(region, lv);
         LOG.infov("Deleted layer version: {0} v{1} in region {2}", layerName, versionNumber, region);
+    }
+
+    private void deleteLayerArchive(String region, LambdaLayerVersion lv) {
+        if (s3Service == null) {
+            return;
+        }
+        try {
+            var account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
+            s3Service.deleteObject(LambdaService.tasksBucketName(region),
+                    LambdaService.layerObjectKey(account, lv.getLayerName(), lv.getVersion()));
+        } catch (Exception e) {
+            LOG.debugv("Could not delete stored layer archive for {0} v{1}: {2}",
+                    lv.getLayerName(), lv.getVersion(), e.getMessage());
+        }
+    }
+
+    /**
+     * GetLayerVersionByArn. Arn is validated before lookup, so a malformed value is a 400
+     * ValidationException and a well-formed but absent one a 404 — both as the live service
+     * answers them.
+     */
+    public LambdaLayerVersion getLayerVersionByArn(String layerVersionArn) {
+        if (layerVersionArn == null || layerVersionArn.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'arn' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (layerVersionArn.length() > MAX_LAYER_VERSION_ARN_LENGTH
+                || !LAYER_VERSION_ARN.matcher(layerVersionArn).matches()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + layerVersionArn + "' at 'arn' failed to satisfy"
+                            + " constraint: Member must satisfy regular expression pattern: "
+                            + LAYER_VERSION_ARN_PATTERN, 400);
+        }
+        // resolveLayerByArn keys on region/name/version within the caller's own partition, so an
+        // ARN naming another account would otherwise resolve to the caller's same-named layer.
+        // No layer here can be shared cross-account (layer permissions are unimplemented), so a
+        // foreign account is always a miss; this is where sharing would hook in if that changes.
+        // resolveLayerByArn also drops the partition, so an ARN naming another one would
+        // otherwise resolve to the local layer under a foreign-partition ARN. Floci emulates
+        // the aws partition; the live service rejects the others outright.
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(layerVersionArn);
+        if (parsed.partition() != null && !parsed.partition().isEmpty()
+                && !"aws".equals(parsed.partition())) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Invalid layer version " + layerVersionArn, 400);
+        }
+        String requestedAccount = AwsArnUtils.accountOrDefault(layerVersionArn, null);
+        if (requestedAccount != null && !requestedAccount.equals(regionResolver.getAccountId())) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The resource you requested does not exist.", 404);
+        }
+        LambdaLayerVersion lv = resolveLayerByArn(layerVersionArn);
+        if (lv == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The resource you requested does not exist.", 404);
+        }
+        return lv;
     }
 
     /**

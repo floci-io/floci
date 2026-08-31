@@ -60,11 +60,13 @@ nav:
     - Quick Start: getting-started/quick-start.md
     - Installation: getting-started/installation.md
     - AWS CLI & SDK Setup: getting-started/aws-setup.md
+    - Terraform: getting-started/terraform.md
     - Migrate from LocalStack: getting-started/migrate-from-localstack.md
   - Configuration:
     - Environment Variables: configuration/environment-variables.md
     - Docker Images: configuration/docker-images.md
     - Docker Compose: configuration/docker-compose.md
+    - Docker Configuration: configuration/docker.md
     - Ports Reference: configuration/ports.md
     - Multi-Account Isolation: configuration/multi-account.md
     - Storage Modes: configuration/storage.md
@@ -79,22 +81,31 @@ nav:
     - SNS: services/sns.md
     - SES: services/ses.md
     - S3: services/s3.md
+    - S3 Tables: services/s3tables.md
+    - S3 Vectors: services/s3vectors.md
     - DynamoDB: services/dynamodb.md
     - Lambda: services/lambda.md
+    - Lambda MicroVMs: services/lambda-microvms.md
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - KMS: services/kms.md
+    - CloudHSM v2: services/cloudhsmv2.md
     - Kinesis: services/kinesis.md
+    - Managed Service for Apache Flink: services/kinesisanalytics.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
+    - Cloud Control API: services/cloudcontrol.md
     - Step Functions: services/step-functions.md
+    - SWF: services/swf.md
     - IAM: services/iam.md
     - STS: services/sts.md
+    - Organizations: services/organizations.md
     - ElastiCache: services/elasticache.md
     - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
     - MSK (Kafka): services/msk.md
+    - Amazon MQ: services/amazonmq.md
     - Glue: services/glue.md
     - Neptune: services/neptune.md
     - DocumentDB: services/docdb.md
@@ -104,24 +115,35 @@ nav:
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch RUM: services/rum.md
+    - GuardDuty: services/guardduty.md
+    - Connect: services/connect.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
+    - Resource Explorer 2: services/resource-explorer.md
     - EKS: services/eks.md
+    - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
     - Lightsail: services/lightsail.md
     - AppConfig: services/appconfig.md
     - Bedrock Runtime: services/bedrock-runtime.md
+    - Bedrock AgentCore: services/bedrock-agentcore.md
     - ELB v2: services/elb.md
     - Auto Scaling: services/autoscaling.md
+    - Application Auto Scaling: services/applicationautoscaling.md
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
+    - CodeGuru Reviewer: services/codegurureviewer.md
     - CodePipeline: services/codepipeline.md
+    - Service Quotas: services/servicequotas.md
+    - AWS RAM: services/ram.md
     - AWS Backup: services/backup.md
+    - AWS FIS: services/fis.md
     - CloudTrail: services/cloudtrail.md
     - CloudFront: services/cloudfront.md
     - Route53: services/route53.md
@@ -132,6 +154,7 @@ nav:
     - AWS Config: services/config.md
     - CloudTrail: services/cloudtrail.md
     - EMR: services/emr.md
+    - EMR Serverless: services/emr-serverless.md
     - WAF v2: services/wafv2.md
     - Textract: services/textract.md
     - Transcribe: services/transcribe.md

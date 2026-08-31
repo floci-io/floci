@@ -149,6 +149,19 @@ class SnsServiceTest {
     }
 
     @Test
+    void subscribe_lazilySeedsControlTowerAggregateSecurityTopic() {
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:"
+                + "aws-controltower-AggregateSecurityNotifications";
+
+        Subscription subscription = snsService.subscribe(
+                topicArn, "lambda", "arn:aws:lambda:us-east-1:000000000000:function:forwarder",
+                REGION, Map.of());
+
+        assertEquals(topicArn, subscription.getTopicArn());
+        assertEquals(topicArn, snsService.listTopics(REGION).getFirst().getTopicArn());
+    }
+
+    @Test
     void subscribe_requiresProtocol() {
         Topic topic = snsService.createTopic("my-topic", null, null, REGION);
         assertThrows(AwsException.class,

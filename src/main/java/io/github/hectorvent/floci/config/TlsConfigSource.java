@@ -52,7 +52,9 @@ public class TlsConfigSource implements ConfigSource {
     // host.docker.internal: how Lambda containers reach Floci when it runs on the host (not in a container).
     private static final List<String> DEFAULT_SAN_HOSTNAMES = List.of(
             "localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-            "localhost.floci.io", "*.localhost.floci.io", "host.docker.internal");
+            "localhost.floci.io", "*.localhost.floci.io",
+            "*.execute-api.localhost.floci.io",
+            "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
 
     private final Map<String, String> properties = new HashMap<>();
 
@@ -62,6 +64,13 @@ public class TlsConfigSource implements ConfigSource {
             LOG.debug("TLS disabled — TlsConfigSource inactive");
             return;
         }
+
+        // BouncyCastle may not be registered yet — this ConfigSource runs before CDI (@Startup beans)
+        // and before quarkus-security's runtime provider registration. Register it up front so BOTH
+        // certificate parsing (isSelfSigned/parseCertificate) and generation work; otherwise
+        // parseCertificate fails "no such provider: BC", isSelfSigned returns false, and the persisted
+        // self-signed certificate is needlessly regenerated on every restart.
+        ensureBouncyCastleRegistered();
 
         String certPath = resolveProperty("floci.tls.cert-path", "");
         String keyPath = resolveProperty("floci.tls.key-path", "");
@@ -162,14 +171,16 @@ public class TlsConfigSource implements ConfigSource {
         return defaultValue;
     }
 
+    private static void ensureBouncyCastleRegistered() {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+    }
+
     private void generateSelfSignedCert(Path tlsDir, Path certFile, Path keyFile) {
         try {
             Files.createDirectories(tlsDir);
-
-            // BouncyCastle may not be registered yet — ConfigSource runs before CDI
-            if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-                Security.addProvider(new BouncyCastleProvider());
-            }
+            ensureBouncyCastleRegistered();
 
             // Extract custom hostnames and combine with defaults
             List<String> customHostnames = extractCustomHostnames();

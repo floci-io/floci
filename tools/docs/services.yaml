@@ -14,6 +14,10 @@ services:
     doc: docs/services/acm.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/acm/AcmJsonHandler.java, mode: switch }
+  - service: applicationautoscaling
+    doc: docs/services/applicationautoscaling.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/applicationautoscaling/ApplicationAutoScalingJsonHandler.java, mode: switch }
   - service: athena
     doc: docs/services/athena.md
     sources:
@@ -22,14 +26,60 @@ services:
     doc: docs/services/cloudformation.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cloudformation/CloudFormationQueryHandler.java, mode: switch }
+  - service: cloudhsmv2
+    doc: docs/services/cloudhsmv2.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/cloudhsmv2/CloudHsmV2JsonHandler.java, mode: switch }
   - service: cloudtrail
     doc: docs/services/cloudtrail.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailJsonHandler.java, mode: switch }
+  - service: codegurureviewer
+    doc: docs/services/codegurureviewer.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/codegurureviewer/CodeGuruReviewerController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
+  - service: comprehend
+    doc: docs/services/comprehend.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/comprehend/ComprehendJsonHandler.java, mode: switch }
+  - service: connect
+    doc: docs/services/connect.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/connect/ConnectController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
+  - service: rekognition
+    doc: docs/services/rekognition.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/rekognition/RekognitionJsonHandler.java, mode: switch }
   - service: docdb
     doc: docs/services/docdb.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/docdb/DocDbQueryHandler.java, mode: switch }
+  - service: efs
+    doc: docs/services/efs.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/efs/EfsController.java, mode: rest }
+  - service: organizations
+    doc: docs/services/organizations.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/organizations/OrganizationsJsonHandler.java, mode: switch }
   - service: elasticache
     doc: docs/services/elasticache.md
     sources:
@@ -46,10 +96,40 @@ services:
     doc: docs/services/firehose.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/firehose/FirehoseJsonHandler.java, mode: switch }
+  - service: resource-explorer-2
+    doc: docs/services/resource-explorer.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/resourceexplorer2/ResourceExplorer2Controller.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
+  - service: fis
+    doc: docs/services/fis.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/fis/FisController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: kinesis
     doc: docs/services/kinesis.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/kinesis/KinesisJsonHandler.java, mode: switch }
+  - service: kinesisanalytics
+    doc: docs/services/kinesisanalytics.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/kinesisanalytics/KinesisAnalyticsV2JsonHandler.java, mode: switch }
   - service: kms
     doc: docs/services/kms.md
     sources:
@@ -62,15 +142,42 @@ services:
     doc: docs/services/neptune.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/neptune/NeptuneQueryHandler.java, mode: switch }
+  - service: networkfirewall
+    doc: docs/services/network-firewall.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/networkfirewall/NetworkFirewallJsonHandler.java, mode: switch }
+  - service: ram
+    doc: docs/services/ram.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/ram/RamController.java, mode: rest }
   - service: rds
     doc: docs/services/rds.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
-    exclude_actions: [SubnetIds, VpcSecurityGroupIds]
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove]
+  - service: redshift
+    doc: docs/services/redshift.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftQueryHandler.java, mode: switch }
+    # SubnetIds / VpcSecurityGroupIds / TagKeys are labels of an inner member-name
+    # switch (memberKeyRegex), not actions — same shape as the rds exclusions above.
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, TagKeys]
+  - service: route53resolver
+    doc: docs/services/route53resolver.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/route53resolver/Route53ResolverJsonHandler.java, mode: switch }
   - service: secretsmanager
     doc: docs/services/secrets-manager.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/secretsmanager/SecretsManagerJsonHandler.java, mode: switch }
+  - service: servicecatalog
+    doc: docs/services/service-catalog.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/servicecatalog/ServiceCatalogJsonHandler.java, mode: switch }
+  - service: servicequotas
+    doc: docs/services/servicequotas.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/servicequotas/ServiceQuotasJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:
@@ -80,6 +187,10 @@ services:
     doc: docs/services/step-functions.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/stepfunctions/StepFunctionsJsonHandler.java, mode: switch }
+  - service: swf
+    doc: docs/services/swf.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/swf/SwfJsonHandler.java, mode: switch }
   - service: wafv2
     doc: docs/services/wafv2.md
     sources:
@@ -88,7 +199,9 @@ services:
 # Switch handlers that exist but are intentionally not yet covered (see reasons).
 # A NEW switch handler not listed here and not registered above fails `--strict`.
 deferred_handlers:
+  - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java }  # single-op Identity Center stub, no standalone doc page yet
   - { path: src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2JsonHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/applicationautoscaling/ScalingPolicyAlarmActionHandler.java }  # not a JSON/Query action dispatcher — its `case "X" ->` arms are the StepScaling AdjustmentType switch, not AWS actions
   - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/bcmdataexports/BcmDataExportsJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/ce/CostExplorerJsonHandler.java }  # no standalone action table yet
@@ -112,6 +225,7 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/glue/GlueJsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/iam/IamQueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java }  # sts (lives in iam package); single-table, registerable next
+  - { path: src/main/java/io/github/hectorvent/floci/services/lakeformation/LakeFormationJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/lightsail/LightsailJsonHandler.java }  # non-tabular doc (grouped/inline); standalone action table to be added
   - { path: src/main/java/io/github/hectorvent/floci/services/pricing/PricingJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java }  # non-tabular doc (grouped/inline)

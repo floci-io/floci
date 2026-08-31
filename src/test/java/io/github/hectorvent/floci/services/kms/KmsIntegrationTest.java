@@ -13,6 +13,8 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -561,6 +563,8 @@ class KmsIntegrationTest {
                         {
                             "KeyId": "%s",
                             "GranteePrincipal": "arn:aws:iam::000000000000:user/grantee",
+                            "Name": "vellum-tenant-round-trip",
+                            "Constraints": {"EncryptionContextEquals": {"tenant_id": "tenant-001"}},
                             "Operations": ["Encrypt", "Decrypt"]
                         }
                         """.formatted(keyId))
@@ -585,6 +589,8 @@ class KmsIntegrationTest {
                 .body("Grants[0].GrantId", equalTo(grantId))
                 .body("Grants[0].KeyId", startsWith("arn:aws:kms:"))
                 .body("Grants[0].GranteePrincipal", equalTo("arn:aws:iam::000000000000:user/grantee"))
+                .body("Grants[0].Name", equalTo("vellum-tenant-round-trip"))
+                .body("Grants[0].Constraints.EncryptionContextEquals.tenant_id", equalTo("tenant-001"))
                 .body("Grants[0].Operations[0]", equalTo("Encrypt"))
                 .body("Grants[0].Operations[1]", equalTo("Decrypt"))
                 .body("Truncated", equalTo(false));
@@ -780,6 +786,36 @@ class KmsIntegrationTest {
                 .statusCode(200)
                 .body("Grants.size()", equalTo(0))
                 .body("Truncated", equalTo(false));
+    }
+
+    @Test
+    void createGrantWithNonObjectConstraintsReturnsValidationException() {
+        // The handler previously converted any non-object Constraints (e.g. a raw string or
+        // array) to null before it reached KmsService, so a malformed request was silently
+        // treated as "no constraints" instead of rejected.
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"constraints-type-check\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateGrant")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                        {
+                            "KeyId": "%s",
+                            "GranteePrincipal": "arn:aws:iam::000000000000:user/grantee",
+                            "Operations": ["Encrypt"],
+                            "Constraints": "not-an-object"
+                        }
+                        """.formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 
     @Test
@@ -1105,5 +1141,260 @@ class KmsIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(expectedStatusCode);
+    }
+
+    // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicyThroughJsonHandler() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"list-key-policies\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("PolicyNames.size()", equalTo(1))
+                .body("PolicyNames[0]", equalTo("default"))
+                .body("Truncated", equalTo(false))
+                // Truncated is always false, so NextMarker must be absent rather than null.
+                .body("$", not(hasKey("NextMarker")));
+    }
+
+    @Test
+    void listKeyPoliciesIgnoresLimitAndMarker() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"list-key-policies-paging\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        // A single policy name cannot be paginated, and ListKeyPolicies does not declare
+        // InvalidMarkerException, so both parameters are accepted without error.
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s","Limit":1,"Marker":"anything"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("PolicyNames[0]", equalTo("default"))
+                .body("Truncated", equalTo(false));
+    }
+
+    @Test
+    void listKeyPoliciesReturnsNotFoundForUnknownKey() {
+        // Asserting the error type only. Floci returns 404 where real KMS uses 400 for
+        // NotFoundException, a pre-existing service-wide deviation that is not this change's to fix.
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"non-existent-id\"}")
+                .when()
+                .post("/")
+                .then()
+                .body("__type", equalTo("NotFoundException"));
+    }
+
+    @Test
+    void updateAliasRoundTripThroughJsonHandler() {
+        String keyId1 = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String keyId2 = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-test\",\"TargetKeyId\":\"" + keyId1 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-test\",\"TargetKeyId\":\"" + keyId2 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId2 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Aliases.find { it.AliasName == 'alias/update-alias-test' }.TargetKeyId", equalTo(keyId2));
+    }
+
+    @Test
+    void updateAliasReturnsNotFoundForUnknownAlias() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/non-existent\",\"TargetKeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+    }
+
+    @Test
+    void updateAliasReturnsNotFoundForUnknownTargetKey() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-missing-target\",\"TargetKeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-missing-target\",\"TargetKeyId\":\"non-existent-key\"}")
+                .when().post("/")
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+    }
+
+    @Test
+    void updateAliasReturnsInvalidStateForPendingDeletionTarget() {
+        String keyId1 = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String keyId2 = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.ScheduleKeyDeletion")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId2 + "\",\"PendingWindowInDays\":7}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-pending-deletion\",\"TargetKeyId\":\"" + keyId1 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-pending-deletion\",\"TargetKeyId\":\"" + keyId2 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"));
+    }
+
+    @Test
+    void updateAliasReturnsValidationForIncompatibleKeyUsage() {
+        String symmetricKeyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String hmacKeyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"GENERATE_VERIFY_MAC\",\"KeySpec\":\"HMAC_256\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-incompatible-usage\",\"TargetKeyId\":\"" + symmetricKeyId + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-incompatible-usage\",\"TargetKeyId\":\"" + hmacKeyId + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 }

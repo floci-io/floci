@@ -95,6 +95,32 @@ class XmlParserTest {
         assertNull(groups.get(0).get("Nested"));
     }
 
+    // --- extractElementTree: scoped structured parsing ---
+
+    @Test
+    void extractElementTreePreservesNestedNamespaceQualifiedBlocks() {
+        var root = XmlParser.extractElementTree("""
+                <Envelope xmlns:cf="https://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <cf:Config>
+                    <cf:First><cf:Value>one</cf:Value></cf:First>
+                    <cf:Second><cf:Value><![CDATA[two]]></cf:Value></cf:Second>
+                  </cf:Config>
+                </Envelope>
+                """, "Config");
+
+        assertNotNull(root);
+        assertEquals("Config", root.name());
+        assertEquals("one", root.child("First").child("Value").text());
+        assertEquals("two", root.child("Second").child("Value").text());
+    }
+
+    @Test
+    void extractElementTreeReturnsNullForMalformedOrMissingElements() {
+        assertNull(XmlParser.extractElementTree("<Root><Target></Root>", "Target"));
+        assertNull(XmlParser.extractElementTree("<Root/>", "Target"));
+        assertNull(XmlParser.extractElementTree(null, "Target"));
+    }
+
     // --- extractPairsPerGroup ---
 
     @Test
@@ -212,5 +238,26 @@ class XmlParserTest {
         assertEquals(2, filters.size());
         assertTrue(filters.get(0).isEmpty());
         assertEquals("logs/", filters.get(1).get("prefix"));
+    }
+
+    // --- rootElementName: root identification and well-formedness ---
+
+    @Test
+    void rootElementNameReturnsTheRootLocalName() {
+        assertEquals("AccelerateConfiguration", XmlParser.rootElementName(
+                "<AccelerateConfiguration><Status>Enabled</Status></AccelerateConfiguration>"));
+        assertEquals("AccelerateConfiguration", XmlParser.rootElementName(
+                "<ns:AccelerateConfiguration xmlns:ns=\"urn:x\"/>"));
+        assertEquals("Wrapper", XmlParser.rootElementName(
+                "<Wrapper><AccelerateConfiguration/></Wrapper>"));
+    }
+
+    @Test
+    void rootElementNameReturnsNullForBodiesThatDoNotParse() {
+        assertNull(XmlParser.rootElementName(null));
+        assertNull(XmlParser.rootElementName(""));
+        assertNull(XmlParser.rootElementName("garbage {} not xml"));
+        assertNull(XmlParser.rootElementName("<AccelerateConfiguration><Status>Enabled"));
+        assertNull(XmlParser.rootElementName("<AccelerateConfiguration/>trailing"));
     }
 }

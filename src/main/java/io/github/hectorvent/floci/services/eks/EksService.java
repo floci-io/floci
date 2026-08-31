@@ -8,9 +8,12 @@ import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
@@ -39,11 +42,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.Set;
 
 @ApplicationScoped
-public class EksService implements TagHandler {
+public class EksService implements TagHandler, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
+
+    /** The AWS charset for EKS cluster names. It admits no dot, which the Docker-name account
+     *  qualifier relies on — see EksClusterManager#accountQualifiedName. */
+    static final String CLUSTER_NAME_REGEX = "[0-9A-Za-z][A-Za-z0-9\\-_]*";
 
     private final StorageBackend<String, Cluster> storage;
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
@@ -51,11 +62,14 @@ public class EksService implements TagHandler {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final EksClusterManager clusterManager;
+    private final Ec2Service ec2Service;
+    private final EksOidcService oidcService;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
-            RegionResolver regionResolver, EksClusterManager clusterManager) {
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -68,13 +82,119 @@ public class EksService implements TagHandler {
         this.config = config;
         this.regionResolver = regionResolver;
         this.clusterManager = clusterManager;
+        this.ec2Service = ec2Service;
+        this.oidcService = oidcService;
     }
 
     @PostConstruct
     public void init() {
+        backfillOidcIdentities();
         if (!config.services().eks().mock()) {
+            restorePersistedClusters();
             startReadinessPoller();
         }
+    }
+
+    /**
+     * Re-latches persisted clusters onto their k3s containers after a restart (#2609). Without
+     * this, a cluster restored from {@code eks-clusters.json} reported ACTIVE but its container
+     * was never restarted after a Docker daemon reboot, so every kubectl/deploy against it failed.
+     * A surviving container is adopted (and started if stopped); a missing one is recreated
+     * against the cluster's retained data volume. Restored clusters go back to CREATING so the
+     * readiness poller re-verifies the API server and re-extracts the certificate authority
+     * before marking them ACTIVE again.
+     */
+    private void restorePersistedClusters() {
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            Cluster cluster = entry.value();
+            if (cluster.getContainerId() != null
+                    || (cluster.getStatus() != ClusterStatus.ACTIVE
+                            && cluster.getStatus() != ClusterStatus.CREATING)) {
+                continue;
+            }
+            // Cluster.accountId is @JsonIgnore, so a reloaded record carries none — the owning
+            // account must come from the storage key, or a non-default account's cluster would be
+            // written back under the default account (stale owner record + duplicate). Rehydrate
+            // it on the record too, so the readiness poller's later put lands under the owner.
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(entry.accountId());
+            }
+            // A persisted name that predates create-time validation may violate the AWS charset —
+            // in particular contain a dot, which could spell out another account's qualified
+            // Docker name and cross-bind its container. Such a record is never restored; the
+            // cluster must be deleted and recreated under a valid name.
+            if (cluster.getName() == null || !cluster.getName().matches(CLUSTER_NAME_REGEX)) {
+                LOG.errorv("Not restoring EKS cluster \"{0}\" (account {1}): its persisted name "
+                        + "violates the AWS charset and could alias another account''s Docker "
+                        + "resources. Delete it and recreate it under a valid name.",
+                        cluster.getName(), entry.accountId());
+                cluster.setStatus(ClusterStatus.FAILED);
+                putClusterForAccount(entry.accountId(), cluster);
+                continue;
+            }
+            try {
+                LOG.infov("Restoring k3s container for persisted EKS cluster {0}", cluster.getName());
+                cluster.setStatus(ClusterStatus.CREATING);
+                clusterManager.restoreCluster(cluster);
+            } catch (Exception e) {
+                LOG.errorv("Failed to restore k3s container for EKS cluster {0}: {1}",
+                        cluster.getName(), e.getMessage());
+                cluster.setStatus(ClusterStatus.FAILED);
+            }
+            putClusterForAccount(entry.accountId(), cluster);
+        }
+    }
+
+    private List<AccountAwareStorageBackend.AccountEntry<Cluster>> allClusterEntries() {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            return aware.scanAllAccountEntries(k -> true);
+        }
+        return storage.scan(k -> true).stream()
+                .map(cluster -> new AccountAwareStorageBackend.AccountEntry<>(
+                        cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getAccountId(),
+                        cluster.getName(), cluster))
+                .toList();
+    }
+
+    /**
+     * Gives clusters persisted before IRSA support an OIDC issuer and signing key. Without this,
+     * a cluster restored from {@code eks-clusters.json} would report no
+     * {@code identity.oidc.issuer}, and token minting and the JWKS routes would fail for it until
+     * it was recreated.
+     */
+    private void backfillOidcIdentities() {
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            Cluster cluster = entry.value();
+            // Runs at startup with no request context, and Cluster.accountId is @JsonIgnore so a
+            // reloaded record carries none — the owning account comes from the storage key and is
+            // passed explicitly, or the account-scoped put()/get() would resolve to the default
+            // account and strand a cluster (and its signing key) owned by any other one.
+            String accountId = entry.accountId();
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(accountId);
+            }
+
+            if (cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
+                    && cluster.getIdentity().getOidc().getIssuer() != null) {
+                oidcService.ensureKeyForAccount(accountId, cluster.getName(),
+                        cluster.getIdentity().getOidc().getIssuer());
+                continue;
+            }
+            String issuer = oidcService.newIssuerUrl(config.defaultRegion());
+            cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+            oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+            putClusterForAccount(accountId, cluster);
+            LOG.infov("Backfilled IRSA OIDC issuer for existing EKS cluster {0} in account {1}",
+                    cluster.getName(), accountId);
+        }
+    }
+
+    private void putClusterForAccount(String accountId, Cluster cluster) {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            aware.putForAccount(accountId, cluster.getName(), cluster);
+            return;
+        }
+        storage.put(cluster.getName(), cluster);
     }
 
     @PreDestroy
@@ -92,12 +212,23 @@ public class EksService implements TagHandler {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "Cluster name is required", 400);
         }
+        // The AWS constraint on EKS cluster names. Enforcing it also guarantees no name can
+        // contain the dot EksClusterManager uses to account-qualify Docker names, so a
+        // default-account cluster name can never spell out another account's qualified name
+        // and collide with its container or data volume.
+        if (name.length() > 100 || !name.matches(CLUSTER_NAME_REGEX)) {
+            throw new AwsException("InvalidParameterException",
+                    "Value '" + name + "' at 'name' failed to satisfy constraint: Member must "
+                            + "satisfy regular expression pattern: ^" + CLUSTER_NAME_REGEX + "$",
+                    400);
+        }
         if (storage.get(name).isPresent()) {
             throw new AwsException("ResourceInUseException",
                     "Cluster already exists: " + name, 409);
         }
 
-        String region = config.defaultRegion();
+        String region = regionResolver.getRegion();
+        String resolvedVpcId = validateSubnetsAndResolveVpcId(region, request.getResourcesVpcConfig());
         String accountId = regionResolver.getAccountId();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString();
 
@@ -108,12 +239,16 @@ public class EksService implements TagHandler {
         cluster.setCreatedAt(Instant.now());
         cluster.setVersion(request.getVersion() != null ? request.getVersion() : "1.29");
         cluster.setRoleArn(request.getRoleArn());
-        cluster.setResourcesVpcConfig(buildVpcConfigResponse(request.getResourcesVpcConfig()));
+        cluster.setResourcesVpcConfig(buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId));
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
+
+        String issuer = oidcService.newIssuerUrl(region);
+        cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        oidcService.ensureKey(name, issuer);
 
         if (config.services().eks().mock()) {
             cluster.setStatus(ClusterStatus.ACTIVE);
@@ -153,6 +288,7 @@ public class EksService implements TagHandler {
             clusterManager.stopCluster(cluster);
         }
         storage.delete(name);
+        oidcService.deleteKey(name);
         return cluster;
     }
 
@@ -380,12 +516,42 @@ public class EksService implements TagHandler {
         return resourceArn.substring(idx + 1);
     }
 
-    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request) {
+    /**
+     * Validates every requested subnet and returns the VPC they belong to.
+     *
+     * CreateCluster carries no vpcId — real EKS derives it from the subnets, and
+     * #1942 reported resourcesVpcConfig.vpcId coming back blank because the
+     * Subnet that requireSubnet already resolves was discarded here.
+     *
+     * @return the vpcId of the requested subnets, or null when none were given
+     */
+    private String validateSubnetsAndResolveVpcId(String region, ResourcesVpcConfig vpcConfig) {
+        if (vpcConfig == null || vpcConfig.getSubnetIds() == null) {
+            return null;
+        }
+        String vpcId = null;
+        for (String subnetId : vpcConfig.getSubnetIds()) {
+            try {
+                vpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
+            } catch (AwsException e) {
+                throw new AwsException("InvalidParameterException",
+                        "Subnet ID '" + subnetId + "' does not exist", 400);
+            }
+        }
+        return vpcId;
+    }
+
+    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId) {
         ResourcesVpcConfig response = new ResourcesVpcConfig();
         if (request != null) {
             response.setSubnetIds(request.getSubnetIds() != null ? request.getSubnetIds() : List.of());
             response.setSecurityGroupIds(request.getSecurityGroupIds() != null ? request.getSecurityGroupIds() : List.of());
-            response.setVpcId(request.getVpcId() != null ? request.getVpcId() : "");
+            // A caller-supplied vpcId still wins; otherwise fall back to the one
+            // the subnets resolved to, and only then to empty.
+            String vpcId = request.getVpcId() != null && !request.getVpcId().isBlank()
+                    ? request.getVpcId()
+                    : (resolvedVpcId != null ? resolvedVpcId : "");
+            response.setVpcId(vpcId);
             response.setEndpointPublicAccess(
                     request.getEndpointPublicAccess() != null ? request.getEndpointPublicAccess() : Boolean.TRUE);
             response.setEndpointPrivateAccess(
@@ -487,5 +653,30 @@ public class EksService implements TagHandler {
         } else {
             storage.put(cluster.getName(), cluster);
         }
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Cluster cluster : storage.scan(k -> true)) {
+            String arn = cluster.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "eks:cluster", "eks",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.now(),
+                    cluster.getTags() != null ? cluster.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("eks:cluster", "eks", true));
     }
 }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
@@ -47,9 +48,15 @@ class AslExecutorJsonMergeTest {
                 mock(S3Service.class),
                 mock(EcsService.class),
                 mock(EcsJsonHandler.class),
+                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 mapper,
                 new JsonataEvaluator(mapper),
-                mock(Instance.class));
+                mock(Instance.class),
+                mock(EmulatorConfig.class),
+                null,
+                null);
     }
 
     @Test

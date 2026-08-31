@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -24,6 +25,7 @@ import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
@@ -205,6 +207,108 @@ class BatchServiceTest {
                 {"jobQueue":"%s","jobStatus":"SUCCEEDED","maxResults":1,"nextToken":"%s"}
                 """.formatted(queueArn, firstPage.path("nextToken").asText())));
         assertEquals("b-job", secondPage.path("jobSummaryList").get(0).path("jobId").asText());
+    }
+
+    @Test
+    void updateJobQueueChangesPriorityStateAndComputeEnvironmentOrder() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        String firstComputeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"update-ce-1","type":"MANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+        String secondComputeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"update-ce-2","type":"MANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+        String queueArn = service.createJobQueue(json("""
+                {
+                  "jobQueueName":"update-queue",
+                  "priority":1,
+                  "computeEnvironmentOrder":[{"order":1,"computeEnvironment":"%s"}]
+                }
+                """.formatted(firstComputeArn)), REGION).path("jobQueueArn").asText();
+
+        JsonNode updated = service.updateJobQueue(json("""
+                {
+                  "jobQueue":"update-queue",
+                  "state":"DISABLED",
+                  "priority":5,
+                  "computeEnvironmentOrder":[{"order":1,"computeEnvironment":"%s"}]
+                }
+                """.formatted(secondComputeArn)));
+        assertEquals("update-queue", updated.path("jobQueueName").asText());
+        assertEquals(queueArn, updated.path("jobQueueArn").asText());
+
+        JsonNode detail = service.describeJobQueues(json("""
+                {"jobQueues":["%s"]}
+                """.formatted(queueArn))).path("jobQueues").get(0);
+        assertEquals("DISABLED", detail.path("state").asText());
+        assertEquals(5, detail.path("priority").asInt());
+        assertEquals(secondComputeArn,
+                detail.path("computeEnvironmentOrder").get(0).path("computeEnvironment").asText());
+    }
+
+    @Test
+    void updateJobQueueRejectsUnknownQueue() {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        AwsException e = assertThrows(AwsException.class, () -> service.updateJobQueue(json("""
+                {"jobQueue":"missing-queue","priority":2}
+                """)));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteJobQueueRejectsEnabledQueue() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        String computeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"delete-enabled-ce","type":"MANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+        service.createJobQueue(json("""
+                {
+                  "jobQueueName":"delete-enabled-queue",
+                  "priority":1,
+                  "computeEnvironmentOrder":[{"order":1,"computeEnvironment":"%s"}]
+                }
+                """.formatted(computeArn)), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deleteJobQueue(json("""
+                {"jobQueue":"delete-enabled-queue"}
+                """)));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteJobQueueRemovesDisabledQueueAndToleratesRepeatDeletes() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        String computeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"delete-ce","type":"MANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+        String queueArn = service.createJobQueue(json("""
+                {
+                  "jobQueueName":"delete-queue",
+                  "priority":1,
+                  "computeEnvironmentOrder":[{"order":1,"computeEnvironment":"%s"}]
+                }
+                """.formatted(computeArn)), REGION).path("jobQueueArn").asText();
+
+        service.updateJobQueue(json("""
+                {"jobQueue":"delete-queue","state":"DISABLED"}
+                """));
+        JsonNode deleted = service.deleteJobQueue(json("""
+                {"jobQueue":"delete-queue"}
+                """));
+        assertEquals(0, deleted.size());
+
+        JsonNode queues = service.describeJobQueues(json("""
+                {"jobQueues":["%s"]}
+                """.formatted(queueArn))).path("jobQueues");
+        assertEquals(0, queues.size());
+
+        JsonNode repeated = service.deleteJobQueue(json("""
+                {"jobQueue":"delete-queue"}
+                """));
+        assertEquals(0, repeated.size());
     }
 
     private BatchService dockerService(BatchDockerRunner runner) {

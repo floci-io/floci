@@ -8,8 +8,10 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -39,6 +41,27 @@ class SqsCfnProvisionerTest {
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
+        });
+        // Mirrors the engine's resolveNode contract for the flat objects these tests use:
+        // Fn::GetAtt collapses to a text ARN, everything else passes through untouched.
+        when(engine.resolveNode(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            if (node == null || !node.isObject()) {
+                return node;
+            }
+            ObjectNode resolved = mapper.createObjectNode();
+            node.fields().forEachRemaining(e -> {
+                if (e.getValue().isObject() && e.getValue().has("Fn::GetAtt")) {
+                    resolved.put(e.getKey(), "arn:aws:sqs:us-east-1:000000000000:my-stack-Dlq.fifo");
+                } else {
+                    resolved.set(e.getKey(), e.getValue());
+                }
+            });
+            return resolved;
+        });
+        when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
+            JsonNode resolved = engine.resolveNode(inv.getArgument(0));
+            return resolved != null && resolved.isTextual() ? resolved.asText() : resolved.toString();
         });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
     }
@@ -76,6 +99,101 @@ class SqsCfnProvisionerTest {
 
         // <stack>-<logicalId>-<suffix>, capped at 80
         assertEquals("my-stack-MyQueue", r.getAttributes().get("QueueName").replaceAll("-[0-9a-f]{12}$", ""));
+    }
+
+    @Test
+    void queuePassesFifoScalarAttributesToCreateQueue() {
+        // Reproduces #1907: DeduplicationScope and FifoThroughputLimit from the template must
+        // reach SqsService.createQueue — the engine already persists them (issue Control 2).
+        when(sqs.createQueue(eq("orders.fifo"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("orders.fifo", "http://localhost:4566/000000000000/orders.fifo"));
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        ObjectNode props = mapper.createObjectNode()
+                .put("QueueName", "orders.fifo")
+                .put("FifoQueue", true)
+                .put("ContentBasedDeduplication", false)
+                .put("DeduplicationScope", "messageGroup")
+                .put("FifoThroughputLimit", "perMessageGroupId")
+                .put("VisibilityTimeout", 30);
+
+        provisioner.provision(r, props, ctx());
+
+        Map<String, String> attrs = capturedCreateQueueAttributes("orders.fifo");
+        assertEquals("messageGroup", attrs.get("DeduplicationScope"));
+        assertEquals("perMessageGroupId", attrs.get("FifoThroughputLimit"));
+        // The two attributes that already worked keep working.
+        assertEquals("false", attrs.get("ContentBasedDeduplication"));
+        assertEquals("30", attrs.get("VisibilityTimeout"));
+    }
+
+    @Test
+    void queueSerializesRedrivePolicyWithResolvedDlqArn() {
+        // Reproduces #1907: RedrivePolicy is a JSON object in the template (with an intrinsic
+        // for the DLQ ARN) and must reach createQueue as the JSON string SqsService parses.
+        when(sqs.createQueue(eq("orders.fifo"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("orders.fifo", "http://localhost:4566/000000000000/orders.fifo"));
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        ObjectNode getAtt = mapper.createObjectNode();
+        getAtt.set("Fn::GetAtt", mapper.createArrayNode().add("Dlq").add("Arn"));
+        ObjectNode redrive = mapper.createObjectNode();
+        redrive.set("deadLetterTargetArn", getAtt);
+        redrive.put("maxReceiveCount", 5);
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders.fifo");
+        props.set("RedrivePolicy", redrive);
+
+        provisioner.provision(r, props, ctx());
+
+        Map<String, String> attrs = capturedCreateQueueAttributes("orders.fifo");
+        assertEquals(
+                "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:my-stack-Dlq.fifo\",\"maxReceiveCount\":5}",
+                attrs.get("RedrivePolicy"));
+    }
+
+    @Test
+    void queuePassesThroughAlreadySerializedRedrivePolicyString() {
+        // Reported on #1939: CDK commonly emits RedrivePolicy via Fn::Join, which resolveNode
+        // collapses to an already-JSON-encoded TextNode. TextNode#toString() re-encodes it (quotes
+        // and escapes the string), double-serializing the policy so SqsService can't parse it.
+        when(sqs.createQueue(eq("orders.fifo"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("orders.fifo", "http://localhost:4566/000000000000/orders.fifo"));
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        String serializedRedrive =
+                "{\"maxReceiveCount\":5,\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:my-stack-Dlq.fifo\"}";
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders.fifo");
+        props.put("RedrivePolicy", serializedRedrive);
+
+        provisioner.provision(r, props, ctx());
+
+        Map<String, String> attrs = capturedCreateQueueAttributes("orders.fifo");
+        assertEquals(serializedRedrive, attrs.get("RedrivePolicy"));
+    }
+
+    @Test
+    void fifoQueueWithoutNameGetsGeneratedFifoNameAndFifoAttribute() {
+        // Like real CloudFormation, a FifoQueue: true resource without a QueueName must get a
+        // generated physical name ending in .fifo — SqsService rejects FifoQueue=true otherwise.
+        when(sqs.createQueue(anyString(), any(), eq("us-east-1")))
+                .thenAnswer(inv -> new Queue(inv.getArgument(0), "http://q/" + inv.getArgument(0)));
+        StackResource r = resource("AWS::SQS::Queue", "MyDlq");
+        ObjectNode props = mapper.createObjectNode().put("FifoQueue", true);
+
+        provisioner.provision(r, props, ctx());
+
+        String queueName = r.getAttributes().get("QueueName");
+        assertTrue(queueName.endsWith(".fifo"),
+                "generated FIFO queue name should end with .fifo but was: " + queueName);
+        assertTrue(queueName.length() <= 80, "queue name must stay within the 80-char limit");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).createQueue(eq(queueName), captor.capture(), eq("us-east-1"));
+        assertEquals("true", captor.getValue().get("FifoQueue"));
+    }
+
+    private Map<String, String> capturedCreateQueueAttributes(String queueName) {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).createQueue(eq(queueName), captor.capture(), eq("us-east-1"));
+        return captor.getValue();
     }
 
     @Test

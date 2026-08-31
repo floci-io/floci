@@ -13,7 +13,8 @@ import java.util.regex.Pattern;
  */
 public final class LambdaArnUtils {
 
-    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9-_]+");
+    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9-_.]+");
+    private static final int MAX_NAME_LENGTH = 256;
     private static final Pattern ACCOUNT_PATTERN = Pattern.compile("\\d{12}");
     private static final Pattern QUALIFIER_PATTERN = Pattern.compile("\\$LATEST|[a-zA-Z0-9-_]+");
 
@@ -144,6 +145,9 @@ public final class LambdaArnUtils {
         if (name == null || name.isEmpty()) {
             throw invalid("FunctionName segment is empty");
         }
+        if (name.length() > MAX_NAME_LENGTH) {
+            throw invalid("FunctionName exceeds maximum length of " + MAX_NAME_LENGTH + ": " + name);
+        }
         if (!NAME_PATTERN.matcher(name).matches()) {
             throw invalid("FunctionName contains invalid characters: " + name);
         }
@@ -163,16 +167,23 @@ public final class LambdaArnUtils {
     }
 
     /**
-     * Extracts the Lambda function name from an API Gateway integration URI.
+     * Extracts the Lambda function reference from an API Gateway integration URI.
      * Handles formats like:
      * <ul>
      *   <li>{@code arn:aws:lambda:us-east-1:000000000000:function:myFn/invocations}</li>
      *   <li>{@code arn:aws:lambda:us-east-1:000000000000:function:myFn}</li>
+     *   <li>{@code arn:aws:lambda:us-east-1:000000000000:function:myFn:PROD/invocations} (alias/version)</li>
      *   <li>{@code myFn} (bare function name)</li>
      * </ul>
      *
+     * <p>Any trailing {@code :qualifier} (alias or version) is preserved in the returned
+     * value (e.g. {@code myFn:PROD}) so downstream {@code invoke} calls, which resolve the
+     * reference via {@link #resolve(String)}, target the configured alias/version rather
+     * than reducing to the bare function name and invoking {@code $LATEST}.
+     *
      * @param uri the integration URI (may be null)
-     * @return the extracted function name, or null if the URI is null or unparseable
+     * @return the extracted function reference (name, optionally with {@code :qualifier}),
+     *         or null if the URI is null or unparseable
      */
     public static String extractFunctionNameFromUri(String uri) {
         if (uri == null) {
@@ -189,8 +200,16 @@ public final class LambdaArnUtils {
                 String embeddedArn = String.join("/", java.util.Arrays.copyOfRange(parts, 3, parts.length));
                 return extractFunctionNameFromUri(embeddedArn);
             }
-            // Standard Lambda ARN: parts[0] is "function:myFn", strip the "function:" prefix
+            // Standard Lambda ARN: parts[0] is "function:myFn" or "function:myFn:qualifier".
+            // Strip only the leading "function:" resource-type prefix, preserving any
+            // trailing :qualifier (alias/version) so the invoke target is not lost.
             String functionPart = parts[0];
+            String functionPrefix = "function:";
+            if (functionPart.startsWith(functionPrefix)) {
+                return functionPart.substring(functionPrefix.length());
+            }
+            // Fallback for malformed/non-standard resources: every real Lambda ARN resource
+            // starts with "function:" and is handled above, so this only fires on unexpected input.
             int colon = functionPart.lastIndexOf(':');
             return colon >= 0 ? functionPart.substring(colon + 1) : functionPart;
         } catch (IllegalArgumentException e) {
