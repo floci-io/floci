@@ -105,6 +105,16 @@ public class RedshiftService {
             } catch (Exception e) {
                 LOG.warnv(e, "Failed to recover container for cluster {0}, marking as unavailable",
                         cluster.getClusterIdentifier());
+                try {
+                    proxyManager.stopProxy(relayKey(entry.accountId(), cluster.getClusterIdentifier()));
+                } catch (Exception ex) {
+                    LOG.warnv(ex, "Failed to stop proxy during recovery rollback for cluster {0}", cluster.getClusterIdentifier());
+                }
+                try {
+                    containerManager.stop(entry.accountId(), cluster.getClusterIdentifier());
+                } catch (Exception ex) {
+                    LOG.warnv(ex, "Failed to stop container during recovery rollback for cluster {0}", cluster.getClusterIdentifier());
+                }
                 cluster.setClusterStatus("unavailable");
                 clusters.putForAccount(entry.accountId(), entry.key(), cluster);
             }
@@ -301,16 +311,12 @@ public class RedshiftService {
             cluster.setClusterStatus("available");
             rebooted = true;
         } catch (AwsException e) {
-            if (rollbackReboot(clusterIdentifier, proxyPort, originalTornDown)) {
-                cluster.setProxyPort(0);
-            }
+            rollbackReboot(clusterIdentifier, originalTornDown);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw e;
         } catch (Exception e) {
-            if (rollbackReboot(clusterIdentifier, proxyPort, originalTornDown)) {
-                cluster.setProxyPort(0);
-            }
+            rollbackReboot(clusterIdentifier, originalTornDown);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
@@ -886,17 +892,20 @@ public class RedshiftService {
      * throwing (e.g. its readiness check timed out). The pre-reboot data dump is kept by
      * the caller.
      */
-    private boolean rollbackReboot(String identifier, int proxyPort, boolean originalTornDown) {
+    private void rollbackReboot(String identifier, boolean originalTornDown) {
         if (!originalTornDown) {
-            return false;
+            return;
         }
-        boolean proxyStopped = stopProxyAndReleasePortSafely(identifier, proxyPort);
+        try {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), identifier));
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to stop proxy during reboot rollback for cluster {0}", identifier);
+        }
         try {
             containerManager.stop(clusters.accountId(), identifier);
         } catch (Exception ex) {
             LOG.warnv(ex, "Failed to stop replacement container during rollback of reboot for cluster {0}", identifier);
         }
-        return proxyStopped;
     }
 
     private void releaseProxyPort(int port) {

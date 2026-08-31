@@ -500,10 +500,10 @@ class RedshiftServiceTest {
         // original is already gone, so rollback removes anything under the name —
         // once for the original teardown, once for the possible orphan.
         verify(cm, times(2)).stop("111111111111", "c1");
-        
-        // Proxy port must be cleared from the failed cluster's metadata to prevent
-        // double-release when the cluster is eventually deleted.
-        assertEquals(0, cluster.getProxyPort());
+
+        // The reserved port belongs to the cluster and is not released by reboot rollback;
+        // it is released only when the cluster is successfully deleted.
+        assertEquals(7107, cluster.getProxyPort());
     }
 
     @Test
