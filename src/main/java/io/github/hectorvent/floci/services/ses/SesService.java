@@ -2936,13 +2936,7 @@ public class SesService {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
-        boolean hasSubject = subject != null && !subject.isBlank();
-        boolean hasText = textPart != null && !textPart.isBlank();
-        boolean hasHtml = htmlPart != null && !htmlPart.isBlank();
-        if (!hasSubject && !hasText && !hasHtml) {
-            throw new AwsException("InvalidTemplate",
-                    "Template must have at least a subject, text, or html part.", 400);
-        }
+        requireInlineTemplateContent(subject, textPart, htmlPart);
         if (entries == null || entries.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination entry is required.", 400);

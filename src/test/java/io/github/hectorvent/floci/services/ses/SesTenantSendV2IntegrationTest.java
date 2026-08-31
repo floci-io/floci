@@ -232,6 +232,13 @@ class SesTenantSendV2IntegrationTest {
                         + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"" + TEMPLATE + "\","
                         + "\"TemplateData\":\"{}\"}},\"BulkEmailEntries\":[]}")
                 .when().post("/v2/email/outbound-bulk-emails").then().statusCode(400);
+        // An all-blank inline template is a shape error too — 400 before the ghost tenant's 404.
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"ghost-tenant\","
+                        + "\"DefaultContent\":{\"Template\":{\"TemplateContent\":{},"
+                        + "\"TemplateData\":\"{}\"}},"
+                        + "\"BulkEmailEntries\":[{\"Destination\":{\"ToAddresses\":"
+                        + "[\"success@simulator.amazonses.com\"]}}]}")
+                .when().post("/v2/email/outbound-bulk-emails").then().statusCode(400);
 
         v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"ghost-tenant\","
                         + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"" + TEMPLATE + "\","

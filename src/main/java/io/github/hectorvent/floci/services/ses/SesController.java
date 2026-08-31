@@ -661,6 +661,8 @@ public class SesController {
                 subject = inline.path("Subject").asText(null);
                 text = inline.path("Text").asText(null);
                 html = inline.path("Html").asText(null);
+                // Shape validation belongs before the tenant gate below, as on SendEmail.
+                SesService.requireInlineTemplateContent(subject, text, html);
             } else {
                 String resolvedName = hasName
                         ? templateName
