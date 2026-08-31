@@ -312,12 +312,16 @@ public class RedshiftService {
             rebooted = true;
         } catch (AwsException e) {
             rollbackReboot(clusterIdentifier, originalTornDown);
-            cluster.setClusterStatus("failed");
+            if (originalTornDown) {
+                cluster.setClusterStatus("failed");
+            }
             clusters.flush();
             throw e;
         } catch (Exception e) {
             rollbackReboot(clusterIdentifier, originalTornDown);
-            cluster.setClusterStatus("failed");
+            if (originalTornDown) {
+                cluster.setClusterStatus("failed");
+            }
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
         } finally {
@@ -328,10 +332,17 @@ public class RedshiftService {
                     LOG.warnv(ex, "Failed to clean up temporary dump file {0} after rebooting cluster {1}", tempDump, clusterIdentifier);
                 }
             } else {
-                // Once the original container is torn down it holds no volume, so this dump can
-                // be the only surviving copy of the cluster's data — keep it for manual recovery.
-                LOG.warnv("Reboot of cluster {0} did not complete; retained pre-reboot data dump at {1}",
-                        clusterIdentifier, tempDump);
+                if (originalTornDown) {
+                    // Once the original container is torn down it holds no volume, so this dump can
+                    // be the only surviving copy of the cluster's data — keep it for manual recovery.
+                    LOG.warnv("Reboot of cluster {0} did not complete; retained pre-reboot data dump at {1}",
+                            clusterIdentifier, tempDump);
+                } else {
+                    try {
+                        Files.deleteIfExists(tempDump);
+                    } catch (IOException ignored) {
+                    }
+                }
             }
         }
 
