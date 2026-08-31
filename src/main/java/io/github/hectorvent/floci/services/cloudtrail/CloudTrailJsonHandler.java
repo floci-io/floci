@@ -140,7 +140,7 @@ public class CloudTrailJsonHandler {
         }
 
         ObjectNode resp = mapper.createObjectNode();
-        Trail trail = firstTrail(service.describeTrails(region, List.of(trailName)));
+        Trail trail = trailName != null ? firstTrail(service.describeTrails(region, List.of(trailName))) : null;
         if (trail != null) {
             resp.put("TrailARN", trail.trailArn());
         }
@@ -163,7 +163,7 @@ public class CloudTrailJsonHandler {
         List<AdvancedEventSelector> advancedSelectors = service.getAdvancedEventSelectors(region, trailName);
 
         ObjectNode resp = mapper.createObjectNode();
-        Trail trail = firstTrail(service.describeTrails(region, List.of(trailName)));
+        Trail trail = trailName != null ? firstTrail(service.describeTrails(region, List.of(trailName))) : null;
         if (trail != null) {
             resp.put("TrailARN", trail.trailArn());
         }

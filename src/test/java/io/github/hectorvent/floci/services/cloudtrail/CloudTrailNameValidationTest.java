@@ -90,4 +90,28 @@ class CloudTrailNameValidationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    void putEventSelectors_missingTrailName_rejectsWithTrailNotFoundException() {
+        given()
+            .header("X-Amz-Target", CT_TARGET + "PutEventSelectors")
+            .contentType(JSON11)
+            .body("{\"EventSelectors\":[{\"ReadWriteType\":\"All\"}]}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("TrailNotFoundException"));
+    }
+
+    @Test
+    void getEventSelectors_missingTrailName_rejectsWithTrailNotFoundException() {
+        given()
+            .header("X-Amz-Target", CT_TARGET + "GetEventSelectors")
+            .contentType(JSON11)
+            .body("{}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("TrailNotFoundException"));
+    }
 }
