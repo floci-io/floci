@@ -142,7 +142,8 @@ Floci's Redshift auth proxy intercepts frontend queries on the PostgreSQL wire p
 ### Supported Features
 
 - **DDL Compatibility:**
-  - Redshift-specific DDL keywords are automatically stripped before forwarding to PostgreSQL: `DISTSTYLE ALL|EVEN|KEY|AUTO`, `DISTKEY (<col>)`, `COMPOUND|INTERLEAVED SORTKEY (<cols>)`, and column encodings `ENCODE <codec>` (e.g. `az64`, `zstd`, `lzo`).
+  - Redshift-specific DDL keywords are automatically stripped before forwarding to PostgreSQL: `DISTSTYLE ALL|EVEN|KEY|AUTO`, `DISTKEY (<col>)`, `COMPOUND|INTERLEAVED SORTKEY (<cols>)`, and column encodings `ENCODE <codec>` (only the real Redshift encodings — `raw`, `az64`, `bytedict`, `delta`, `delta32k`, `lzo`, `mostly8/16/32`, `runlength`, `text255`, `text32k`, `zstd`, `auto`).
+  - The rewrite only runs when the query's first keyword is `CREATE TABLE` / `ALTER TABLE`; a `SELECT`, `INSERT`, etc. is forwarded byte-for-byte even if it mentions these keywords. String literals are masked before rewriting, so a keyword inside a quoted value (including in a later statement of a multi-statement query) is preserved.
 - **S3 COPY Emulation:**
   - `COPY <table> FROM 's3://<bucket>/<prefix>'` is intercepted and streamed from Floci's S3 service directly into PostgreSQL via `COPY ... FROM STDIN WITH (FORMAT csv...)`.
   - Supports exact object keys or prefix directories (streams all matching objects).
@@ -153,8 +154,11 @@ Floci's Redshift auth proxy intercepts frontend queries on the PostgreSQL wire p
 
 ### Limitations
 
-- Emulation is supported on the **Simple Query protocol** (`'Q'`). Extended Query protocol statements (prepared statements) pass through directly to PostgreSQL.
+- Emulation is supported on the **Simple Query protocol** (`'Q'`) only. Extended Query protocol statements (`Parse`/`Bind`/`Execute`) pass through untouched — including anything a JDBC `PreparedStatement` sends, and, with the pgjdbc default `preferQueryMode=extended`, plain `Statement` calls too. To exercise the interceptor from JDBC, connect with `preferQueryMode=simple`.
 - Only `CSV` and `GZIP` formats are currently supported for S3 COPY/UNLOAD (Parquet, ORC, JSON, and columnar formats are not yet supported).
+- The DDL rewrite is textual (regex). It masks single-quoted string literals first, so `DEFAULT`/`CHECK` string values are safe. It is **not** comment-aware and does not recognise dollar-quoting (`$$ … $$`) or escape strings (`E'…'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe — the statement then reaches PostgreSQL, which returns its own syntax error — but avoid apostrophes-in-comments and dollar-quoted bodies in `CREATE TABLE`.
+- `UNLOAD` buffers the entire result set in memory before writing to S3 (single `<prefix>000` object, no multi-file split); a warning is logged past 256 MiB.
+- `IGNOREHEADER <n>` with `n > 1` still skips only the first line (maps to PostgreSQL `HEADER`).
 
 ## Out of Scope
 
