@@ -170,7 +170,9 @@ public class CloudTrailService {
         List<TrailInfo> result = new ArrayList<>();
         for (String k : store.keys()) {
             CloudTrailEntry entry = store.get(k).orElse(null);
-            if (entry == null) continue;
+            if (entry == null) {
+                continue;
+            }
             Trail t = entry.trail();
             if (regionFromKey(k).equals(region) || t.isMultiRegionTrail()) {
                 result.add(new TrailInfo(t.name(), t.trailArn(), t.homeRegion()));
@@ -299,10 +301,16 @@ public class CloudTrailService {
             String trailRegion = regionFromKey(k);
             boolean sameRegion = trailRegion.equals(region);
             CloudTrailEntry entry = store.get(k).orElse(null);
-            if (entry == null) continue;
+            if (entry == null) {
+                continue;
+            }
             Trail trail = entry.trail();
-            if (!sameRegion && !trail.isMultiRegionTrail()) continue;
-            if (!entry.logging()) continue;
+            if (!sameRegion && !trail.isMultiRegionTrail()) {
+                continue;
+            }
+            if (!entry.logging()) {
+                continue;
+            }
             List<AdvancedEventSelector> advancedSelectors =
                     entry.advancedSelectors() != null ? entry.advancedSelectors() : List.of();
             boolean matched;
