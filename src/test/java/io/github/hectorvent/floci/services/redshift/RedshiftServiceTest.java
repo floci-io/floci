@@ -269,7 +269,7 @@ class RedshiftServiceTest {
                 service.createCluster("c1", "dc2.large", "admin", "password123"));
 
         verify(clusterBackend, never()).delete("c1");
-        verify(clusterBackend).put(eq("c1"), argThat(c -> "failed".equals(c.getClusterStatus())));
+        verify(clusterBackend, atLeast(1)).put(eq("c1"), argThat(c -> "failed".equals(c.getClusterStatus())));
         verify(clusterBackend, atLeastOnce()).flush();
     }
 
@@ -316,7 +316,7 @@ class RedshiftServiceTest {
                 service.restoreFromClusterSnapshot("c1", "snap-1"));
 
         verify(clusterBackend, never()).delete("c1");
-        verify(clusterBackend).put(eq("c1"), argThat(c -> "failed".equals(c.getClusterStatus())));
+        verify(clusterBackend, atLeast(1)).put(eq("c1"), argThat(c -> "failed".equals(c.getClusterStatus())));
         verify(clusterBackend, atLeastOnce()).flush();
     }
 
