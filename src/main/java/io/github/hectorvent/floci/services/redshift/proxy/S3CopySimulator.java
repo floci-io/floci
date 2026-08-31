@@ -8,10 +8,12 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -19,12 +21,23 @@ public class S3CopySimulator {
 
     private static final Logger LOG = Logger.getLogger(S3CopySimulator.class);
 
-    private static final long UNLOAD_BUFFER_WARN_BYTES = 256L * 1024 * 1024;
-    /** Hard cap on an in-memory UNLOAD result; past this the operation is aborted, not just logged. */
-    private static final long UNLOAD_BUFFER_MAX_BYTES = 512L * 1024 * 1024;
+    /** Log a warning once the (uncompressed) UNLOAD result passes this size. */
+    private static final long UNLOAD_WARN_BYTES = 64L * 1024 * 1024;
+    /**
+     * Hard cap on the (uncompressed) UNLOAD result. Past this the transfer is aborted rather
+     * than risk the shared emulator heap: the whole result is buffered in memory and copied
+     * once more for {@code putObject}, so peak use per operation is roughly twice this.
+     */
+    private static final long UNLOAD_MAX_RESULT_BYTES = 128L * 1024 * 1024;
+    /** Cap on how many UNLOADs may be buffering at once, so the per-operation cost cannot multiply without bound. */
+    private static final Semaphore UNLOAD_SLOTS = new Semaphore(4);
 
     /** Postgres SQLSTATE for insufficient_privilege — surfaced to the client when S3 authorization denies. */
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
+    /** Postgres SQLSTATE program_limit_exceeded — surfaced when the UNLOAD result is too large. */
+    private static final String SQLSTATE_PROGRAM_LIMIT_EXCEEDED = "54000";
+    /** Postgres SQLSTATE configuration_limit_exceeded — surfaced when too many UNLOADs run at once. */
+    private static final String SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED = "53400";
 
     public static void runCopyFrom(Socket client, Socket backend, CopyStatementParser.S3CopyFrom spec, S3Service s3) throws IOException {
         // Authorize S3 access with an unsigned identity — a Postgres session carries no AWS
@@ -130,9 +143,15 @@ public class S3CopySimulator {
     }
 
     public static void runUnload(Socket client, Socket backend, CopyStatementParser.S3Unload spec, S3Service s3) throws IOException {
-        // Reject before running the SELECT if the target is not writable (see runCopyFrom).
+        String dataKey = spec.prefix() + "000";
+        String manifestKey = spec.prefix() + "manifest";
+        // Reject before running the SELECT if any target key is not writable (see runCopyFrom).
+        // Every key that will be written is authorized here — including the manifest.
         try {
-            s3.authorizeAnonymousPutObject(spec.bucket(), spec.prefix() + "000");
+            s3.authorizeAnonymousPutObject(spec.bucket(), dataKey);
+            if (spec.manifest()) {
+                s3.authorizeAnonymousPutObject(spec.bucket(), manifestKey);
+            }
         } catch (AwsException e) {
             sendErrorResponse(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "S3 access denied for s3://" + spec.bucket() + "/" + spec.prefix());
@@ -140,6 +159,21 @@ public class S3CopySimulator {
             return;
         }
 
+        if (!UNLOAD_SLOTS.tryAcquire()) {
+            sendErrorResponse(client, SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
+                    "too many concurrent UNLOAD operations; retry shortly");
+            sendReadyForQuery(client);
+            return;
+        }
+        try {
+            runUnloadBuffered(client, backend, spec, s3, dataKey, manifestKey);
+        } finally {
+            UNLOAD_SLOTS.release();
+        }
+    }
+
+    private static void runUnloadBuffered(Socket client, Socket backend, CopyStatementParser.S3Unload spec,
+                                          S3Service s3, String dataKey, String manifestKey) throws IOException {
         StringBuilder sql = new StringBuilder("COPY (");
         sql.append(spec.selectQuery());
         sql.append(") TO STDOUT WITH (FORMAT csv");
@@ -171,59 +205,65 @@ public class S3CopySimulator {
             return;
         }
 
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        // Accumulate (already GZIP-compressed on the fly when requested) into a single buffer —
+        // no second full-size copy for a separate compression pass.
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        OutputStream acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
+        long rawBytes = 0;
+        boolean warnedOversize = false;
         PostgresWireDecoder.FrontendMessage msg;
         PostgresWireDecoder.FrontendMessage cmdCompleteMsg = null;
         PostgresWireDecoder.FrontendMessage readyForQueryMsg = null;
-        boolean warnedOversize = false;
-        while ((msg = backendDecoder.nextMessage()) != null) {
-            if (msg.type() == 'd') {
-                baos.write(msg.body(), 0, msg.body().length);
-                if (!warnedOversize && baos.size() > UNLOAD_BUFFER_WARN_BYTES) {
-                    warnedOversize = true;
-                    LOG.warnv("UNLOAD result set exceeded {0} bytes and is buffered fully in memory "
-                            + "(bucket={1}, prefix={2})", UNLOAD_BUFFER_WARN_BYTES, spec.bucket(), spec.prefix());
-                }
-                if (baos.size() > UNLOAD_BUFFER_MAX_BYTES) {
-                    // Bound heap use: abandon the transfer rather than risk exhausting the shared
-                    // process. The backend is still mid-CopyOut, so drain it to ReadyForQuery.
-                    LOG.warnv("UNLOAD aborted: result exceeded the {0}-byte in-memory limit (bucket={1}, prefix={2})",
-                            UNLOAD_BUFFER_MAX_BYTES, spec.bucket(), spec.prefix());
-                    baos = null; // release the buffer for GC before we block on drain
-                    sendErrorResponse(client, "54000",
-                            "UNLOAD result exceeds the " + UNLOAD_BUFFER_MAX_BYTES + "-byte emulator limit");
+        try {
+            while ((msg = backendDecoder.nextMessage()) != null) {
+                if (msg.type() == 'd') {
+                    acc.write(msg.body(), 0, msg.body().length);
+                    rawBytes += msg.body().length;
+                    if (!warnedOversize && rawBytes > UNLOAD_WARN_BYTES) {
+                        warnedOversize = true;
+                        LOG.warnv("UNLOAD result passed {0} bytes and is buffered fully in memory "
+                                + "(bucket={1}, prefix={2})", UNLOAD_WARN_BYTES, spec.bucket(), spec.prefix());
+                    }
+                    if (rawBytes > UNLOAD_MAX_RESULT_BYTES) {
+                        LOG.warnv("UNLOAD aborted: result exceeded the {0}-byte in-memory limit (bucket={1}, prefix={2})",
+                                UNLOAD_MAX_RESULT_BYTES, spec.bucket(), spec.prefix());
+                        closeQuietly(acc);
+                        sink = null; // release for GC before we block on drain
+                        sendErrorResponse(client, SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+                                "UNLOAD result exceeds the " + UNLOAD_MAX_RESULT_BYTES + "-byte emulator limit");
+                        drainToReadyForQuery(backendDecoder, client);
+                        return;
+                    }
+                } else if (msg.type() == 'c') {
+                    // CopyDone
+                } else if (msg.type() == 'C') {
+                    cmdCompleteMsg = msg;
+                } else if (msg.type() == 'Z') {
+                    readyForQueryMsg = msg;
+                    break;
+                } else if (msg.type() == 'E') {
+                    closeQuietly(acc);
+                    forwardMessage(client, msg);
                     drainToReadyForQuery(backendDecoder, client);
                     return;
                 }
-            } else if (msg.type() == 'c') {
-                // CopyDone
-            } else if (msg.type() == 'C') {
-                cmdCompleteMsg = msg;
-            } else if (msg.type() == 'Z') {
-                readyForQueryMsg = msg;
-                break;
-            } else if (msg.type() == 'E') {
-                forwardMessage(client, msg);
-                drainToReadyForQuery(backendDecoder, client);
-                return;
             }
+        } catch (IOException e) {
+            closeQuietly(acc);
+            throw e;
+        }
+        if (acc != sink) {
+            acc.close(); // flush the GZIP trailer
         }
 
-        byte[] payload = baos.toByteArray();
-        if (spec.gzip()) {
-            ByteArrayOutputStream gzOs = new ByteArrayOutputStream();
-            try (GZIPOutputStream gzip = new GZIPOutputStream(gzOs)) {
-                gzip.write(payload);
-            }
-            payload = gzOs.toByteArray();
-        }
-
-        String key = spec.prefix() + "000";
-        s3.putObject(spec.bucket(), key, payload, "application/octet-stream", null);
+        byte[] payload = sink.toByteArray();
+        s3.putObject(spec.bucket(), dataKey, payload, "application/octet-stream", null);
 
         if (spec.manifest()) {
-            String manifestJson = "{\"entries\":[{\"url\":\"s3://" + spec.bucket() + "/" + key + "\",\"meta\":{\"content_length\":" + payload.length + "}}]}";
-            s3.putObject(spec.bucket(), spec.prefix() + "manifest", manifestJson.getBytes(StandardCharsets.UTF_8), "application/json", null);
+            String manifestJson = "{\"entries\":[{\"url\":\"s3://" + spec.bucket() + "/" + dataKey
+                    + "\",\"meta\":{\"content_length\":" + payload.length + "}}]}";
+            s3.putObject(spec.bucket(), manifestKey, manifestJson.getBytes(StandardCharsets.UTF_8),
+                    "application/json", null);
         }
 
         if (cmdCompleteMsg != null) {
@@ -258,6 +298,15 @@ public class S3CopySimulator {
 
     private static String escapeSqlString(String s) {
         return s.replace("'", "''");
+    }
+
+    /** Close a stream, swallowing the {@link IOException} — used only on error/abort paths. */
+    private static void closeQuietly(OutputStream out) {
+        try {
+            out.close();
+        } catch (IOException e) {
+            LOG.debugv(e, "error closing the UNLOAD accumulation stream");
+        }
     }
 
     private static void sendQuery(Socket backend, String sql) throws IOException {
