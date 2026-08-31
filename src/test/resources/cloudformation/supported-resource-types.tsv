@@ -20,6 +20,7 @@ AWS::Batch::JobQueue	LEGACY_SWITCH
 AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CloudFormation::CustomResource	LEGACY_SWITCH
 AWS::CloudFront::Distribution	LEGACY_SWITCH
+AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	LEGACY_SWITCH
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
