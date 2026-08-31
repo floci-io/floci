@@ -96,7 +96,10 @@ public class SesService {
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
     // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
     private final SesTemplateService templateService;
-    private final StorageBackend<String, ConfigurationSet> configSetStore;
+    // Configuration sets extracted to SesConfigurationSetService. The facade delegates; the
+    // cross-domain option validation (tracking's verified domain, delivery's dedicated pool), the
+    // send-path reads, and the ARN-dispatched tagging go through its get/find/save.
+    private final SesConfigurationSetService configSetService;
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
     private final SesSuppressionService suppressionService;
@@ -135,7 +138,8 @@ public class SesService {
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
-                       SesTenantService tenantService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesTenantService tenantService, SesConfigurationSetService configSetService,
+                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        RegionResolver regionResolver, Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
@@ -143,8 +147,7 @@ public class SesService {
         this.sentEmailService = sentEmailService;
         this.accountService = accountService;
         this.templateService = templateService;
-        this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
-                new TypeReference<Map<String, ConfigurationSet>>() {});
+        this.configSetService = configSetService;
         this.suppressionService = suppressionService;
         this.dedicatedIpService = dedicatedIpService;
         this.contactService = contactService;
@@ -166,7 +169,7 @@ public class SesService {
                SesSentEmailService sentEmailService,
                SesAccountService accountService,
                SesTemplateService templateService,
-               StorageBackend<String, ConfigurationSet> configSetStore,
+               SesConfigurationSetService configSetService,
                SesSuppressionService suppressionService,
                SesDedicatedIpService dedicatedIpService,
                SesContactService contactService,
@@ -177,7 +180,7 @@ public class SesService {
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
-        this(identityStore, sentEmailService, accountService, templateService, configSetStore, suppressionService,
+        this(identityStore, sentEmailService, accountService, templateService, configSetService, suppressionService,
                 dedicatedIpService, contactService, policyService,
                 receiptRuleService, cvetService, tenantService, smtpRelay, objectMapper, null, clock);
     }
@@ -186,7 +189,7 @@ public class SesService {
                SesSentEmailService sentEmailService,
                SesAccountService accountService,
                SesTemplateService templateService,
-               StorageBackend<String, ConfigurationSet> configSetStore,
+               SesConfigurationSetService configSetService,
                SesSuppressionService suppressionService,
                SesDedicatedIpService dedicatedIpService,
                SesContactService contactService,
@@ -202,7 +205,7 @@ public class SesService {
         this.sentEmailService = sentEmailService;
         this.accountService = accountService;
         this.templateService = templateService;
-        this.configSetStore = configSetStore;
+        this.configSetService = configSetService;
         this.suppressionService = suppressionService;
         this.dedicatedIpService = dedicatedIpService;
         this.contactService = contactService;
@@ -482,9 +485,7 @@ public class SesService {
         if (configurationSetName == null || configurationSetName.isBlank()) {
             return;
         }
-        ConfigurationSet cs = configSetStore.get(configSetKey(region, configurationSetName))
-                .orElseThrow(() -> new AwsException("ConfigurationSetDoesNotExist",
-                        "Configuration set <" + configurationSetName + "> does not exist.", 400));
+        ConfigurationSet cs = configSetService.get(configurationSetName, region);
         if (cs.getSendingEnabled() != null && !cs.getSendingEnabled()) {
             throw new AwsException("ConfigurationSetSendingPausedException",
                     "Sending is paused for configuration set " + configurationSetName, 400);
@@ -503,7 +504,7 @@ public class SesService {
         }
         ConfigurationSet cs = null;
         if (configurationSetName != null && !configurationSetName.isBlank()) {
-            cs = configSetStore.get(configSetKey(region, configurationSetName)).orElse(null);
+            cs = configSetService.find(configurationSetName, region).orElse(null);
             if (cs == null) {
                 LOG.warnv("SES send references unknown ConfigurationSet <{0}>; configuration-set "
                         + "events not published (identity notifications, if any, still apply).",
@@ -1046,7 +1047,7 @@ public class SesService {
         }
         // AWS: deleting the configuration set that is an identity's default, then sending through
         // that identity, fails with a bad-request error rather than silently sending without it.
-        if (configSetStore.get(configSetKey(region, cs)).isEmpty()) {
+        if (configSetService.find(cs, region).isEmpty()) {
             throw new AwsException("BadRequestException",
                     "Configuration set <" + cs + "> does not exist.", 400);
         }
@@ -1166,11 +1167,7 @@ public class SesService {
     }
 
     public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        cs.setSendingEnabled(enabled);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Updated SendingEnabled on configuration set {0} in region {1}: {2}",
-                configSetName, region, enabled);
+        configSetService.setSendingEnabled(configSetName, enabled, region);
     }
 
     // ──────────────────────────── Templates ────────────────────────────
@@ -1393,16 +1390,16 @@ public class SesService {
             throw new AwsException("InvalidParameterValue",
                     "ConfigurationSetName is required.", 400);
         }
-        String key = configSetKey(region, configSet.getName());
+        SesConfigurationSetService.validateConfigurationSetName(configSet.getName());
         SesTags.validate(configSet.getTags());
         if (configSet.getSuppressionOptions() != null
                 && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
             for (String reason : configSet.getSuppressionOptions().getSuppressedReasons()) {
                 if (reason == null) {
                     throw new AwsException("BadRequestException",
-                            invalidSuppressionReasonMessage(null), 400);
+                            SesConfigurationSetService.invalidSuppressionReasonMessage(null), 400);
                 }
-                if (!isValidConfigSetSuppressionReason(reason)) {
+                if (!SesConfigurationSetService.isValidSuppressionReason(reason)) {
                     throw new AwsException("BadRequestException",
                             "1 validation error detected: Value at "
                                     + "'suppressionOptions.suppressedReasons' failed to satisfy "
@@ -1414,41 +1411,32 @@ public class SesService {
         }
         validateTrackingOptions(configSet.getTrackingOptions(), region);
         validateDeliveryOptions(configSet.getDeliveryOptions(), region);
-        validateVdmOptions(configSet.getVdmOptions());
-        if (configSetStore.get(key).isPresent()) {
-            throw new AwsException("ConfigurationSetAlreadyExists",
-                    "Configuration set " + configSet.getName() + " already exists.", 400);
-        }
-        if (configSet.getCreatedTimestamp() == null) {
-            configSet.setCreatedTimestamp(Instant.now());
-        }
-        configSetStore.put(key, configSet);
-        LOG.infov("Created SES configuration set: {0} in region {1}", configSet.getName(), region);
-        return configSet;
+        SesConfigurationSetService.validateVdmOptions(configSet.getVdmOptions());
+        return configSetService.create(configSet, region);
     }
 
+    // The tracking and delivery setters stay here: their validation reads other domains (a verified
+    // domain identity, a dedicated IP pool), so the facade resolves existence through the service,
+    // validates, and writes back through save.
+
     public void setConfigurationSetTrackingOptions(String configSetName, TrackingOptions options, String region) {
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        ConfigurationSet cs = configSetService.get(configSetName, region);
         validateTrackingOptions(options, region);
         cs.setTrackingOptions(options);
-        configSetStore.put(configSetKey(region, configSetName), cs);
+        configSetService.save(cs, region);
         LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
     }
 
     public void setConfigurationSetDeliveryOptions(String configSetName, DeliveryOptions options, String region) {
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        ConfigurationSet cs = configSetService.get(configSetName, region);
         validateDeliveryOptions(options, region);
         cs.setDeliveryOptions(options);
-        configSetStore.put(configSetKey(region, configSetName), cs);
+        configSetService.save(cs, region);
         LOG.infov("Updated DeliveryOptions on configuration set {0} in region {1}", configSetName, region);
     }
 
     public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        cs.setReputationMetricsEnabled(metricsEnabled);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Updated ReputationMetricsEnabled on configuration set {0} in region {1}: {2}",
-                configSetName, region, metricsEnabled);
+        configSetService.setReputationMetricsEnabled(configSetName, metricsEnabled, region);
     }
 
     private boolean isVerifiedDomainIdentity(String domain, String region) {
@@ -1476,7 +1464,7 @@ public class SesService {
     public void createConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
                                                       String region) {
         requireVerifiedRedirectDomain(customRedirectDomain, region);
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        ConfigurationSet cs = configSetService.get(configSetName, region);
         if (cs.getTrackingOptions() != null && cs.getTrackingOptions().getCustomRedirectDomain() != null) {
             throw new AwsException("TrackingOptionsAlreadyExistsException",
                     "Configuration set <" + configSetName + "> already has tracking options.", 400);
@@ -1484,71 +1472,33 @@ public class SesService {
         TrackingOptions options = new TrackingOptions();
         options.setCustomRedirectDomain(customRedirectDomain);
         cs.setTrackingOptions(options);
-        configSetStore.put(configSetKey(region, configSetName), cs);
+        configSetService.save(cs, region);
         LOG.infov("Created TrackingOptions on configuration set {0} in region {1}", configSetName, region);
     }
 
     public void updateConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
                                                       String region) {
         requireVerifiedRedirectDomain(customRedirectDomain, region);
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        ConfigurationSet cs = configSetService.get(configSetName, region);
         if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
             throw new AwsException("TrackingOptionsDoesNotExistException",
                     "There are no tracking options for configuration set <" + configSetName + ">", 400);
         }
         cs.getTrackingOptions().setCustomRedirectDomain(customRedirectDomain);
-        configSetStore.put(configSetKey(region, configSetName), cs);
+        configSetService.save(cs, region);
         LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
     }
 
     public void deleteConfigurationSetTrackingOptions(String configSetName, String region) {
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
-            throw new AwsException("TrackingOptionsDoesNotExistException",
-                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
-        }
-        cs.setTrackingOptions(null);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Deleted TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+        configSetService.deleteTrackingOptions(configSetName, region);
     }
 
     public void setConfigurationSetArchivingOptions(String configSetName, ArchivingOptions options, String region) {
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        cs.setArchivingOptions(options);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Updated ArchivingOptions on configuration set {0} in region {1}", configSetName, region);
+        configSetService.setArchivingOptions(configSetName, options, region);
     }
-
-    private static final java.util.Set<String> VDM_FEATURE_STATES = java.util.Set.of("ENABLED", "DISABLED");
 
     public void setConfigurationSetVdmOptions(String configSetName, VdmOptions options, String region) {
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        validateVdmOptions(options);
-        cs.setVdmOptions(options);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Updated VdmOptions on configuration set {0} in region {1}", configSetName, region);
-    }
-
-    private void validateVdmOptions(VdmOptions options) {
-        if (options == null) {
-            return;
-        }
-        // Enum values verified against real AWS 2026-06-19; messages use the
-        // nested member path and the [ENABLED, DISABLED] value set.
-        if (options.getDashboardOptions() != null
-                && options.getDashboardOptions().getEngagementMetrics() != null
-                && !VDM_FEATURE_STATES.contains(options.getDashboardOptions().getEngagementMetrics())) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'vdmOptions.dashboardOptions.engagementMetrics' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
-        }
-        if (options.getGuardianOptions() != null
-                && options.getGuardianOptions().getOptimizedSharedDelivery() != null
-                && !VDM_FEATURE_STATES.contains(options.getGuardianOptions().getOptimizedSharedDelivery())) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'vdmOptions.guardianOptions.optimizedSharedDelivery' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
-        }
+        configSetService.setVdmOptions(configSetName, options, region);
     }
 
     private static final java.util.Set<String> HTTPS_POLICIES =
@@ -1620,39 +1570,17 @@ public class SesService {
     }
 
     public ConfigurationSet getConfigurationSet(String name, String region) {
-        return configSetStore.get(configSetKey(region, name))
-                .orElseThrow(() -> new AwsException("ConfigurationSetDoesNotExist",
-                        "Configuration set <" + name + "> does not exist.", 400));
+        return configSetService.get(name, region);
     }
 
     public List<ConfigurationSet> listConfigurationSets(String region) {
-        String prefix = "configSet::" + region + "::";
-        List<ConfigurationSet> all = new ArrayList<>(configSetStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(ConfigurationSet::getCreatedTimestamp,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(ConfigurationSet::getName,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        return all;
+        return configSetService.list(region);
     }
 
     public void deleteConfigurationSet(String name, String region) {
-        String key = configSetKey(region, name);
-        if (configSetStore.get(key).isEmpty()) {
-            throw new AwsException("ConfigurationSetDoesNotExist",
-                    "Configuration set <" + name + "> does not exist.", 400);
-        }
+        configSetService.get(name, region);
         tenantService.deleteBackingResource(SesTenantService.RESOURCE_TYPE_CONFIGURATION_SET, name,
-                region, () -> {
-                    configSetStore.delete(key);
-                    LOG.infov("Deleted SES configuration set: {0} in region {1}", name, region);
-                });
-    }
-
-    private static final Pattern CONFIG_SET_NAME = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
-
-    private static String configSetKey(String region, String name) {
-        validateConfigurationSetName(name);
-        return "configSet::" + region + "::" + name;
+                region, () -> configSetService.remove(name, region));
     }
 
     // ──────────────────────── Tenants (multi-tenancy) ────────────────────────
@@ -1817,8 +1745,8 @@ public class SesService {
             case SesTenantService.RESOURCE_TYPE_IDENTITY ->
                     identityStore.get(identityKey(region, ref.name())).isPresent();
             case SesTenantService.RESOURCE_TYPE_CONFIGURATION_SET ->
-                    CONFIG_SET_NAME.matcher(ref.name()).matches()
-                            && configSetStore.get(configSetKey(region, ref.name())).isPresent();
+                    SesConfigurationSetService.isValidName(ref.name())
+                            && configSetService.find(ref.name(), region).isPresent();
             case SesTenantService.RESOURCE_TYPE_TEMPLATE ->
                     templateService.find(ref.name(), region).isPresent();
             default -> false;
@@ -2004,104 +1932,28 @@ public class SesService {
 
 
 
-    static void validateConfigurationSetName(String name) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("InvalidParameterValue",
-                    "ConfigurationSetName is required.", 400);
-        }
-        if (!CONFIG_SET_NAME.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "ConfigurationSetName must be 1-64 characters and may only contain "
-                            + "alphanumeric characters, underscores, and hyphens.", 400);
-        }
-    }
-
-    private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
-
-    private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
-
-    private static final List<String> VALID_EVENT_TYPES = List.of(
-            "SEND", "REJECT", "BOUNCE", "COMPLAINT", "DELIVERY", "OPEN", "CLICK",
-            "RENDERING_FAILURE", "DELIVERY_DELAY", "SUBSCRIPTION");
-
     public void createConfigurationSetEventDestination(String configSetName, String eventDestinationName,
                                                        EventDestination dest, String region) {
-        validateEventDestinationName(eventDestinationName);
-        validateEventDestination(dest);
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        if (indexOfEventDestination(cs.getEventDestinations(), eventDestinationName) >= 0) {
-            throw new AwsException("AlreadyExists",
-                    "An event destination with name <" + eventDestinationName
-                            + "> already exists for configuration set <" + configSetName + ">.", 400);
-        }
-        dest.setName(eventDestinationName);
-        cs.getEventDestinations().add(dest);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Created SES event destination {0} on configuration set {1} in region {2}",
-                eventDestinationName, configSetName, region);
+        configSetService.createEventDestination(configSetName, eventDestinationName, dest, region);
     }
 
     public List<EventDestination> getConfigurationSetEventDestinations(String configSetName, String region) {
-        return List.copyOf(getConfigurationSet(configSetName, region).getEventDestinations());
+        return configSetService.getEventDestinations(configSetName, region);
     }
 
     public void updateConfigurationSetEventDestination(String configSetName, String eventDestinationName,
                                                        EventDestination dest, String region) {
-        validateEventDestinationName(eventDestinationName);
-        validateEventDestination(dest);
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        int index = indexOfEventDestination(cs.getEventDestinations(), eventDestinationName);
-        if (index < 0) {
-            throw new AwsException("NotFoundException",
-                    "An event destination with name <" + eventDestinationName
-                            + "> does not exist for configuration set <" + configSetName + ">.", 404);
-        }
-        dest.setName(eventDestinationName);
-        cs.getEventDestinations().set(index, dest);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Updated SES event destination {0} on configuration set {1} in region {2}",
-                eventDestinationName, configSetName, region);
+        configSetService.updateEventDestination(configSetName, eventDestinationName, dest, region);
     }
 
     public void deleteConfigurationSetEventDestination(String configSetName, String eventDestinationName,
                                                        String region) {
-        validateEventDestinationName(eventDestinationName);
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        boolean removed = cs.getEventDestinations().removeIf(ed -> eventDestinationName.equals(ed.getName()));
-        if (!removed) {
-            throw new AwsException("NotFoundException",
-                    "An event destination with name <" + eventDestinationName
-                            + "> does not exist for configuration set <" + configSetName + ">.", 404);
-        }
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Deleted SES event destination {0} on configuration set {1} in region {2}",
-                eventDestinationName, configSetName, region);
+        configSetService.deleteEventDestination(configSetName, eventDestinationName, region);
     }
 
-    /**
-     * Stores per-configuration-set suppression overrides. Mirrors the AWS V2
-     * {@code PutConfigurationSetSuppressionOptions} contract: {@code reasons} may
-     * be {@code null} or empty (explicit "no filtering" for this set) or a subset
-     * of {@code [BOUNCE, COMPLAINT]}. Once set, the value is returned through
-     * {@link #getConfigurationSet}; downstream callers can resolve the effective
-     * reasons for a given send via {@link #getEffectiveSuppressedReasons}.
-     */
     public void putConfigurationSetSuppressionOptions(String configSetName,
                                                       List<String> reasons, String region) {
-        List<String> sanitized = new ArrayList<>();
-        if (reasons != null) {
-            for (String r : reasons) {
-                validateConfigSetSuppressionReason(r);
-                sanitized.add(r);
-            }
-        }
-        ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        SuppressionOptions options = new SuppressionOptions();
-        options.setSuppressedReasons(sanitized);
-        cs.setSuppressionOptions(options);
-        configSetStore.put(configSetKey(region, configSetName), cs);
-        LOG.infov("Updated SuppressionOptions on configuration set {0} in region {1}: {2}",
-                configSetName, region, sanitized);
+        configSetService.putSuppressionOptions(configSetName, reasons, region);
     }
 
     /**
@@ -2125,118 +1977,6 @@ public class SesService {
         return List.copyOf(getAccountSuppressionAttributes(region).getSuppressedReasons());
     }
 
-    private static int indexOfEventDestination(List<EventDestination> destinations, String name) {
-        for (int i = 0; i < destinations.size(); i++) {
-            if (name != null && name.equals(destinations.get(i).getName())) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    static void validateEventDestinationName(String name) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "EventDestinationName is required.", 400);
-        }
-        if (!EVENT_DESTINATION_NAME_CHARS.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid event destination name <" + name + ">: only alphanumeric ASCII characters, "
-                            + "'_', and '-' are allowed.", 400);
-        }
-        if (name.length() > MAX_EVENT_DESTINATION_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Event destination name cannot exceed 64 characters.", 400);
-        }
-    }
-
-    static void validateEventDestination(EventDestination dest) {
-        if (dest == null) {
-            throw new AwsException("InvalidParameterValue", "EventDestination is required.", 400);
-        }
-        List<String> types = dest.getMatchingEventTypes();
-        if (types == null || types.isEmpty()) {
-            throw new AwsException("InvalidParameterValue", "At least one event type must be specified.", 400);
-        }
-        for (String t : types) {
-            if (t == null || !VALID_EVENT_TYPES.contains(t)) {
-                throw new AwsException("InvalidParameterValue",
-                        "Invalid event type: " + t + ". Valid values are " + VALID_EVENT_TYPES + ".", 400);
-            }
-        }
-        int destinationCount = countDestinations(dest);
-        if (destinationCount == 0) {
-            throw new AwsException("InvalidParameterValue", "Event destination is not provided.", 400);
-        }
-        if (destinationCount > 1) {
-            throw new AwsException("InvalidParameterValue",
-                    "Please provide only one destination with each request. Either a Firehose Destination "
-                            + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.", 400);
-        }
-        if (dest.getSnsDestination() != null
-                && (dest.getSnsDestination().getTopicArn() == null
-                || dest.getSnsDestination().getTopicArn().isBlank())) {
-            throw new AwsException("InvalidParameterValue",
-                    "SnsDestination requires a non-blank TopicArn.", 400);
-        }
-        if (dest.getKinesisFirehoseDestination() != null
-                && (dest.getKinesisFirehoseDestination().getIamRoleArn() == null
-                || dest.getKinesisFirehoseDestination().getIamRoleArn().isBlank()
-                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn() == null
-                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn().isBlank())) {
-            throw new AwsException("InvalidParameterValue",
-                    "KinesisFirehoseDestination requires both IamRoleArn and DeliveryStreamArn.",
-                    400);
-        }
-        if (dest.getCloudWatchDestination() != null) {
-            List<CloudWatchDimensionConfiguration> dims =
-                    dest.getCloudWatchDestination().getDimensionConfigurations();
-            if (dims == null || dims.isEmpty()) {
-                throw new AwsException("InvalidParameterValue",
-                        "CloudWatch metrics dimension configuration list cannot be empty.", 400);
-            }
-            for (int i = 0; i < dims.size(); i++) {
-                CloudWatchDimensionConfiguration dim = dims.get(i);
-                if (dim == null
-                        || dim.getDimensionName() == null || dim.getDimensionName().isBlank()
-                        || dim.getDimensionValueSource() == null
-                        || dim.getDimensionValueSource().isBlank()
-                        || dim.getDefaultDimensionValue() == null
-                        || dim.getDefaultDimensionValue().isBlank()) {
-                    throw new AwsException("InvalidParameterValue",
-                            "CloudWatchDestination dimension configurations require "
-                                    + "DimensionName, DimensionValueSource, and DefaultDimensionValue "
-                                    + "(missing on member " + (i + 1) + ").", 400);
-                }
-            }
-        }
-        if (dest.getPinpointDestination() != null
-                && (dest.getPinpointDestination().getApplicationArn() == null
-                || dest.getPinpointDestination().getApplicationArn().isBlank())) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid Pinpoint application ARN provided: "
-                            + dest.getPinpointDestination().getApplicationArn() + ".", 400);
-        }
-    }
-
-    private static int countDestinations(EventDestination dest) {
-        int count = 0;
-        if (dest.getSnsDestination() != null) {
-            count++;
-        }
-        if (dest.getCloudWatchDestination() != null) {
-            count++;
-        }
-        if (dest.getKinesisFirehoseDestination() != null) {
-            count++;
-        }
-        if (dest.getEventBridgeDestination() != null) {
-            count++;
-        }
-        if (dest.getPinpointDestination() != null) {
-            count++;
-        }
-        return count;
-    }
 
     public List<Tag> listResourceTags(String arn, String region) {
         ResourceRef ref = parseSesArn(arn);
@@ -2310,25 +2050,23 @@ public class SesService {
     }
 
     private List<Tag> listConfigurationSetTags(String name, String region) {
-        ConfigurationSet cs = configSetStore.get(configSetKey(region, name))
+        ConfigurationSet cs = configSetService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No ConfigurationSet present with name: " + name, 404));
         return new ArrayList<>(cs.getTags());
     }
 
     private void tagConfigurationSet(String name, String region, List<Tag> newTags) {
-        String key = configSetKey(region, name);
-        ConfigurationSet cs = configSetStore.get(key)
+        ConfigurationSet cs = configSetService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No ConfigurationSet present with name: " + name, 404));
         cs.setTags(SesTags.merge(cs.getTags(), newTags));
-        configSetStore.put(key, cs);
+        configSetService.save(cs, region);
         LOG.infov("Tagged SES configuration set: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
 
     private void untagConfigurationSet(String name, String region, List<String> tagKeys) {
-        String key = configSetKey(region, name);
-        ConfigurationSet cs = configSetStore.get(key)
+        ConfigurationSet cs = configSetService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No ConfigurationSet present with name: " + name, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
@@ -2336,7 +2074,7 @@ public class SesService {
         List<Tag> remaining = new ArrayList<>(cs.getTags());
         remaining.removeIf(t -> toRemove.contains(t.key()));
         cs.setTags(remaining);
-        configSetStore.put(key, cs);
+        configSetService.save(cs, region);
         LOG.infov("Untagged SES configuration set: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
     }
 
@@ -2719,7 +2457,7 @@ public class SesService {
      * callers (publishSendEvents) to map the recipient to a synthetic Bounce / Complaint
      * event without consulting the store again. Both the per-address suppression entries
      * and the account-level / per-CS {@code suppressedReasons} go through
-     * {@link SesSuppressionService}'s reason validation / {@link #validateConfigSetSuppressionReason},
+     * {@link SesSuppressionService}'s reason validation / {@link SesConfigurationSetService}'s,
      * which enforce exact case-sensitive equality with the two canonical values, so
      * {@code entry.getReason()} is guaranteed to be canonical and downstream
      * {@code .equals("BOUNCE")} / {@code .equals("COMPLAINT")} checks are safe.
@@ -2743,30 +2481,6 @@ public class SesService {
     }
 
 
-    /**
-     * Validation message used by PutConfigurationSetSuppressionOptions. AWS
-     * V2 SES uses a different, simpler natural-language sentence on this
-     * endpoint than on the three older suppression APIs above:
-     *   "Reason <X> is invalid, must be one of [BOUNCE, COMPLAINT]."
-     * (Verified against real AWS V2 SES on 2026-06-03.) CreateConfigurationSet
-     * reports the constraint-style validation message for invalid non-null
-     * values but falls back to this sentence for null elements, matching AWS
-     * (verified 2026-06-13); see {@link #createConfigurationSet}.
-     */
-    private static void validateConfigSetSuppressionReason(String reason) {
-        if (!isValidConfigSetSuppressionReason(reason)) {
-            throw new AwsException("BadRequestException",
-                    invalidSuppressionReasonMessage(reason), 400);
-        }
-    }
-
-    private static boolean isValidConfigSetSuppressionReason(String reason) {
-        return "BOUNCE".equals(reason) || "COMPLAINT".equals(reason);
-    }
-
-    private static String invalidSuppressionReasonMessage(String reason) {
-        return "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].";
-    }
 
     public String sendTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                      List<String> bccAddresses, List<String> replyToAddresses,
