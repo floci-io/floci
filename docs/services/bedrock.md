@@ -21,36 +21,44 @@ For real-time single-request model inference (`Converse` / `InvokeModel`), see [
 
 ## How Batch Inference Works
 
-1. **Input S3 Dataset**: Place a JSON Lines (`.jsonl`) file in an S3 bucket. Each line contains a record with a unique `recordId` and the `modelInput` payload:
-   ```json
-   {"recordId": "rec-001", "modelInput": {"messages": [{"role": "user", "content": [{"text": "Hello world"}]}]}}
-   {"recordId": "rec-002", "modelInput": {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 100, "messages": [{"role": "user", "content": [{"type": "text", "text": "Explain quantum computing"}]}]}}
-   ```
+1. **Input S3 Dataset**: Place a JSON Lines (`.jsonl`) file in an S3 bucket. Each line contains a record with a unique `recordId` and the `modelInput` payload formatted for the target model:
+   - **Anthropic Claude 3 / 3.5**:
+     ```json
+     {"recordId": "rec-001", "modelInput": {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 1024, "messages": [{"role": "user", "content": [{"type": "text", "text": "Explain quantum computing"}]}]}}
+     ```
+   - **Amazon Titan**:
+     ```json
+     {"recordId": "rec-002", "modelInput": {"inputText": "Hello world", "textGenerationConfig": {"maxTokenCount": 512, "temperature": 0.7}}}
+     ```
+   - **Meta Llama**:
+     ```json
+     {"recordId": "rec-003", "modelInput": {"prompt": "What is gravity?", "max_gen_len": 512, "temperature": 0.5}}
+     ```
 2. **Job Submission**: Call `CreateModelInvocationJob` specifying `inputDataConfig` (`s3Uri`), `outputDataConfig` (`s3Uri`), `modelId`, `roleArn`, and `jobName`.
 3. **Execution & Backend Delegation**:
    - Floci reads the input JSONL file from the specified S3 bucket.
    - For each record, inference is executed via the configured Bedrock Runtime backend:
      - `stub` (default): generates simulated model outputs.
-     - `proxy`: forwards Converse requests to any OpenAI-compatible backend (Ollama, vLLM, LiteLLM, OpenRouter).
+     - `proxy`: forwards Converse/InvokeModel requests to any OpenAI-compatible backend (Ollama, vLLM, LiteLLM, OpenRouter).
 4. **S3 Output Files**:
    - Output records are written to `<outputS3Uri>/<jobId>/<inputFilename>.out`:
      ```json
-     {"recordId": "rec-001", "modelInput": {...}, "modelOutput": {...}}
+     {"recordId": "rec-001", "modelInput": {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 1024, "messages": [{"role": "user", "content": [{"type": "text", "text": "Explain quantum computing"}]}]}, "modelOutput": {"id": "msg_01...", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Quantum computing is..."}], "stop_reason": "end_turn", "usage": {"input_tokens": 12, "output_tokens": 25}}}
      ```
    - If an individual record fails, an error entry is recorded:
      ```json
-     {"recordId": "rec-002", "modelInput": {...}, "error": {"errorCode": "400", "errorMessage": "Invalid model input"}}
+     {"recordId": "rec-002", "modelInput": {}, "error": {"errorCode": "400", "errorMessage": "Malformed record: recordId and modelInput object are required."}}
      ```
 5. **Manifest Generation**:
    - A summary manifest is written to `<outputS3Uri>/<jobId>/manifest.json.out`:
      ```json
      {
-       "total-record-count": 2,
-       "processed-record-count": 2,
-       "success-record-count": 2,
-       "error-record-count": 0,
-       "input": "s3://my-input-bucket/prompts.jsonl",
-       "output": "s3://my-output-bucket/results/job-123456789abc/prompts.jsonl.out"
+       "totalRecordCount": 2,
+       "processedRecordCount": 2,
+       "successRecordCount": 2,
+       "errorRecordCount": 0,
+       "inputTokenCount": 24,
+       "outputTokenCount": 50
      }
      ```
 
@@ -64,7 +72,7 @@ Floci models all AWS Bedrock batch job states:
 | `Validating` | Input data configuration and S3 paths are being validated |
 | `Scheduled` | Job is scheduled for batch processing |
 | `InProgress` | Records are being processed and model inference is executing |
-| `Completed` | All records were processed successfully (`error-record-count == 0`) |
+| `Completed` | All records were processed successfully (`errorRecordCount == 0`) |
 | `PartiallyCompleted` | Processing finished with both successful and failed records |
 | `Failed` | Job failed to process (e.g., missing S3 input file or all records errored) |
 | `Stopping` | Stop request received, halting execution |
@@ -76,7 +84,7 @@ Floci models all AWS Bedrock batch job states:
 Every batch job transition emits state change notifications to EventBridge matching AWS event patterns:
 
 - **Source**: `aws.bedrock`
-- **Detail Type**: `Bedrock Model Invocation Job State Change`
+- **Detail Type**: `Batch Inference Job State Change`
 - **Resources**: `["arn:aws:bedrock:<region>:<accountId>:model-invocation-job/<jobId>"]`
 
 Example EventBridge event payload:
@@ -85,7 +93,7 @@ Example EventBridge event payload:
 {
   "version": "0",
   "id": "c1a2b3c4-d5e6-7f80-9101-112131415161",
-  "detail-type": "Bedrock Model Invocation Job State Change",
+  "detail-type": "Batch Inference Job State Change",
   "source": "aws.bedrock",
   "account": "000000000000",
   "time": "2026-08-30T12:00:00Z",
@@ -94,23 +102,14 @@ Example EventBridge event payload:
     "arn:aws:bedrock:us-east-1:000000000000:model-invocation-job/abc123def456"
   ],
   "detail": {
-    "jobArn": "arn:aws:bedrock:us-east-1:000000000000:model-invocation-job/abc123def456",
-    "jobName": "my-batch-job",
-    "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+    "version": "0.0",
+    "accountId": "000000000000",
+    "batchJobName": "my-batch-job",
+    "batchJobArn": "arn:aws:bedrock:us-east-1:000000000000:model-invocation-job/abc123def456",
+    "batchModelId": "anthropic.claude-3-haiku-20240307-v1:0",
     "status": "Completed",
-    "submitTime": "2026-08-30T12:00:00Z",
-    "endTime": "2026-08-30T12:00:05Z",
-    "inputDataConfig": {
-      "s3InputDataConfig": {
-        "s3Uri": "s3://input-bucket/prompts.jsonl"
-      }
-    },
-    "outputDataConfig": {
-      "s3OutputDataConfig": {
-        "s3Uri": "s3://output-bucket/results"
-      }
-    },
-    "roleArn": "arn:aws:iam::000000000000:role/BedrockBatchRole"
+    "failureMessage": "",
+    "creationTime": "Aug 30, 2026, 12:00:00 PM"
   }
 }
 ```
@@ -134,7 +133,7 @@ export AWS_DEFAULT_REGION=us-east-1
 # 1. Create S3 buckets and upload prompts
 aws s3 mb s3://bedrock-batch-input
 aws s3 mb s3://bedrock-batch-output
-echo '{"recordId": "rec-1", "modelInput": {"messages": [{"role": "user", "content": [{"text": "Hello"}]}]}}' > prompts.jsonl
+echo '{"recordId": "rec-1", "modelInput": {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 1024, "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]}}' > prompts.jsonl
 aws s3 cp prompts.jsonl s3://bedrock-batch-input/prompts.jsonl
 
 # 2. Create Model Invocation Job
@@ -168,7 +167,7 @@ s3 = boto3.client("s3", endpoint_url="http://localhost:4566", region_name="us-ea
 s3.create_bucket(Bucket="batch-input")
 s3.create_bucket(Bucket="batch-output")
 
-prompts = '{"recordId": "p1", "modelInput": {"messages": [{"role": "user", "content": [{"text": "Summarize Floci"}]}]}}\n'
+prompts = '{"recordId": "p1", "modelInput": {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 1024, "messages": [{"role": "user", "content": [{"type": "text", "text": "Summarize Floci"}]}]}}\n'
 s3.put_object(Bucket="batch-input", Key="prompts.jsonl", Body=prompts.encode("utf-8"))
 
 # Submit batch inference job
