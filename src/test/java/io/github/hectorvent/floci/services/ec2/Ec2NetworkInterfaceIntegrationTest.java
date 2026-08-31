@@ -320,9 +320,9 @@ class Ec2NetworkInterfaceIntegrationTest {
 
         org.junit.jupiter.api.Assertions.assertTrue(overrideInstanceId.startsWith("i-"));
 
-        // The interface's identity now lives on the instance, not as a separately-listed
-        // standalone ENI — DescribeNetworkInterfaces still finds it exactly once, through the
-        // instance, with no duplicate standalone entry.
+        // The interface keeps its own standalone record — that is the side that knows its real
+        // attach time and its deleteOnTermination — while the instance carries a copy. Describe
+        // reports it exactly once regardless, from the standalone record.
         given()
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("NetworkInterfaceId.1", overrideEniId)
@@ -363,5 +363,172 @@ class Ec2NetworkInterfaceIntegrationTest {
         .then()
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+    }
+
+    /**
+     * An attachment has to be visible from both ends. Recording it only on the standalone ENI let
+     * DescribeNetworkInterfaces report an attachment DescribeInstances denied — and left the
+     * device-index conflict check, which reads the instance's own list, unable to see anything
+     * this operation had attached.
+     */
+    @Test
+    @Order(16)
+    void attachingAnInterfaceAlsoRecordsItOnTheInstance() {
+        String eni = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .formParam("SecurityGroupId.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        String host = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        // Mock mode settles a pending instance to "running" on the next describe; attach needs it.
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", host)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "AttachNetworkInterface")
+            .formParam("NetworkInterfaceId", eni)
+            .formParam("InstanceId", host)
+            .formParam("DeviceIndex", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", host)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item."
+                    + "networkInterfaceSet.item.networkInterfaceId", hasItem(eni));
+
+        // ... and the device index it now occupies is refused to a second interface.
+        String second = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        given()
+            .formParam("Action", "AttachNetworkInterface")
+            .formParam("NetworkInterfaceId", second)
+            .formParam("InstanceId", host)
+            .formParam("DeviceIndex", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    /**
+     * An interface the caller created is not the instance's to destroy. AWS attaches it with
+     * deleteOnTermination false, so terminating the instance returns it to "available" rather
+     * than making it disappear — which is what a client that reuses one ENI across successive
+     * instances depends on.
+     */
+    @Test
+    @Order(17)
+    void terminatingTheInstanceReturnsAPreExistingInterfaceToAvailable() {
+        String eni = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .formParam("SecurityGroupId.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        String host = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("NetworkInterface.1.NetworkInterfaceId", eni)
+            .formParam("NetworkInterface.1.DeviceIndex", "0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "TerminateInstances")
+            .formParam("InstanceId.1", host)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.status",
+                    equalTo("available"));
+
+        // Free again, so it can be attached to a new instance — and this is the assertion that
+        // proves the attachment is really gone, not just the status text: RunInstances resolves
+        // the interface through takeNetworkInterfaceForLaunch, which refuses one that still
+        // carries an attachment with InvalidNetworkInterface.InUse.
+        String replacement = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("NetworkInterface.1.NetworkInterfaceId", eni)
+            .formParam("NetworkInterface.1.DeviceIndex", "0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        org.junit.jupiter.api.Assertions.assertTrue(replacement.startsWith("i-"));
     }
 }

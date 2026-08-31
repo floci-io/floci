@@ -2333,9 +2333,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             inst.getNetworkInterfaces().add(eni);
             if (suppliedEni != null) {
-                // Its authoritative representation now lives on the instance; drop the
-                // standalone record so DescribeNetworkInterfaces doesn't see it twice.
-                networkInterfaces.delete(key(region, suppliedEni.getNetworkInterfaceId()));
+                // The standalone record stays authoritative rather than being folded into the
+                // instance: AWS defaults deleteOnTermination to false for an interface the caller
+                // created and handed to a launch, so it outlives the instance and returns to
+                // "available" on termination instead of vanishing with it. Double-counting is
+                // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
+                // id the standalone store owns.
+                NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
+                launchAttachment.setAttachmentId(eni.getAttachmentId());
+                launchAttachment.setDeviceIndex(eni.getDeviceIndex());
+                launchAttachment.setStatus("attached");
+                launchAttachment.setInstanceId(instanceId);
+                launchAttachment.setInstanceOwnerId(accountId);
+                launchAttachment.setAttachTime(eni.getAttachTime());
+                launchAttachment.setDeleteOnTermination(false);
+                suppliedEni.setAttachment(launchAttachment);
+                suppliedEni.setStatus("in-use");
+                networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
             }
 
             // Root EBS volume
@@ -2584,6 +2598,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (inst.getRootVolumeId() != null) {
                 volumes.delete(key(region, inst.getRootVolumeId()));
             }
+            releaseStandaloneInterfacesOnTermination(region, inst);
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
@@ -6059,6 +6074,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         && !networkInterfaceIds.contains(eni.getNetworkInterfaceId())) {
                     continue;
                 }
+                // A standalone ENI attached to this instance is reported from its own record
+                // below, which is the side that knows its real attach time and its
+                // deleteOnTermination — both of which the instance-side copy would guess wrong.
+                if (networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).isPresent()) {
+                    continue;
+                }
                 foundIds.add(eni.getNetworkInterfaceId());
                 NetworkInterface ni = new NetworkInterface();
                 ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
@@ -6287,6 +6308,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         ni.setAttachment(attachment);
         ni.setStatus("in-use");
         networkInterfaces.put(key(region, networkInterfaceId), ni);
+
+        // The instance must carry it as well, or DescribeInstances would deny an attachment
+        // DescribeNetworkInterfaces reports — and the device-index check above, which reads this
+        // very list, would never see an interface attached by this method.
+        InstanceNetworkInterface attached = new InstanceNetworkInterface();
+        attached.setNetworkInterfaceId(ni.getNetworkInterfaceId());
+        attached.setSubnetId(ni.getSubnetId());
+        attached.setVpcId(ni.getVpcId());
+        attached.setDescription(ni.getDescription());
+        attached.setOwnerId(ni.getOwnerId());
+        attached.setStatus("in-use");
+        attached.setMacAddress(ni.getMacAddress());
+        attached.setPrivateIpAddress(ni.getPrivateIpAddress());
+        attached.setPrivateDnsName(ni.getPrivateDnsName());
+        attached.setGroups(new ArrayList<>(ni.getGroups()));
+        attached.setAttachmentId(attachment.getAttachmentId());
+        attached.setDeviceIndex(deviceIndex);
+        attached.setAttachTime(attachment.getAttachTime());
+        inst.getNetworkInterfaces().add(attached);
+        instances.put(key(region, instanceId), inst);
         return attachment;
     }
 
@@ -6304,7 +6345,46 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         ni.setAttachment(null);
         ni.setStatus("available");
         networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        detachFromInstance(region, detached.getInstanceId(), ni.getNetworkInterfaceId());
         return detached;
+    }
+
+    /** Removes an interface from an instance's own list, the mirror of attaching it. */
+    private void detachFromInstance(String region, String instanceId, String networkInterfaceId) {
+        if (instanceId == null) {
+            return;
+        }
+        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        if (inst == null) {
+            return;
+        }
+        if (inst.getNetworkInterfaces().removeIf(
+                e -> networkInterfaceId.equals(e.getNetworkInterfaceId()))) {
+            instances.put(key(region, instanceId), inst);
+        }
+    }
+
+    /**
+     * Releases the standalone ENIs an instance holds when it is terminated. An interface the
+     * caller created is not the instance's to destroy unless it was attached with
+     * deleteOnTermination — AWS returns it to "available", and only a launch-created interface
+     * dies with its instance.
+     */
+    private void releaseStandaloneInterfacesOnTermination(String region, Instance inst) {
+        for (InstanceNetworkInterface e : List.copyOf(inst.getNetworkInterfaces())) {
+            NetworkInterface ni = networkInterfaces.get(key(region, e.getNetworkInterfaceId())).orElse(null);
+            if (ni == null) {
+                continue;
+            }
+            NetworkInterfaceAttachment att = ni.getAttachment();
+            if (att != null && att.isDeleteOnTermination()) {
+                networkInterfaces.delete(key(region, ni.getNetworkInterfaceId()));
+                continue;
+            }
+            ni.setAttachment(null);
+            ni.setStatus("available");
+            networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
     }
 
     private NetworkInterface requireStandaloneNetworkInterface(String region, String networkInterfaceId) {

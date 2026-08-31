@@ -3557,7 +3557,9 @@ public class Ec2QueryHandler {
         List<String> privateIpAddresses = new ArrayList<>();
         for (int i = 1; ; i++) {
             String addr = p.getFirst("PrivateIpAddresses." + i + ".PrivateIpAddress");
-            if (addr == null) break;
+            if (addr == null) {
+                break;
+            }
             privateIpAddresses.add(addr);
         }
         List<String> securityGroupIds = getList(p, "SecurityGroupId");
