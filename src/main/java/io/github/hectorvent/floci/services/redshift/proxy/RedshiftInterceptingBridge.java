@@ -8,8 +8,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Replaces the transparent {@code bridge()} for Redshift connections so Simple
@@ -25,37 +25,37 @@ import java.util.concurrent.TimeUnit;
  * {@link S3CopySimulator}, anything else is run through
  * {@link RedshiftSqlInterceptor#rewrite} and forwarded.
  *
- * <p><b>Pump suspension.</b> {@link S3CopySimulator} drives a fabricated
- * request/response exchange <em>and reads the backend socket directly</em>. That
- * would race the pump, which is also reading the backend. Before calling the
- * simulator the loop parks the pump and takes exclusive ownership of the backend
- * stream, then resumes it. The pump only ever parks <em>between</em> PostgreSQL
- * backend messages — a lightweight frame tracker over the bytes it is already
- * copying tells it where the boundaries are — so the simulator's own decoder
- * always starts on a clean boundary, even if a client pipelines a {@code 'Q'}
- * behind an unfinished response. If the pump cannot reach a boundary within
- * {@link #PUMP_PARK_WAIT_MS} (sustained streaming, or a pipelined COPY behind a
- * long query), the COPY/UNLOAD is <em>not</em> intercepted — the original
- * {@code 'Q'} is forwarded and PostgreSQL returns its own error, rather than the
- * session hanging.
+ * <p><b>Backend ownership.</b> {@link S3CopySimulator} drives a fabricated
+ * request/response exchange and reads the backend socket directly, so it must
+ * not run while the pump is also reading. Both guard every backend read with
+ * {@link #backendLock}: the pump takes and releases it once per {@code read()}
+ * (bounded by {@link #PUMP_READ_TIMEOUT_MS}), and the client loop takes it for
+ * the whole COPY/UNLOAD exchange. The client loop only proceeds once
+ * {@link #pumpBetweenMessages} shows the pump last stopped on a PostgreSQL
+ * message boundary, so the simulator's decoder never starts mid-frame — even if
+ * a client pipelines a {@code 'Q'} behind an unfinished response. If a boundary
+ * is not reached within {@link #PUMP_PARK_WAIT_MS}, the COPY/UNLOAD is
+ * <em>not</em> intercepted: the original {@code 'Q'} is forwarded and PostgreSQL
+ * returns its own error rather than the session hanging.
  */
 public class RedshiftInterceptingBridge {
 
     private static final Logger LOG = Logger.getLogger(RedshiftInterceptingBridge.class);
 
-    /** How long a pump {@code read()} blocks before looping to check for a park request. */
+    /** How long a pump {@code read()} blocks (holding {@link #backendLock}) before looping. */
     private static final int PUMP_READ_TIMEOUT_MS = 200;
-    /** Upper bound on how long the client loop waits for the pump to reach a message boundary. */
+    /** Upper bound on how long the client loop waits to take the backend stream at a boundary. */
     private static final long PUMP_PARK_WAIT_MS = 2_000L;
 
     private final Socket client;
     private final Socket backend;
     private final S3Service s3Service;
 
-    private volatile boolean pausePump = false;
+    /** Held around every backend read, by the pump per-iteration and by the client loop per exchange. */
+    private final ReentrantLock backendLock = new ReentrantLock(true);
+    /** True when the pump's last read left the stream on a wire-message boundary. */
+    private volatile boolean pumpBetweenMessages = true;
     private volatile boolean pumpFinished = false;
-    private final Semaphore pumpParkedAck = new Semaphore(0);
-    private final Semaphore pumpResume = new Semaphore(0);
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service) {
         this.client = client;
@@ -66,8 +66,7 @@ public class RedshiftInterceptingBridge {
     public void run() {
         try {
             // Set the pump's read timeout BEFORE the pump can enter read() — a setSoTimeout
-            // that races an in-flight blocking read does not take effect, and if the client's
-            // first message is an S3 COPY/UNLOAD the pump would never wake to park itself.
+            // that races an in-flight blocking read does not take effect.
             backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
             Thread.ofVirtual().name("redshift-pump-backend-to-client").start(this::pumpBackendToClient);
 
@@ -99,9 +98,9 @@ public class RedshiftInterceptingBridge {
 
                 boolean intercepted = false;
                 if (handledByParser && stmt instanceof CopyStatementParser.S3CopyFrom copyFrom) {
-                    intercepted = runWithPumpPaused(() -> S3CopySimulator.runCopyFrom(client, backend, copyFrom, s3Service));
+                    intercepted = runWithBackendOwned(() -> S3CopySimulator.runCopyFrom(client, backend, copyFrom, s3Service));
                 } else if (handledByParser && stmt instanceof CopyStatementParser.S3Unload unload) {
-                    intercepted = runWithPumpPaused(() -> S3CopySimulator.runUnload(client, backend, unload, s3Service));
+                    intercepted = runWithBackendOwned(() -> S3CopySimulator.runUnload(client, backend, unload, s3Service));
                 }
 
                 if (intercepted) {
@@ -132,9 +131,6 @@ public class RedshiftInterceptingBridge {
         } finally {
             closeQuietly(client, "client");
             closeQuietly(backend, "backend");
-            // Wake the pump if it is parked waiting to resume.
-            pausePump = false;
-            pumpResume.release();
         }
     }
 
@@ -144,40 +140,55 @@ public class RedshiftInterceptingBridge {
     }
 
     /**
-     * Park the backend&rarr;client pump at a message boundary, hand the backend stream to
-     * {@code exchange}, then resume the pump.
+     * Take exclusive ownership of the backend stream at a wire-message boundary, run
+     * {@code exchange}, then release it.
      *
-     * @return {@code true} if the pump parked and {@code exchange} ran; {@code false} if the
-     *         pump could not reach a boundary in time — the caller must then forward the
+     * @return {@code true} if ownership was taken and {@code exchange} ran; {@code false} if the
+     *         pump could not be caught at a boundary in time — the caller must then forward the
      *         original {@code 'Q'} unmodified (fail-open).
      */
-    private boolean runWithPumpPaused(CopyExchange exchange) throws IOException {
-        pausePump = true;
-        boolean parked = false;
-        try {
-            parked = pumpParkedAck.tryAcquire(1, PUMP_PARK_WAIT_MS, TimeUnit.MILLISECONDS);
-            if (!parked) {
-                if (!pumpFinished) {
-                    LOG.warn("Backend pump did not reach a message boundary in time; "
-                            + "forwarding the COPY/UNLOAD to PostgreSQL unintercepted");
-                }
-                return false;
+    private boolean runWithBackendOwned(CopyExchange exchange) throws IOException {
+        long deadlineNanos = System.nanoTime() + PUMP_PARK_WAIT_MS * 1_000_000L;
+        while (true) {
+            if (pumpFinished) {
+                return false; // pump (and almost certainly the backend) is gone
             }
-            backend.setSoTimeout(0); // the simulator wants blocking reads
-            exchange.run();
-            return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("interrupted while pausing backend pump", e);
-        } finally {
+            boolean locked;
             try {
-                backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
-            } catch (IOException e) {
-                LOG.debugv(e, "could not restore backend read timeout (socket closing)");
+                locked = backendLock.tryLock(PUMP_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted while acquiring the backend lock", e);
             }
-            pausePump = false;
-            if (parked) {
-                pumpResume.release();
+            if (!locked) {
+                if (System.nanoTime() >= deadlineNanos) {
+                    LOG.warn("could not take the backend stream in time; forwarding the COPY/UNLOAD unintercepted");
+                    return false;
+                }
+                continue;
+            }
+            try {
+                if (!pumpBetweenMessages && !pumpFinished) {
+                    // The pump stopped mid-message; release so it can finish, then retry.
+                    if (System.nanoTime() >= deadlineNanos) {
+                        LOG.warn("backend never reached a message boundary in time; forwarding the COPY/UNLOAD unintercepted");
+                        return false;
+                    }
+                    continue;
+                }
+                backend.setSoTimeout(0); // the simulator wants blocking reads
+                try {
+                    exchange.run();
+                    return true;
+                } finally {
+                    try {
+                        backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
+                    } catch (IOException e) {
+                        LOG.debugv(e, "could not restore backend read timeout (socket closing)");
+                    }
+                }
+            } finally {
+                backendLock.unlock();
             }
         }
     }
@@ -189,24 +200,24 @@ public class RedshiftInterceptingBridge {
             OutputStream clientOut = client.getOutputStream();
             byte[] buffer = new byte[8192];
             while (true) {
-                int read;
+                backendLock.lockInterruptibly();
                 try {
-                    read = backendIn.read(buffer);
-                } catch (SocketTimeoutException e) {
-                    // Only hand the backend stream over between whole messages, so the
-                    // simulator's decoder never starts mid-frame.
-                    if (pausePump && tracker.betweenMessages()) {
-                        pumpParkedAck.release();
-                        pumpResume.acquire();
+                    int read;
+                    try {
+                        read = backendIn.read(buffer);
+                    } catch (SocketTimeoutException e) {
+                        continue; // release the lock (finally), let a waiting exchange in, retry
                     }
-                    continue;
+                    if (read == -1) {
+                        break;
+                    }
+                    clientOut.write(buffer, 0, read);
+                    clientOut.flush();
+                    tracker.consume(buffer, 0, read);
+                    pumpBetweenMessages = tracker.betweenMessages();
+                } finally {
+                    backendLock.unlock();
                 }
-                if (read == -1) {
-                    break;
-                }
-                clientOut.write(buffer, 0, read);
-                clientOut.flush();
-                tracker.consume(buffer, 0, read);
             }
         } catch (IOException e) {
             LOG.debugv(e, "backend->client pump ended");
@@ -214,7 +225,6 @@ public class RedshiftInterceptingBridge {
             Thread.currentThread().interrupt();
         } finally {
             pumpFinished = true;
-            pumpParkedAck.release(); // unblock a waiter expecting a park that will never come
             closeQuietly(client, "client");
             closeQuietly(backend, "backend");
         }
