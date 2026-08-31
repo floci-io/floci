@@ -105,7 +105,17 @@ class CognitoServiceTest {
         assertEquals("FullConfigPool", pool.getName());
         assertEquals("arn:aws:cognito-idp:us-east-1:000000000000:userpool/" + pool.getId(), pool.getArn());
         assertEquals(schema, pool.getSchemaAttributes());
-        assertEquals(policies, pool.getPolicies());
+        // A supplied PasswordPolicy is normalized with AWS's defaults for the fields left unset
+        // (MinimumLength here was explicit; the rest were not), matching what DescribeUserPool
+        // returns on real Cognito for a policy submitted this way.
+        Map<String, Object> expectedPasswordPolicy = new HashMap<>();
+        expectedPasswordPolicy.put("MinimumLength", 12);
+        expectedPasswordPolicy.put("RequireUppercase", true);
+        expectedPasswordPolicy.put("RequireLowercase", true);
+        expectedPasswordPolicy.put("RequireNumbers", true);
+        expectedPasswordPolicy.put("RequireSymbols", true);
+        expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
         assertEquals(List.of("email"), pool.getUsernameAttributes());
     }
 
@@ -162,7 +172,67 @@ class CognitoServiceTest {
         AwsException exception = assertThrows(AwsException.class, () ->
                 service.adminSetUserPassword(pool.getId(), "alice", "InitialPass1!", true));
 
+        // AWS declares PasswordHistoryPolicyViolationException specifically for password reuse,
+        // distinct from InvalidPasswordException for a password that fails the complexity rules.
+        assertEquals("PasswordHistoryPolicyViolationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void passwordHistoryCountsTheCurrentPasswordAsOneOfN() {
+        // PasswordHistorySize: 1 blocks the current password and nothing else — AWS counts the
+        // current password as one of the n, not an extra entry on top of n stored ones.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "HistorySizeOnePool",
+                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 1))
+        ), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "PasswordA1!");
+        service.adminSetUserPassword(pool.getId(), "alice", "PasswordB1!", true);
+
+        AwsException reuseOfCurrent = assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "PasswordB1!", true));
+        assertEquals("PasswordHistoryPolicyViolationException", reuseOfCurrent.getErrorCode());
+
+        // Two changes back, real Cognito allows this at PasswordHistorySize: 1.
+        assertDoesNotThrow(() -> service.adminSetUserPassword(pool.getId(), "alice", "PasswordA1!", true));
+    }
+
+    @Test
+    void adminResetUserPasswordDoesNotBypassPasswordHistory() {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        service.adminCreateUser(
+                pool.getId(), "alice", Map.of("email", "alice@example.com"), "InitialPass1!");
+        service.adminSetUserPassword(pool.getId(), "alice", "Replacement2!", true);
+
+        // Resetting must archive the outgoing password into history rather than discarding it,
+        // or an admin reset becomes a way around PasswordHistorySize.
+        service.adminResetUserPassword(pool.getId(), "alice");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "Replacement2!", true));
+        assertEquals("PasswordHistoryPolicyViolationException", exception.getErrorCode());
+    }
+
+    @Test
+    void createUserPoolDefaultsAnUnsetMinimumLengthToEight() {
+        // A policy present but silent on MinimumLength gets AWS's default (8), not policyInt's
+        // fallback of 0 for an absent key — and the unset RequireUppercase/Lowercase/Numbers
+        // default to enabled too, the same "Cognito defaults" a console-created pool gets.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "SymbolsOnlyPool",
+                "Policies", Map.of("PasswordPolicy", Map.of("RequireSymbols", true))
+        ), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "symbols-only-client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.signUp(client.getClientId(), "alice@example.com", "a!", Map.of(
+                        "email", "alice@example.com", "phone_number", "+4915112345678")));
         assertEquals("InvalidPasswordException", exception.getErrorCode());
+
+        assertDoesNotThrow(() -> service.signUp(
+                client.getClientId(), "bob@example.com", "Eightplus1!", Map.of(
+                        "email", "bob@example.com", "phone_number", "+4915112345679")));
     }
 
     @Test

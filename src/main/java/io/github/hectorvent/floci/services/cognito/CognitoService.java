@@ -195,6 +195,7 @@ public class CognitoService {
         pool.setClientIdOverride(getClientIdOverride(userPoolTags));
         pool.setClientSecretOverride(ReservedTags.extractOverrideCognitoClientSecret(userPoolTags));
         populateUserPool(pool, request);
+        normalizePasswordPolicy(pool);
 
         ensureJwtSigningKeys(pool);
         ensureRefreshTokenSecret(pool);
@@ -272,6 +273,41 @@ public class CognitoService {
         pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         poolStore.put(userPoolId, pool);
         LOG.infov("Added custom attributes to User Pool: {0}", userPoolId);
+    }
+
+    /**
+     * Fills in AWS's per-field password policy defaults for a pool created with a
+     * {@code PasswordPolicy} that has some fields unset: MinimumLength 8 (AWS's documented
+     * complex-password recommendation; the field itself only documents a minimum of 6), the four
+     * character-class requirements enabled, and TemporaryPasswordValidityDays 7 (the one default
+     * the API reference states explicitly). "If you don't provide a value for an attribute,
+     * Amazon Cognito sets it to its default value" (CreateUserPool).
+     *
+     * <p>Deliberately does not fabricate a {@code PasswordPolicy} for a pool that supplies none
+     * at all — every other test and fixture in this codebase creates pools that way, relying on
+     * "no policy configured" meaning no password validation, and defaulting one into existence
+     * here would enforce it retroactively on all of them. Whether an unconfigured pool should
+     * get AWS's default policy is tracked separately (hectorvent's follow-up on #2066).
+     *
+     * <p>Scoped to creation only, not UpdateUserPool, whose partial-update semantics for a
+     * re-supplied PasswordPolicy are not verified here.
+     */
+    @SuppressWarnings("unchecked")
+    private void normalizePasswordPolicy(UserPool pool) {
+        Map<String, Object> policies = pool.getPolicies();
+        if (policies == null || !(policies.get("PasswordPolicy") instanceof Map<?, ?> raw)) {
+            return;
+        }
+        Map<String, Object> normalized = new HashMap<>(policies);
+        Map<String, Object> passwordPolicy = new HashMap<>((Map<String, Object>) raw);
+        passwordPolicy.putIfAbsent("MinimumLength", 8);
+        passwordPolicy.putIfAbsent("RequireUppercase", true);
+        passwordPolicy.putIfAbsent("RequireLowercase", true);
+        passwordPolicy.putIfAbsent("RequireNumbers", true);
+        passwordPolicy.putIfAbsent("RequireSymbols", true);
+        passwordPolicy.putIfAbsent("TemporaryPasswordValidityDays", 7);
+        normalized.put("PasswordPolicy", passwordPolicy);
+        pool.setPolicies(normalized);
     }
 
     @SuppressWarnings("unchecked")
@@ -1016,6 +1052,9 @@ public class CognitoService {
 
     public void adminResetUserPassword(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
+        // Archive the outgoing password before clearing it, the same way an ordinary password
+        // update does, so a reset cannot be used to bypass PasswordHistorySize.
+        updatePasswordHistory(describeUserPool(userPoolId), user, user.getPasswordHash());
         user.setUserStatus("RESET_REQUIRED");
         user.setPasswordHash(null);
         user.setSrpVerifier(null);
@@ -2365,15 +2404,29 @@ public class CognitoService {
                     && password.codePoints().noneMatch(
                             codePoint -> COGNITO_PASSWORD_SYMBOLS.indexOf(codePoint) >= 0);
 
-        String passwordHash = password == null ? "" : hashPassword(password);
-        int historySize = policyInt(policy, "PasswordHistorySize");
-        boolean reused = historySize > 0 && (passwordHash.equals(user.getPasswordHash())
-                || user.getPasswordHistory().stream().limit(historySize).anyMatch(passwordHash::equals));
-
-        if (invalid || reused) {
+        if (invalid) {
             throw new AwsException(
                     "InvalidPasswordException",
                     "Password does not conform to the configured password policy.",
+                    400
+            );
+        }
+
+        String passwordHash = password == null ? "" : hashPassword(password);
+        int historySize = policyInt(policy, "PasswordHistorySize");
+        // AWS counts the current password as one of the `n` in PasswordHistorySize, so only
+        // n-1 additional prior passwords are blocked alongside it: "users can't set a password
+        // that matches any of n previous passwords, where n is PasswordHistorySize" together
+        // with the documented max of "current password or any of up to 23 additional previous
+        // passwords, for a maximum total of 24" (PasswordHistorySize's max value is 24).
+        boolean reused = historySize > 0 && (passwordHash.equals(user.getPasswordHash())
+                || user.getPasswordHistory().stream().limit(historySize - 1L).anyMatch(passwordHash::equals));
+
+        if (reused) {
+            throw new AwsException(
+                    "PasswordHistoryPolicyViolationException",
+                    "Password matches a previously used password and does not comply with the "
+                            + "password history policy.",
                     400
             );
         }
@@ -2394,7 +2447,9 @@ public class CognitoService {
         List<String> history = new ArrayList<>();
         history.add(previousPasswordHash);
         history.addAll(user.getPasswordHistory());
-        user.setPasswordHistory(history.stream().limit(historySize).toList());
+        // Retain only n-1 entries: the current password (set by the caller after this returns)
+        // is the nth, per the counting fixed in validatePasswordAgainstPolicy.
+        user.setPasswordHistory(history.stream().limit(historySize - 1L).toList());
     }
 
     private int policyInt(Map<String, Object> policy, String key) {
