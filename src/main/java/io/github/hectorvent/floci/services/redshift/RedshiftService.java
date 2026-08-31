@@ -254,6 +254,8 @@ public class RedshiftService {
         // Hoisted so a failure after the proxy is (re)started still tears it down and
         // returns the port, matching createCluster/restoreFromClusterSnapshot rollback.
         int proxyPort = -1;
+        boolean originalTornDown = false;   // original proxy + container already stopped
+        boolean replacementStarted = false; // the new container is up and owns the cluster id
         boolean rebooted = false;
         try {
             String accountId = clusters.accountId();
@@ -262,10 +264,12 @@ public class RedshiftService {
             containerManager.takeSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
             proxyManager.stopProxy(key);
             containerManager.stop(accountId, clusterIdentifier);
+            originalTornDown = true;
 
             String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
             RedshiftContainerHandle handle = containerManager.start(
                     accountId, clusterIdentifier, cluster.getMasterUsername(), password);
+            replacementStarted = true;
 
             // Reuse the stored proxy port so the advertised endpoint is unchanged by a reboot.
             proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
@@ -283,12 +287,12 @@ public class RedshiftService {
             cluster.setClusterStatus("available");
             rebooted = true;
         } catch (AwsException e) {
-            rollbackReboot(clusterIdentifier, proxyPort);
+            rollbackReboot(clusterIdentifier, proxyPort, originalTornDown, replacementStarted);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw e;
         } catch (Exception e) {
-            rollbackReboot(clusterIdentifier, proxyPort);
+            rollbackReboot(clusterIdentifier, proxyPort, originalTornDown, replacementStarted);
             cluster.setClusterStatus("failed");
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
@@ -300,8 +304,8 @@ public class RedshiftService {
                     LOG.warnv(ex, "Failed to clean up temporary dump file {0} after rebooting cluster {1}", tempDump, clusterIdentifier);
                 }
             } else {
-                // The original container is already gone and holds no volume, so this dump is
-                // the only surviving copy of the cluster's data — keep it for manual recovery.
+                // Once the original container is torn down it holds no volume, so this dump can
+                // be the only surviving copy of the cluster's data — keep it for manual recovery.
                 LOG.warnv("Reboot of cluster {0} did not complete; retained pre-reboot data dump at {1}",
                         clusterIdentifier, tempDump);
             }
@@ -841,17 +845,27 @@ public class RedshiftService {
     }
 
     /**
-     * Undo a failed reboot: tear down the auth proxy and return its port, then stop the
-     * replacement container so it is not left running behind a "failed" cluster (mirrors
-     * createCluster/restoreFromClusterSnapshot rollback). The pre-reboot data dump is
-     * kept by the caller.
+     * Undo a failed reboot. Only acts on state the reboot actually changed:
+     * <ul>
+     *   <li>{@code originalTornDown} — the original proxy + container were already stopped,
+     *       so tearing down the (replacement's) proxy and returning its port is safe;</li>
+     *   <li>{@code replacementStarted} — a new container was started under the cluster id,
+     *       so it must be stopped rather than left running behind a "failed" cluster.</li>
+     * </ul>
+     * If the reboot failed before either milestone the original data-bearing container is
+     * still running and must not be touched. The pre-reboot data dump is kept by the caller.
      */
-    private void rollbackReboot(String identifier, int proxyPort) {
-        stopProxyAndReleasePortSafely(identifier, proxyPort);
-        try {
-            containerManager.stop(clusters.accountId(), identifier);
-        } catch (Exception ex) {
-            LOG.warnv(ex, "Failed to stop replacement container during rollback of reboot for cluster {0}", identifier);
+    private void rollbackReboot(String identifier, int proxyPort,
+                               boolean originalTornDown, boolean replacementStarted) {
+        if (originalTornDown) {
+            stopProxyAndReleasePortSafely(identifier, proxyPort);
+        }
+        if (replacementStarted) {
+            try {
+                containerManager.stop(clusters.accountId(), identifier);
+            } catch (Exception ex) {
+                LOG.warnv(ex, "Failed to stop replacement container during rollback of reboot for cluster {0}", identifier);
+            }
         }
     }
 

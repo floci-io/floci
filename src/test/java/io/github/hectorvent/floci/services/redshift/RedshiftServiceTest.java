@@ -387,6 +387,25 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void rebootClusterLeavesTheOriginalContainerAloneWhenTheDumpFails() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        doThrow(new RuntimeException("dump boom"))
+                .when(cm).takeSnapshot(eq("111111111111"), eq("c1"), eq("admin"), any(Path.class));
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        // The dump failed before the original was torn down: rollback must not stop the
+        // still-running original container or touch its proxy.
+        verify(cm, never()).stop(anyString(), anyString());
+        verify(proxyManager, never()).stopProxy(anyString());
+    }
+
+    @Test
     void testCreateSnapshot() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
