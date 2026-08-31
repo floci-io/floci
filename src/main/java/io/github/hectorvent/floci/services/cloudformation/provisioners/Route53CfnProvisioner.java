@@ -110,7 +110,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             for (JsonNode item : node) {
                 String id = item.path("VPCId").asText(null);
                 String region = item.path("VPCRegion").asText(null);
-                if (id == null || region == null) {
+                if (id == null || id.isBlank() || region == null || region.isBlank()) {
                     // AWS requires both fields on every VPCs entry; silently dropping an
                     // incomplete one would create an unassociated public zone while the
                     // stack still reports CREATE_COMPLETE.

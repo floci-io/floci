@@ -227,6 +227,27 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
+    void rejectsVpcEntryWithBlankIdOrRegionInsteadOfSilentlyAccepting() {
+        Route53Service service = mock(Route53Service.class);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+                .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "   ")));
+
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(invocation -> invocation.<JsonNode>getArgument(0).asText());
+        when(engine.resolveNode(props)).thenReturn(props);
+        ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Zone");
+        resource.setResourceType("AWS::Route53::HostedZone");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new Route53CfnProvisioner(service).provision(resource, props, context));
+        verify(service, never()).createHostedZone(any(), any(), any(), any());
+    }
+
+    @Test
     void skipsBlankTagKeysMatchingProvisionContextResolveTagsConvention() {
         Route53Service service = mock(Route53Service.class);
         VpcAssociation vpc = new VpcAssociation("vpc-123", "us-east-1");
