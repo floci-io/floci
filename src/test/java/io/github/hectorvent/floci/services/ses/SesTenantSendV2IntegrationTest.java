@@ -185,7 +185,7 @@ class SesTenantSendV2IntegrationTest {
                 .when().post("/v2/email/identities").then().statusCode(200);
         String mime = "From: probe@floci-raw.example.com\r\nTo: success@simulator.amazonses.com\r\n"
                 + "Subject: s\r\n\r\nbody";
-        String data = java.util.Base64.getEncoder().encodeToString(mime.getBytes());
+        String data = java.util.Base64.getEncoder().encodeToString(mime.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         // FromEmailAddress omitted: the sender comes from the MIME From header, and that identity
         // is not associated with the tenant.
         v2().body("{\"TenantName\":\"" + TENANT + "\","

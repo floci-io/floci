@@ -448,6 +448,9 @@ class SesTenantServiceTest {
         assertEquals("TenantName cannot be empty",
                 assertThrows(AwsException.class,
                         () -> service.tenantForSending(" ", REGION, ACCOUNT)).getMessage());
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class,
+                        () -> service.tenantForSending(null, REGION, ACCOUNT)).getMessage());
     }
 
     @Test

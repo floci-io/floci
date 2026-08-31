@@ -201,7 +201,9 @@ public class SesTenantService {
      * no angle brackets, and the account id is included.
      */
     public Tenant tenantForSending(String tenantName, String region, String accountId) {
-        if (tenantName.isBlank()) {
+        // Unreachable through the facade (which treats a null TenantName as a non-tenant send), but
+        // a public helper should fail the AWS way — same guard as runWithTenant.
+        if (tenantName == null || tenantName.isBlank()) {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         return tenantStore.get(tenantKey(region, tenantName))
