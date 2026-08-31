@@ -135,10 +135,31 @@ cluster = redshift.create_cluster(
 print(cluster["Cluster"]["Endpoint"])
 ```
 
+## SQL Interceptor & S3 COPY/UNLOAD
+
+Floci's Redshift auth proxy intercepts frontend queries on the PostgreSQL wire protocol (Simple Query `'Q'` protocol) to emulate common Redshift-specific SQL syntax:
+
+### Supported Features
+
+- **DDL Compatibility:**
+  - Redshift-specific DDL keywords are automatically stripped before forwarding to PostgreSQL: `DISTSTYLE ALL|EVEN|KEY|AUTO`, `DISTKEY (<col>)`, `COMPOUND|INTERLEAVED SORTKEY (<cols>)`, and column encodings `ENCODE <codec>` (e.g. `az64`, `zstd`, `lzo`).
+- **S3 COPY Emulation:**
+  - `COPY <table> FROM 's3://<bucket>/<prefix>'` is intercepted and streamed from Floci's S3 service directly into PostgreSQL via `COPY ... FROM STDIN WITH (FORMAT csv...)`.
+  - Supports exact object keys or prefix directories (streams all matching objects).
+  - Supports `CSV`, `DELIMITER`, `HEADER` / `IGNOREHEADER <n>`, `GZIP` decompression, and `NULL AS '<string>'`.
+- **S3 UNLOAD Emulation:**
+  - `UNLOAD ('<select query>') TO 's3://<bucket>/<prefix>'` executes the query against PostgreSQL using `COPY (...) TO STDOUT WITH (FORMAT csv...)` and writes the output directly to Floci's S3 service as `<prefix>000`.
+  - Supports `CSV`, `DELIMITER`, `HEADER`, `GZIP` compression, `ADDQUOTES`, `NULL AS '<string>'`, and `MANIFEST` generation (writes `<prefix>manifest` JSON metadata).
+
+### Limitations
+
+- Emulation is supported on the **Simple Query protocol** (`'Q'`). Extended Query protocol statements (prepared statements) pass through directly to PostgreSQL.
+- Only `CSV` and `GZIP` formats are currently supported for S3 COPY/UNLOAD (Parquet, ORC, JSON, and columnar formats are not yet supported).
+
 ## Out of Scope
 
-- Real Redshift SQL semantics — the data plane is stock PostgreSQL, so Redshift-only SQL (distribution/sort keys, `COPY`/`UNLOAD` from S3, `SUPER`/`SPECTRUM`) is not emulated.
-- Multi-node clusters — `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
+- Real Redshift distributed execution — every cluster is a single PostgreSQL container; `NodeType` and `NumberOfNodes` are metadata only.
+- Redshift-specific data types and advanced features like `SUPER`, `SPECTRUM`, or columnar storage internals.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
