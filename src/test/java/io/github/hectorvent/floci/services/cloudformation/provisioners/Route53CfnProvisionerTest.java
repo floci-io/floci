@@ -278,4 +278,84 @@ class Route53CfnProvisionerTest {
         verify(service).changeTagsForResource("hostedzone", "Z123456789",
                 List.of(java.util.Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
     }
+
+    @Test
+    void deletesReplacementZoneWhenVpcAssociationFailsDuringUpdateRecreate() {
+        // If an update recreates a missing legacy zone (see
+        // recreatesZoneWhenTheTrackedPhysicalIdNoLongerBacksARealZone) and a later VPC
+        // association throws, the update-rollback path in CloudFormationService restores the
+        // stack's previous StackResource wholesale and never learns the new zone's ID -
+        // orphaning it. The next retry then reuses the same caller reference and fails with
+        // HostedZoneAlreadyExists. The provisioner must clean up the replacement itself.
+        Route53Service service = mock(Route53Service.class);
+        when(service.getHostedZone("ZLEGACYSTUBID")).thenThrow(
+                new AwsException("NoSuchHostedZone", "No hosted zone found with ID: ZLEGACYSTUBID", 404));
+        VpcAssociation firstVpc = new VpcAssociation("vpc-123", "us-east-1");
+        VpcAssociation secondVpc = new VpcAssociation("vpc-456", "us-west-2");
+        HostedZone zone = new HostedZone("Z987654321", "ssm.us-east-1.amazonaws.com.",
+                "dns-stack/Zone", null, firstVpc);
+        when(service.createHostedZone(eq("ssm.us-east-1.amazonaws.com"), eq("dns-stack/Zone"),
+                eq(null), argThat(sameVpc(firstVpc)))).thenReturn(
+                        new Route53Service.CreateZoneResult(zone, null));
+        RuntimeException associateFailure = new AwsException(
+                "ServiceUnavailable", "throttled", 503);
+        when(service.associateVpcWithHostedZone(eq("Z987654321"), argThat(sameVpc(secondVpc)), any()))
+                .thenThrow(associateFailure);
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+                .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
+                .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
+
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(invocation -> invocation.<JsonNode>getArgument(0).asText());
+        when(engine.resolveNode(props)).thenReturn(props);
+        ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Zone");
+        resource.setResourceType("AWS::Route53::HostedZone");
+        resource.setPhysicalId("ZLEGACYSTUBID");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> new Route53CfnProvisioner(service).provision(resource, props, context));
+
+        assertEquals(associateFailure, thrown);
+        verify(service).deleteHostedZone("Z987654321");
+    }
+
+    @Test
+    void deletesReplacementZoneWhenTagWriteFailsDuringUpdateRecreate() {
+        Route53Service service = mock(Route53Service.class);
+        when(service.getHostedZone("ZLEGACYSTUBID")).thenThrow(
+                new AwsException("NoSuchHostedZone", "No hosted zone found with ID: ZLEGACYSTUBID", 404));
+        HostedZone zone = new HostedZone("Z987654321", "ssm.us-east-1.amazonaws.com.",
+                "dns-stack/Zone", null, (VpcAssociation) null);
+        when(service.createHostedZone(eq("ssm.us-east-1.amazonaws.com"), eq("dns-stack/Zone"),
+                eq(null), eq(null))).thenReturn(new Route53Service.CreateZoneResult(zone, null));
+        when(service.getNameServers()).thenReturn(List.of("ns-1.example", "ns-2.example"));
+        RuntimeException tagFailure = new AwsException("ServiceUnavailable", "throttled", 503);
+        org.mockito.Mockito.doThrow(tagFailure).when(service)
+                .changeTagsForResource(eq("hostedzone"), eq("Z987654321"), any(), any());
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+                .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
+
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(invocation -> invocation.<JsonNode>getArgument(0).asText());
+        when(engine.resolveNode(props)).thenReturn(props);
+        ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Zone");
+        resource.setResourceType("AWS::Route53::HostedZone");
+        resource.setPhysicalId("ZLEGACYSTUBID");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> new Route53CfnProvisioner(service).provision(resource, props, context));
+
+        assertEquals(tagFailure, thrown);
+        verify(service).deleteHostedZone("Z987654321");
+    }
 }

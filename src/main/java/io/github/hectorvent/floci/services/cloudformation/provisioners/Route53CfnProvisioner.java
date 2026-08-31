@@ -66,8 +66,19 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             // physicalId alone (see CfnRollback.ROLLBACK_OWNED_ATTR).
             resource.setPhysicalId(id);
             resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
-            for (int i = 1; i < vpcs.size(); i++) {
-                route53Service.associateVpcWithHostedZone(id, vpcs.get(i), comment);
+            try {
+                for (int i = 1; i < vpcs.size(); i++) {
+                    route53Service.associateVpcWithHostedZone(id, vpcs.get(i), comment);
+                }
+            } catch (RuntimeException e) {
+                // An update that recreates a missing legacy zone (isTrackedZoneMissing above)
+                // fails through CloudFormationService's generic update-rollback path, which
+                // restores the stack's previous StackResource wholesale and never learns this
+                // zone's ID - orphaning it, so the next retry reuses the same caller reference
+                // and fails with HostedZoneAlreadyExists. Since we own this zone (we just
+                // created it), clean it up ourselves rather than depend on that path.
+                route53Service.deleteHostedZone(id);
+                throw e;
             }
         } else {
             id = resource.getPhysicalId();
@@ -82,7 +93,14 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
 
         List<Map<String, String>> tags = parseTags(resolved.path("HostedZoneTags"));
         if (!tags.isEmpty()) {
-            route53Service.changeTagsForResource("hostedzone", id, tags, List.of());
+            try {
+                route53Service.changeTagsForResource("hostedzone", id, tags, List.of());
+            } catch (RuntimeException e) {
+                if ("true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR))) {
+                    route53Service.deleteHostedZone(id);
+                }
+                throw e;
+            }
         }
         resource.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
     }
