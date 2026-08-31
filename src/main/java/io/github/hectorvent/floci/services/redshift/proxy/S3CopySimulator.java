@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -16,21 +16,24 @@ import java.util.zip.GZIPOutputStream;
 
 public class S3CopySimulator {
 
+    private static final Logger LOG = Logger.getLogger(S3CopySimulator.class);
+
+    private static final long UNLOAD_BUFFER_WARN_BYTES = 256L * 1024 * 1024;
+
     public static void runCopyFrom(Socket client, Socket backend, CopyStatementParser.S3CopyFrom spec, S3Service s3) throws IOException {
         List<String> objectKeys = new ArrayList<>();
-        try {
-            s3.headObject(spec.bucket(), spec.keyOrPrefix());
+        // Exact key first; if it is not an object, treat the value as a prefix and
+        // concatenate every object under it in key order. objectExists() never throws
+        // for a missing key or bucket, so an unknown bucket falls through to an empty
+        // prefix listing and the clean ErrorResponse branch below.
+        if (s3.objectExists(spec.bucket(), spec.keyOrPrefix())) {
             objectKeys.add(spec.keyOrPrefix());
-        } catch (AwsException e) {
-            if ("NoSuchKey".equals(e.getErrorCode())) {
-                List<S3Object> objs = s3.listObjects(spec.bucket(), spec.keyOrPrefix(), null, 10000);
-                if (objs != null && !objs.isEmpty()) {
-                    for (S3Object obj : objs) {
-                        objectKeys.add(obj.getKey());
-                    }
+        } else {
+            List<S3Object> objs = s3.listObjects(spec.bucket(), spec.keyOrPrefix(), null, 10000);
+            if (objs != null) {
+                for (S3Object obj : objs) {
+                    objectKeys.add(obj.getKey());
                 }
-            } else {
-                throw e;
             }
         }
 
@@ -66,24 +69,15 @@ public class S3CopySimulator {
             client.close();
             return;
         }
-        if (copyInResp.type() == 'E') {
-            forwardMessage(client, copyInResp);
-            PostgresWireDecoder.FrontendMessage rfq = backendDecoder.nextMessage();
-            if (rfq != null && rfq.type() == 'Z') {
-                forwardMessage(client, rfq);
-            } else if (rfq != null) {
-                sendReadyForQuery(client);
-            }
-            return;
-        }
         if (copyInResp.type() != 'G') {
             forwardMessage(client, copyInResp);
+            drainToReadyForQuery(backendDecoder, client);
             return;
         }
 
         for (String key : objectKeys) {
-            try (InputStream s3Stream = s3.openObjectStream(spec.bucket(), key, null)) {
-                InputStream in = spec.gzip() ? new GZIPInputStream(s3Stream) : s3Stream;
+            try (InputStream s3Stream = s3.openObjectStream(spec.bucket(), key, null);
+                 InputStream in = spec.gzip() ? new GZIPInputStream(s3Stream) : s3Stream) {
                 byte[] buffer = new byte[65536];
                 int read;
                 while ((read = in.read(buffer)) != -1) {
@@ -132,38 +126,35 @@ public class S3CopySimulator {
             client.close();
             return;
         }
-        if (copyOutResp.type() == 'E') {
-            forwardMessage(client, copyOutResp);
-            PostgresWireDecoder.FrontendMessage rfq = backendDecoder.nextMessage();
-            if (rfq != null && rfq.type() == 'Z') {
-                forwardMessage(client, rfq);
-            } else if (rfq != null) {
-                sendReadyForQuery(client);
-            }
-            return;
-        }
         if (copyOutResp.type() != 'H') {
             forwardMessage(client, copyOutResp);
+            drainToReadyForQuery(backendDecoder, client);
             return;
         }
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         PostgresWireDecoder.FrontendMessage msg;
         PostgresWireDecoder.FrontendMessage cmdCompleteMsg = null;
+        PostgresWireDecoder.FrontendMessage readyForQueryMsg = null;
+        boolean warnedOversize = false;
         while ((msg = backendDecoder.nextMessage()) != null) {
             if (msg.type() == 'd') {
                 baos.write(msg.body(), 0, msg.body().length);
-                if (baos.size() > 256 * 1024 * 1024) {
-                    System.err.println("WARN: UNLOAD buffer exceeded 256MB");
+                if (!warnedOversize && baos.size() > UNLOAD_BUFFER_WARN_BYTES) {
+                    warnedOversize = true;
+                    LOG.warnv("UNLOAD result set exceeded {0} bytes and is buffered fully in memory "
+                            + "(bucket={1}, prefix={2})", UNLOAD_BUFFER_WARN_BYTES, spec.bucket(), spec.prefix());
                 }
             } else if (msg.type() == 'c') {
                 // CopyDone
             } else if (msg.type() == 'C') {
                 cmdCompleteMsg = msg;
             } else if (msg.type() == 'Z') {
+                readyForQueryMsg = msg;
                 break;
             } else if (msg.type() == 'E') {
                 forwardMessage(client, msg);
+                drainToReadyForQuery(backendDecoder, client);
                 return;
             }
         }
@@ -187,6 +178,30 @@ public class S3CopySimulator {
 
         if (cmdCompleteMsg != null) {
             forwardMessage(client, cmdCompleteMsg);
+        }
+        // Forward the backend's real ReadyForQuery so its transaction-status byte
+        // ('I' idle / 'T' in-block / 'E' failed-block) reaches the driver intact.
+        // Only fall back to a synthesised 'I' if the backend never sent one.
+        if (readyForQueryMsg != null) {
+            forwardMessage(client, readyForQueryMsg);
+        } else {
+            sendReadyForQuery(client);
+        }
+    }
+
+    /**
+     * After an error/unexpected reply on the injected COPY, forward the rest of the
+     * backend's messages through its terminating {@code ReadyForQuery} so the backend
+     * socket is left clean for the next client query and the driver sees the real
+     * transaction status. Synthesise {@code 'Z' 'I'} only if the backend hung up first.
+     */
+    private static void drainToReadyForQuery(PostgresWireDecoder backendDecoder, Socket client) throws IOException {
+        PostgresWireDecoder.FrontendMessage m;
+        while ((m = backendDecoder.nextMessage()) != null) {
+            forwardMessage(client, m);
+            if (m.type() == 'Z') {
+                return;
+            }
         }
         sendReadyForQuery(client);
     }

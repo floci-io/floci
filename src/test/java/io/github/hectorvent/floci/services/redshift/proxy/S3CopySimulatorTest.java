@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -36,7 +34,7 @@ public class S3CopySimulatorTest {
         ByteArrayOutputStream clientOut = new ByteArrayOutputStream();
         when(client.getOutputStream()).thenReturn(clientOut);
 
-        when(s3.headObject("bucket", "missing.csv")).thenThrow(new AwsException("NoSuchKey", "not found", 404));
+        when(s3.objectExists("bucket", "missing.csv")).thenReturn(false);
         when(s3.listObjects("bucket", "missing.csv", null, 10000)).thenReturn(List.of());
 
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
@@ -62,7 +60,7 @@ public class S3CopySimulatorTest {
         ByteArrayOutputStream backendOut = new ByteArrayOutputStream();
         when(backend.getOutputStream()).thenReturn(backendOut);
 
-        when(s3.headObject("bucket", "file.csv")).thenReturn(new S3Object("bucket", "file.csv", new byte[0], "text/csv"));
+        when(s3.objectExists("bucket", "file.csv")).thenReturn(true);
         when(s3.openObjectStream(eq("bucket"), eq("file.csv"), isNull())).thenReturn(new ByteArrayInputStream("data".getBytes(StandardCharsets.UTF_8)));
 
         byte[] backendResponse = new byte[] {
