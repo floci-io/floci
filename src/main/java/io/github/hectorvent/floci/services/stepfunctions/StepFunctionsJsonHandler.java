@@ -410,7 +410,9 @@ public class StepFunctionsJsonHandler {
     private Response handleSendTaskFailure(JsonNode request) {
         service.sendTaskFailure(
                 request.path("taskToken").asText(),
-                request.path("cause").asText(null),
+                // A SendTaskFailure that names no cause fails the task with an empty one, not with
+                // a missing key.
+                request.path("cause").asText(""),
                 request.path("error").asText(null)
         );
         return Response.ok(objectMapper.createObjectNode()).build();

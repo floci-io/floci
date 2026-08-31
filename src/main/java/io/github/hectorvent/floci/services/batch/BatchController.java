@@ -57,6 +57,20 @@ public class BatchController {
     }
 
     @POST
+    @Path("/v1/updatejobqueue")
+    public Response updateJobQueue(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.updateJobQueue(request)).build());
+    }
+
+    @POST
+    @Path("/v1/deletejobqueue")
+    public Response deleteJobQueue(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.deleteJobQueue(request)).build());
+    }
+
+    @POST
     @Path("/v1/describejobqueues")
     public Response describeJobQueues(@Context HttpHeaders headers, String body) {
         return handle(headers, body, (request, region) ->

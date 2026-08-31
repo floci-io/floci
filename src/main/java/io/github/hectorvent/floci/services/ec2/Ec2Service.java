@@ -4417,6 +4417,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (resourceId.startsWith("sgr-")) {
             return "security-group-rule";
         }
+        if (resourceId.startsWith("eni-")) {
+            return "network-interface";
+        }
         if (resourceId.startsWith("sg-")) {
             return "security-group";
         }
@@ -4970,15 +4973,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Address> describeAddresses(String region, List<String> allocationIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        List<Address> matched = addresses.scan(k -> true).stream()
+        List<Address> candidates = addresses.scan(k -> true).stream()
                 .filter(a -> a.getRegion().equals(region))
                 .filter(a -> allocationIds.isEmpty() || allocationIds.contains(a.getAllocationId()))
                 .collect(Collectors.toList());
         // An EIP can be associated before its instance has a container, and Docker hands out a
         // different bridge IP after a stop/start, either of which would leave the association
-        // reporting an address that no longer answers. Re-resolve on read: this is the call
-        // Terraform refreshes public_ip from, so it is the last chance to be right.
-        for (Address addr : matched) {
+        // reporting an address that no longer answers. Re-resolve BEFORE filtering: a public-ip
+        // or association filter must be judged against the address the response will carry, not
+        // the one persisted before the restart. This is also the call Terraform refreshes
+        // public_ip from, so it is the last chance to be right.
+        for (Address addr : candidates) {
             if (addr.getInstanceId() != null) {
                 String before = addr.getPublicIp();
                 pointAddressAtInstance(addr, region, addr.getInstanceId());
@@ -4987,7 +4992,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 }
             }
         }
-        return matched;
+        // The filters parameter was previously accepted and never applied: every
+        // DescribeAddresses filter, including the generic tag: family that works
+        // against every other resource here, was a silent no-op.
+        return candidates.stream()
+                .filter(a -> matchesFilters(a, filters, region))
+                .collect(Collectors.toList());
     }
 
     // ─── Availability Zones & Regions ─────────────────────────────────────────
@@ -5153,7 +5163,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "vpc-id" -> matchesValue(values, vpc.getVpcId());
                 case "state" -> matchesValue(values, vpc.getState());
                 case "isDefault", "is-default" -> matchesValue(values, String.valueOf(vpc.isDefault()));
-                case "cidr" -> matchesValue(values, vpc.getCidrBlock());
+                // "cidr" is the documented filter name for a VPC's primary CIDR block; real EC2
+                // also accepts the undocumented alias "cidr-block" (confirmed against live AWS
+                // 2026-08-25: it matches only the primary block, not a secondary
+                // cidr-block-association entry).
+                case "cidr", "cidr-block" -> matchesValue(values, vpc.getCidrBlock());
                 default -> true;
             };
         }
@@ -5208,6 +5222,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "group-id" -> matchesValue(values, sg.getGroupId());
                 case "group-name" -> matchesValue(values, sg.getGroupName());
                 case "vpc-id" -> matchesValue(values, sg.getVpcId());
+                // "description" is a documented DescribeSecurityGroups filter matching the
+                // group's description exactly (wildcards allowed). Without this case the
+                // default arm silently matched every group regardless of value, which is
+                // indistinguishable from "no filter" for the caller.
+                case "description" -> matchesValue(values, sg.getDescription());
                 default -> true;
             };
         }
@@ -5220,6 +5239,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "subnet-id" -> matchesValue(values, inst.getSubnetId());
                 case "availabilityZone", "availability-zone" -> inst.getPlacement() != null
                         && matchesValue(values, inst.getPlacement().getAvailabilityZone());
+                // "image-id" is a documented DescribeInstances filter matching the AMI the
+                // instance was launched from; it previously fell through the default arm and
+                // matched every instance regardless of value.
+                case "image-id" -> matchesValue(values, inst.getImageId());
                 default -> true;
             };
         }
@@ -5265,7 +5288,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "vpc-endpoint-id" -> matchesValue(values, endpoint.getVpcEndpointId());
                 case "vpc-endpoint-type" -> matchesValue(values, endpoint.getVpcEndpointType());
                 case "vpc-id" -> matchesValue(values, endpoint.getVpcId());
-                case "state" -> matchesValue(values, endpoint.getState());
+                // AWS documents this filter as "vpc-endpoint-state", not "state" (see
+                // DescribeVpcEndpoints in the EC2 API reference). The old key was a silent
+                // rename: a caller sending the documented name fell through the default arm
+                // and got every endpoint back unfiltered. Renamed rather than aliased -
+                // there is no evidence real AWS accepts "state" here.
+                case "vpc-endpoint-state" -> matchesValue(values, endpoint.getState());
                 case "route-table-id" -> endpoint.getRouteTableIds().stream()
                         .anyMatch(routeTableId -> matchesValue(values, routeTableId));
                 case "subnet-id" -> endpoint.getSubnetIds().stream()
@@ -5290,6 +5318,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "volume-type" -> matchesValue(values, vol.getVolumeType());
                 case "availability-zone" -> matchesValue(values, vol.getAvailabilityZone());
                 case "encrypted" -> matchesValue(values, String.valueOf(vol.isEncrypted()));
+                // attachment.* was previously unhandled and fell through to the default arm,
+                // so DescribeVolumes --filters attachment.instance-id/attachment.device
+                // matched every volume in the region instead of the attached one; Volumes[0]
+                // then depended on iteration order, which reads as nondeterminism but is a
+                // plain missing-filter bug.
+                case "attachment.instance-id" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getInstanceId()));
+                case "attachment.device" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getDevice()));
+                case "attachment.status" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getState()));
+                case "attachment.delete-on-termination" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, String.valueOf(a.isDeleteOnTermination())));
                 default -> true;
             };
         }
@@ -5311,6 +5352,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "owner-id" -> matchesValue(values, ni.getOwnerId());
                 case "mac-address" -> matchesValue(values, ni.getMacAddress());
                 case "private-dns-name" -> matchesValue(values, ni.getPrivateDnsName());
+                default -> true;
+            };
+        }
+        // These are the AWS-documented DescribeAddresses filters this store can back with
+        // real data; two documented filters (network-border-group,
+        // network-interface-owner-id) are omitted because Address has no such field and
+        // fabricating one would be its own wrong answer.
+        if (resource instanceof Address addr) {
+            return switch (filterName) {
+                case "allocation-id" -> matchesValue(values, addr.getAllocationId());
+                case "public-ip" -> matchesValue(values, addr.getPublicIp());
+                case "domain" -> matchesValue(values, addr.getDomain());
+                case "association-id" -> addr.getAssociationId() != null
+                        && matchesValue(values, addr.getAssociationId());
+                case "instance-id" -> addr.getInstanceId() != null
+                        && matchesValue(values, addr.getInstanceId());
+                case "network-interface-id" -> addr.getNetworkInterfaceId() != null
+                        && matchesValue(values, addr.getNetworkInterfaceId());
+                case "private-ip-address" -> addr.getPrivateIpAddress() != null
+                        && matchesValue(values, addr.getPrivateIpAddress());
                 default -> true;
             };
         }
@@ -5548,7 +5609,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 if (inst.getPlacement() != null) {
                     ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
                 }
-                ni.getTagSet().addAll(inst.getTags());
+                // A network interface's tags are its OWN, never the instance's. AWS tags
+                // exactly the resource types a RunInstances TagSpecification names, so an
+                // interface created for an instance whose specification said
+                // ResourceType=instance carries no tags until something tags the eni- id
+                // itself - and DescribeTags never listed these copied tags either, so
+                // DescribeNetworkInterfaces disagreed with DescribeTags about the same
+                // resource. Read the interface's own entry in the tag store instead:
+                // CreateTags on the eni- id writes it, and so does a RunInstances
+                // TagSpecification with ResourceType=network-interface.
+                ni.getTagSet().addAll(tags.get(eni.getNetworkInterfaceId()).orElse(List.of()));
 
                 NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
                 att.setAttachmentId(eni.getAttachmentId());

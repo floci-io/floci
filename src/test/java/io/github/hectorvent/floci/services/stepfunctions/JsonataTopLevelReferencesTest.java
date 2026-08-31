@@ -8,15 +8,21 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * Every expression here was run through
  * {@code aws stepfunctions validate-state-machine-definition --region us-east-1} as the Output of
  * a one-state Pass machine. The names asserted are the ones AWS puts in
- * {@code Reference to '<name>' at the top level is not supported.}, and the expressions asserted
- * empty are the ones AWS answers {@code result: OK}.
+ * {@code Reference to '<name>' at the top level is not supported.}, the expressions asserted
+ * empty are the ones AWS answers {@code result: OK}, and the parse errors asserted are the
+ * messages AWS puts in its {@code INVALID_JSONATA_EXPRESSION} diagnostic, word for word.
  */
 class JsonataTopLevelReferencesTest {
+
+    private static List<String> references(String expression) {
+        return JsonataTopLevelReferences.analyze(expression).topLevelReferences();
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {
@@ -43,7 +49,7 @@ class JsonataTopLevelReferencesTest {
             "phone.**.deeper"})
     @DisplayName("AWS names the identifier read at the top level")
     void namesTheTopLevelIdentifier(String expression) {
-        assertEquals(List.of("phone"), JsonataTopLevelReferences.in(expression));
+        assertEquals(List.of("phone"), references(expression));
     }
 
     @ParameterizedTest
@@ -71,7 +77,7 @@ class JsonataTopLevelReferencesTest {
             "$now()"})
     @DisplayName("AWS accepts a name that is not read from the top-level context")
     void namesNothingWhenTheReferenceIsAnchored(String expression) {
-        assertEquals(List.of(), JsonataTopLevelReferences.in(expression));
+        assertEquals(List.of(), references(expression));
     }
 
     @ParameterizedTest
@@ -79,32 +85,62 @@ class JsonataTopLevelReferencesTest {
             "$map($states.input.a, function($x){ $ })"})
     @DisplayName("the context item itself is named '$', as AWS names it")
     void namesTheContextItem(String expression) {
-        assertEquals(List.of("$"), JsonataTopLevelReferences.in(expression));
+        assertEquals(List.of("$"), references(expression));
     }
 
-    @Test
-    @DisplayName("'$$' is AWS's separate rule and is left to it")
-    void leavesTheRootReferenceAlone() {
-        assertEquals(List.of(), JsonataTopLevelReferences.in("$$"));
-        assertEquals(List.of(), JsonataTopLevelReferences.in("$$.phone"));
+    @ParameterizedTest
+    @ValueSource(strings = {"$$", "$$.phone"})
+    @DisplayName("'$$' is named on its own, as AWS's separate rule needs")
+    void namesTheRootReference(String expression) {
+        assertEquals(List.of("$$"), references(expression));
     }
 
     @Test
     @DisplayName("every distinct name is reported once, in writing order")
     void reportsEveryDistinctNameOnce() {
-        assertEquals(List.of("aaa", "bbb"), JsonataTopLevelReferences.in("aaa + bbb"));
-        assertEquals(List.of("bbb", "aaa"), JsonataTopLevelReferences.in("[bbb, aaa]"));
-        assertEquals(List.of("aaa"), JsonataTopLevelReferences.in("aaa + aaa"));
-        assertEquals(List.of("aaa", "bbb"), JsonataTopLevelReferences.in("(aaa; bbb)"));
-        assertEquals(List.of("aaa", "bbb"),
-                JsonataTopLevelReferences.in("$number(aaa) + $number(bbb)"));
+        assertEquals(List.of("aaa", "bbb"), references("aaa + bbb"));
+        assertEquals(List.of("bbb", "aaa"), references("[bbb, aaa]"));
+        assertEquals(List.of("aaa"), references("aaa + aaa"));
+        assertEquals(List.of("aaa", "bbb"), references("(aaa; bbb)"));
+        assertEquals(List.of("aaa", "bbb"), references("$number(aaa) + $number(bbb)"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "$states.errorOutput",
+            "$states.errorOutput.Cause",
+            "$states.errorOutput.Error",
+            "[$states.errorOutput]",
+            "$states.errorOutput ? 1 : 2"})
+    @DisplayName("'$states.errorOutput' is named on its own; whether it is allowed is the caller's call")
+    void namesTheStatesErrorOutputPath(String expression) {
+        assertEquals(List.of("$states.errorOutput"), references(expression));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$states.input.errorOutput", "$states.error", "$states"})
+    @DisplayName("only the exact '$states.errorOutput' path is named")
+    void namesNothingForALookalikeStatesPath(String expression) {
+        assertEquals(List.of(), references(expression));
     }
 
     @Test
-    @DisplayName("a syntax error names nothing, so the definition stays accepted")
-    void namesNothingWhenTheExpressionDoesNotParse() {
-        assertEquals(List.of(), JsonataTopLevelReferences.in("phone[1,2)"));
-        assertEquals(List.of(), JsonataTopLevelReferences.in("phone %.other"));
-        assertEquals(List.of(), JsonataTopLevelReferences.in(""));
+    @DisplayName("a syntax error names nothing but reports the message AWS prints for it")
+    void reportsTheParserMessageWhenTheExpressionDoesNotParse() {
+        assertParseError("phone[1,2)", "Expected \"]\", got \",\"");
+        assertParseError("phone %.other", "The symbol \".\" cannot be used as a unary operator");
+        assertParseError("", "Unexpected end of expression");
+    }
+
+    private static void assertParseError(String expression, String expectedMessage) {
+        JsonataTopLevelReferences.Analysis analysis = JsonataTopLevelReferences.analyze(expression);
+        assertEquals(List.of(), analysis.topLevelReferences());
+        assertEquals(expectedMessage, analysis.parseError());
+    }
+
+    @Test
+    @DisplayName("an expression that parses carries no parse error")
+    void carriesNoParseErrorWhenTheExpressionParses() {
+        assertNull(JsonataTopLevelReferences.analyze("phone").parseError());
     }
 }

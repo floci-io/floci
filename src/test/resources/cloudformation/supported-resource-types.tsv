@@ -21,7 +21,7 @@ AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CloudFormation::CustomResource	LEGACY_SWITCH
 AWS::CloudFront::Distribution	LEGACY_SWITCH
 AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
-AWS::CloudWatch::Alarm	LEGACY_SWITCH
+AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
 AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner
@@ -73,7 +73,7 @@ AWS::IAM::Role	IamRoleCfnProvisioner
 AWS::IAM::User	LEGACY_SWITCH
 AWS::KMS::Alias	KmsCfnProvisioner
 AWS::KMS::Key	KmsCfnProvisioner
-AWS::Kinesis::Stream	LEGACY_SWITCH
+AWS::Kinesis::Stream	KinesisCfnProvisioner
 AWS::KinesisFirehose::DeliveryStream	FirehoseCfnProvisioner
 AWS::Lambda::Alias	LambdaVersionAliasCfnProvisioner
 AWS::Lambda::EventSourceMapping	LEGACY_SWITCH
@@ -83,7 +83,7 @@ AWS::Lambda::MicrovmImage	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::NetworkConnector	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
-AWS::Logs::LogGroup	LEGACY_SWITCH
+AWS::Logs::LogGroup	LogsCfnProvisioner
 AWS::Organizations::Account	OrganizationsCfnProvisioner
 AWS::Organizations::Organization	OrganizationsCfnProvisioner
 AWS::Organizations::OrganizationalUnit	OrganizationsCfnProvisioner
@@ -99,10 +99,10 @@ AWS::RDS::DBProxyTargetGroup	LEGACY_SWITCH
 AWS::RDS::DBSubnetGroup	LEGACY_SWITCH
 AWS::Route53::HostedZone	LEGACY_SWITCH
 AWS::Route53::RecordSet	LEGACY_SWITCH
-AWS::S3::Bucket	LEGACY_SWITCH
-AWS::S3::BucketPolicy	LEGACY_SWITCH
-AWS::SNS::Subscription	LEGACY_SWITCH
-AWS::SNS::Topic	LEGACY_SWITCH
+AWS::S3::Bucket	S3CfnProvisioner
+AWS::S3::BucketPolicy	S3CfnProvisioner
+AWS::SNS::Subscription	SnsCfnProvisioner
+AWS::SNS::Topic	SnsCfnProvisioner
 AWS::SQS::Queue	SqsCfnProvisioner
 AWS::SQS::QueuePolicy	SqsCfnProvisioner
 AWS::SSM::Parameter	SsmCfnProvisioner
