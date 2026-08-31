@@ -1988,6 +1988,7 @@ public class SesService {
             case "contact-list" -> contactService.listTags(ref.name(), region);
             case "custom-verification-email-template" -> cvetService.listTags(ref.name(), region);
             case "dedicated-ip-pool" -> dedicatedIpService.listTags(ref.name(), region);
+            case "tenant" -> listTenantTags(ref.name(), region);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         };
@@ -2018,6 +2019,7 @@ public class SesService {
             case "contact-list" -> contactService.tag(ref.name(), region, tags);
             case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
             case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
+            case "tenant" -> tagTenant(ref.name(), region, tags);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -2044,9 +2046,39 @@ public class SesService {
             case "contact-list" -> contactService.untag(ref.name(), region, tagKeys);
             case "custom-verification-email-template" -> cvetService.untag(ref.name(), region, tagKeys);
             case "dedicated-ip-pool" -> dedicatedIpService.untag(ref.name(), region, tagKeys);
+            case "tenant" -> untagTenant(ref.name(), region, tagKeys);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
+    }
+
+    // A tenant tag ARN carries two path segments (tenant/<name>/<tenantId>), so parseSesArn's
+    // first-slash split leaves "<name>/<tenantId>" as the resource name; the tenant domain owns
+    // that remainder's decomposition and the id-only resolution (see SesTenantService.TenantTagArn).
+
+    private List<Tag> listTenantTags(String resourceName, String region) {
+        Tenant tenant = tenantService.tenantForTagArn(resourceName, region);
+        // AWS returns a tenant's tags ordered by key (probe-confirmed).
+        return (tenant.tags() == null ? List.<Tag>of() : tenant.tags()).stream()
+                .sorted(Comparator.comparing(Tag::key, Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    private void tagTenant(String resourceName, String region, List<Tag> newTags) {
+        tenantService.mutateTags(resourceName, region, tags -> SesTags.merge(tags, newTags));
+        LOG.infov("Tagged SES tenant <{0}> (region {1}, +{2} tags)",
+                resourceName, region, newTags.size());
+    }
+
+    private void untagTenant(String resourceName, String region, List<String> tagKeys) {
+        Set<String> toRemove = new HashSet<>(tagKeys);
+        tenantService.mutateTags(resourceName, region, tags -> {
+            List<Tag> remaining = new ArrayList<>(tags);
+            remaining.removeIf(t -> toRemove.contains(t.key()));
+            return remaining;
+        });
+        LOG.infov("Untagged SES tenant <{0}> (region {1}, -{2} keys)",
+                resourceName, region, tagKeys.size());
     }
 
     private List<Tag> listConfigurationSetTags(String name, String region) {
