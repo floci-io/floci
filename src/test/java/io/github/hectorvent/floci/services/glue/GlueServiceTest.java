@@ -9,7 +9,13 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Crawler;
+import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
+import io.github.hectorvent.floci.services.glue.model.Job;
+import io.github.hectorvent.floci.services.glue.model.JobCommand;
+import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.S3Target;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
@@ -70,8 +76,8 @@ class GlueServiceTest {
                 partitionStore,
                 new InMemoryStorage<String, Map<String, Object>>(),
                 new InMemoryStorage<String, UserDefinedFunction>(),
-                new InMemoryStorage<String, io.github.hectorvent.floci.services.glue.model.Job>(),
-                new InMemoryStorage<String, io.github.hectorvent.floci.services.glue.model.Crawler>(),
+                new InMemoryStorage<String, Job>(),
+                new InMemoryStorage<String, Crawler>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null));
         glueService.createDatabase(new Database("db1"));
     }
@@ -1042,16 +1048,32 @@ class GlueServiceTest {
         }
     }
 
+    private Job createValidJob(String name) {
+        Job job = new Job();
+        job.setName(name);
+        job.setRole("arn:aws:iam::000000000000:role/my-role");
+        job.setCommand(new JobCommand());
+        return job;
+    }
+
+    private Crawler createValidCrawler(String name) {
+        Crawler crawler = new Crawler();
+        crawler.setName(name);
+        crawler.setRole("arn:aws:iam::000000000000:role/my-role");
+        CrawlerTargets targets = new CrawlerTargets();
+        targets.setS3Targets(java.util.List.of(new S3Target()));
+        crawler.setTargets(targets);
+        return crawler;
+    }
+
     @Test
     void jobCanBeCreatedFetchedUpdatedAndDeleted() {
-        io.github.hectorvent.floci.services.glue.model.Job job = new io.github.hectorvent.floci.services.glue.model.Job();
-        job.setName("my-job");
+        Job job = createValidJob("my-job");
         job.setDescription("Original description");
-        job.setRole("arn:aws:iam::000000000000:role/my-role");
 
         glueService.createJob(job);
 
-        io.github.hectorvent.floci.services.glue.model.Job fetched = glueService.getJob("my-job");
+        Job fetched = glueService.getJob("my-job");
         assertEquals("my-job", fetched.getName());
         assertEquals("Original description", fetched.getDescription());
         assertNotNull(fetched.getCreatedOn());
@@ -1060,13 +1082,13 @@ class GlueServiceTest {
         assertEquals(1, glueService.getJobs().size());
         assertEquals(1, glueService.getJobs(10, null).items().size());
 
-        io.github.hectorvent.floci.services.glue.model.JobUpdate update = new io.github.hectorvent.floci.services.glue.model.JobUpdate();
+        JobUpdate update = new JobUpdate();
         update.setDescription("Updated description");
         update.setRole("arn:aws:iam::000000000000:role/new-role");
 
         glueService.updateJob("my-job", update);
 
-        io.github.hectorvent.floci.services.glue.model.Job updated = glueService.getJob("my-job");
+        Job updated = glueService.getJob("my-job");
         assertEquals("Updated description", updated.getDescription());
         assertEquals("arn:aws:iam::000000000000:role/new-role", updated.getRole());
         assertTrue(updated.getLastModifiedOn().isAfter(fetched.getCreatedOn()) || updated.getLastModifiedOn().equals(fetched.getCreatedOn()));
@@ -1080,15 +1102,13 @@ class GlueServiceTest {
 
     @Test
     void crawlerCanBeCreatedFetchedUpdatedAndDeleted() {
-        io.github.hectorvent.floci.services.glue.model.Crawler crawler = new io.github.hectorvent.floci.services.glue.model.Crawler();
-        crawler.setName("my-crawler");
+        Crawler crawler = createValidCrawler("my-crawler");
         crawler.setDescription("Original crawler");
-        crawler.setRole("arn:aws:iam::000000000000:role/my-role");
         crawler.setDatabaseName("db1");
 
         glueService.createCrawler(crawler);
 
-        io.github.hectorvent.floci.services.glue.model.Crawler fetched = glueService.getCrawler("my-crawler");
+        Crawler fetched = glueService.getCrawler("my-crawler");
         assertEquals("my-crawler", fetched.getName());
         assertEquals("Original crawler", fetched.getDescription());
         assertEquals("db1", fetched.getDatabaseName());
@@ -1098,14 +1118,14 @@ class GlueServiceTest {
         assertEquals(1, glueService.getCrawlers().size());
         assertEquals(1, glueService.getCrawlers(10, null).items().size());
 
-        io.github.hectorvent.floci.services.glue.model.Crawler update = new io.github.hectorvent.floci.services.glue.model.Crawler();
+        Crawler update = new Crawler();
         update.setName("my-crawler");
         update.setDescription("Updated crawler");
         update.setDatabaseName("db2");
 
         glueService.updateCrawler(update);
 
-        io.github.hectorvent.floci.services.glue.model.Crawler updated = glueService.getCrawler("my-crawler");
+        Crawler updated = glueService.getCrawler("my-crawler");
         assertEquals("Updated crawler", updated.getDescription());
         assertEquals("db2", updated.getDatabaseName());
         assertTrue(updated.getLastUpdated().isAfter(fetched.getCreationTime()) || updated.getLastUpdated().equals(fetched.getCreationTime()));
@@ -1119,8 +1139,7 @@ class GlueServiceTest {
 
     @Test
     void resourceTaggingWorksForJobsAndCrawlers() {
-        io.github.hectorvent.floci.services.glue.model.Job job = new io.github.hectorvent.floci.services.glue.model.Job();
-        job.setName("tagged-job");
+        Job job = createValidJob("tagged-job");
         glueService.createJob(job, Map.of("key1", "value1"), REGION);
 
         String jobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/tagged-job";
@@ -1137,8 +1156,7 @@ class GlueServiceTest {
         assertNull(finalTags.get("key1"));
         assertEquals("value2", finalTags.get("key2"));
 
-        io.github.hectorvent.floci.services.glue.model.Crawler crawler = new io.github.hectorvent.floci.services.glue.model.Crawler();
-        crawler.setName("tagged-crawler");
+        Crawler crawler = createValidCrawler("tagged-crawler");
         glueService.createCrawler(crawler, Map.of("env", "prod"), REGION);
 
         String crawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/tagged-crawler";
@@ -1148,15 +1166,13 @@ class GlueServiceTest {
 
     @Test
     void jobAndCrawlerRejectsDuplicateCreation() {
-        io.github.hectorvent.floci.services.glue.model.Job job = new io.github.hectorvent.floci.services.glue.model.Job();
-        job.setName("dup-job");
+        Job job = createValidJob("dup-job");
         glueService.createJob(job);
 
         AwsException jobEx = assertThrows(AwsException.class, () -> glueService.createJob(job));
         assertEquals("AlreadyExistsException", jobEx.getErrorCode());
 
-        io.github.hectorvent.floci.services.glue.model.Crawler crawler = new io.github.hectorvent.floci.services.glue.model.Crawler();
-        crawler.setName("dup-crawler");
+        Crawler crawler = createValidCrawler("dup-crawler");
         glueService.createCrawler(crawler);
 
         AwsException crawlerEx = assertThrows(AwsException.class, () -> glueService.createCrawler(crawler));
@@ -1166,28 +1182,26 @@ class GlueServiceTest {
     @Test
     void getJobsAndCrawlersPagination() {
         for (int i = 0; i < 5; i++) {
-            io.github.hectorvent.floci.services.glue.model.Job job = new io.github.hectorvent.floci.services.glue.model.Job();
-            job.setName("job-" + i);
+            Job job = createValidJob("job-" + i);
             glueService.createJob(job);
 
-            io.github.hectorvent.floci.services.glue.model.Crawler crawler = new io.github.hectorvent.floci.services.glue.model.Crawler();
-            crawler.setName("crawler-" + i);
+            Crawler crawler = createValidCrawler("crawler-" + i);
             glueService.createCrawler(crawler);
         }
 
-        GlueService.Page<io.github.hectorvent.floci.services.glue.model.Job> jobsPage = glueService.getJobs(2, null);
+        GlueService.Page<Job> jobsPage = glueService.getJobs(2, null);
         assertEquals(2, jobsPage.items().size());
         assertNotNull(jobsPage.nextToken());
 
-        GlueService.Page<io.github.hectorvent.floci.services.glue.model.Job> jobsNextPage = glueService.getJobs(10, jobsPage.nextToken());
+        GlueService.Page<Job> jobsNextPage = glueService.getJobs(10, jobsPage.nextToken());
         assertEquals(3, jobsNextPage.items().size());
         assertNull(jobsNextPage.nextToken());
 
-        GlueService.Page<io.github.hectorvent.floci.services.glue.model.Crawler> crawlersPage = glueService.getCrawlers(3, null);
+        GlueService.Page<Crawler> crawlersPage = glueService.getCrawlers(3, null);
         assertEquals(3, crawlersPage.items().size());
         assertNotNull(crawlersPage.nextToken());
 
-        GlueService.Page<io.github.hectorvent.floci.services.glue.model.Crawler> crawlersNextPage = glueService.getCrawlers(10, crawlersPage.nextToken());
+        GlueService.Page<Crawler> crawlersNextPage = glueService.getCrawlers(10, crawlersPage.nextToken());
         assertEquals(2, crawlersNextPage.items().size());
         assertNull(crawlersNextPage.nextToken());
 

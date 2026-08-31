@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Crawler;
+import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Job;
 import io.github.hectorvent.floci.services.glue.model.JobUpdate;
@@ -1023,12 +1024,29 @@ public class GlueService {
         return source != null ? new LinkedHashMap<>(source) : null;
     }
 
+    private void validateRequired(String value, String fieldName) {
+        if (value == null || value.isBlank()) {
+            throw new AwsException("InvalidInputException", fieldName + " is required.", 400);
+        }
+    }
+
+    private void validateRequired(Object value, String fieldName) {
+        if (value == null) {
+            throw new AwsException("InvalidInputException", fieldName + " is required.", 400);
+        }
+    }
+
     public void createJob(Job job) {
         createJob(job, null, regionResolver.getDefaultRegion());
     }
 
     public void createJob(Job job, Map<String, String> tags, String region) {
-        String name = normalizeName(job.getName());
+        validateRequired(job.getName(), "Name");
+        validateRequired(job.getRole(), "Role");
+        validateRequired(job.getCommand(), "Command");
+        
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String name = job.getName();
         if (jobStore.get(name).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Job " + name + " already exists.", 400);
         }
@@ -1043,7 +1061,8 @@ public class GlueService {
     }
 
     public Job getJob(String name) {
-        return jobStore.get(normalizeName(name))
+        validateRequired(name, "JobName");
+        return jobStore.get(name)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
     }
 
@@ -1058,13 +1077,19 @@ public class GlueService {
     }
 
     public void updateJob(String name, JobUpdate update) {
-        String normalizedName = normalizeName(name);
+        validateRequired(name, "JobName");
+        validateRequired(update, "JobUpdate");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String normalizedName = name;
         Job existing = jobStore.get(normalizedName)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
 
+        // UpdateJob replaces unspecified configuration with nulls (full replacement) rather than merging.
+        // This is deliberate and matches AWS behavior. We only copy fields that the user cannot specify.
         Job updated = new Job();
         updated.setName(existing.getName());
         updated.setCreatedOn(existing.getCreatedOn());
+        updated.setProfileName(existing.getProfileName());
         updated.setLastModifiedOn(Instant.now());
 
         updated.setAllocatedCapacity(update.getAllocatedCapacity());
@@ -1087,6 +1112,7 @@ public class GlueService {
         updated.setNumberOfWorkers(update.getNumberOfWorkers());
         updated.setRole(update.getRole());
         updated.setSecurityConfiguration(update.getSecurityConfiguration());
+        updated.setSourceControlDetails(update.getSourceControlDetails());
         updated.setTimeout(update.getTimeout());
         updated.setWorkerType(update.getWorkerType());
 
@@ -1095,7 +1121,9 @@ public class GlueService {
     }
 
     public void deleteJob(String name, String region) {
-        String normalizedName = normalizeName(name);
+        validateRequired(name, "JobName");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String normalizedName = name;
         if (jobStore.get(normalizedName).isEmpty()) {
             throw new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400);
         }
@@ -1109,13 +1137,33 @@ public class GlueService {
     }
 
     public void createCrawler(Crawler crawler, Map<String, String> tags, String region) {
-        String name = normalizeName(crawler.getName());
+        validateRequired(crawler.getName(), "Name");
+        validateRequired(crawler.getRole(), "Role");
+        validateRequired(crawler.getTargets(), "Targets");
+        
+        CrawlerTargets t = crawler.getTargets();
+        boolean hasTargets = (t.getS3Targets() != null && !t.getS3Targets().isEmpty()) ||
+                             (t.getJdbcTargets() != null && !t.getJdbcTargets().isEmpty()) ||
+                             (t.getDynamoDBTargets() != null && !t.getDynamoDBTargets().isEmpty()) ||
+                             (t.getCatalogTargets() != null && !t.getCatalogTargets().isEmpty()) ||
+                             (t.getDeltaTargets() != null && !t.getDeltaTargets().isEmpty()) ||
+                             (t.getIcebergTargets() != null && !t.getIcebergTargets().isEmpty()) ||
+                             (t.getMongoDBTargets() != null && !t.getMongoDBTargets().isEmpty()) ||
+                             (t.getHudiTargets() != null && !t.getHudiTargets().isEmpty());
+        if (!hasTargets) {
+            throw new AwsException("InvalidInputException", "At least one crawl target must be specified.", 400);
+        }
+
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String name = crawler.getName();
         if (crawlerStore.get(name).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Crawler " + name + " already exists.", 400);
         }
         Instant now = Instant.now();
         crawler.setCreationTime(now);
         crawler.setLastUpdated(now);
+        crawler.setState("READY");
+        crawler.setVersion(1L);
         crawlerStore.put(name, crawler);
         if (tags != null && !tags.isEmpty()) {
             resourceGroupsTaggingService.tagResources(List.of(crawlerArn(region, name)), tags, region);
@@ -1124,7 +1172,8 @@ public class GlueService {
     }
 
     public Crawler getCrawler(String name) {
-        return crawlerStore.get(normalizeName(name))
+        validateRequired(name, "Name");
+        return crawlerStore.get(name)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400));
     }
 
@@ -1139,7 +1188,9 @@ public class GlueService {
     }
 
     public void updateCrawler(Crawler update) {
-        String name = normalizeName(update.getName());
+        validateRequired(update.getName(), "Name");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String name = update.getName();
         Crawler existing = crawlerStore.get(name)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + update.getName() + " not found.", 400));
 
@@ -1147,6 +1198,8 @@ public class GlueService {
         updated.setName(existing.getName());
         updated.setCreationTime(existing.getCreationTime());
         updated.setLastUpdated(Instant.now());
+        updated.setState(existing.getState());
+        updated.setVersion((existing.getVersion() == null ? 1L : existing.getVersion()) + 1L);
 
         updated.setClassifiers(update.getClassifiers() != null ? update.getClassifiers() : existing.getClassifiers());
         updated.setConfiguration(update.getConfiguration() != null ? update.getConfiguration() : existing.getConfiguration());
@@ -1167,7 +1220,9 @@ public class GlueService {
     }
 
     public void deleteCrawler(String name, String region) {
-        String normalizedName = normalizeName(name);
+        validateRequired(name, "Name");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String normalizedName = name;
         if (crawlerStore.get(normalizedName).isEmpty()) {
             throw new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400);
         }

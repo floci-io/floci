@@ -45,7 +45,6 @@ class GlueJsonHandlerEmptyListTest {
         handler = new GlueJsonHandler(glueService, schemaRegistryService, mapper);
     }
 
-
     @Test
     void listDataQualityRulesetsReturnsEmptyRulesetsList() throws Exception {
         assertEmptyList("ListDataQualityRulesets", "Rulesets");
