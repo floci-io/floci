@@ -203,6 +203,46 @@ public class BatchService {
         return out;
     }
 
+    public synchronized ObjectNode updateJobQueue(JsonNode request) {
+        BatchJobQueue queue = resolveJobQueue(requiredText(request, "jobQueue"));
+        if (request.hasNonNull("state")) {
+            queue.setState(request.path("state").asText());
+        }
+        if (request.hasNonNull("priority")) {
+            queue.setPriority(request.path("priority").asInt());
+        }
+        if (request.hasNonNull("computeEnvironmentOrder")) {
+            List<BatchComputeEnvironmentOrder> orders =
+                    computeEnvironmentOrder(request.path("computeEnvironmentOrder"));
+            for (BatchComputeEnvironmentOrder order : orders) {
+                BatchComputeEnvironment env = resolveComputeEnvironment(order.getComputeEnvironment());
+                if (!"VALID".equals(env.getStatus())) {
+                    throw client("Compute environment is not VALID: " + order.getComputeEnvironment());
+                }
+            }
+            queue.setComputeEnvironmentOrder(orders);
+        }
+        jobQueueStore.put(queue.getJobQueueArn(), queue);
+
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("jobQueueName", queue.getJobQueueName());
+        out.put("jobQueueArn", queue.getJobQueueArn());
+        return out;
+    }
+
+    public synchronized ObjectNode deleteJobQueue(JsonNode request) {
+        String ref = requiredText(request, "jobQueue");
+        Optional<BatchJobQueue> queue = resolveJobQueueOptional(ref);
+        if (queue.isEmpty()) {
+            return objectMapper.createObjectNode();
+        }
+        if ("ENABLED".equals(queue.get().getState())) {
+            throw client("Cannot delete job queue in ENABLED state: " + queue.get().getJobQueueName());
+        }
+        jobQueueStore.delete(queue.get().getJobQueueArn());
+        return objectMapper.createObjectNode();
+    }
+
     public ObjectNode describeJobQueues(JsonNode request) {
         List<String> refs = stringList(request.path("jobQueues"));
         if (refs.size() > DESCRIBE_JOBS_LIMIT) {

@@ -448,6 +448,57 @@ class BatchIntegrationTest {
     }
 
     @Test
+    void updateAndDeleteJobQueueSupportsTeardownFlow() {
+        String suffix = uniqueSuffix();
+        String queueName = "teardown-queue-" + suffix;
+        String queueArn = createQueue(queueName, createComputeEnvironment("teardown-ce-" + suffix));
+
+        givenJson("{\"jobQueue\":\"%s\"}".formatted(queueName))
+        .when()
+            .post("/v1/deletejobqueue")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+
+        givenJson("{\"jobQueue\":\"%s\",\"state\":\"DISABLED\",\"priority\":9}".formatted(queueName))
+        .when()
+            .post("/v1/updatejobqueue")
+        .then()
+            .statusCode(200)
+            .body("jobQueueName", equalTo(queueName))
+            .body("jobQueueArn", equalTo(queueArn));
+
+        givenJson("{\"jobQueues\":[\"%s\"]}".formatted(queueArn))
+        .when()
+            .post("/v1/describejobqueues")
+        .then()
+            .statusCode(200)
+            .body("jobQueues", hasSize(1))
+            .body("jobQueues[0].state", equalTo("DISABLED"))
+            .body("jobQueues[0].priority", equalTo(9));
+
+        givenJson("{\"jobQueue\":\"%s\"}".formatted(queueName))
+        .when()
+            .post("/v1/deletejobqueue")
+        .then()
+            .statusCode(200)
+            .body("isEmpty()", equalTo(true));
+
+        givenJson("{\"jobQueues\":[\"%s\"]}".formatted(queueArn))
+        .when()
+            .post("/v1/describejobqueues")
+        .then()
+            .statusCode(200)
+            .body("jobQueues", hasSize(0));
+
+        givenJson("{\"jobQueue\":\"%s\"}".formatted(queueName))
+        .when()
+            .post("/v1/deletejobqueue")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void describeUnknownJobsReturnsEmptyList() {
         givenJson("{\"jobs\":[\"does-not-exist\"]}")
         .when()
