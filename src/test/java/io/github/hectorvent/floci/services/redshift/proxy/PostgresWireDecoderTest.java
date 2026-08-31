@@ -156,7 +156,7 @@ class PostgresWireDecoderTest {
 
     @Test
     void testPrematureEofInBody() {
-        // Type 'Q', length = 10, nhung chi co 2 byte payload
+        // Type 'Q', declared length = 10, but only 2 payload bytes follow
         byte[] truncated = new byte[]{'Q', 0, 0, 0, 10, 'S', 'E'};
         PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(truncated));
         assertThrows(EOFException.class, decoder::nextMessage);
@@ -168,6 +168,15 @@ class PostgresWireDecoderTest {
         byte[] invalid = new byte[]{'Q', 0, 0, 0, 2};
         PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(invalid));
         assertThrows(IOException.class, decoder::nextMessage);
+    }
+
+    @Test
+    void testOversizedLengthRejectedBeforeAllocating() {
+        // 'Q' with a ~2 GiB declared length and no body — must be refused, not allocated.
+        byte[] hostile = new byte[]{'Q', 0x7F, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(hostile));
+        IOException ex = assertThrows(IOException.class, decoder::nextMessage);
+        assertTrue(ex.getMessage().contains("Refusing"), ex.getMessage());
     }
 
     @Test

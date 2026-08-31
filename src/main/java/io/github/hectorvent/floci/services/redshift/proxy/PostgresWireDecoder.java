@@ -11,6 +11,14 @@ import java.util.Objects;
  */
 public class PostgresWireDecoder {
 
+    /**
+     * Refuse a single message larger than this. The length field is attacker-controlled (up to
+     * ~2 GiB); without a cap {@code readNBytes(length - 4)} would allocate from it and block for
+     * body bytes that may never arrive, exhausting the shared emulator heap. 64 MiB is far above
+     * any realistic single SQL statement or backend row.
+     */
+    private static final int MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+
     private final InputStream in;
 
     public PostgresWireDecoder(InputStream in) {
@@ -43,6 +51,10 @@ public class PostgresWireDecoder {
 
         if (length < 4) {
             throw new IOException("Invalid message length: " + length);
+        }
+        if (length > MAX_MESSAGE_BYTES) {
+            throw new IOException("Refusing PostgreSQL message of " + length
+                    + " bytes (limit " + MAX_MESSAGE_BYTES + ")");
         }
 
         int bodyLength = length - 4;

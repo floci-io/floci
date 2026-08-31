@@ -225,6 +225,10 @@ class CopyStatementParserTest {
     @ValueSource(strings = {
         "UNLOAD ('SELECT 1); DROP TABLE users --') TO 's3://b/k'",
         "UNLOAD ('SELECT 1) TO STDOUT; DELETE FROM t --') TO 's3://b/k'",
+        "UNLOAD ('SELECT 1) TO PROGRAM $$rm -rf /$$ --') TO 's3://b/k'",
+        "UNLOAD ('SELECT 1) TO STDOUT/*') TO 's3://b/k'",
+        "UNLOAD ('SELECT $$x$$') TO 's3://b/k'",
+        "UNLOAD ('SELECT (1') TO 's3://b/k'",
         "UNLOAD ('DROP TABLE users') TO 's3://b/k'",
         "UNLOAD ('  DELETE FROM users') TO 's3://b/k'",
         "UNLOAD ('SELECT 1; SELECT 2') TO 's3://b/k'"
@@ -234,12 +238,15 @@ class CopyStatementParserTest {
         assertNull(CopyStatementParser.parse(sql));
     }
 
-    @Test
-    @DisplayName("UNLOAD with a leading CTE is still accepted")
-    void testUnloadWithCteAccepted() {
-        S3Statement s = CopyStatementParser.parse(
-                "UNLOAD ('WITH x AS (SELECT 1) SELECT * FROM x') TO 's3://b/k'");
-        assertInstanceOf(S3Unload.class, s);
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "UNLOAD ('WITH x AS (SELECT 1) SELECT * FROM x') TO 's3://b/k'",
+        "UNLOAD ('SELECT count(*) FROM t WHERE x > 5') TO 's3://b/k'",
+        "UNLOAD ('SELECT \"MixedCase\" FROM t') TO 's3://b/k'"
+    })
+    @DisplayName("UNLOAD with balanced parens / quoted parts is still accepted")
+    void testUnloadLegitSubqueriesAccepted(String sql) {
+        assertInstanceOf(S3Unload.class, CopyStatementParser.parse(sql));
     }
 
     @ParameterizedTest

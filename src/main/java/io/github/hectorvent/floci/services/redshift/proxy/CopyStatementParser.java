@@ -89,11 +89,9 @@ public class CopyStatementParser {
 
     private static S3Statement parseUnload(Matcher matcher) {
         String selectQuery = matcher.group(1).trim();
-        // The select is spliced verbatim into `COPY (<select>) TO STDOUT`. Refuse anything that
-        // could break out of the parenthesised subquery: it must be a single SELECT/WITH with
-        // no statement separator. A rejected UNLOAD falls through to PostgreSQL, which errors.
-        if (selectQuery.indexOf(';') >= 0 || selectQuery.indexOf('\0') >= 0
-                || !(startsWithKeyword(selectQuery, "SELECT") || startsWithKeyword(selectQuery, "WITH"))) {
+        // The select is spliced verbatim into `COPY (<select>) TO STDOUT`. Only intercept when it
+        // provably cannot break out of that wrapper; otherwise fall through to PostgreSQL (errors).
+        if (!isSafeUnloadSubquery(selectQuery)) {
             return null;
         }
         String bucket = matcher.group(2);
@@ -213,6 +211,70 @@ public class CopyStatementParser {
             }
         }
         return current;
+    }
+
+    /**
+     * True only if the UNLOAD subquery cannot escape the {@code COPY (<q>) TO STDOUT} wrapper it is
+     * spliced into: it must start with {@code SELECT}/{@code WITH}, keep parentheses balanced (and
+     * never dip below zero), and contain no statement separator, SQL comment, dollar-quote or
+     * positional-parameter marker outside a string literal. A crafted fragment like
+     * {@code SELECT 1) TO PROGRAM $$…$$ --} fails the paren-balance and dollar checks.
+     */
+    private static boolean isSafeUnloadSubquery(String q) {
+        if (!(startsWithKeyword(q, "SELECT") || startsWithKeyword(q, "WITH"))) {
+            return false;
+        }
+        int depth = 0;
+        boolean inSingle = false;
+        boolean inDouble = false;
+        for (int i = 0; i < q.length(); i++) {
+            char c = q.charAt(i);
+            if (inSingle) {
+                if (c == '\'') {
+                    if (i + 1 < q.length() && q.charAt(i + 1) == '\'') {
+                        i++;
+                    } else {
+                        inSingle = false;
+                    }
+                }
+                continue;
+            }
+            if (inDouble) {
+                if (c == '"') {
+                    if (i + 1 < q.length() && q.charAt(i + 1) == '"') {
+                        i++;
+                    } else {
+                        inDouble = false;
+                    }
+                }
+                continue;
+            }
+            switch (c) {
+                case '\'' -> inSingle = true;
+                case '"' -> inDouble = true;
+                case '(' -> depth++;
+                case ')' -> {
+                    if (--depth < 0) {
+                        return false;
+                    }
+                }
+                case ';', '\0', '$' -> {
+                    return false;
+                }
+                case '-' -> {
+                    if (i + 1 < q.length() && q.charAt(i + 1) == '-') {
+                        return false;
+                    }
+                }
+                case '/' -> {
+                    if (i + 1 < q.length() && q.charAt(i + 1) == '*') {
+                        return false;
+                    }
+                }
+                default -> { }
+            }
+        }
+        return depth == 0 && !inSingle && !inDouble;
     }
 
     /** True if {@code s}, after leading whitespace, begins with {@code keyword} followed by a non-identifier char. */
