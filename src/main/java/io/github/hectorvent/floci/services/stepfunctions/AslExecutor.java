@@ -678,7 +678,8 @@ public class AslExecutor {
             try {
                 taskResult = mockedSteps != null
                         ? mockedTaskResult(mockedSteps, stateName, attempt)
-                        : invokeResource(effectiveResource, effectiveInput, sm, taskToken, executionDeadlineNanos);
+                        : invokeResource(effectiveResource, effectiveInput, sm, taskToken,
+                                executionDeadlineNanos, jsonata ? null : stateDef.path("Parameters"));
                 if (tokenFuture != null) {
                     taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos);
                 }
@@ -859,7 +860,7 @@ public class AslExecutor {
     }
 
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
-                                    long executionDeadlineNanos) throws Exception {
+                                    long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         JsonNode lambdaPayload = input;
@@ -1010,7 +1011,7 @@ public class AslExecutor {
         if (resource.startsWith("arn:aws:states:::states:startExecution")) {
             String mode = resource.substring("arn:aws:states:::states:startExecution".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeNestedStateMachine(mode, input, region, executionDeadlineNanos);
+            return invokeNestedStateMachine(mode, input, region, executionDeadlineNanos, rawParameters);
         }
 
         // Activity resource: arn:aws:states:{region}:{account}:activity:{name}
@@ -1344,17 +1345,35 @@ public class AslExecutor {
     }
 
     private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region,
-                                              long executionDeadlineNanos) throws Exception {
+                                              long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
         if (smArn == null || smArn.isBlank()) {
             throw new FailStateException("States.TaskFailed",
                     "StateMachineArn is required for nested state machine execution");
         }
-        JsonNode inputNode = input.path("Input");
-        String childInput = inputNode.isMissingNode() ? "{}" : objectMapper.writeValueAsString(inputNode);
+        // Preserve provenance: an Input produced by States.JsonToString is JSON text whose content is the
+        // child's wire input (so the child parses it back to an object); any other value is serialized as
+        // a JSON value. Also honor Name/Name.$ instead of always generating a random execution name.
+        boolean fromJsonToString = NestedExecutionInput.isJsonToStringInput(rawParameters);
+        String childInput = NestedExecutionInput.childInput(input.path("Input"), fromJsonToString, objectMapper);
+
+        // Honor Name/Name.$ without coercion: use it only when it resolves to a non-empty string. A Name
+        // that was SUPPLIED (Name or Name.$ in the raw Parameters) but did not resolve to such a string is
+        // a runtime error, not a silent fall-through to a generated name; a truly omitted Name generates one.
+        JsonNode nameNode = input.path("Name");
+        String childName;
+        if (nameNode.isTextual() && !nameNode.asText().isBlank()) {
+            childName = nameNode.asText();
+        } else if (rawParameters != null && rawParameters.isObject()
+                && (rawParameters.has("Name") || rawParameters.has("Name.$"))) {
+            throw new FailStateException("States.Runtime",
+                    "Nested StartExecution 'Name' must resolve to a non-empty string");
+        } else {
+            childName = null;
+        }
 
         io.github.hectorvent.floci.services.stepfunctions.model.Execution exec =
-                sfnService.get().startExecution(smArn, null, childInput, region);
+                sfnService.get().startExecution(smArn, childName, childInput, region);
         String execArn = exec.getExecutionArn();
 
         if ("".equals(mode)) {
@@ -3345,7 +3364,7 @@ public class AslExecutor {
         if (parenOpen < 0 || parenClose < 0) {
             throw new FailStateException("States.Runtime", "Malformed intrinsic function: " + expr);
         }
-        String fnName = expr.substring(0, parenOpen).trim();
+        String fnName = NestedExecutionInput.intrinsicFunctionName(expr);
         String argsStr = expr.substring(parenOpen + 1, parenClose).trim();
 
         return switch (fnName) {
