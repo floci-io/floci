@@ -65,6 +65,14 @@ class CloudWatchDashboardsServiceTest {
         assertEquals(400, e.getHttpStatus());
     }
 
+    /** A leading object followed by anything else is still a malformed document, not a dashboard. */
+    @Test
+    void putRejectsABodyWithTrailingContentAfterTheObject() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.putDashboard("ops", "{\"widgets\": []} and then some", REGION));
+        assertEquals("InvalidParameterInput", e.getErrorCode());
+    }
+
     /** A body that parses but is not an object is equally unusable as a dashboard. */
     @Test
     void putRejectsABodyThatIsNotAJsonObject() {

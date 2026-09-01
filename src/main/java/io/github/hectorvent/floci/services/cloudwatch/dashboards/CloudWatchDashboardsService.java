@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.cloudwatch.dashboards;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -28,7 +30,11 @@ public class CloudWatchDashboardsService {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchDashboardsService.class);
 
-    private static final ObjectMapper JSON = new ObjectMapper();
+    // FAIL_ON_TRAILING_TOKENS matters here: without it a body of "{} garbage" parses as the
+    // leading object and the rest is silently dropped, so a document AWS rejects would be stored.
+    private static final ObjectReader JSON = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .readerFor(JsonNode.class);
 
     private final StorageBackend<String, Dashboard> dashboardStore;
     private final RegionResolver regionResolver;
@@ -78,7 +84,7 @@ public class CloudWatchDashboardsService {
     private static void validateDashboardBody(String dashboardBody) {
         JsonNode parsed;
         try {
-            parsed = JSON.readTree(dashboardBody);
+            parsed = JSON.readValue(dashboardBody);
         } catch (JsonProcessingException e) {
             throw new AwsException("InvalidParameterInput",
                     "The dashboard body is invalid: " + e.getOriginalMessage(), 400);
