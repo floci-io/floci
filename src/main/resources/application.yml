@@ -14,7 +14,7 @@ quarkus:
     port: ${floci.port}
     host: 0.0.0.0
     limits:
-      max-body-size: ${floci.max-request-size}M
+      max-body-size: ${floci.protocols.max-request-size}M
   datasource:
     active: false
   kubernetes-client:
@@ -78,7 +78,6 @@ quarkus:
 
 floci:
   port: 4566
-  max-request-size: 2048
   base-url: "http://localhost:4566"
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
@@ -213,6 +212,7 @@ floci:
     aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
 
   protocols:
+    max-request-size: 2048             # FLOCI_PROTOCOLS_MAX_REQUEST_SIZE: max HTTP request body size in MB (legacy: floci.max-request-size / FLOCI_MAX_REQUEST_SIZE)
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
     reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
@@ -249,6 +249,7 @@ floci:
     lambda:
       enabled: true
       ephemeral: false
+      ecr-base-uri: public.ecr.aws            # FLOCI_SERVICES_LAMBDA_ECR_BASE_URI — registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
       default-memory-mb: 128
       default-timeout-seconds: 3
       # 500 ports, not the former 100 (9200-9299): one port is held per running Lambda

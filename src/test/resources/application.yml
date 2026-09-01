@@ -3,7 +3,7 @@ quarkus:
     port: 0
     test-port: 0
     limits:
-      max-body-size: ${floci.max-request-size}M
+      max-body-size: ${floci.protocols.max-request-size}M
   datasource:
     active: false
   kubernetes-client:

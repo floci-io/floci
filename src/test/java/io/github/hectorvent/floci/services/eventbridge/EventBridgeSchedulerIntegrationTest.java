@@ -296,10 +296,6 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public String defaultAccountId() { return ACCOUNT; }
             @Override
-            public int maxRequestSize() { return 512; }
-            @Override
-            public String ecrBaseUri() { return ""; }
-            @Override
             public Optional<String> aiMockConfigFile() { return Optional.empty(); }
             @Override
             public StorageConfig storage() { return null; }
@@ -327,6 +323,7 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public ProtocolsConfig protocols() {
                 return new ProtocolsConfig() {
+                    @Override public int maxRequestSize() { return 512; }
                     @Override public boolean strictClaiming() { return false; }
                     @Override public boolean rejectUnknownServiceScope() { return true; }
                 };

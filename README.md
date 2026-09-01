@@ -382,7 +382,7 @@ docker run -d --name floci \
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` |
 | `FLOCI_SERVICES_MWAA_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` |
-| `FLOCI_ECR_BASE_URI` | `public.ecr.aws` |
+| `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` | `public.ecr.aws` |
 
 ## Persistence and Storage Modes
 
@@ -788,7 +788,7 @@ All settings are overridable through environment variables with the `FLOCI_` pre
 | `FLOCI_HOSTNAME` | Unset | Hostname used in returned URLs when Floci runs inside Docker Compose |
 | `FLOCI_STORAGE_MODE` | `memory` | Storage mode: `memory`, `persistent`, `hybrid`, or `wal` |
 | `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Directory used for persisted state |
-| `FLOCI_ECR_BASE_URI` | `public.ecr.aws` | ECR base URI used when pulling container images |
+| `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` | `public.ecr.aws` | ECR base URI used when pulling Lambda runtime images (legacy name `FLOCI_ECR_BASE_URI` still works) |
 | `FLOCI_SERVICES_S3_ENFORCE_AUTH` | `false` | Enforce S3 public/private read access and reject unknown signed S3 access keys |
 
 Full reference: [configuration docs](https://floci.io/floci/configuration/advanced/application-yml)

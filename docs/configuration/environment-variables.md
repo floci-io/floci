@@ -13,8 +13,6 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | AWS region used in ARNs and API responses |
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Fallback account ID used in ARNs when the request's access key is not exactly 12 digits. When the access key IS 12 digits, it is used directly as the account ID — see [Multi-Account Isolation](./multi-account.md) |
 | `FLOCI_DEFAULT_AVAILABILITY_ZONE` | `us-east-1a` | Availability zone reported in EC2 and other responses |
-| `FLOCI_MAX_REQUEST_SIZE` | `512` | Maximum HTTP request body size in megabytes |
-| `FLOCI_ECR_BASE_URI` | `public.ecr.aws` | Base URI for public ECR image references |
 
 ---
 
@@ -54,6 +52,7 @@ See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss:/
 
 | Variable | Default | Description |
 |---|---|---|
+| `FLOCI_PROTOCOLS_MAX_REQUEST_SIZE` | `2048` | Maximum HTTP request body size in megabytes (feeds `quarkus.http.limits.max-body-size`). Legacy name `FLOCI_MAX_REQUEST_SIZE` still works |
 | `FLOCI_PROTOCOLS_STRICT_CLAIMING` | `false` | Reject RPC-signaled requests that no supported wire protocol claims, per the [Smithy wire-protocol-selection guide](https://smithy.io/2.0/guides/wire-protocol-selection.html) (e.g. an unknown `Smithy-Protocol` header value or an unimplemented `rpc-v2-json` request). When disabled such requests are logged and pass through |
 | `FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE` | `true` | Reject REST requests whose SigV4 credential scope names a service Floci does not implement, with `UnknownOperationException` instead of letting them fall through to S3's path-style routes and return a misleading `NoSuchBucket`. Set to `false` if Floci serves a route whose signing scope is not yet enumerated: the request then falls through as before instead of failing with a 404 |
 
@@ -188,6 +187,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable the Lambda service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove Lambda containers immediately after each invocation |
+| `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` | `public.ecr.aws` | Registry (optionally with a path prefix) the Lambda runtime images are pulled from, e.g. `public.ecr.aws/lambda/python:3.12`. Legacy name `FLOCI_ECR_BASE_URI` still works |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default memory allocation for functions that don't specify one |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default invocation timeout in seconds |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API port range |
