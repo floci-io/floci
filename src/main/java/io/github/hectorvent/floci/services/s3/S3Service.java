@@ -1653,9 +1653,9 @@ public class S3Service implements Resettable, ResourceProvider {
             String indexKey = prefix.isEmpty() ? index : prefix + "/" + index;
             try {
                 authorizeGetObject(bucket, indexKey, null, authorization);
-                // getObject (not headObject): the controller serves the body from this snapshot,
-                // so it must carry the data that matches its metadata.
-                return new WebsiteResolution.ServeObject(indexKey, getObject(bucket, indexKey, null));
+                // Metadata only: the controller fetches the body atomically itself when the
+                // request actually needs one (GET), so HEAD website requests never load it.
+                return new WebsiteResolution.ServeObject(indexKey, headObject(bucket, indexKey, null));
             } catch (AwsException e) {
                 if (!isWebsiteErrorDocumentTrigger(e)) {
                     throw e;
