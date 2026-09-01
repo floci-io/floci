@@ -8,6 +8,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.containsString;
 
 /**
  * Integration tests for standalone elastic network interfaces over the EC2 Query protocol,
@@ -498,6 +499,18 @@ class Ec2NetworkInterfaceIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        // The terminated instance lets go of it too. Leaving it on that record would have two
+        // instances claiming the interface once it is reused below.
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", host)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(eni)));
 
         given()
             .formParam("Action", "DescribeNetworkInterfaces")

@@ -6378,6 +6378,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 continue;
             }
             NetworkInterfaceAttachment att = ni.getAttachment();
+            // Either way the instance stops carrying it. A deleted interface obviously cannot stay
+            // on the record, and a released one must not either: once it is attached to something
+            // else, two instance records would claim it and DescribeInstances has no rule that
+            // picks the live one.
+            inst.getNetworkInterfaces().removeIf(
+                    carried -> ni.getNetworkInterfaceId().equals(carried.getNetworkInterfaceId()));
             if (att != null && att.isDeleteOnTermination()) {
                 networkInterfaces.delete(key(region, ni.getNetworkInterfaceId()));
                 continue;
