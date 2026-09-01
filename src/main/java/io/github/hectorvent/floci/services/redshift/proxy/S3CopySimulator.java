@@ -289,12 +289,16 @@ public class S3CopySimulator {
         sink = null;
         acc = null;
 
-        // Reauthorize data object write immediately before writing
+        // Reauthorize all target keys before writing any output, ensuring atomic-like permission
+        // validation so a denied manifest key does not leave an unmanifested data object committed in S3.
         try {
             s3.authorizeAnonymousPutObject(spec.bucket(), dataKey);
+            if (spec.manifest()) {
+                s3.authorizeAnonymousPutObject(spec.bucket(), manifestKey);
+            }
         } catch (AwsException e) {
             sendErrorResponse(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                    "S3 access denied for s3://" + spec.bucket() + "/" + dataKey);
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.prefix());
             if (readyForQueryMsg != null) {
                 forwardMessage(client, readyForQueryMsg);
             } else {
@@ -308,23 +312,19 @@ public class S3CopySimulator {
         s3.putObject(spec.bucket(), dataKey, payload, "application/octet-stream", null);
 
         if (spec.manifest()) {
-            // Reauthorize manifest object write immediately before writing
             try {
-                s3.authorizeAnonymousPutObject(spec.bucket(), manifestKey);
-            } catch (AwsException e) {
-                sendErrorResponse(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                        "S3 access denied for s3://" + spec.bucket() + "/" + manifestKey);
-                if (readyForQueryMsg != null) {
-                    forwardMessage(client, readyForQueryMsg);
-                } else {
-                    sendReadyForQuery(client);
+                String manifestJson = "{\"entries\":[{\"url\":\"s3://" + spec.bucket() + "/" + dataKey
+                        + "\",\"meta\":{\"content_length\":" + payload.length + "}}]}";
+                s3.putObject(spec.bucket(), manifestKey, manifestJson.getBytes(StandardCharsets.UTF_8),
+                        "application/json", null);
+            } catch (Exception e) {
+                // If manifest creation fails, remove the orphaned data object so partial output is not left behind.
+                try {
+                    s3.deleteObject(spec.bucket(), dataKey);
+                } catch (Exception ignored) {
                 }
-                return;
+                throw e;
             }
-            String manifestJson = "{\"entries\":[{\"url\":\"s3://" + spec.bucket() + "/" + dataKey
-                    + "\",\"meta\":{\"content_length\":" + payload.length + "}}]}";
-            s3.putObject(spec.bucket(), manifestKey, manifestJson.getBytes(StandardCharsets.UTF_8),
-                    "application/json", null);
         }
 
         if (cmdCompleteMsg != null) {
