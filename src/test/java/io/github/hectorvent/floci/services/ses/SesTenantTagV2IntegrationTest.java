@@ -118,6 +118,23 @@ class SesTenantTagV2IntegrationTest {
                         + tenantArn.replace(":us-east-1:", ":eu-west-1:"))
                 .then().statusCode(200)
                 .body("Tags", hasSize(0));
+
+        // Tag and Untag take the generic pre-dispatch region guard instead: 400 with the same
+        // wording as the other six taggable types, probe-confirmed on a tenant ARN directly
+        // (the guard fires before any tenant resolution, so nothing is mutated).
+        String crossRegionArn = tenantArn.replace(":us-east-1:", ":eu-west-1:");
+        v2().body("{\"ResourceArn\":\"" + crossRegionArn
+                        + "\",\"Tags\":[{\"Key\":\"x\",\"Value\":\"y\"}]}")
+                .when().post("/v2/email/tags").then().statusCode(400)
+                .body("message", equalTo("Failed to tag resource"));
+        v2().when().delete("/v2/email/tags?ResourceArn=" + crossRegionArn + "&TagKeys=team")
+                .then().statusCode(400)
+                .body("message", equalTo("Failed to untag resource"));
+
+        // The guarded calls left the tenant's tags untouched.
+        v2().when().get("/v2/email/tags?ResourceArn=" + tenantArn).then().statusCode(200)
+                .body("Tags", hasSize(1))
+                .body("Tags[0].Key", equalTo("team"));
     }
 
     @Test
