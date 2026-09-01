@@ -3880,15 +3880,32 @@ public class Ec2QueryHandler {
         if (natGateway.getCreateTime() != null) {
             xml.elem("createTime", ISO_FMT.format(natGateway.getCreateTime()));
         }
-        if (natGateway.getAllocationId() != null) {
-            xml.start("natGatewayAddressSet")
-                    .start("item")
-                    .elem("allocationId", natGateway.getAllocationId())
-                    .end("item")
-                    .end("natGatewayAddressSet");
-        } else {
-            xml.start("natGatewayAddressSet").end("natGatewayAddressSet");
+        xml.start("natGatewayAddressSet");
+        for (NatGatewayAddress address : natGateway.getNatGatewayAddresses()) {
+            xml.start("item");
+            if (address.getAllocationId() != null) {
+                xml.elem("allocationId", address.getAllocationId());
+            }
+            if (address.getAssociationId() != null) {
+                xml.elem("associationId", address.getAssociationId());
+            }
+            xml.elem("networkInterfaceId", address.getNetworkInterfaceId())
+                    .elem("privateIp", address.getPrivateIp());
+            if (address.getPublicIp() != null) {
+                xml.elem("publicIp", address.getPublicIp());
+            }
+            xml.elem("isPrimary", String.valueOf(address.isPrimary()))
+                    .elem("status", address.getStatus())
+                    .end("item");
         }
+        // A gateway restored from a store written before addresses were modelled has none, but
+        // still knows its allocation id — report what it does know rather than an empty set.
+        if (natGateway.getNatGatewayAddresses().isEmpty() && natGateway.getAllocationId() != null) {
+            xml.start("item")
+                    .elem("allocationId", natGateway.getAllocationId())
+                    .end("item");
+        }
+        xml.end("natGatewayAddressSet");
         xml.raw(tagSetXml(natGateway.getTags()));
         return xml.build();
     }
