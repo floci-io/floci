@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.concurrent.Semaphore;
 
 /**
  * Decoder for PostgreSQL wire-protocol messages sent by the frontend (client).
@@ -19,6 +20,12 @@ public class PostgresWireDecoder {
      * 16 MiB is well above any realistic single SQL statement or backend row.
      */
     private static final int MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+    /**
+     * Shared budget across all connections for in-flight message body allocations during decoding,
+     * preventing multiple concurrent clients from exhausting the shared JVM heap with stalled or slow reads.
+     */
+    private static final Semaphore DECODER_HEAP_BUDGET = new Semaphore(64 * 1024 * 1024);
 
     private final InputStream in;
 
@@ -59,10 +66,20 @@ public class PostgresWireDecoder {
         }
 
         int bodyLength = length - 4;
-        byte[] body = in.readNBytes(bodyLength);
-        if (body.length < bodyLength) {
-            throw new EOFException("Unexpected EOF while reading message body (expected "
-                    + bodyLength + " bytes, got " + body.length + ")");
+        if (bodyLength > 0 && !DECODER_HEAP_BUDGET.tryAcquire(bodyLength)) {
+            throw new IOException("Decoder memory budget exhausted (" + bodyLength + " bytes requested)");
+        }
+        byte[] body;
+        try {
+            body = in.readNBytes(bodyLength);
+            if (body.length < bodyLength) {
+                throw new EOFException("Unexpected EOF while reading message body (expected "
+                        + bodyLength + " bytes, got " + body.length + ")");
+            }
+        } finally {
+            if (bodyLength > 0) {
+                DECODER_HEAP_BUDGET.release(bodyLength);
+            }
         }
 
         return new FrontendMessage(type, body);

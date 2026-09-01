@@ -164,8 +164,9 @@ public class S3CopySimulator {
         }
 
         // Claim an initial slice of the shared accumulation budget up front; more is taken as the
-        // result grows (see runUnloadBuffered). Everything claimed is released in the finally.
-        int initialMib = 4;
+        // result grows (see runUnloadBuffered). We account 2x to cover both the accumulator stream
+        // and the toByteArray() payload copy. Everything claimed is released in the finally.
+        int initialMib = 8;
         if (!UNLOAD_HEAP_MIB.tryAcquire(initialMib)) {
             sendErrorResponse(client, SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
                     "UNLOAD memory budget exhausted; retry shortly");
@@ -235,9 +236,9 @@ public class S3CopySimulator {
                         LOG.warnv("UNLOAD result passed {0} bytes and is buffered fully in memory "
                                 + "(bucket={1}, prefix={2})", UNLOAD_WARN_BYTES, spec.bucket(), spec.prefix());
                     }
-                    // Grow the shared budget claim to match the buffer; abort if it (or the per-op
-                    // cap) is exhausted, so concurrent UNLOADs cannot together exhaust the heap.
-                    int wantMib = (int) (rawBytes / ONE_MIB) + 1;
+                    // Grow the shared budget claim to match both accumulator and payload copy (2x); abort
+                    // if it (or the per-op cap) is exhausted, so concurrent UNLOADs cannot exhaust heap.
+                    int wantMib = (int) ((rawBytes * 2) / ONE_MIB) + 1;
                     boolean overBudget = false;
                     while (heldMib[0] < wantMib) {
                         if (!UNLOAD_HEAP_MIB.tryAcquire(1)) {
@@ -284,6 +285,26 @@ public class S3CopySimulator {
         }
 
         byte[] payload = sink.toByteArray();
+        sink = null;
+        acc = null;
+
+        // Reauthorize before writes: permissions may have been revoked while the query ran.
+        try {
+            s3.authorizeAnonymousPutObject(spec.bucket(), dataKey);
+            if (spec.manifest()) {
+                s3.authorizeAnonymousPutObject(spec.bucket(), manifestKey);
+            }
+        } catch (AwsException e) {
+            sendErrorResponse(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.prefix());
+            if (readyForQueryMsg != null) {
+                forwardMessage(client, readyForQueryMsg);
+            } else {
+                sendReadyForQuery(client);
+            }
+            return;
+        }
+
         LOG.infov("UNLOAD: {0} raw bytes over CopyData -> {1} bytes to s3://{2}/{3}",
                 rawBytes, payload.length, spec.bucket(), dataKey);
         s3.putObject(spec.bucket(), dataKey, payload, "application/octet-stream", null);

@@ -123,8 +123,8 @@ class RedshiftInterceptorIntegrationTest {
                 assertNotNull(in);
                 String data = new String(in.readAllBytes(), StandardCharsets.UTF_8);
                 assertTrue(data.contains("id"), "Header should contain column name id");
-                assertTrue(data.contains("10,2026-02-01"));
-                assertTrue(data.contains("20,2026-02-02"));
+                assertTrue(data.contains("10|2026-02-01"));
+                assertTrue(data.contains("20|2026-02-02"));
             }
 
             try (InputStream in = s3Service.openObjectStream(bucket, "out/manifest", null)) {

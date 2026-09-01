@@ -194,4 +194,40 @@ public class S3CopySimulatorTest {
         verify(s3, Mockito.never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
         verify(backend, Mockito.never()).getOutputStream();
     }
+
+    @Test
+    public void testRunUnload_ReauthorizationRevokedDuringQueryFailsWrite() throws Exception {
+        Socket client = mock(Socket.class);
+        Socket backend = mock(Socket.class);
+        S3Service s3 = mock(S3Service.class);
+
+        ByteArrayOutputStream clientOut = new ByteArrayOutputStream();
+        when(client.getOutputStream()).thenReturn(clientOut);
+
+        ByteArrayOutputStream backendOut = new ByteArrayOutputStream();
+        when(backend.getOutputStream()).thenReturn(backendOut);
+
+        // Initial authorization passes; reauthorization before write fails
+        Mockito.doNothing()
+                .doThrow(new AwsException("AccessDenied", "Access Denied", 403))
+                .when(s3).authorizeAnonymousPutObject("bkt", "out/000");
+
+        byte[] backendResponse = new byte[] {
+                'H', 0, 0, 0, 4,
+                'd', 0, 0, 0, 8, '1', ',', '2', '\n',
+                'c', 0, 0, 0, 4,
+                'C', 0, 0, 0, 4,
+                'Z', 0, 0, 0, 5, 'I'
+        };
+        when(backend.getInputStream()).thenReturn(new ByteArrayInputStream(backendResponse));
+
+        CopyStatementParser.S3Unload spec = new CopyStatementParser.S3Unload(
+                "SELECT 1", "bkt", "out/", ",", false, false, true, false, null, false);
+
+        S3CopySimulator.runUnload(client, backend, spec, s3);
+
+        byte[] out = clientOut.toByteArray();
+        assertEquals('E', out[0], "revoked write permission must surface as ErrorResponse");
+        verify(s3, Mockito.never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
+    }
 }

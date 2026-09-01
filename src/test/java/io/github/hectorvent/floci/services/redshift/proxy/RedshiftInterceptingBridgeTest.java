@@ -192,6 +192,76 @@ class RedshiftInterceptingBridgeTest {
         bridge.join(TimeUnit.SECONDS.toMillis(3));
     }
 
+    @Test
+    void threeStatementSequenceUnloadsEveryRow() throws Exception {
+        SocketPair clientPair = SocketPair.create(open);
+        SocketPair backendPair = SocketPair.create(open);
+
+        S3Service s3 = mock(S3Service.class);
+        AtomicReference<byte[]> stored = new AtomicReference<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            stored.set(inv.getArgument(2));
+            return null;
+        }).when(s3).putObject(eq("b"), eq("out/000"), any(byte[].class), any(), any());
+
+        Thread bridge = Thread.ofVirtual().start(() ->
+                new RedshiftInterceptingBridge(clientPair.near, backendPair.near, s3).run());
+
+        java.util.List<String> received = new java.util.concurrent.CopyOnWriteArrayList<>();
+        Thread fakeBackend = Thread.ofVirtual().start(() -> {
+            try {
+                InputStream in = backendPair.far.getInputStream();
+                OutputStream out = backendPair.far.getOutputStream();
+                for (int i = 0; i < 3; i++) {
+                    Frame q = Frame.read(in);
+                    String sql = new String(q.body, 0, q.body.length - 1, StandardCharsets.UTF_8);
+                    received.add(sql);
+                    if (sql.contains("TO STDOUT")) { // the injected UNLOAD copy
+                        out.write(Frame.of('H', new byte[]{0, 0, 0}));
+                        out.write(Frame.of('d', "id,d\n".getBytes(StandardCharsets.UTF_8)));
+                        out.write(Frame.of('d', "10,2026-02-01\n".getBytes(StandardCharsets.UTF_8)));
+                        out.write(Frame.of('d', "20,2026-02-02\n".getBytes(StandardCharsets.UTF_8)));
+                        out.write(Frame.of('c', new byte[0]));
+                        out.write(Frame.of('C', "COPY 2\0".getBytes(StandardCharsets.UTF_8)));
+                    } else {
+                        out.write(Frame.of('C', (sql.split(" ")[0] + " OK\0").getBytes(StandardCharsets.UTF_8)));
+                    }
+                    out.write(Frame.of('Z', new byte[]{'I'}));
+                    out.flush();
+                }
+            } catch (IOException ignored) {
+            }
+        });
+
+        InputStream fromBridge = clientPair.far.getInputStream();
+        OutputStream toBridge = clientPair.far.getOutputStream();
+        // Non-pipelined: send each statement only after the previous response's ReadyForQuery.
+        for (String stmt : new String[]{
+                "CREATE TABLE sales (id int, d date)",
+                "INSERT INTO sales VALUES (10, '2026-02-01'), (20, '2026-02-02')",
+                "UNLOAD ('SELECT * FROM sales ORDER BY id') TO 's3://b/out/' MANIFEST HEADER"}) {
+            toBridge.write(PostgresWireDecoder.encodeQuery(stmt));
+            toBridge.flush();
+            Frame f;
+            do {
+                f = Frame.read(fromBridge);
+            } while (f.type != 'Z');
+        }
+
+        fakeBackend.join(TimeUnit.SECONDS.toMillis(3));
+        clientPair.far.close();
+        bridge.join(TimeUnit.SECONDS.toMillis(3));
+
+        assertEquals(3, received.size(), "backend must receive all three statements");
+        assertTrue(received.get(0).startsWith("CREATE TABLE sales"), received.get(0));
+        assertTrue(received.get(1).startsWith("INSERT INTO sales"), received.get(1));
+        assertTrue(received.get(2).contains("COPY (SELECT * FROM sales ORDER BY id) TO STDOUT"), received.get(2));
+        assertTrue(stored.get() != null, "out/000 must be written");
+        String csv = new String(stored.get(), StandardCharsets.UTF_8);
+        assertTrue(csv.contains("10,2026-02-01") && csv.contains("20,2026-02-02"),
+                "every row must be unloaded, got: " + csv);
+    }
+
     // --- tiny wire-frame helpers -------------------------------------------------
 
     private record Frame(char type, byte[] body) {
