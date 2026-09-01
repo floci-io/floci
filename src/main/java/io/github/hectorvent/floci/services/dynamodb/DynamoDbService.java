@@ -556,12 +556,16 @@ public class DynamoDbService implements ResourceProvider {
             LOG.tracev("Put item in {0}: key={1} item={2}", canonicalTableName, itemKey, item);
 
             String eventName = existing == null ? "INSERT" : "MODIFY";
+            // Captured in request scope on purpose: this event may be deferred to the batch drain,
+            // and resolving the account inside the lambda would fall back to the default account,
+            // which is the ambient-account bug this commit exists to remove.
+            String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
                     streamService.captureEvent(canonicalTableName, eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
-                    kinesisForwarder.forward(eventName, existing, item, table, region);
+                    kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
                 }
             };
             if (deferredStreamEvents != null) {
@@ -645,12 +649,16 @@ public class DynamoDbService implements ResourceProvider {
             LOG.tracev("Deleted item from {0}: key={1} removed={2}", canonicalTableName, itemKey, removed);
 
             if (removed != null) {
+                // Captured in request scope on purpose: this event may be deferred to the batch drain,
+                // and resolving the account inside the lambda would fall back to the default account,
+                // which is the ambient-account bug this commit exists to remove.
+                String ownerAccountId = regionResolver.getAccountId();
                 Runnable streamEvent = () -> {
                     if (streamService != null) {
                         streamService.captureEvent(canonicalTableName, "REMOVE", removed, null, table, region);
                     }
                     if (kinesisForwarder != null) {
-                        kinesisForwarder.forward("REMOVE", removed, null, table, region);
+                        kinesisForwarder.forward("REMOVE", removed, null, table, region, ownerAccountId);
                     }
                 };
                 if (deferredStreamEvents != null) {
@@ -813,12 +821,16 @@ public class DynamoDbService implements ResourceProvider {
             LOG.tracev("Updated item in {0}: key={1} updateExpression={2} item={3}",
                     canonicalTableName, itemKey, updateExpression, item);
 
+            // Captured in request scope on purpose: this event may be deferred to the batch drain,
+            // and resolving the account inside the lambda would fall back to the default account,
+            // which is the ambient-account bug this commit exists to remove.
+            String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
                     streamService.captureEvent(canonicalTableName, "MODIFY", existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
-                    kinesisForwarder.forward("MODIFY", existing, item, table, region);
+                    kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
                 }
             };
             if (deferredStreamEvents != null) {
@@ -1814,7 +1826,9 @@ public class DynamoDbService implements ResourceProvider {
                         streamService.captureEvent(table.getTableName(), "REMOVE", removed, null, table, region);
                     }
                     if (kinesisForwarder != null) {
-                        kinesisForwarder.forward("REMOVE", removed, null, table, region);
+                        // Out of request scope here: pass the table owner's account explicitly so the CDC
+                        // record lands in the owner's stream, not the default account's same-named stream.
+                        kinesisForwarder.forward("REMOVE", removed, null, table, region, accountId);
                     }
                 }
             }

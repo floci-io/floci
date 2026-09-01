@@ -131,7 +131,9 @@ class DynamoDbTtlForwardingTest {
         StorageBackend<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
 
         KinesisService throwingKinesis = mock(KinesisService.class);
-        when(throwingKinesis.putRecord(anyString(), any(byte[].class), anyString(), anyString()))
+        // The TTL sweep's storage key is unprefixed here, so the forwarder is called with a null owner
+        // account; any() (not anyString()) matches it. The forwarder now uses putRecordForAccount.
+        when(throwingKinesis.putRecordForAccount(any(), anyString(), any(byte[].class), anyString(), anyString()))
                 .thenThrow(new RuntimeException("kinesis unavailable"));
         KinesisStreamingForwarder forwarder = new KinesisStreamingForwarder(throwingKinesis, mapper);
         DynamoDbService svc = new DynamoDbService(
