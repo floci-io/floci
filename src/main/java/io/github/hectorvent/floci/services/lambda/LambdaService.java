@@ -533,6 +533,15 @@ public class LambdaService implements ResourceProvider {
             }
         }
 
+        if (request.containsKey("Architectures")) {
+            @SuppressWarnings("unchecked")
+            List<String> archs = request.get("Architectures") instanceof List
+                    ? (List<String>) request.get("Architectures") : null;
+            if (archs != null && !archs.isEmpty()) {
+                fn.setArchitectures(new ArrayList<>(archs));
+            }
+        }
+
         fn.setLastModified(System.currentTimeMillis());
         fn.setRevisionId(UUID.randomUUID().toString());
 
