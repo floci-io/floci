@@ -2816,19 +2816,13 @@ public class AslExecutor {
             return result;
         }
         String resultPath = stateDef.get("ResultPath").asText();
-        if (resultPath == null || resultPath.equals("null")) {
-            return input;
+        try {
+            return ResultPathMerge.merge(input, resultPath, result, objectMapper);
+        } catch (ResultPathMerge.ResultPathMatchException e) {
+            // AWS fails a non-applicable ResultPath with States.ResultPathMatchFailure rather than
+            // silently discarding the state input.
+            throw new FailStateException("States.ResultPathMatchFailure", e.getMessage());
         }
-        if ("$".equals(resultPath)) {
-            return result;
-        }
-        // Merge result into input at the given path
-        if (!input.isObject()) {
-            return result;
-        }
-        ObjectNode merged = input.deepCopy();
-        setPath(merged, resultPath, result);
-        return merged;
     }
 
     private JsonNode applyOutputPath(JsonNode stateDef, JsonNode input, JsonNode output) {
@@ -3770,28 +3764,6 @@ public class AslExecutor {
             return s.substring(1, s.length() - 1);
         }
         return s;
-    }
-
-    private void setPath(ObjectNode root, String path, JsonNode value) {
-        if (!path.startsWith("$.") && !"$".equals(path)) {
-            return;
-        }
-        if ("$".equals(path)) {
-            return;
-        }
-        String[] parts = path.substring(2).split("\\.");
-        ObjectNode current = root;
-        for (int i = 0; i < parts.length - 1; i++) {
-            JsonNode next = current.path(parts[i]);
-            if (!next.isObject()) {
-                ObjectNode newNode = objectMapper.createObjectNode();
-                current.set(parts[i], newNode);
-                current = newNode;
-            } else {
-                current = (ObjectNode) next;
-            }
-        }
-        current.set(parts[parts.length - 1], value);
     }
 
     // ──────────────────────────── History helpers ────────────────────────────
