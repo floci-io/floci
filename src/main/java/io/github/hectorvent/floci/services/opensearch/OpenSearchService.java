@@ -142,11 +142,14 @@ public class OpenSearchService implements ResourceProvider {
         }
         applyDomainOptions(domain, options);
 
-        if (config.services().opensearch().mock()) {
-            domain.setProcessing(false);
-        } else {
-            domain.setProcessing(true);
-            domainManager.startDomain(domain);
+        // A domain record is metadata, and SDK/Terraform waiters poll DescribeDomain for
+        // Processing=false, so the domain reports its terminal state from the first read (same
+        // pattern as MediaLive multiplexes) instead of gating on backing-container readiness.
+        // Only the search data plane needs the container, and startDomain sets the endpoint as
+        // soon as it is up.
+        domain.setProcessing(false);
+        if (!config.services().opensearch().mock()) {
+            domainManager.tryStartDomain(domain);
         }
 
         domainStore.put(domainName, domain);
