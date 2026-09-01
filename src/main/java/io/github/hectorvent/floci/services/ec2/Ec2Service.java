@@ -109,6 +109,13 @@ import jakarta.inject.Inject;
 public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
+
+    /**
+     * The availability zones every region is modelled with. DescribeAvailabilityZones publishes
+     * exactly these, the seeded default subnets sit in them, and CreateSubnet refuses a zone id
+     * outside them, so the three cannot drift apart.
+     */
+    private static final String[] MODELLED_ZONE_SUFFIXES = {"a", "b", "c"};
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
@@ -428,7 +435,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vpcs.put(key(region, vpcId), defaultVpc);
 
         // Default subnets (a/b/c)
-        String[] azSuffixes = {"a", "b", "c"};
+        String[] azSuffixes = MODELLED_ZONE_SUFFIXES;
         String[] cidrBlocks = {"172.31.0.0/20", "172.31.16.0/20", "172.31.32.0/20"};
         String[] subnetIds = {
                 defaultSubnetId(region, azSuffixes[0]),
@@ -3023,7 +3030,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /**
      * The zone id Floci publishes for a zone name. AWS's real zone ids are opaque and per-account
      * ({@code use1-az4}); Floci derives a deterministic one instead, and what matters is that
-     * every surface derives it the same way — DescribeAvailabilityZones, the seeded default
+     * every surface derives it the same way, DescribeAvailabilityZones, the seeded default
      * subnets and CreateSubnet all come through here, so a subnet's zone id agrees with the zone
      * list a client just read. A zone name that is not this region's {@code <region><letter>}
      * keeps the first zone's id, which is what an unrecognised name resolved to before.
@@ -3058,21 +3065,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return fromId;
     }
 
-    /** The inverse of {@link #zoneIdForZoneName}; a malformed id is refused rather than ignored. */
+    /**
+     * The inverse of {@link #zoneIdForZoneName}. An id outside the zones this region publishes is
+     * refused rather than resolved: placing a subnet in a zone DescribeAvailabilityZones does not
+     * list would leave a client unable to pair the two, which is the same inconsistency the
+     * hardcoded az1 produced, only quieter.
+     */
     private static String zoneNameForZoneId(String region, String availabilityZoneId) {
         String prefix = region + "-az";
         if (availabilityZoneId.startsWith(prefix)) {
             try {
                 int index = Integer.parseInt(availabilityZoneId.substring(prefix.length()));
-                if (index >= 1 && index <= 26) {
-                    return region + (char) ('a' + index - 1);
+                if (index >= 1 && index <= MODELLED_ZONE_SUFFIXES.length) {
+                    return region + MODELLED_ZONE_SUFFIXES[index - 1];
                 }
-            } catch (NumberFormatException ignored) {
-                // falls through to the same error a non-numeric suffix deserves
+            } catch (NumberFormatException e) {
+                LOG.debugv("Availability zone ID {0} has a non-numeric zone index: {1}",
+                        availabilityZoneId, e.getMessage());
             }
         }
         throw new AwsException("InvalidParameterValue",
-                "Invalid availability zone ID: '" + availabilityZoneId + "'", 400);
+                "Invalid availability zone ID: '" + availabilityZoneId + "'. This region publishes "
+                        + MODELLED_ZONE_SUFFIXES.length + " availability zones, " + prefix + "1 to "
+                        + prefix + MODELLED_ZONE_SUFFIXES.length + ".", 400);
     }
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
@@ -5449,7 +5464,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Map<String, String>> describeAvailabilityZones(String region) {
         List<Map<String, String>> zones = new ArrayList<>();
-        String[] azSuffixes = {"a", "b", "c"};
+        String[] azSuffixes = MODELLED_ZONE_SUFFIXES;
         for (String suffix : azSuffixes) {
             Map<String, String> az = new LinkedHashMap<>();
             az.put("zoneName", region + suffix);

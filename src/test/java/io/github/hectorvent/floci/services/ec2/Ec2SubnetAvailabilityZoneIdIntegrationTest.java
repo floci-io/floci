@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 
@@ -11,7 +12,7 @@ import io.quarkus.test.junit.QuarkusTest;
 
 /**
  * CreateSubnet never read AvailabilityZoneId and hardcoded every new subnet's zone id to the
- * region's first zone, so a subnet asked for us-east-1-az2 came back in us-east-1-az1 — and even
+ * region's first zone, so a subnet asked for us-east-1-az2 came back in us-east-1-az1, and even
  * a subnet placed correctly by zone <em>name</em> reported a zone id that contradicted it.
  * Anything selecting subnets by zone id (Terraform's aws_subnet.availability_zone_id, and any
  * client pairing subnets with the DescribeAvailabilityZones list) therefore saw one zone.
@@ -140,6 +141,27 @@ class Ec2SubnetAvailabilityZoneIdIntegrationTest {
         .then()
             .statusCode(200)
             .body("CreateSubnetResponse.subnet.availabilityZone", equalTo("us-east-1b"));
+    }
+
+    /**
+     * A well-formed id past the zones this region publishes is refused too. Resolving it would put
+     * the subnet in a zone DescribeAvailabilityZones does not list, leaving a client unable to
+     * pair the two: the same inconsistency the hardcoded az1 produced, only quieter.
+     */
+    @Test
+    void aZoneIdBeyondThePublishedZonesIsRefused() {
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpcId)
+            .formParam("CidrBlock", "10.90.7.0/24")
+            .formParam("AvailabilityZoneId", "us-east-1-az4")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message", containsString("us-east-1-az1 to us-east-1-az3"));
     }
 
     @Test
