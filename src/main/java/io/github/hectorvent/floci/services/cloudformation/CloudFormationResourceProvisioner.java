@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
@@ -826,7 +827,13 @@ public class CloudFormationResourceProvisioner {
             description = "Managed by CloudFormation";
         }
         String vpcId = resolveOptional(props, "VpcId", engine);
-        var sg = ec2Service.createSecurityGroup(region, groupName, description, vpcId);
+        // provision() re-runs for every resource on every update. Re-creating an unchanged group
+        // would mint a new group id (and collide on the name whenever the VPC id is stable), so
+        // reuse the group this resource already points at.
+        var sg = existingSecurityGroupToReconcile(r.getPhysicalId(), groupName, region);
+        if (sg == null) {
+            sg = ec2Service.createSecurityGroup(region, groupName, description, vpcId);
+        }
         // Ref on AWS::EC2::SecurityGroup returns the group id for VPC security groups.
         r.setPhysicalId(sg.getGroupId());
         r.getAttributes().put("GroupId", sg.getGroupId());
@@ -1383,6 +1390,32 @@ public class CloudFormationResourceProvisioner {
         }
         r.setPhysicalId(group.getDbClusterParameterGroupName());
         r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
+    }
+
+    /**
+     * The security group this stack resource already points at, when an UpdateStack re-invocation
+     * left it unchanged. Unlike most resources the physical id here is the group <em>id</em>, not
+     * the name, so the rename check compares the stored group's name against the template's.
+     *
+     * <p>Returns {@code null} for a fresh create, a rename (a replacement on AWS), or a group
+     * deleted out of band - the caller then creates.
+     */
+    private SecurityGroup existingSecurityGroupToReconcile(String priorPhysicalId, String groupName, String region) {
+        if (priorPhysicalId == null || priorPhysicalId.isBlank()) {
+            return null;
+        }
+        try {
+            return ec2Service.describeSecurityGroups(region, List.of(priorPhysicalId), List.of(), Map.of())
+                    .stream()
+                    .filter(existing -> groupName == null || groupName.equals(existing.getGroupName()))
+                    .findFirst()
+                    .orElse(null);
+        } catch (AwsException notFound) {
+            // Expected when the group was deleted out of band since the prior update.
+            LOG.debugv(notFound, "No existing security group {0} found on file, falling back to create",
+                    priorPhysicalId);
+            return null;
+        }
     }
 
     /**
