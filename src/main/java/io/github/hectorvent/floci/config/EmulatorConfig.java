@@ -676,6 +676,7 @@ public interface EmulatorConfig {
         TextractServiceConfig textract();
         ComprehendServiceConfig comprehend();
         RekognitionServiceConfig rekognition();
+        TranslateServiceConfig translate();
         PricingServiceConfig pricing();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
@@ -1603,6 +1604,11 @@ public interface EmulatorConfig {
     }
 
     interface RekognitionServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface TranslateServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

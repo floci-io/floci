@@ -190,7 +190,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**84 AWS services. Broad coverage. Free forever.**
+**85 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -235,7 +235,7 @@ Floci supports local emulation for application services, data services, eventing
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2 |
-| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Bedrock Runtime, Bedrock AgentCore |
+| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Comprehend, Rekognition, Translate, Transcribe, Bedrock Runtime, Bedrock AgentCore |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, IoT Core |
 | Security and governance | AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations |
@@ -322,6 +322,9 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
 | Textract | In-process stub | API-compatible stubs, dummy block data, async job simulation |
+| Comprehend | In-process stub | Sentiment, key phrase, dominant language, and PII detection stubs; configurable per-call responses via `AI_MOCK_CONFIG` |
+| Rekognition | In-process stub | Label, face, text, and moderation detection stubs; configurable per-call responses via `AI_MOCK_CONFIG` |
+| Translate | In-process stub | Text and document translation, language catalog; configurable per-call responses via `AI_MOCK_CONFIG` |
 | Transcribe | In-process stub | Transcription jobs and custom vocabularies; jobs complete immediately, no real audio processing |
 | Pricing | In-process with static snapshot | Product discovery, attributes, price list files, pagination |
 | Cost Explorer | In-process | Cost synthesized from Floci resource state and pricing snapshots |

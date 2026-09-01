@@ -64,6 +64,10 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: translate
+    doc: docs/services/translate.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/translate/TranslateJsonHandler.java, mode: switch }
   - service: rekognition
     doc: docs/services/rekognition.md
     sources:
