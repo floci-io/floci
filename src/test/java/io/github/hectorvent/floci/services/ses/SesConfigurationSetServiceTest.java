@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -62,9 +63,20 @@ class SesConfigurationSetServiceTest {
         service.create(cs("b-cs"), REGION);
         service.create(cs("a-cs"), REGION);
         service.create(cs("other"), "eu-west-1");
+        // create() stamps Instant.now(), which can collide within one clock tick and fall back to
+        // the name tie-break; pin distinct timestamps through the escape hatch so the
+        // creation-order assertion stays deterministic.
+        stampCreated("b-cs", Instant.parse("2026-01-01T00:00:00Z"));
+        stampCreated("a-cs", Instant.parse("2026-01-02T00:00:00Z"));
         List<ConfigurationSet> list = service.list(REGION);
         assertEquals(2, list.size());
         assertEquals("b-cs", list.get(0).getName());
+    }
+
+    private void stampCreated(String name, Instant timestamp) {
+        ConfigurationSet loaded = service.find(name, REGION).orElseThrow();
+        loaded.setCreatedTimestamp(timestamp);
+        service.save(loaded, REGION);
     }
 
     @Test

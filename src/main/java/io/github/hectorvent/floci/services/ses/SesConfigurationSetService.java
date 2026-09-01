@@ -29,8 +29,8 @@ import java.util.regex.Pattern;
  * event destinations live here.
  *
  * <p>The boundary follows the cross-domain seams: option validation that reads OTHER domains stays
- * in the facade — tracking options check a verified domain identity, delivery options check a
- * dedicated IP pool — which validates first (or resolves existence through {@link #get}) and then
+ * in the facade (tracking options check a verified domain identity, delivery options check a
+ * dedicated IP pool), which validates first (or resolves existence through {@link #get}) and then
  * mutates through {@link #save}. The facade also keeps the send-path reads (pause check, event
  * publishing, effective suppression reasons), the ARN-dispatched tagging, and the tenant
  * delete-guard around {@link #remove}.
@@ -62,9 +62,9 @@ public class SesConfigurationSetService {
     }
 
     /**
-     * Stores a validated configuration set. The option validation runs in the facade first — the
-     * cross-domain pieces (tracking's verified-domain check, delivery's dedicated-pool check) can't
-     * live here — so this owns only the duplicate check, the timestamp, and the write.
+     * Stores a validated configuration set. The option validation runs in the facade first, since
+     * the cross-domain pieces (tracking's verified-domain check, delivery's dedicated-pool check)
+     * can't live here, so this owns only the duplicate check, the timestamp, and the write.
      */
     public ConfigurationSet create(ConfigurationSet configSet, String region) {
         String key = configSetKey(region, configSet.getName());
