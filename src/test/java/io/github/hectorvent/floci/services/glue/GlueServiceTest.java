@@ -1216,14 +1216,26 @@ class GlueServiceTest {
     }
 
     @Test
-    void taggingNonExistentJobOrCrawlerThrows() {
+    void taggingNonExistentResourceThrows() {
         String fakeJobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/fake-job";
         String fakeCrawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/fake-crawler";
+        String fakeDbArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":database/fake-db";
+        String fakeTableArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":table/fake-db/fake-table";
+        String fakeUdfArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":userDefinedFunction/fake-db/fake-udf";
 
         AwsException jobTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeJobArn, Map.of("k", "v"), REGION));
         assertEquals("EntityNotFoundException", jobTagEx.getErrorCode());
 
         AwsException crawlerGetTagsEx = assertThrows(AwsException.class, () -> glueService.getTags(fakeCrawlerArn, REGION));
         assertEquals("EntityNotFoundException", crawlerGetTagsEx.getErrorCode());
+
+        AwsException dbTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeDbArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", dbTagEx.getErrorCode());
+
+        AwsException tableTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeTableArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", tableTagEx.getErrorCode());
+
+        AwsException udfTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeUdfArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", udfTagEx.getErrorCode());
     }
 }

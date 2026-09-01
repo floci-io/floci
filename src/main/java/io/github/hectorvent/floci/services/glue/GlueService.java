@@ -1275,6 +1275,18 @@ public class GlueService {
                 getJob(resource.substring(4));
             } else if (resource.startsWith("crawler/")) {
                 getCrawler(resource.substring(8));
+            } else if (resource.startsWith("database/")) {
+                getDatabase(resource.substring(9));
+            } else if (resource.startsWith("table/")) {
+                String[] tableParts = resource.substring(6).split("/");
+                if (tableParts.length >= 2) {
+                    getTable(tableParts[0], tableParts[1]);
+                }
+            } else if (resource.startsWith("userDefinedFunction/")) {
+                String[] funcParts = resource.substring(20).split("/");
+                if (funcParts.length >= 2) {
+                    getUserDefinedFunction(funcParts[0], funcParts[1]);
+                }
             }
         }
     }
