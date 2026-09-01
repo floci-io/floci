@@ -969,7 +969,8 @@ public class Ec2QueryHandler {
 
     private Response handleCreateVpc(MultivaluedMap<String, String> p, String region) {
         String cidrBlock = p.getFirst("CidrBlock");
-        Vpc vpc = service.createVpc(region, cidrBlock, false);
+        boolean amazonProvidedIpv6 = "true".equalsIgnoreCase(p.getFirst("AmazonProvidedIpv6CidrBlock"));
+        Vpc vpc = service.createVpc(region, cidrBlock, false, amazonProvidedIpv6);
         List<Tag> vpcTags = new ArrayList<>();
         for (int i = 1; ; i++) {
             String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
@@ -2265,6 +2266,18 @@ public class Ec2QueryHandler {
     private Response handleAssociateVpcCidrBlock(MultivaluedMap<String, String> p, String region) {
         String vpcId = p.getFirst("VpcId");
         String cidrBlock = p.getFirst("CidrBlock");
+        if ("true".equalsIgnoreCase(p.getFirst("AmazonProvidedIpv6CidrBlock"))) {
+            VpcIpv6CidrBlockAssociation ipv6 = service.associateAmazonProvidedIpv6CidrBlock(region, vpcId);
+            XmlBuilder ipv6Xml = new XmlBuilder()
+                    .start("AssociateVpcCidrBlockResponse", AwsNamespaces.EC2)
+                    .elem("requestId", UUID.randomUUID().toString())
+                    .elem("vpcId", vpcId)
+                    .start("ipv6CidrBlockAssociation")
+                    .raw(vpcIpv6AssociationXml(ipv6))
+                    .end("ipv6CidrBlockAssociation")
+                    .end("AssociateVpcCidrBlockResponse");
+            return xmlResponse(ipv6Xml.build());
+        }
         VpcCidrBlockAssociation assoc = service.associateVpcCidrBlock(region, vpcId, cidrBlock);
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateVpcCidrBlockResponse", AwsNamespaces.EC2)
@@ -2277,6 +2290,16 @@ public class Ec2QueryHandler {
                 .end("cidrBlockAssociation")
                 .end("AssociateVpcCidrBlockResponse");
         return xmlResponse(xml.build());
+    }
+
+    private String vpcIpv6AssociationXml(VpcIpv6CidrBlockAssociation assoc) {
+        return new XmlBuilder()
+                .elem("associationId", assoc.getAssociationId())
+                .elem("ipv6CidrBlock", assoc.getIpv6CidrBlock())
+                .start("ipv6CidrBlockState").elem("state", assoc.getIpv6CidrBlockState()).end("ipv6CidrBlockState")
+                .elem("ipv6Pool", assoc.getIpv6Pool())
+                .elem("networkBorderGroup", assoc.getNetworkBorderGroup())
+                .build();
     }
 
     private Response handleDisassociateVpcCidrBlock(MultivaluedMap<String, String> p, String region) {
@@ -3717,7 +3740,12 @@ public class Ec2QueryHandler {
                     .start("cidrBlockState").elem("state", assoc.getCidrBlockState()).end("cidrBlockState")
                     .end("item");
         }
-        xml.end("cidrBlockAssociationSet")
+        xml.end("cidrBlockAssociationSet");
+        xml.start("ipv6CidrBlockAssociationSet");
+        for (VpcIpv6CidrBlockAssociation assoc : vpc.getIpv6CidrBlockAssociationSet()) {
+            xml.start("item").raw(vpcIpv6AssociationXml(assoc)).end("item");
+        }
+        xml.end("ipv6CidrBlockAssociationSet")
                 .raw(tagSetXml(vpc.getTags()));
         return xml.build();
     }

@@ -94,6 +94,7 @@ import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
+import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
@@ -2717,6 +2718,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // ─── VPCs ──────────────────────────────────────────────────────────────────
 
     public Vpc createVpc(String region, String cidrBlock, boolean isDefault) {
+        return createVpc(region, cidrBlock, isDefault, false);
+    }
+
+    public Vpc createVpc(String region, String cidrBlock, boolean isDefault,
+                         boolean amazonProvidedIpv6CidrBlock) {
         ensureDefaultResources(region);
         String vpcId = "vpc-" + randomHex(8);
         Vpc vpc = new Vpc();
@@ -2728,6 +2734,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vpc.setRegion(region);
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
+        if (amazonProvidedIpv6CidrBlock) {
+            vpc.getIpv6CidrBlockAssociationSet().add(amazonProvidedIpv6Association(region));
+        }
         vpcs.put(key(region, vpcId), vpc);
 
         createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
@@ -2800,11 +2809,39 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return assoc;
     }
 
+    /**
+     * Associates an Amazon-provided IPv6 block with an existing VPC — the AssociateVpcCidrBlock
+     * half of {@code AmazonProvidedIpv6CidrBlock}, which the Terraform provider issues when
+     * assign_generated_ipv6_cidr_block is turned on for a VPC that already exists.
+     */
+    public VpcIpv6CidrBlockAssociation associateAmazonProvidedIpv6CidrBlock(String region, String vpcId) {
+        ensureDefaultResources(region);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+        VpcIpv6CidrBlockAssociation assoc = amazonProvidedIpv6Association(region);
+        vpc.getIpv6CidrBlockAssociationSet().add(assoc);
+        vpcs.put(key(region, vpcId), vpc);
+        return assoc;
+    }
+
+    /**
+     * Allocates a /56 the way an Amazon-provided association looks on the wire. AWS hands out a
+     * block from its own pool with no say from the caller, so the exact prefix is not something a
+     * client can predict or assert on — what matters is that one is returned at all, that it is a
+     * well-formed /56, and that it comes back unchanged on every later read.
+     */
+    private VpcIpv6CidrBlockAssociation amazonProvidedIpv6Association(String region) {
+        String block = "2600:1f18:" + randomHex(4) + ":" + randomHex(2) + "00::/56";
+        return new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), block, region);
+    }
+
     public void disassociateVpcCidrBlock(String region, String associationId) {
         ensureDefaultResources(region);
         for (Vpc vpc : vpcs.scan(k -> true)) {
             if (vpc.getRegion().equals(region)) {
                 vpc.getCidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
+                // The same operation disassociates either family; AWS takes one association id and
+                // does not ask which set it belongs to.
+                vpc.getIpv6CidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
                 vpcs.put(key(region, vpc.getVpcId()), vpc);
             }
         }
