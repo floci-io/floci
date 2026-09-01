@@ -714,6 +714,7 @@ public interface EmulatorConfig {
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
         ConnectServiceConfig connect();
+        CognitoIdentityServiceConfig cognitoidentity();
 
         ApsServiceConfig aps();
 
@@ -723,6 +724,11 @@ public interface EmulatorConfig {
     }
 
     interface ConnectServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CognitoIdentityServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

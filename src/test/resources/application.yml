@@ -374,6 +374,8 @@ floci:
       enabled: true
     connect:
       enabled: true
+    cognitoidentity:
+      enabled: true
     aps:
       enabled: true
     lakeformation:
