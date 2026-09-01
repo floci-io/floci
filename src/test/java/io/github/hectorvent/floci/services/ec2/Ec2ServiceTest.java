@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
@@ -81,6 +82,28 @@ class Ec2ServiceTest {
         service.terminateInstances("us-east-1", List.of(instanceId));
         assertFalse(service.isInstanceContainerRunning(instanceId));
         verifyNoInteractions(containerManager);
+    }
+
+    @Test
+    void describeNetworkInterfacesGroupIdFilterSkipsNullGroupEntry() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        String groupId = inst.getNetworkInterfaces().getFirst().getGroups().getFirst().getGroupId();
+        // A null entry in an interface's group list must not crash the group-id filter: the interface
+        // is still matched on its real group and the null is skipped. Regression: matchesFilter
+        // dereferenced the entry with no null-guard, so DescribeNetworkInterfaces returned a 500 that
+        // hung a Terraform/Pulumi security-group delete (it polls this call until the group is gone).
+        inst.getNetworkInterfaces().getFirst().getGroups().add(null);
+
+        NetworkInterfaceListResult result = service.describeNetworkInterfaces("us-east-1", List.of(),
+                Map.of("group-id", List.of(groupId)), 0, null);
+
+        assertEquals(1, result.networkInterfaces().size());
     }
 
     @Test

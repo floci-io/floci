@@ -5340,7 +5340,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "subnet-id" -> matchesValue(values, ni.getSubnetId());
                 case "vpc-id" -> matchesValue(values, ni.getVpcId());
                 case "group-id" -> ni.getGroups().stream()
-                        .anyMatch(g -> matchesValue(values, g.getGroupId()));
+                        .anyMatch(g -> g != null && matchesValue(values, g.getGroupId()));
                 case "status" -> matchesValue(values, ni.getStatus());
                 case "attachment.instance-id" -> ni.getAttachment() != null
                         && matchesValue(values, ni.getAttachment().getInstanceId());
