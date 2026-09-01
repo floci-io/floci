@@ -157,6 +157,17 @@ class BedrockServiceTest {
                 null, 24, null
         );
         assertThrows(AwsException.class, () -> service.createModelInvocationJob(reqNoOutput, REGION));
+
+        // foreign roleArn (different account than caller)
+        CreateModelInvocationJobRequest reqForeignRole = new CreateModelInvocationJobRequest(
+                "jobName", "modelId", "arn:aws:iam::999999999999:role/ForeignRole", "token",
+                new InputDataConfig(new InputDataConfig.S3InputDataConfig("s3://b/in", null, null)),
+                new OutputDataConfig(new OutputDataConfig.S3OutputDataConfig("s3://b/out", null, null)),
+                null, 24, null
+        );
+        AwsException ex = assertThrows(AwsException.class, () -> service.createModelInvocationJob(reqForeignRole, REGION));
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("does not belong to the calling account"));
     }
 
     @Test
@@ -275,6 +286,61 @@ class BedrockServiceTest {
             assertTrue(job.getMessage().contains("000000000000"));
             assertTrue(job.getMessage().contains("999999999999"));
         });
+    }
+
+    @Test
+    void createModelInvocationJob_crossAccountOutputBucket_fails() {
+        String inputBucket = "my-input-bucket";
+        String outputBucket = "foreign-output-bucket";
+        String inputUri = "s3://" + inputBucket + "/data.jsonl";
+        String outputUri = "s3://" + outputBucket + "/results";
+
+        String jsonlContent = "{\"recordId\": \"rec-1\", \"modelInput\": {\"anthropic_version\": \"bedrock-2023-05-31\", \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Hello\"}]}]}}\n";
+        S3Object s3Object = new S3Object(inputBucket, "data.jsonl", jsonlContent.getBytes(StandardCharsets.UTF_8), "application/jsonlines");
+        when(s3Service.getObject(eq(inputBucket), eq("data.jsonl"))).thenReturn(s3Object);
+        when(s3Service.getBucketOwnerAccountId(eq(inputBucket))).thenReturn(ACCOUNT_ID);
+        // Output bucket belongs to a different account
+        when(s3Service.getBucketOwnerAccountId(eq(outputBucket))).thenReturn("999999999999");
+
+        CreateModelInvocationJobRequest req = createValidRequest("cross-account-out-job", inputUri, outputUri);
+        CreateModelInvocationJobResponse response = service.createModelInvocationJob(req, REGION);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            ModelInvocationJob job = service.getModelInvocationJob(response.jobArn(), REGION);
+            assertEquals(ModelInvocationJobStatus.FAILED, job.getStatus());
+            assertTrue(job.getMessage().contains("Access denied"));
+            assertTrue(job.getMessage().contains(outputBucket));
+        });
+    }
+
+    @Test
+    void stopModelInvocationJob_activeJob_transitionsToStoppedAndDoesNotGetOverwritten() {
+        String inputBucket = "slow-input-bucket";
+        String inputUri = "s3://" + inputBucket + "/data.jsonl";
+        String outputUri = "s3://test-output-bucket/results";
+
+        // Provide input that triggers delay or stop
+        when(s3Service.getObject(eq(inputBucket), eq("data.jsonl"))).thenAnswer(inv -> {
+            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+            return new S3Object(inputBucket, "data.jsonl",
+                    "{\"recordId\": \"rec-1\", \"modelInput\": {\"anthropic_version\": \"bedrock-2023-05-31\", \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Hi\"}]}]}}\n"
+                            .getBytes(StandardCharsets.UTF_8), "application/jsonlines");
+        });
+
+        CreateModelInvocationJobRequest req = createValidRequest("stop-race-job", inputUri, outputUri);
+        CreateModelInvocationJobResponse response = service.createModelInvocationJob(req, REGION);
+
+        // Stop the job while it's in flight
+        service.stopModelInvocationJob(response.jobArn(), REGION);
+
+        // Verify status is STOPPED and remains STOPPED
+        ModelInvocationJob job = service.getModelInvocationJob(response.jobArn(), REGION);
+        assertEquals(ModelInvocationJobStatus.STOPPED, job.getStatus());
+
+        // Wait a bit to ensure background worker does not overwrite STOPPED
+        try { Thread.sleep(400); } catch (InterruptedException ignored) {}
+        ModelInvocationJob afterWait = service.getModelInvocationJob(response.jobArn(), REGION);
+        assertEquals(ModelInvocationJobStatus.STOPPED, afterWait.getStatus());
     }
 
     @Test

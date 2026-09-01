@@ -41,6 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -52,6 +54,7 @@ public class BedrockService implements Resettable {
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final StorageBackend<String, ModelInvocationJob> jobStore;
+    private final ConcurrentHashMap<String, Object> jobLocks = new ConcurrentHashMap<>();
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -80,6 +83,11 @@ public class BedrockService implements Resettable {
     @Override
     public void clear() {
         jobStore.clear();
+        jobLocks.clear();
+    }
+
+    private Object getJobLock(String jobArn) {
+        return jobLocks.computeIfAbsent(jobArn, k -> new Object());
     }
 
     public CreateModelInvocationJobResponse createModelInvocationJob(
@@ -114,6 +122,15 @@ public class BedrockService implements Resettable {
         String effectiveRegion = region != null && !region.isBlank()
                 ? region : regionResolver.getDefaultRegion();
         String accountId = regionResolver.getAccountId();
+
+        // Validate that roleArn belongs to the calling account. A caller cannot submit an IAM
+        // role from another account to bypass cross-account restrictions.
+        String roleAccountId = extractAccountIdFromRoleArn(request.roleArn());
+        if (roleAccountId != null && accountId != null && !roleAccountId.equals(accountId)) {
+            throw new AwsException("ValidationException",
+                    "The roleArn " + request.roleArn() + " does not belong to the calling account (" + accountId + ").", 400);
+        }
+
         String jobId = generateJobId();
         String jobArn = "arn:aws:bedrock:" + effectiveRegion + ":" + accountId + ":model-invocation-job/" + jobId;
 
@@ -152,7 +169,7 @@ public class BedrockService implements Resettable {
                 executeBatchJob(job, effectiveRegion, accountId);
             } catch (Exception e) {
                 LOG.errorv(e, "Unexpected error running batch job {0}", jobArn);
-                failJob(job, "Unexpected batch error: " + e.getMessage(), effectiveRegion, accountId);
+                failJob(jobArn, "Unexpected batch error: " + e.getMessage(), effectiveRegion, accountId);
             }
         });
 
@@ -186,27 +203,28 @@ public class BedrockService implements Resettable {
 
     public void stopModelInvocationJob(String jobIdentifier, String region) {
         ModelInvocationJob job = getModelInvocationJob(jobIdentifier, region);
-        if (job.getStatus() == ModelInvocationJobStatus.COMPLETED
-                || job.getStatus() == ModelInvocationJobStatus.FAILED
-                || job.getStatus() == ModelInvocationJobStatus.STOPPED
-                || job.getStatus() == ModelInvocationJobStatus.EXPIRED
-                || job.getStatus() == ModelInvocationJobStatus.PARTIALLY_COMPLETED) {
-            throw new AwsException("ValidationException",
-                    "Job " + job.getJobArn() + " is already in terminal status: " + job.getStatus(), 400);
-        }
-
+        String jobArn = job.getJobArn();
         String effectiveRegion = region != null && !region.isBlank()
                 ? region : regionResolver.getDefaultRegion();
         String accountId = regionResolver.getAccountId();
 
-        Instant now = Instant.now();
-        job.setStatus(ModelInvocationJobStatus.STOPPED);
-        job.setEndTime(now);
-        job.setLastModifiedTime(now);
-        jobStore.put(job.getJobArn(), job);
+        Object lock = getJobLock(jobArn);
+        synchronized (lock) {
+            ModelInvocationJob current = jobStore.get(jobArn).orElse(job);
+            if (isTerminal(current.getStatus())) {
+                throw new AwsException("ValidationException",
+                        "Job " + current.getJobArn() + " is already in terminal status: " + current.getStatus(), 400);
+            }
 
-        LOG.infov("Stopped model invocation job: {0}", job.getJobArn());
-        emitStateChangeEvent(job, effectiveRegion, accountId);
+            Instant now = Instant.now();
+            current.setStatus(ModelInvocationJobStatus.STOPPED);
+            current.setEndTime(now);
+            current.setLastModifiedTime(now);
+            jobStore.put(jobArn, current);
+
+            LOG.infov("Stopped model invocation job: {0}", jobArn);
+            emitStateChangeEvent(current, effectiveRegion, accountId);
+        }
     }
 
     public PaginatedResult<ModelInvocationJobSummary> listModelInvocationJobs(
@@ -275,82 +293,120 @@ public class BedrockService implements Resettable {
         );
     }
 
-    private boolean isJobStopped(ModelInvocationJob job) {
-        return jobStore.get(job.getJobArn())
-                .map(j -> j.getStatus() == ModelInvocationJobStatus.STOPPED)
-                .orElse(false);
+    private static boolean isTerminal(ModelInvocationJobStatus status) {
+        return status == ModelInvocationJobStatus.COMPLETED
+                || status == ModelInvocationJobStatus.FAILED
+                || status == ModelInvocationJobStatus.STOPPED
+                || status == ModelInvocationJobStatus.EXPIRED
+                || status == ModelInvocationJobStatus.PARTIALLY_COMPLETED;
     }
 
-    private void executeBatchJob(ModelInvocationJob job, String region, String accountId) {
-        // Validating
-        job.setStatus(ModelInvocationJobStatus.VALIDATING);
-        job.setLastModifiedTime(Instant.now());
-        jobStore.put(job.getJobArn(), job);
-        emitStateChangeEvent(job, region, accountId);
+    private boolean isJobStoppedOrTerminal(String jobArn) {
+        Object lock = getJobLock(jobArn);
+        synchronized (lock) {
+            return jobStore.get(jobArn)
+                    .map(j -> isTerminal(j.getStatus()))
+                    .orElse(false);
+        }
+    }
 
-        if (isJobStopped(job)) return;
+    private boolean transitionJobStatus(String jobArn, ModelInvocationJobStatus newStatus,
+                                        Consumer<ModelInvocationJob> mutator,
+                                        String region, String accountId) {
+        Object lock = getJobLock(jobArn);
+        synchronized (lock) {
+            Optional<ModelInvocationJob> opt = jobStore.get(jobArn);
+            if (opt.isEmpty()) {
+                return false;
+            }
+            ModelInvocationJob current = opt.get();
+            if (isTerminal(current.getStatus())) {
+                return false;
+            }
+            current.setStatus(newStatus);
+            current.setLastModifiedTime(Instant.now());
+            if (mutator != null) {
+                mutator.accept(current);
+            }
+            jobStore.put(jobArn, current);
+            emitStateChangeEvent(current, region, accountId);
+            return true;
+        }
+    }
+
+    private void failJob(String jobArn, String message, String region, String accountId) {
+        boolean transitioned = transitionJobStatus(jobArn, ModelInvocationJobStatus.FAILED, current -> {
+            Instant now = Instant.now();
+            current.setMessage(message);
+            current.setEndTime(now);
+        }, region, accountId);
+        if (transitioned) {
+            LOG.warnv("Model invocation job {0} failed: {1}", jobArn, message);
+        }
+    }
+
+    private void executeBatchJob(ModelInvocationJob initialJob, String region, String accountId) {
+        String jobArn = initialJob.getJobArn();
+
+        // Validating
+        if (!transitionJobStatus(jobArn, ModelInvocationJobStatus.VALIDATING, null, region, accountId)) {
+            return;
+        }
 
         // Scheduled
-        job.setStatus(ModelInvocationJobStatus.SCHEDULED);
-        job.setLastModifiedTime(Instant.now());
-        jobStore.put(job.getJobArn(), job);
-        emitStateChangeEvent(job, region, accountId);
-
-        if (isJobStopped(job)) return;
+        if (!transitionJobStatus(jobArn, ModelInvocationJobStatus.SCHEDULED, null, region, accountId)) {
+            return;
+        }
 
         // Transition to InProgress
-        job.setStatus(ModelInvocationJobStatus.IN_PROGRESS);
-        job.setLastModifiedTime(Instant.now());
-        jobStore.put(job.getJobArn(), job);
-        emitStateChangeEvent(job, region, accountId);
+        if (!transitionJobStatus(jobArn, ModelInvocationJobStatus.IN_PROGRESS, null, region, accountId)) {
+            return;
+        }
 
-        if (isJobStopped(job)) return;
-
-        String inputS3Uri = job.getInputDataConfig().s3InputDataConfig().s3Uri();
+        String inputS3Uri = initialJob.getInputDataConfig().s3InputDataConfig().s3Uri();
         S3Location inputLoc = parseS3Uri(inputS3Uri);
 
         if (s3Service == null) {
-            failJob(job, "S3 service is not available", region, accountId);
+            failJob(jobArn, "S3 service is not available", region, accountId);
             return;
         }
 
-        // Verify the caller-supplied input bucket exists and belongs to the same account as the
-        // submitted roleArn.  Full IAM role assumption and S3 policy evaluation are not
-        // implemented; this ownership check is the practical cross-account guard available in
-        // the emulator.
+        // Verify the caller-supplied input bucket exists and belongs to the calling account.
+        // Even when globalBucketNamespace is enabled, a caller in account A cannot read or copy
+        // another account B's bucket by providing account B's role or bucket name.
         try {
             s3Service.headBucket(inputLoc.bucket());
         } catch (Exception e) {
-            if (isJobStopped(job)) return;
-            failJob(job, "Input S3 bucket does not exist or is not accessible: " + inputLoc.bucket(),
+            if (isJobStoppedOrTerminal(jobArn)) return;
+            failJob(jobArn, "Input S3 bucket does not exist or is not accessible: " + inputLoc.bucket(),
                     region, accountId);
             return;
         }
-        String roleAccountId = extractAccountIdFromRoleArn(job.getRoleArn());
-        if (roleAccountId != null) {
-            String bucketOwner = s3Service.getBucketOwnerAccountId(inputLoc.bucket());
-            if (bucketOwner != null && !roleAccountId.equals(bucketOwner)) {
-                if (isJobStopped(job)) return;
-                failJob(job, "Access denied: roleArn account " + roleAccountId
-                        + " does not own input bucket " + inputLoc.bucket()
-                        + " (owned by " + bucketOwner + ")", region, accountId);
-                return;
-            }
+
+        String inputBucketOwner = s3Service.getBucketOwnerAccountId(inputLoc.bucket());
+        if (inputBucketOwner != null && accountId != null && !inputBucketOwner.equals(accountId)) {
+            if (isJobStoppedOrTerminal(jobArn)) return;
+            failJob(jobArn, "Access denied: calling account " + accountId
+                    + " does not own input bucket " + inputLoc.bucket()
+                    + " (owned by " + inputBucketOwner + ")", region, accountId);
+            return;
         }
+
+        if (isJobStoppedOrTerminal(jobArn)) return;
 
         byte[] inputBytes;
         try {
             S3Object s3Obj = s3Service.getObject(inputLoc.bucket(), inputLoc.key());
             if (s3Obj == null || s3Obj.getData() == null) {
-                if (isJobStopped(job)) return;
-                failJob(job, "Input S3 file is empty or not found: " + inputS3Uri, region, accountId);
+                if (isJobStoppedOrTerminal(jobArn)) return;
+                failJob(jobArn, "Input S3 file is empty or not found: " + inputS3Uri, region, accountId);
                 return;
             }
             inputBytes = s3Obj.getData();
         } catch (Exception e) {
-            if (isJobStopped(job)) return;
+            if (isJobStoppedOrTerminal(jobArn)) return;
             LOG.warnv(e, "Failed to read S3 input file: {0}", inputS3Uri);
-            failJob(job, "Failed to read input S3 file: " + e.getMessage(), region, accountId);
+            failJob(jobArn, "Failed to read input S3 file: " + e.getMessage(), region, accountId);
             return;
         }
 
@@ -365,6 +421,10 @@ public class BedrockService implements Resettable {
         long totalOutputTokens = 0;
 
         for (String line : lines) {
+            if (isJobStoppedOrTerminal(jobArn)) {
+                LOG.infov("Job {0} stopped during record processing; aborting execution.", jobArn);
+                return;
+            }
             if (line == null || line.trim().isEmpty()) {
                 continue;
             }
@@ -394,7 +454,7 @@ public class BedrockService implements Resettable {
                     continue;
                 }
 
-                JsonNode modelOutputNode = processModelInput(job.getModelId(), (ObjectNode) parsedModelInput);
+                JsonNode modelOutputNode = processModelInput(initialJob.getModelId(), (ObjectNode) parsedModelInput);
                 totalInputTokens += extractInputTokens(modelOutputNode);
                 totalOutputTokens += extractOutputTokens(modelOutputNode);
 
@@ -422,8 +482,12 @@ public class BedrockService implements Resettable {
             }
         }
 
+        if (isJobStoppedOrTerminal(jobArn)) {
+            return;
+        }
+
         // Write output files to S3
-        String outputS3Uri = job.getOutputDataConfig().s3OutputDataConfig().s3Uri();
+        String outputS3Uri = initialJob.getOutputDataConfig().s3OutputDataConfig().s3Uri();
         S3Location outLoc = parseS3Uri(outputS3Uri);
 
         String inputKey = inputLoc.key();
@@ -434,32 +498,32 @@ public class BedrockService implements Resettable {
         }
 
         String outPrefix = outLoc.key().isEmpty()
-                ? job.getJobId()
-                : (outLoc.key().replaceAll("/+$", "") + "/" + job.getJobId());
+                ? initialJob.getJobId()
+                : (outLoc.key().replaceAll("/+$", "") + "/" + initialJob.getJobId());
         String outputJsonlKey = outPrefix + "/" + inputFilename + ".out";
         String manifestKey = outPrefix + "/manifest.json.out";
 
-        String outputJsonlUri = "s3://" + outLoc.bucket() + "/" + outputJsonlKey;
-
-        // Verify the caller-supplied output bucket exists and belongs to the same account as the
-        // submitted roleArn, for the same reason as the input check above.
+        // Verify the caller-supplied output bucket exists and belongs to the calling account.
         try {
             s3Service.headBucket(outLoc.bucket());
         } catch (Exception e) {
-            if (isJobStopped(job)) return;
-            failJob(job, "Output S3 bucket does not exist or is not accessible: " + outLoc.bucket(),
+            if (isJobStoppedOrTerminal(jobArn)) return;
+            failJob(jobArn, "Output S3 bucket does not exist or is not accessible: " + outLoc.bucket(),
                     region, accountId);
             return;
         }
-        if (roleAccountId != null) {
-            String outBucketOwner = s3Service.getBucketOwnerAccountId(outLoc.bucket());
-            if (outBucketOwner != null && !roleAccountId.equals(outBucketOwner)) {
-                if (isJobStopped(job)) return;
-                failJob(job, "Access denied: roleArn account " + roleAccountId
-                        + " does not own output bucket " + outLoc.bucket()
-                        + " (owned by " + outBucketOwner + ")", region, accountId);
-                return;
-            }
+
+        String outBucketOwner = s3Service.getBucketOwnerAccountId(outLoc.bucket());
+        if (outBucketOwner != null && accountId != null && !outBucketOwner.equals(accountId)) {
+            if (isJobStoppedOrTerminal(jobArn)) return;
+            failJob(jobArn, "Access denied: calling account " + accountId
+                    + " does not own output bucket " + outLoc.bucket()
+                    + " (owned by " + outBucketOwner + ")", region, accountId);
+            return;
+        }
+
+        if (isJobStoppedOrTerminal(jobArn)) {
+            return;
         }
 
         try {
@@ -482,45 +546,51 @@ public class BedrockService implements Resettable {
             s3Service.putObject(outLoc.bucket(), manifestKey, manifestBytes,
                     "application/json", Map.of());
         } catch (Exception e) {
+            if (isJobStoppedOrTerminal(jobArn)) return;
             LOG.warnv(e, "Failed to write batch output files to S3 bucket {0}", outLoc.bucket());
-            failJob(job, "Failed to write batch output to S3: " + e.getMessage(), region, accountId);
+            failJob(jobArn, "Failed to write batch output to S3: " + e.getMessage(), region, accountId);
             return;
         }
 
-        Instant completionTime = Instant.now();
-        job.setEndTime(completionTime);
-        job.setLastModifiedTime(completionTime);
-        job.setTotalRecordCount(totalCount);
-        job.setProcessedRecordCount(processedCount);
-        job.setSuccessRecordCount(successCount);
-        job.setErrorRecordCount(errorCount);
-        job.setInputTokenCount(totalInputTokens > 0 ? totalInputTokens : null);
-        job.setOutputTokenCount(totalOutputTokens > 0 ? totalOutputTokens : null);
-
-        // Check whether a stop request arrived while records were being processed or output was
-        // being written.  If so, honour the stopped state instead of overwriting it with a
-        // completion/failure status derived from partial work.
-        if (isJobStopped(job)) {
-            return;
-        }
-
-        if (totalCount == 0) {
-            job.setStatus(ModelInvocationJobStatus.COMPLETED);
-        } else if (errorCount == 0) {
-            job.setStatus(ModelInvocationJobStatus.COMPLETED);
+        // Compute final status and message
+        ModelInvocationJobStatus finalStatus;
+        String finalMessage = null;
+        if (totalCount == 0 || errorCount == 0) {
+            finalStatus = ModelInvocationJobStatus.COMPLETED;
         } else if (successCount > 0) {
-            job.setStatus(ModelInvocationJobStatus.PARTIALLY_COMPLETED);
-            job.setMessage(String.format("Batch job partially completed with %d successes and %d errors.",
-                    successCount, errorCount));
+            finalStatus = ModelInvocationJobStatus.PARTIALLY_COMPLETED;
+            finalMessage = String.format("Batch job partially completed with %d successes and %d errors.",
+                    successCount, errorCount);
         } else {
-            job.setStatus(ModelInvocationJobStatus.FAILED);
-            job.setMessage(String.format("Batch job failed: all %d records failed.", totalCount));
+            finalStatus = ModelInvocationJobStatus.FAILED;
+            finalMessage = String.format("Batch job failed: all %d records failed.", totalCount);
         }
 
-        jobStore.put(job.getJobArn(), job);
-        LOG.infov("Completed model invocation job {0} with status {1}",
-                job.getJobArn(), job.getStatus());
-        emitStateChangeEvent(job, region, accountId);
+        final String msg = finalMessage;
+        final long total = totalCount;
+        final long processed = processedCount;
+        final long success = successCount;
+        final long error = errorCount;
+        final long inTokens = totalInputTokens;
+        final long outTokens = totalOutputTokens;
+
+        boolean transitioned = transitionJobStatus(jobArn, finalStatus, current -> {
+            Instant completionTime = Instant.now();
+            current.setEndTime(completionTime);
+            current.setTotalRecordCount(total);
+            current.setProcessedRecordCount(processed);
+            current.setSuccessRecordCount(success);
+            current.setErrorRecordCount(error);
+            current.setInputTokenCount(inTokens > 0 ? inTokens : null);
+            current.setOutputTokenCount(outTokens > 0 ? outTokens : null);
+            if (msg != null) {
+                current.setMessage(msg);
+            }
+        }, region, accountId);
+
+        if (transitioned) {
+            LOG.infov("Completed model invocation job {0} with status {1}", jobArn, finalStatus);
+        }
     }
 
     private static long extractInputTokens(JsonNode output) {
@@ -587,16 +657,7 @@ public class BedrockService implements Resettable {
         return objectMapper.readTree(responseBytes);
     }
 
-    private void failJob(ModelInvocationJob job, String message, String region, String accountId) {
-        Instant now = Instant.now();
-        job.setStatus(ModelInvocationJobStatus.FAILED);
-        job.setMessage(message);
-        job.setEndTime(now);
-        job.setLastModifiedTime(now);
-        jobStore.put(job.getJobArn(), job);
-        LOG.warnv("Model invocation job {0} failed: {1}", job.getJobArn(), message);
-        emitStateChangeEvent(job, region, accountId);
-    }
+
 
     private static final DateTimeFormatter CREATION_TIME_FMT =
             DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm:ss a", Locale.ENGLISH).withZone(ZoneOffset.UTC);

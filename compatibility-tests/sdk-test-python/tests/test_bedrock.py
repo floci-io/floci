@@ -130,6 +130,7 @@ class TestBedrockBatchInference:
                 break
             time.sleep(0.5)
 
+        assert job is not None
         assert job["status"] == "Failed"
         assert "endTime" in job
 
@@ -178,6 +179,7 @@ class TestBedrockBatchInference:
                 break
             time.sleep(0.5)
 
+        assert job is not None
         assert job["status"] == "Completed"
 
         # Check output JSONL in S3 at <output_prefix>/<jobId>/<input_key>.out
