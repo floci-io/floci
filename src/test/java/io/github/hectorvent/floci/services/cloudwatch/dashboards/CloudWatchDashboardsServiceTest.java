@@ -115,13 +115,50 @@ class CloudWatchDashboardsServiceTest {
     }
 
     @Test
-    void deleteDashboardsIsAtomicWhenOneNameIsMissing() {
+    void tagsGivenOnCreateAreReadableByArn() {
+        service.putDashboard("ops", BODY, java.util.Map.of("team", "platform"), REGION);
+        String arn = service.getDashboard("ops", REGION).getDashboardArn();
+
+        assertEquals(java.util.Map.of("team", "platform"), service.listTagsForResource(arn, REGION));
+        assertTrue(CloudWatchDashboardsService.isDashboardArn(arn));
+    }
+
+    /**
+     * AWS documents Tags on PutDashboard as create-only, so replacing a dashboard keeps the tags
+     * it already had: an update must not be able to retag a resource sideways.
+     */
+    @Test
+    void tagsOnAReplacingPutDoNotOverwriteTheExistingOnes() {
+        service.putDashboard("ops", BODY, java.util.Map.of("team", "platform"), REGION);
+        String arn = service.getDashboard("ops", REGION).getDashboardArn();
+
+        service.putDashboard("ops", BODY, java.util.Map.of("team", "someone-else"), REGION);
+
+        assertEquals(java.util.Map.of("team", "platform"), service.listTagsForResource(arn, REGION));
+    }
+
+    @Test
+    void tagAndUntagResourceReachDashboards() {
+        service.putDashboard("ops", BODY, REGION);
+        String arn = service.getDashboard("ops", REGION).getDashboardArn();
+
+        service.tagResource(arn, java.util.Map.of("env", "dev"), REGION);
+        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
+
+        service.untagResource(arn, List.of("env"), REGION);
+        assertEquals(java.util.Map.of(), service.listTagsForResource(arn, REGION));
+    }
+
+    @Test
+    void deleteDashboardsIsBestEffortWhenOneNameIsMissing() {
         service.putDashboard("a", BODY, REGION);
+        service.putDashboard("b", BODY, REGION);
 
         AwsException e = assertThrows(AwsException.class,
-                () -> service.deleteDashboards(List.of("a", "missing"), REGION));
+                () -> service.deleteDashboards(List.of("a", "missing", "b"), REGION));
         assertEquals("ResourceNotFound", e.getErrorCode());
-        // "a" existed and was named first - it must still be there.
-        assertEquals(1, service.listDashboards(null, REGION).size());
+        // AWS attempts to delete as many dashboards as possible, so the two that existed are
+        // gone even though the batch errored, and a name after the missing one is still tried.
+        assertEquals(0, service.listDashboards(null, REGION).size());
     }
 }
