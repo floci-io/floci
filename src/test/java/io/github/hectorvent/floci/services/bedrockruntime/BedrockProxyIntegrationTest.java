@@ -19,6 +19,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -369,6 +371,27 @@ class BedrockProxyIntegrationTest {
     }
 
     @Test
+    void converse_noChoicesInResponse_returns424InsteadOfFakeSuccess() {
+        // A 2xx response with no "choices" at all (e.g. an error object returned with a
+        // success status) must not be translated into a fake successful empty completion.
+        nextResponseBody.set("""
+            {"error": {"message": "model not found"}}
+            """);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(424)
+            .body("__type", equalTo("ModelErrorException"));
+    }
+
+    @Test
     void converse_omitsToolsWhenNoToolConfig() throws IOException {
         nextResponseBody.set("""
             {
@@ -676,6 +699,179 @@ class BedrockProxyIntegrationTest {
 
         JsonNode sentRequest = objectMapper.readTree(received.get().body());
         assertFalse(sentRequest.has("tool_choice"));
+    }
+
+    @Test
+    void converseStream_basicTextResponse_translatesSseToEventStream() throws IOException {
+        nextResponseBody.set("""
+            data: {"choices":[{"delta":{"role":"assistant"}}]}
+
+            data: {"choices":[{"delta":{"content":"Hello"}}]}
+
+            data: {"choices":[{"delta":{"content":" world"}}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":9,"total_tokens":16}}
+
+            data: [DONE]
+            """);
+
+        String body = given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+        .then()
+            .statusCode(200)
+            .header("Content-Type", containsString("application/vnd.amazon.eventstream"))
+            .extract().body().asString();
+
+        assertThat(body, containsString("messageStart"));
+        assertThat(body, containsString("Hello"));
+        assertThat(body, containsString(" world"));
+        assertThat(body, containsString("contentBlockStop"));
+        assertThat(body, containsString("messageStop"));
+        assertThat(body, containsString("end_turn"));
+        assertThat(body, containsString("metadata"));
+
+        JsonNode sentRequest = objectMapper.readTree(received.get().body());
+        assertTrue(sentRequest.path("stream").asBoolean());
+        assertEquals("claude-3-haiku", sentRequest.path("model").asText());
+    }
+
+    @Test
+    void converseStream_toolCallsTranslateToToolUseContentBlock() {
+        nextResponseBody.set("""
+            data: {"choices":[{"delta":{"role":"assistant"}}]}
+
+            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc123","function":{"name":"get_weather","arguments":"{\\"city\\":"}}]}}]}
+
+            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"Berlin\\"}"}}]}}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":8,"total_tokens":13}}
+
+            data: [DONE]
+            """);
+
+        String body = given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages": [{"role": "user", "content": [{"text": "weather in Berlin?"}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        assertThat(body, containsString("contentBlockStart"));
+        assertThat(body, containsString("call_abc123"));
+        assertThat(body, containsString("get_weather"));
+        assertThat(body, containsString("Berlin"));
+        assertThat(body, containsString("tool_use"));
+    }
+
+    @Test
+    void converseStream_noUsableSseChunks_returns424InsteadOfFakeSuccess() {
+        // A 2xx response with a body that isn't SSE-shaped at all (e.g. a plain JSON error
+        // object) must not be silently translated into a "successful" empty completion.
+        nextResponseBody.set("""
+            {"error": {"message": "model not found"}}
+            """);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+        .then()
+            .statusCode(424)
+            .body("__type", equalTo("ModelErrorException"));
+    }
+
+    @Test
+    void converseStream_parsableChunksWithNoContent_returns424InsteadOfFakeSuccess() {
+        // Every line here parses as valid JSON (parsedChunks > 0), but none of them carry
+        // actual completion content - a role-only chunk, then a bare finish_reason with no
+        // text or tool_calls. A finish_reason alone must not be treated as proof of a real
+        // completion; this is indistinguishable from a truncated/failed generation.
+        nextResponseBody.set("""
+            data: {"choices":[{"delta":{"role":"assistant"}}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}
+
+            data: [DONE]
+            """);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+        .then()
+            .statusCode(424)
+            .body("__type", equalTo("ModelErrorException"));
+    }
+
+    @Test
+    void converseStream_truncatedTextWithNoFinishReason_returns424() {
+        // A real text delta arrives, but the stream ends (EOF, no [DONE], no finish_reason) -
+        // e.g. the upstream connection dropped mid-generation. Accumulated text alone must not
+        // be treated as a completed answer.
+        nextResponseBody.set("""
+            data: {"choices":[{"delta":{"role":"assistant"}}]}
+
+            data: {"choices":[{"delta":{"content":"Hello"}}]}
+            """);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+        .then()
+            .statusCode(424)
+            .body("__type", equalTo("ModelErrorException"));
+    }
+
+    @Test
+    void converseStream_incompleteToolCallFragment_returns424() {
+        // The tool_calls delta never carries a "name" and its arguments never close into
+        // valid JSON - a partial/corrupted fragment, not a usable tool_use block. It must be
+        // dropped rather than surfacing as a 200 with an empty-name toolUse block.
+        nextResponseBody.set("""
+            data: {"choices":[{"delta":{"role":"assistant"}}]}
+
+            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"{\\"city\\":"}}]}}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+
+            data: [DONE]
+            """);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages": [{"role": "user", "content": [{"text": "weather?"}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+        .then()
+            .statusCode(424)
+            .body("__type", equalTo("ModelErrorException"));
     }
 
     @Test
