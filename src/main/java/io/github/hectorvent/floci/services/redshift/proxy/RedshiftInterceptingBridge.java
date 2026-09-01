@@ -82,16 +82,15 @@ public class RedshiftInterceptingBridge {
 
             InputStream clientIn = client.getInputStream();
             OutputStream backendOut = backend.getOutputStream();
-            PostgresWireDecoder decoder = new PostgresWireDecoder(clientIn);
-
-            PostgresWireDecoder.FrontendMessage msg;
-            while ((msg = decoder.nextMessage()) != null) {
-                if (!msg.isQuery()) {
-                    // Count BEFORE forwarding: a fast backend could answer and the pump could
-                    // decrement before a later increment, stranding the counter above zero.
-                    if (msg.type() == 'S') { // Sync — its response ends with ReadyForQuery
-                        outstandingResponses.incrementAndGet();
-                    }
+            try (PostgresWireDecoder decoder = new PostgresWireDecoder(clientIn)) {
+                PostgresWireDecoder.FrontendMessage msg;
+                while ((msg = decoder.nextMessage()) != null) {
+                    if (!msg.isQuery()) {
+                        // Count BEFORE forwarding: a fast backend could answer and the pump could
+                        // decrement before a later increment, stranding the counter above zero.
+                        if (msg.type() == 'S') { // Sync — its response ends with ReadyForQuery
+                            outstandingResponses.incrementAndGet();
+                        }
                     backendOut.write(msg.toPacketBytes());
                     backendOut.flush();
                     if (msg.type() == 'X') { // Terminate
@@ -142,6 +141,7 @@ public class RedshiftInterceptingBridge {
                 backendOut.flush();
                 // Response flows back over the untouched pump.
             }
+        }
         } catch (IOException e) {
             LOG.debugv(e, "RedshiftInterceptingBridge client loop ended");
         } catch (Exception e) {

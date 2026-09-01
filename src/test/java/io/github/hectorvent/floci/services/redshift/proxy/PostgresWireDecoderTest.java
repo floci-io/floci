@@ -188,4 +188,25 @@ class PostgresWireDecoderTest {
         assertEquals(21, length);
         assertEquals(0x00, encoded[encoded.length - 1]);
     }
+
+    @Test
+    void testDecoderReleasesBudgetOnCloseAndNextMessage() throws Exception {
+        byte[] packet1 = PostgresWireDecoder.encodeQuery("SELECT 1");
+        byte[] packet2 = PostgresWireDecoder.encodeQuery("SELECT 2");
+        ByteArrayOutputStream combined = new ByteArrayOutputStream();
+        combined.write(packet1);
+        combined.write(packet2);
+
+        try (PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(combined.toByteArray()))) {
+            PostgresWireDecoder.FrontendMessage msg1 = decoder.nextMessage();
+            assertNotNull(msg1);
+            assertEquals("SELECT 1", msg1.getSql());
+
+            PostgresWireDecoder.FrontendMessage msg2 = decoder.nextMessage();
+            assertNotNull(msg2);
+            assertEquals("SELECT 2", msg2.getSql());
+
+            assertNull(decoder.nextMessage());
+        }
+    }
 }

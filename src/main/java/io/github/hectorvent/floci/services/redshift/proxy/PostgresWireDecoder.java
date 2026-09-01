@@ -10,7 +10,7 @@ import java.util.concurrent.Semaphore;
 /**
  * Decoder for PostgreSQL wire-protocol messages sent by the frontend (client).
  */
-public class PostgresWireDecoder {
+public class PostgresWireDecoder implements AutoCloseable {
 
     /**
      * Refuse a single message whose declared length exceeds this. The length field is
@@ -22,12 +22,14 @@ public class PostgresWireDecoder {
     private static final int MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
     /**
-     * Shared budget across all connections for in-flight message body allocations during decoding,
-     * preventing multiple concurrent clients from exhausting the shared JVM heap with stalled or slow reads.
+     * Shared budget across all connections for message body allocations while active,
+     * preventing multiple concurrent clients from exhausting the shared JVM heap with large
+     * or stalled bodies.
      */
     private static final Semaphore DECODER_HEAP_BUDGET = new Semaphore(64 * 1024 * 1024);
 
     private final InputStream in;
+    private int heldBodyBytes = 0;
 
     public PostgresWireDecoder(InputStream in) {
         this.in = Objects.requireNonNull(in, "in must not be null");
@@ -41,6 +43,9 @@ public class PostgresWireDecoder {
      * @throws IOException on an I/O error or an invalid packet length.
      */
     public FrontendMessage nextMessage() throws IOException {
+        // Release the budget held for the previous message now that the caller is done with it.
+        releaseHeldBudget();
+
         int typeByte = in.read();
         if (typeByte == -1) {
             return null; // clean EOF between messages
@@ -76,13 +81,27 @@ public class PostgresWireDecoder {
                 throw new EOFException("Unexpected EOF while reading message body (expected "
                         + bodyLength + " bytes, got " + body.length + ")");
             }
-        } finally {
+            heldBodyBytes = bodyLength;
+        } catch (Throwable t) {
             if (bodyLength > 0) {
                 DECODER_HEAP_BUDGET.release(bodyLength);
             }
+            throw t;
         }
 
         return new FrontendMessage(type, body);
+    }
+
+    private void releaseHeldBudget() {
+        if (heldBodyBytes > 0) {
+            DECODER_HEAP_BUDGET.release(heldBodyBytes);
+            heldBodyBytes = 0;
+        }
+    }
+
+    @Override
+    public void close() {
+        releaseHeldBudget();
     }
 
     /**
