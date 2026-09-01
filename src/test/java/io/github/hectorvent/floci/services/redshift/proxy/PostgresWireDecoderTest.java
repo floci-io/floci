@@ -209,4 +209,18 @@ class PostgresWireDecoderTest {
             assertNull(decoder.nextMessage());
         }
     }
+
+    @Test
+    void testDecoderIncrementalBudgetAcquisition() throws Exception {
+        byte[] packet = PostgresWireDecoder.encodeQuery("SELECT * FROM table");
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(packet));
+
+        assertTrue(decoder.isBetweenMessages());
+        PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage();
+        assertNotNull(msg);
+        assertEquals("SELECT * FROM table", msg.getSql());
+        assertTrue(decoder.isBetweenMessages());
+
+        decoder.close();
+    }
 }

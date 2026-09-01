@@ -52,6 +52,8 @@ public class RedshiftInterceptingBridge {
 
     /** How long a pump {@code read()} blocks (holding {@link #backendLock}) before looping. */
     private static final int PUMP_READ_TIMEOUT_MS = 200;
+    /** Read timeout on the client socket so stalled clients cannot hold connections indefinitely. */
+    private static final int CLIENT_READ_TIMEOUT_MS = 10_000;
     /** Upper bound on how long the client loop waits for the backend to be idle at a boundary. */
     private static final long PUMP_PARK_WAIT_MS = 2_000L;
 
@@ -75,29 +77,41 @@ public class RedshiftInterceptingBridge {
 
     public void run() {
         try {
-            // Set the pump's read timeout BEFORE the pump can enter read() — a setSoTimeout
-            // that races an in-flight blocking read does not take effect.
+            // Set socket timeouts BEFORE loops enter blocking reads
             backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
+            client.setSoTimeout(CLIENT_READ_TIMEOUT_MS);
             Thread.ofVirtual().name("redshift-pump-backend-to-client").start(this::pumpBackendToClient);
 
             InputStream clientIn = client.getInputStream();
             OutputStream backendOut = backend.getOutputStream();
             try (PostgresWireDecoder decoder = new PostgresWireDecoder(clientIn)) {
-                PostgresWireDecoder.FrontendMessage msg;
-                while ((msg = decoder.nextMessage()) != null) {
+                while (true) {
+                    PostgresWireDecoder.FrontendMessage msg;
+                    try {
+                        msg = decoder.nextMessage();
+                    } catch (SocketTimeoutException e) {
+                        if (decoder.isBetweenMessages()) {
+                            continue; // client idle between queries; keep waiting
+                        }
+                        LOG.warnv("Client socket timed out mid-message: {0}", e.getMessage());
+                        break;
+                    }
+                    if (msg == null) {
+                        break; // EOF
+                    }
                     if (!msg.isQuery()) {
                         // Count BEFORE forwarding: a fast backend could answer and the pump could
                         // decrement before a later increment, stranding the counter above zero.
                         if (msg.type() == 'S') { // Sync — its response ends with ReadyForQuery
                             outstandingResponses.incrementAndGet();
                         }
-                    backendOut.write(msg.toPacketBytes());
-                    backendOut.flush();
-                    if (msg.type() == 'X') { // Terminate
-                        break;
+                        backendOut.write(msg.toPacketBytes());
+                        backendOut.flush();
+                        if (msg.type() == 'X') { // Terminate
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
 
                 String sql = msg.getSql();
                 CopyStatementParser.S3Statement stmt = null;

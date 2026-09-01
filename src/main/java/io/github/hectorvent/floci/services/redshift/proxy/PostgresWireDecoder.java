@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Decoder for PostgreSQL wire-protocol messages sent by the frontend (client).
@@ -30,9 +32,18 @@ public class PostgresWireDecoder implements AutoCloseable {
 
     private final InputStream in;
     private int heldBodyBytes = 0;
+    private volatile boolean betweenMessages = true;
 
     public PostgresWireDecoder(InputStream in) {
         this.in = Objects.requireNonNull(in, "in must not be null");
+    }
+
+    /**
+     * True when the decoder is currently at a clean boundary between wire messages (not in the middle
+     * of reading a message header or body).
+     */
+    public boolean isBetweenMessages() {
+        return betweenMessages;
     }
 
     /**
@@ -45,11 +56,13 @@ public class PostgresWireDecoder implements AutoCloseable {
     public FrontendMessage nextMessage() throws IOException {
         // Release the budget held for the previous message now that the caller is done with it.
         releaseHeldBudget();
+        betweenMessages = true;
 
         int typeByte = in.read();
         if (typeByte == -1) {
             return null; // clean EOF between messages
         }
+        betweenMessages = false;
         char type = (char) typeByte;
 
         byte[] lengthBytes = in.readNBytes(4);
@@ -71,25 +84,56 @@ public class PostgresWireDecoder implements AutoCloseable {
         }
 
         int bodyLength = length - 4;
-        if (bodyLength > 0 && !DECODER_HEAP_BUDGET.tryAcquire(bodyLength)) {
-            throw new IOException("Decoder memory budget exhausted (" + bodyLength + " bytes requested)");
+        byte[] body = readBodyBounded(bodyLength);
+        betweenMessages = true;
+
+        return new FrontendMessage(type, body);
+    }
+
+    /**
+     * Read {@code bodyLength} bytes in chunks, acquiring decoder budget proportionally as bytes actually
+     * arrive. A client that declares a near-limit message but stalls mid-stream retains budget only for
+     * the chunks already received, preventing stalled sessions from pinning the entire budget up front.
+     */
+    private byte[] readBodyBounded(int bodyLength) throws IOException {
+        if (bodyLength == 0) {
+            return new byte[0];
         }
-        byte[] body;
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream(Math.min(bodyLength, 8192));
+        byte[] chunk = new byte[Math.min(bodyLength, 8192)];
+        int remaining = bodyLength;
+        int acquired = 0;
+
         try {
-            body = in.readNBytes(bodyLength);
-            if (body.length < bodyLength) {
-                throw new EOFException("Unexpected EOF while reading message body (expected "
-                        + bodyLength + " bytes, got " + body.length + ")");
+            while (remaining > 0) {
+                int toRead = Math.min(remaining, chunk.length);
+                int read = in.read(chunk, 0, toRead);
+                if (read == -1) {
+                    throw new EOFException("Unexpected EOF while reading message body (expected "
+                            + bodyLength + " bytes, got " + buffer.size() + ")");
+                }
+                boolean permitOk;
+                try {
+                    permitOk = DECODER_HEAP_BUDGET.tryAcquire(read, 5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while acquiring decoder memory budget", e);
+                }
+                if (!permitOk) {
+                    throw new IOException("Decoder memory budget exhausted (" + read + " bytes requested)");
+                }
+                acquired += read;
+                buffer.write(chunk, 0, read);
+                remaining -= read;
             }
-            heldBodyBytes = bodyLength;
+            heldBodyBytes = acquired;
+            return buffer.toByteArray();
         } catch (Throwable t) {
-            if (bodyLength > 0) {
-                DECODER_HEAP_BUDGET.release(bodyLength);
+            if (acquired > 0) {
+                DECODER_HEAP_BUDGET.release(acquired);
             }
             throw t;
         }
-
-        return new FrontendMessage(type, body);
     }
 
     private void releaseHeldBudget() {
