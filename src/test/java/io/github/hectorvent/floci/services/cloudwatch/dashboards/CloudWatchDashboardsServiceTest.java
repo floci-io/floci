@@ -58,6 +58,22 @@ class CloudWatchDashboardsServiceTest {
     }
 
     @Test
+    void putRejectsAMalformedBody() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.putDashboard("ops", "{\"widgets\": [", REGION));
+        assertEquals("InvalidParameterInput", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    /** A body that parses but is not an object is equally unusable as a dashboard. */
+    @Test
+    void putRejectsABodyThatIsNotAJsonObject() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.putDashboard("ops", "[]", REGION));
+        assertEquals("InvalidParameterInput", e.getErrorCode());
+    }
+
+    @Test
     void listDashboardsFiltersByNamePrefix() {
         service.putDashboard("prod-api", BODY, REGION);
         service.putDashboard("prod-web", BODY, REGION);

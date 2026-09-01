@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.cloudwatch.dashboards;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -24,6 +27,8 @@ import java.util.Map;
 public class CloudWatchDashboardsService {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchDashboardsService.class);
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final StorageBackend<String, Dashboard> dashboardStore;
     private final RegionResolver regionResolver;
@@ -51,6 +56,7 @@ public class CloudWatchDashboardsService {
         if (dashboardBody == null) {
             throw new AwsException("InvalidParameterValue", "DashboardBody is required.", 400);
         }
+        validateDashboardBody(dashboardBody);
 
         Dashboard dashboard = new Dashboard(dashboardName,
                 regionResolver.buildArn("cloudwatch", region, "dashboard/" + dashboardName),
@@ -62,6 +68,25 @@ public class CloudWatchDashboardsService {
         dashboardStore.put(key(region, dashboardName), dashboard);
         LOG.debugv("PutDashboard: {0} in {1}", dashboardName, region);
         return dashboard;
+    }
+
+    /**
+     * The body is stored opaquely, but it is not accepted blindly: AWS parses it and answers
+     * InvalidParameterInput when it is not a JSON object, so a client that sends a malformed
+     * document gets an error rather than a success and a dashboard that renders as nothing.
+     */
+    private static void validateDashboardBody(String dashboardBody) {
+        JsonNode parsed;
+        try {
+            parsed = JSON.readTree(dashboardBody);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidParameterInput",
+                    "The dashboard body is invalid: " + e.getOriginalMessage(), 400);
+        }
+        if (parsed == null || !parsed.isObject()) {
+            throw new AwsException("InvalidParameterInput",
+                    "The dashboard body is invalid: it must be a JSON object.", 400);
+        }
     }
 
     public Dashboard getDashboard(String dashboardName, String region) {
