@@ -1050,6 +1050,19 @@ public class GlueService {
         if (jobStore.get(name).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Job " + name + " already exists.", 400);
         }
+        
+        if (job.getGlueVersion() == null) {
+            job.setGlueVersion("5.1");
+        }
+        if (job.getTimeout() == null) {
+            try {
+                double version = Double.parseDouble(job.getGlueVersion());
+                job.setTimeout(version >= 5.0 ? 480 : 2880);
+            } catch (NumberFormatException e) {
+                job.setTimeout(2880);
+            }
+        }
+        
         Instant now = Instant.now();
         job.setCreatedOn(now);
         job.setLastModifiedOn(now);
