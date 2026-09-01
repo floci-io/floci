@@ -66,6 +66,9 @@ public class DynamoDbJsonHandler {
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "ListTagsOfResource" -> handleListTagsOfResource(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+            case "GetResourcePolicy" -> handleGetResourcePolicy(request, region);
+            case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
             case "EnableKinesisStreamingDestination" -> handleEnableKinesisStreamingDestination(request, region);
             case "DisableKinesisStreamingDestination" -> handleDisableKinesisStreamingDestination(request, region);
             case "DescribeKinesisStreamingDestination" -> handleDescribeKinesisStreamingDestination(request, region);
@@ -131,6 +134,15 @@ public class DynamoDbJsonHandler {
                 if (!gsiPt.isMissingNode()) {
                     gsi.getProvisionedThroughput().setReadCapacityUnits(gsiPt.path("ReadCapacityUnits").asLong(0));
                     gsi.getProvisionedThroughput().setWriteCapacityUnits(gsiPt.path("WriteCapacityUnits").asLong(0));
+                }
+                JsonNode gsiOnDemand = gsiNode.path("OnDemandThroughput");
+                if (gsiOnDemand.isObject()) {
+                    if (gsiOnDemand.has("MaxReadRequestUnits")) {
+                        gsi.setOnDemandMaxReadRequestUnits(gsiOnDemand.get("MaxReadRequestUnits").asInt());
+                    }
+                    if (gsiOnDemand.has("MaxWriteRequestUnits")) {
+                        gsi.setOnDemandMaxWriteRequestUnits(gsiOnDemand.get("MaxWriteRequestUnits").asInt());
+                    }
                 }
                 gsis.add(gsi);
             }
@@ -1276,6 +1288,15 @@ public class DynamoDbJsonHandler {
                         newGsi.getProvisionedThroughput().setReadCapacityUnits(newGsiPt.path("ReadCapacityUnits").asLong(0));
                         newGsi.getProvisionedThroughput().setWriteCapacityUnits(newGsiPt.path("WriteCapacityUnits").asLong(0));
                     }
+                    JsonNode newGsiOnDemand = createNode.path("OnDemandThroughput");
+                    if (newGsiOnDemand.isObject()) {
+                        if (newGsiOnDemand.has("MaxReadRequestUnits")) {
+                            newGsi.setOnDemandMaxReadRequestUnits(newGsiOnDemand.get("MaxReadRequestUnits").asInt());
+                        }
+                        if (newGsiOnDemand.has("MaxWriteRequestUnits")) {
+                            newGsi.setOnDemandMaxWriteRequestUnits(newGsiOnDemand.get("MaxWriteRequestUnits").asInt());
+                        }
+                    }
                     gsiCreates.add(newGsi);
                 }
                 JsonNode deleteNode = update.path("Delete");
@@ -1671,6 +1692,58 @@ public class DynamoDbJsonHandler {
             tagsArray.add(tagNode);
         }
         response.set("Tags", tagsArray);
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String resourceArn = request.path("ResourceArn").asText();
+        if (!isValidDynamoDbTableArn(resourceArn)) {
+            throw new AwsException("ValidationException",
+                    "Invalid ResourceArn: " + resourceArn, 400);
+        }
+        if (!request.hasNonNull("Policy")) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'policy' failed to satisfy constraint: "
+                    + "Member must not be null", 400);
+        }
+        String policy = request.path("Policy").asText();
+        String expectedRevisionId = request.has("ExpectedRevisionId")
+                ? request.get("ExpectedRevisionId").asText() : null;
+
+        String revisionId = dynamoDbService.putResourcePolicy(resourceArn, policy, expectedRevisionId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("RevisionId", revisionId);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetResourcePolicy(JsonNode request, String region) {
+        String resourceArn = request.path("ResourceArn").asText();
+        if (!isValidDynamoDbTableArn(resourceArn)) {
+            throw new AwsException("ValidationException",
+                    "Invalid ResourceArn: " + resourceArn, 400);
+        }
+        DynamoDbService.ResourcePolicyResult result = dynamoDbService.getResourcePolicy(resourceArn, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Policy", result.policy());
+        response.put("RevisionId", result.revisionId());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteResourcePolicy(JsonNode request, String region) {
+        String resourceArn = request.path("ResourceArn").asText();
+        if (!isValidDynamoDbTableArn(resourceArn)) {
+            throw new AwsException("ValidationException",
+                    "Invalid ResourceArn: " + resourceArn, 400);
+        }
+        String expectedRevisionId = request.has("ExpectedRevisionId")
+                ? request.get("ExpectedRevisionId").asText() : null;
+
+        String revisionId = dynamoDbService.deleteResourcePolicy(resourceArn, expectedRevisionId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("RevisionId", revisionId);
         return Response.ok(response).build();
     }
 
@@ -2090,6 +2163,18 @@ public class DynamoDbJsonHandler {
                 gsiNode.set("ProvisionedThroughput", gsiPt);
                 gsiNode.put("IndexSizeBytes", gsi.getIndexSizeBytes());
                 gsiNode.put("ItemCount", gsi.getItemCount());
+
+                if (gsi.getOnDemandMaxReadRequestUnits() != null
+                        || gsi.getOnDemandMaxWriteRequestUnits() != null) {
+                    ObjectNode gsiOdt = objectMapper.createObjectNode();
+                    if (gsi.getOnDemandMaxReadRequestUnits() != null) {
+                        gsiOdt.put("MaxReadRequestUnits", gsi.getOnDemandMaxReadRequestUnits());
+                    }
+                    if (gsi.getOnDemandMaxWriteRequestUnits() != null) {
+                        gsiOdt.put("MaxWriteRequestUnits", gsi.getOnDemandMaxWriteRequestUnits());
+                    }
+                    gsiNode.set("OnDemandThroughput", gsiOdt);
+                }
 
                 gsiArray.add(gsiNode);
             }
