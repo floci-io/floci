@@ -9,6 +9,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
@@ -54,8 +55,13 @@ public class PortAllocator {
      * @throws RuntimeException if no free port is available in the range
      */
     public synchronized int allocate(int basePort, int maxPort) {
+        // One Docker API round-trip per allocation, not one per candidate: the
+        // snapshot is only as fresh as the moment allocate() started either way,
+        // and this loop runs inside a lock every consumer of the shared
+        // allocator blocks on.
+        Set<Integer> published = publishedHostPorts();
         for (int port = basePort; port <= maxPort; port++) {
-            if (!reserved.contains(port) && isPortFree(port) && !isPortBoundByAnyContainer(port)) {
+            if (!reserved.contains(port) && !published.contains(port) && isPortFree(port)) {
                 reserved.add(port);
                 LOG.debugv("Allocated port {0} from range {1}-{2}", String.valueOf(port), String.valueOf(basePort), String.valueOf(maxPort));
                 return port;
@@ -112,7 +118,7 @@ public class PortAllocator {
      * MSK broker, an ECR registry mirror) - is completely invisible to this
      * check: "is port free" here can only ever mean "free inside my own
      * container," which is not the question a caller allocating a HOST port for
-     * a sibling container is actually asking. See {@link #isPortBoundByAnyContainer}
+     * a sibling container is actually asking. See {@link #publishedHostPorts}
      * for the other half {@link #allocate} needs to answer that question for real.
      *
      * @param port the port to check
@@ -128,31 +134,33 @@ public class PortAllocator {
     }
 
     /**
-     * Reports whether port is already published as a host port by ANY Docker
-     * container (running or not - a container mid-{@code docker run} that has
-     * not started yet, the shape a losing race between two sibling k3s
-     * containers takes, still holds its port binding). This is what
-     * {@link #isPortFree} cannot see from inside floci's own container network
-     * namespace, and why {@link #allocate} checks both: a host running two
-     * floci instances that each manage their own sibling containers on the
-     * SAME Docker host - lex00/floci issue naming this class of bug: two
+     * Snapshots every host port ANY Docker container currently publishes
+     * (running or not - a container mid-{@code docker run} that has not
+     * started yet, the shape a losing race between two sibling k3s containers
+     * takes, still holds its port binding). This is what {@link #isPortFree}
+     * cannot see from inside floci's own container network namespace, and why
+     * {@link #allocate} checks both: a host running two floci instances that
+     * each manage their own sibling containers on the SAME Docker host - two
      * independently-started EKS real-mode clusters both allocating host port
      * 6500 for their own k3s API server container, because each floci
      * instance's own in-process/in-namespace check saw its OWN container as
-     * having nothing bound - is exactly the case this closes.
+     * having nothing bound - is exactly the case this closes. One Docker API
+     * call per invocation; {@link #allocate} calls it once per allocation and
+     * checks every candidate against the returned snapshot.
      *
-     * <p>Returns false (never blocks allocation) when this instance was built
-     * without a {@link DockerClient} - the no-arg constructor's own contract,
-     * unchanged for every caller that predates this method - or when the
-     * Docker API call itself fails, matching {@link #isPortFree}'s own
+     * <p>Returns an empty set (never blocks allocation) when this instance was
+     * built without a {@link DockerClient} - the no-arg constructor's own
+     * contract, unchanged for every caller that predates this method - or when
+     * the Docker API call itself fails, matching {@link #isPortFree}'s own
      * fail-permissive posture for a probe that could not be completed.
      */
-    boolean isPortBoundByAnyContainer(int port) {
+    Set<Integer> publishedHostPorts() {
         if (dockerClient == null) {
-            return false;
+            return Set.of();
         }
         try {
             List<Container> containers = dockerClient.listContainersCmd().withShowAll(true).exec();
+            Set<Integer> published = new HashSet<>();
             for (Container c : containers) {
                 ContainerPort[] ports = c.getPorts();
                 if (ports == null) {
@@ -160,14 +168,15 @@ public class PortAllocator {
                 }
                 for (ContainerPort p : ports) {
                     Integer publicPort = p.getPublicPort();
-                    if (publicPort != null && publicPort == port) {
-                        return true;
+                    if (publicPort != null) {
+                        published.add(publicPort);
                     }
                 }
             }
+            return published;
         } catch (Exception e) {
-            LOG.debugv("Error checking Docker port bindings for {0}: {1}", port, e.getMessage());
+            LOG.debugv("Error checking Docker port bindings: {0}", e.getMessage());
+            return Set.of();
         }
-        return false;
     }
 }
