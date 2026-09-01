@@ -21,16 +21,20 @@ public class S3CopySimulator {
 
     private static final Logger LOG = Logger.getLogger(S3CopySimulator.class);
 
+    private static final long ONE_MIB = 1024L * 1024;
     /** Log a warning once the (uncompressed) UNLOAD result passes this size. */
-    private static final long UNLOAD_WARN_BYTES = 64L * 1024 * 1024;
+    private static final long UNLOAD_WARN_BYTES = 32 * ONE_MIB;
     /**
-     * Hard cap on the (uncompressed) UNLOAD result. Past this the transfer is aborted rather
-     * than risk the shared emulator heap: the whole result is buffered in memory and copied
-     * once more for {@code putObject}, so peak use per operation is roughly twice this.
+     * Hard cap on a single (uncompressed) UNLOAD result. Past this the transfer is aborted:
+     * the whole result is buffered and copied once more for {@code putObject}.
      */
-    private static final long UNLOAD_MAX_RESULT_BYTES = 128L * 1024 * 1024;
-    /** Cap on how many UNLOADs may be buffering at once, so the per-operation cost cannot multiply without bound. */
-    private static final Semaphore UNLOAD_SLOTS = new Semaphore(4);
+    private static final long UNLOAD_MAX_RESULT_BYTES = 64 * ONE_MIB;
+    /**
+     * Shared budget, in MiB, for UNLOAD accumulation buffers across <em>all</em> connections, so
+     * concurrent operations cannot multiply the per-operation cost without bound. An UNLOAD that
+     * cannot claim enough budget is aborted with {@link #SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED}.
+     */
+    private static final Semaphore UNLOAD_HEAP_MIB = new Semaphore(192);
 
     /** Postgres SQLSTATE for insufficient_privilege — surfaced to the client when S3 authorization denies. */
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
@@ -159,21 +163,25 @@ public class S3CopySimulator {
             return;
         }
 
-        if (!UNLOAD_SLOTS.tryAcquire()) {
+        // Claim an initial slice of the shared accumulation budget up front; more is taken as the
+        // result grows (see runUnloadBuffered). Everything claimed is released in the finally.
+        int initialMib = 4;
+        if (!UNLOAD_HEAP_MIB.tryAcquire(initialMib)) {
             sendErrorResponse(client, SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
-                    "too many concurrent UNLOAD operations; retry shortly");
+                    "UNLOAD memory budget exhausted; retry shortly");
             sendReadyForQuery(client);
             return;
         }
+        int[] heldMib = {initialMib};
         try {
-            runUnloadBuffered(client, backend, spec, s3, dataKey, manifestKey);
+            runUnloadBuffered(client, backend, spec, s3, dataKey, manifestKey, heldMib);
         } finally {
-            UNLOAD_SLOTS.release();
+            UNLOAD_HEAP_MIB.release(heldMib[0]);
         }
     }
 
     private static void runUnloadBuffered(Socket client, Socket backend, CopyStatementParser.S3Unload spec,
-                                          S3Service s3, String dataKey, String manifestKey) throws IOException {
+                                          S3Service s3, String dataKey, String manifestKey, int[] heldMib) throws IOException {
         StringBuilder sql = new StringBuilder("COPY (");
         sql.append(spec.selectQuery());
         sql.append(") TO STDOUT WITH (FORMAT csv");
@@ -191,6 +199,7 @@ public class S3CopySimulator {
         }
         sql.append(")");
 
+        LOG.infov("UNLOAD -> backend: {0}", sql);
         sendQuery(backend, sql.toString());
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
@@ -200,6 +209,8 @@ public class S3CopySimulator {
             return;
         }
         if (copyOutResp.type() != 'H') {
+            LOG.infov("UNLOAD: first backend reply was ''{0}'' (not CopyOutResponse ''H''); forwarding and aborting",
+                    copyOutResp.type());
             forwardMessage(client, copyOutResp);
             drainToReadyForQuery(backendDecoder, client);
             return;
@@ -224,13 +235,26 @@ public class S3CopySimulator {
                         LOG.warnv("UNLOAD result passed {0} bytes and is buffered fully in memory "
                                 + "(bucket={1}, prefix={2})", UNLOAD_WARN_BYTES, spec.bucket(), spec.prefix());
                     }
-                    if (rawBytes > UNLOAD_MAX_RESULT_BYTES) {
-                        LOG.warnv("UNLOAD aborted: result exceeded the {0}-byte in-memory limit (bucket={1}, prefix={2})",
-                                UNLOAD_MAX_RESULT_BYTES, spec.bucket(), spec.prefix());
+                    // Grow the shared budget claim to match the buffer; abort if it (or the per-op
+                    // cap) is exhausted, so concurrent UNLOADs cannot together exhaust the heap.
+                    int wantMib = (int) (rawBytes / ONE_MIB) + 1;
+                    boolean overBudget = false;
+                    while (heldMib[0] < wantMib) {
+                        if (!UNLOAD_HEAP_MIB.tryAcquire(1)) {
+                            overBudget = true;
+                            break;
+                        }
+                        heldMib[0]++;
+                    }
+                    if (overBudget || rawBytes > UNLOAD_MAX_RESULT_BYTES) {
+                        LOG.warnv("UNLOAD aborted at {0} bytes ({1}, bucket={2}, prefix={3})", rawBytes,
+                                overBudget ? "shared budget exhausted" : "per-operation cap",
+                                spec.bucket(), spec.prefix());
                         closeQuietly(acc);
                         sink = null; // release for GC before we block on drain
                         sendErrorResponse(client, SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
-                                "UNLOAD result exceeds the " + UNLOAD_MAX_RESULT_BYTES + "-byte emulator limit");
+                                overBudget ? "UNLOAD memory budget exhausted; retry with a smaller result"
+                                        : "UNLOAD result exceeds the " + UNLOAD_MAX_RESULT_BYTES + "-byte limit");
                         drainToReadyForQuery(backendDecoder, client);
                         return;
                     }
@@ -260,6 +284,8 @@ public class S3CopySimulator {
         }
 
         byte[] payload = sink.toByteArray();
+        LOG.infov("UNLOAD: {0} raw bytes over CopyData -> {1} bytes to s3://{2}/{3}",
+                rawBytes, payload.length, spec.bucket(), dataKey);
         s3.putObject(spec.bucket(), dataKey, payload, "application/octet-stream", null);
 
         if (spec.manifest()) {

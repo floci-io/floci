@@ -114,8 +114,10 @@ public class RedshiftInterceptingBridge {
                 boolean intercepted = false;
                 if (handledByParser && stmt instanceof CopyStatementParser.S3CopyFrom copyFrom) {
                     intercepted = runWithBackendOwned(() -> S3CopySimulator.runCopyFrom(client, backend, copyFrom, s3Service));
+                    LOG.infov("S3 COPY FROM {0} -> intercepted={1}", copyFrom.bucket(), intercepted);
                 } else if (handledByParser && stmt instanceof CopyStatementParser.S3Unload unload) {
                     intercepted = runWithBackendOwned(() -> S3CopySimulator.runUnload(client, backend, unload, s3Service));
+                    LOG.infov("S3 UNLOAD -> {0} -> intercepted={1}", unload.bucket(), intercepted);
                 }
 
                 if (intercepted) {

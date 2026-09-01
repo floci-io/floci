@@ -12,12 +12,13 @@ import java.util.Objects;
 public class PostgresWireDecoder {
 
     /**
-     * Refuse a single message larger than this. The length field is attacker-controlled (up to
-     * ~2 GiB); without a cap {@code readNBytes(length - 4)} would allocate from it and block for
-     * body bytes that may never arrive, exhausting the shared emulator heap. 64 MiB is far above
-     * any realistic single SQL statement or backend row.
+     * Refuse a single message whose declared length exceeds this. The length field is
+     * attacker-controlled (up to ~2 GiB). {@link InputStream#readNBytes(int)} allocates in
+     * proportion to bytes actually received (not the declared length), so a client that stalls
+     * mid-body holds only a small buffer; this cap bounds a client that genuinely floods.
+     * 16 MiB is well above any realistic single SQL statement or backend row.
      */
-    private static final int MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+    private static final int MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
     private final InputStream in;
 
