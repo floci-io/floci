@@ -76,7 +76,7 @@ public class CloudTrailService {
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
                 enableLogFileValidation, false, false, isOrganizationTrail);
-        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null));
+        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null, Map.of()));
         return trail;
     }
 
@@ -163,6 +163,59 @@ public class CloudTrailService {
         return store.get(regionKey(trail.homeRegion(), trail.name()))
                 .map(e -> new TrailStatus(e.logging(), e.startLoggingTime(), e.stopLoggingTime()))
                 .orElse(new TrailStatus(false, null, null));
+    }
+
+    // --- Tagging ---
+    //
+    // AddTags/RemoveTags/ListTags identify the trail solely by ARN (ResourceId /
+    // ResourceIdList), unlike every other CloudTrail action here which also accepts a
+    // bare trail name — so these don't take a `region` parameter.
+
+    private static final int MAX_TAGS_PER_RESOURCE = 50;
+
+    public void addTags(String resourceId, Map<String, String> tagsToAdd) {
+        CloudTrailEntry entry = findEntryByArnOrThrow(resourceId);
+        Map<String, String> merged = entry.mutableTags();
+        merged.putAll(tagsToAdd);
+        if (merged.size() > MAX_TAGS_PER_RESOURCE) {
+            throw new AwsException("TagsLimitExceededException",
+                    "Tag limit exceeded for resource " + resourceId
+                            + ". Maximum allowed: " + MAX_TAGS_PER_RESOURCE + ".", 400);
+        }
+        store.put(regionKey(entry.trail().homeRegion(), entry.trail().name()), entry.withTags(merged));
+    }
+
+    public void removeTags(String resourceId, List<String> tagKeys) {
+        CloudTrailEntry entry = findEntryByArnOrThrow(resourceId);
+        Map<String, String> remaining = entry.mutableTags();
+        tagKeys.forEach(remaining::remove);
+        store.put(regionKey(entry.trail().homeRegion(), entry.trail().name()), entry.withTags(remaining));
+    }
+
+    public Map<String, String> listTags(String resourceId) {
+        return findEntryByArnOrThrow(resourceId).tags();
+    }
+
+    private CloudTrailEntry findEntryByArnOrThrow(String resourceId) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceId);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("CloudTrailARNInvalidException",
+                    resourceId + " is not a valid ARN.", 400);
+        }
+        if (!"cloudtrail".equals(arn.service()) || !arn.resource().startsWith("trail/")) {
+            throw new AwsException("CloudTrailARNInvalidException",
+                    resourceId + " is not a valid trail ARN.", 400);
+        }
+        for (String k : store.keys()) {
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            if (entry != null && resourceId.equals(entry.trail().trailArn())) {
+                return entry;
+            }
+        }
+        throw new AwsException("ResourceNotFoundException",
+                "Resource not found: " + resourceId, 400);
     }
 
     // --- Data plane: called by S3 (and other services) when an op happens ---
