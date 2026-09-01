@@ -1470,6 +1470,25 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolveBucket(bucketName).map(Bucket::getRegion).orElse(null);
     }
 
+    /**
+     * Returns the account ID that owns the given bucket, or {@code null} when the bucket does not
+     * exist or the storage backend does not track per-account partitions.
+     *
+     * <p>With {@code globalBucketNamespace} enabled the lookup spans every account partition and
+     * returns the true owning account. Without it the bucket is always in the caller's account, so
+     * {@link #ownerId()} is returned as a safe default.
+     */
+    public String getBucketOwnerAccountId(String bucketName) {
+        if (globalBucketNamespace && bucketStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
+            return typed.findAnyAccountEntry(bucketName)
+                    .map(AccountAwareStorageBackend.OwnedEntry::account)
+                    .orElse(null);
+        }
+        return resolveBucket(bucketName).isPresent() ? ownerId() : null;
+    }
+
     // --- Batch Delete ---
 
     public record DeleteResult(String key, String versionId, boolean deleteMarker, String deleteMarkerVersionId) {

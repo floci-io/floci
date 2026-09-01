@@ -314,9 +314,10 @@ public class BedrockService implements Resettable {
             return;
         }
 
-        // Verify the caller-supplied input bucket is reachable within this emulator instance.
-        // Full IAM role assumption and cross-account S3 policy enforcement are not implemented;
-        // this check prevents accidentally reading buckets that have never been registered.
+        // Verify the caller-supplied input bucket exists and belongs to the same account as the
+        // submitted roleArn.  Full IAM role assumption and S3 policy evaluation are not
+        // implemented; this ownership check is the practical cross-account guard available in
+        // the emulator.
         try {
             s3Service.headBucket(inputLoc.bucket());
         } catch (Exception e) {
@@ -324,6 +325,17 @@ public class BedrockService implements Resettable {
             failJob(job, "Input S3 bucket does not exist or is not accessible: " + inputLoc.bucket(),
                     region, accountId);
             return;
+        }
+        String roleAccountId = extractAccountIdFromRoleArn(job.getRoleArn());
+        if (roleAccountId != null) {
+            String bucketOwner = s3Service.getBucketOwnerAccountId(inputLoc.bucket());
+            if (bucketOwner != null && !roleAccountId.equals(bucketOwner)) {
+                if (isJobStopped(job)) return;
+                failJob(job, "Access denied: roleArn account " + roleAccountId
+                        + " does not own input bucket " + inputLoc.bucket()
+                        + " (owned by " + bucketOwner + ")", region, accountId);
+                return;
+            }
         }
 
         byte[] inputBytes;
@@ -429,7 +441,8 @@ public class BedrockService implements Resettable {
 
         String outputJsonlUri = "s3://" + outLoc.bucket() + "/" + outputJsonlKey;
 
-        // Verify the caller-supplied output bucket is reachable before writing.
+        // Verify the caller-supplied output bucket exists and belongs to the same account as the
+        // submitted roleArn, for the same reason as the input check above.
         try {
             s3Service.headBucket(outLoc.bucket());
         } catch (Exception e) {
@@ -437,6 +450,16 @@ public class BedrockService implements Resettable {
             failJob(job, "Output S3 bucket does not exist or is not accessible: " + outLoc.bucket(),
                     region, accountId);
             return;
+        }
+        if (roleAccountId != null) {
+            String outBucketOwner = s3Service.getBucketOwnerAccountId(outLoc.bucket());
+            if (outBucketOwner != null && !roleAccountId.equals(outBucketOwner)) {
+                if (isJobStopped(job)) return;
+                failJob(job, "Access denied: roleArn account " + roleAccountId
+                        + " does not own output bucket " + outLoc.bucket()
+                        + " (owned by " + outBucketOwner + ")", region, accountId);
+                return;
+            }
         }
 
         try {
@@ -615,6 +638,20 @@ public class BedrockService implements Resettable {
             LOG.warnv("Failed to emit Bedrock EventBridge state change event for job {0}: {1}",
                     job.getJobArn(), e.getMessage());
         }
+    }
+
+    /**
+     * Extracts the account ID segment from an IAM role ARN.
+     * ARN format: {@code arn:aws:iam::<accountId>:role/<name>}
+     * Returns {@code null} when the ARN is missing or malformed.
+     */
+    static String extractAccountIdFromRoleArn(String roleArn) {
+        if (roleArn == null || roleArn.isBlank()) {
+            return null;
+        }
+        String[] parts = roleArn.split(":", -1);
+        // parts[4] is the accountId in a standard AWS ARN
+        return (parts.length > 4 && !parts[4].isBlank()) ? parts[4] : null;
     }
 
     /**
