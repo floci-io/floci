@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * pure logic and live here rather than in the integration test. Error
  * messages mirror the real AWS SESv2 wire responses.
  */
-class SesServiceEventDestinationTest {
+class SesConfigurationSetEventDestinationTest {
 
     private static EventDestination withSns(List<String> matchingEventTypes) {
         EventDestination ed = new EventDestination();
