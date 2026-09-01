@@ -498,6 +498,7 @@ public class OpenSearchController {
         }
         node.set("ClusterConfig", toClusterConfigNode(domain.getClusterConfig()));
         node.set("EBSOptions", toEbsOptionsNode(domain.getEbsOptions()));
+        node.putObject("CognitoOptions").put("Enabled", false);
         if (domain.getVpcOptions() != null) {
             node.set("VPCOptions", toVpcOptionsNode(domain.getVpcOptions()));
         }
