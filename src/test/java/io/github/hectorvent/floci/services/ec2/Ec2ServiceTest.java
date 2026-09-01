@@ -119,7 +119,7 @@ class Ec2ServiceTest {
 
     /**
      * A container-backed launch that fails or is cancelled terminates the instance inside the
-     * container manager, never passing through TerminateInstances — so an ENI the launch had
+     * container manager, never passing through TerminateInstances, so an ENI the launch had
      * already marked in-use would stay pinned to an instance that no longer runs, and could
      * never be reused. The attachment is reconciled when the interface is next read instead.
      */
@@ -149,6 +149,11 @@ class Ec2ServiceTest {
                 .networkInterfaces().getFirst();
         assertEquals("available", afterFailure.getStatus());
         assertNull(afterFailure.getAttachment());
+        // The dead instance lets go of its copy too. Leaving it there would have the terminated
+        // instance still reporting an interface that a later launch is free to take, so two
+        // instance records would claim it.
+        assertTrue(instance.getNetworkInterfaces().stream()
+                .noneMatch(e -> eni.getNetworkInterfaceId().equals(e.getNetworkInterfaceId())));
 
         // And it really is free: a second launch can take it, which the in-use check would refuse.
         Reservation retry = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",

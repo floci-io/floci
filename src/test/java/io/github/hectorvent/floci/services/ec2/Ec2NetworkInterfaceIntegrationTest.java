@@ -10,7 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 /**
- * Integration tests for standalone elastic network interfaces over the EC2 Query protocol —
+ * Integration tests for standalone elastic network interfaces over the EC2 Query protocol,
  * floci-kt9: {@code CreateNetworkInterface} previously returned {@code UnsupportedOperation}
  * unconditionally, blocking every root that attaches a standalone ENI (the attach-eni and
  * override-default-eni patterns in terraform-aws-server/terraform-aws-asg/
@@ -18,7 +18,7 @@ import static org.hamcrest.Matchers.*;
  *
  * <p>Covers the full lifecycle the blocked roots exercise: create, describe (including the
  * pagination/filter surface DescribeNetworkInterfaces already had), attach to a running instance,
- * detach, and delete — plus RunInstances accepting a pre-existing standalone ENI as an instance's
+ * detach, and delete, plus RunInstances accepting a pre-existing standalone ENI as an instance's
  * primary interface (override-default-eni).
  *
  * <p>Ordered because the cases build on one ENI and one instance, mirroring how a client drives
@@ -149,7 +149,7 @@ class Ec2NetworkInterfaceIntegrationTest {
         org.junit.jupiter.api.Assertions.assertTrue(instanceId.startsWith("i-"));
 
         // Mock mode settles a pending instance to "running" on the next describe (see
-        // Ec2Service#describeInstances) — AttachNetworkInterface requires running/stopped.
+        // Ec2Service#describeInstances), AttachNetworkInterface requires running/stopped.
         given()
             .formParam("Action", "DescribeInstances")
             .formParam("InstanceId.1", instanceId)
@@ -320,8 +320,8 @@ class Ec2NetworkInterfaceIntegrationTest {
 
         org.junit.jupiter.api.Assertions.assertTrue(overrideInstanceId.startsWith("i-"));
 
-        // The interface keeps its own standalone record — that is the side that knows its real
-        // attach time and its deleteOnTermination — while the instance carries a copy. Describe
+        // The interface keeps its own standalone record, that is the side that knows its real
+        // attach time and its deleteOnTermination, while the instance carries a copy. Describe
         // reports it exactly once regardless, from the standalone record.
         given()
             .formParam("Action", "DescribeNetworkInterfaces")
@@ -367,7 +367,7 @@ class Ec2NetworkInterfaceIntegrationTest {
 
     /**
      * An attachment has to be visible from both ends. Recording it only on the standalone ENI let
-     * DescribeNetworkInterfaces report an attachment DescribeInstances denied — and left the
+     * DescribeNetworkInterfaces report an attachment DescribeInstances denied, and left the
      * device-index conflict check, which reads the instance's own list, unable to see anything
      * this operation had attached.
      */
@@ -458,7 +458,7 @@ class Ec2NetworkInterfaceIntegrationTest {
     /**
      * An interface the caller created is not the instance's to destroy. AWS attaches it with
      * deleteOnTermination false, so terminating the instance returns it to "available" rather
-     * than making it disappear — which is what a client that reuses one ENI across successive
+     * than making it disappear, which is what a client that reuses one ENI across successive
      * instances depends on.
      */
     @Test
@@ -510,7 +510,7 @@ class Ec2NetworkInterfaceIntegrationTest {
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.status",
                     equalTo("available"));
 
-        // Free again, so it can be attached to a new instance — and this is the assertion that
+        // Free again, so it can be attached to a new instance, and this is the assertion that
         // proves the attachment is really gone, not just the status text: RunInstances resolves
         // the interface through takeNetworkInterfaceForLaunch, which refuses one that still
         // carries an attachment with InvalidNetworkInterface.InUse.

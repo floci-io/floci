@@ -165,7 +165,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes;
     // Keyed by id alone, not region::id — see VpcPeeringConnection's class Javadoc.
     private final StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections;
-    // Standalone (non-primary) ENIs created via CreateNetworkInterface — see #floci-kt9.
+    // Standalone (non-primary) ENIs created via CreateNetworkInterface, see #floci-kt9.
     // Primary/implicit per-instance ENIs remain embedded in Instance#networkInterfaces.
     private final StorageBackend<String, NetworkInterface> networkInterfaces;
     // resourceId → List<Tag>
@@ -2206,7 +2206,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /**
      * @param networkInterfaceId a pre-existing standalone ENI (from {@link #createNetworkInterface})
      *                            to use as the instance's primary interface instead of creating a
-     *                            new implicit one — the override-default-eni pattern (floci-kt9).
+     *                            new implicit one, the override-default-eni pattern (floci-kt9).
      *                            AWS requires {@code subnetId} be omitted when this is set; the
      *                            interface's own subnet/VPC/security-groups govern the launch.
      */
@@ -2314,7 +2314,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 tags.put(instanceId, new ArrayList<>(instanceTags));
             }
 
-            // Network interface — either the caller-supplied standalone ENI (override-default-eni,
+            // Network interface, either the caller-supplied standalone ENI (override-default-eni,
             // floci-kt9) or a freshly-minted implicit primary interface.
             InstanceNetworkInterface eni = new InstanceNetworkInterface();
             eni.setNetworkInterfaceId(suppliedEni != null ? suppliedEni.getNetworkInterfaceId() : "eni-" + randomHex(17));
@@ -6076,7 +6076,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 }
                 // A standalone ENI attached to this instance is reported from its own record
                 // below, which is the side that knows its real attach time and its
-                // deleteOnTermination — both of which the instance-side copy would guess wrong.
+                // deleteOnTermination, both of which the instance-side copy would guess wrong.
                 if (networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).isPresent()) {
                     continue;
                 }
@@ -6147,7 +6147,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
 
         // floci-kt9: standalone ENIs created via CreateNetworkInterface. Only added when not
-        // already surfaced above — an ENI used as an instance's launch-time interface (e.g. via
+        // already surfaced above, an ENI used as an instance's launch-time interface (e.g. via
         // RunInstances' NetworkInterface.1.NetworkInterfaceId, the override-default-eni pattern)
         // is represented on the instance and would otherwise be double-counted here.
         for (NetworkInterface standalone : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
@@ -6190,7 +6190,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
-     * Creates a standalone (not-yet-attached) elastic network interface — floci-kt9. Covers the
+     * Creates a standalone (not-yet-attached) elastic network interface, floci-kt9. Covers the
      * {@code aws_network_interface} resource: an ENI created independently of an instance and
      * either attached later (the attach-eni pattern) or handed to an instance at launch time as
      * its primary interface (the override-default-eni pattern, see {@link #runInstances}).
@@ -6263,7 +6263,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return ni;
     }
 
-    /** Deletes a standalone ENI. AWS refuses while it is still attached — floci-kt9. */
+    /** Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9. */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
         if (ni.getAttachment() != null) {
@@ -6274,7 +6274,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
-     * Attaches a standalone ENI to a running/stopped instance at the given device index —
+     * Attaches a standalone ENI to a running/stopped instance at the given device index,
      * the attach-eni example's runtime pattern (its user-data script calls this via the AWS CLI
      * after boot, rather than through the Terraform provider itself). floci-kt9.
      */
@@ -6311,7 +6311,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         networkInterfaces.put(key(region, networkInterfaceId), ni);
 
         // The instance must carry it as well, or DescribeInstances would deny an attachment
-        // DescribeNetworkInterfaces reports — and the device-index check above, which reads this
+        // DescribeNetworkInterfaces reports, and the device-index check above, which reads this
         // very list, would never see an interface attached by this method.
         InstanceNetworkInterface attached = new InstanceNetworkInterface();
         attached.setNetworkInterfaceId(ni.getNetworkInterfaceId());
@@ -6332,7 +6332,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return attachment;
     }
 
-    /** Detaches a standalone ENI by attachment id — floci-kt9. */
+    /** Detaches a standalone ENI by attachment id, floci-kt9. */
     public NetworkInterfaceAttachment detachNetworkInterface(String region, String attachmentId, boolean force) {
         if (attachmentId == null || attachmentId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter AttachmentId", 400);
@@ -6368,7 +6368,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /**
      * Releases the standalone ENIs an instance holds when it is terminated. An interface the
      * caller created is not the instance's to destroy unless it was attached with
-     * deleteOnTermination — AWS returns it to "available", and only a launch-created interface
+     * deleteOnTermination, AWS returns it to "available", and only a launch-created interface
      * dies with its instance.
      */
     private void releaseStandaloneInterfacesOnTermination(String region, Instance inst) {
@@ -6399,7 +6399,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * Clears an attachment whose instance no longer exists. TerminateInstances is not the only way
      * an instance reaches "terminated": a container-backed launch that fails or is cancelled ends
      * there asynchronously, inside the container manager, which has no access to this store. An
-     * interface must not stay pinned to an instance that is gone — in AWS an ENI outlives its
+     * interface must not stay pinned to an instance that is gone, in AWS an ENI outlives its
      * instance as "available", it does not outlive it stuck "in-use" and unusable. Reconciling on
      * read covers every such path at once, rather than chasing each terminal transition.
      */
@@ -6417,12 +6417,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         ni.setAttachment(null);
         ni.setStatus("available");
         networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        // The dead instance has to let go of its copy as well. Releasing only the standalone
+        // record would leave the terminated instance still reporting the interface, so once it is
+        // reused two instance records would claim it, and a real one is not the winner by any
+        // rule DescribeInstances applies.
+        detachFromInstance(region, attachment.getInstanceId(), ni.getNetworkInterfaceId());
         return ni;
     }
 
     /**
      * Looks up a standalone ENI for use as an instance's launch-time primary interface (the
-     * override-default-eni pattern — RunInstances' {@code NetworkInterface.1.NetworkInterfaceId}).
+     * override-default-eni pattern, RunInstances' {@code NetworkInterface.1.NetworkInterfaceId}).
      * Package-private: called from {@link #runInstances} only.
      */
     NetworkInterface takeNetworkInterfaceForLaunch(String region, String networkInterfaceId) {

@@ -3493,7 +3493,7 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    /** Shared field emission for a {@code networkInterface} item — used by Describe and Create. */
+    /** Shared field emission for a {@code networkInterface} item, used by Describe and Create. */
     private String networkInterfaceXml(NetworkInterface ni) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("networkInterfaceId", ni.getNetworkInterfaceId())
