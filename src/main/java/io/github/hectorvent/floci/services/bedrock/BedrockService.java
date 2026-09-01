@@ -392,6 +392,14 @@ public class BedrockService implements Resettable {
             return;
         }
 
+        try {
+            s3Service.authorizeRoleAccess(initialJob.getRoleArn(), inputLoc.bucket(), inputLoc.key(), "s3:GetObject");
+        } catch (AwsException e) {
+            if (isJobStoppedOrTerminal(jobArn)) return;
+            failJob(jobArn, "Access denied reading input S3 location: " + e.getMessage(), region, accountId);
+            return;
+        }
+
         if (isJobStoppedOrTerminal(jobArn)) return;
 
         byte[] inputBytes;
@@ -522,33 +530,12 @@ public class BedrockService implements Resettable {
             return;
         }
 
-        if (isJobStoppedOrTerminal(jobArn)) {
-            return;
-        }
-
         try {
-            String outputContent = String.join("\n", outputLines)
-                    + (outputLines.isEmpty() ? "" : "\n");
-            s3Service.putObject(outLoc.bucket(), outputJsonlKey,
-                    outputContent.getBytes(StandardCharsets.UTF_8),
-                    "application/jsonlines", Map.of());
-
-            BatchManifest manifest = new BatchManifest(
-                    totalCount,
-                    processedCount,
-                    successCount,
-                    errorCount,
-                    totalInputTokens > 0 ? totalInputTokens : null,
-                    totalOutputTokens > 0 ? totalOutputTokens : null
-            );
-            byte[] manifestBytes = objectMapper.writerWithDefaultPrettyPrinter()
-                    .writeValueAsBytes(manifest);
-            s3Service.putObject(outLoc.bucket(), manifestKey, manifestBytes,
-                    "application/json", Map.of());
-        } catch (Exception e) {
+            s3Service.authorizeRoleAccess(initialJob.getRoleArn(), outLoc.bucket(), outputJsonlKey, "s3:PutObject");
+            s3Service.authorizeRoleAccess(initialJob.getRoleArn(), outLoc.bucket(), manifestKey, "s3:PutObject");
+        } catch (AwsException e) {
             if (isJobStoppedOrTerminal(jobArn)) return;
-            LOG.warnv(e, "Failed to write batch output files to S3 bucket {0}", outLoc.bucket());
-            failJob(jobArn, "Failed to write batch output to S3: " + e.getMessage(), region, accountId);
+            failJob(jobArn, "Access denied writing output S3 location: " + e.getMessage(), region, accountId);
             return;
         }
 
@@ -574,9 +561,54 @@ public class BedrockService implements Resettable {
         final long inTokens = totalInputTokens;
         final long outTokens = totalOutputTokens;
 
-        boolean transitioned = transitionJobStatus(jobArn, finalStatus, current -> {
+        Object lock = getJobLock(jobArn);
+        synchronized (lock) {
+            Optional<ModelInvocationJob> opt = jobStore.get(jobArn);
+            if (opt.isEmpty()) {
+                return;
+            }
+            ModelInvocationJob current = opt.get();
+            if (isTerminal(current.getStatus())) {
+                LOG.infov("Job {0} is already in terminal status {1}; skipping output write and completion.",
+                        jobArn, current.getStatus());
+                return;
+            }
+
+            try {
+                String outputContent = String.join("\n", outputLines)
+                        + (outputLines.isEmpty() ? "" : "\n");
+                s3Service.putObject(outLoc.bucket(), outputJsonlKey,
+                        outputContent.getBytes(StandardCharsets.UTF_8),
+                        "application/jsonlines", Map.of());
+
+                BatchManifest manifest = new BatchManifest(
+                        total,
+                        processed,
+                        success,
+                        error,
+                        inTokens > 0 ? inTokens : null,
+                        outTokens > 0 ? outTokens : null
+                );
+                byte[] manifestBytes = objectMapper.writerWithDefaultPrettyPrinter()
+                        .writeValueAsBytes(manifest);
+                s3Service.putObject(outLoc.bucket(), manifestKey, manifestBytes,
+                        "application/json", Map.of());
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to write batch output files to S3 bucket {0}", outLoc.bucket());
+                Instant now = Instant.now();
+                current.setStatus(ModelInvocationJobStatus.FAILED);
+                current.setMessage("Failed to write batch output to S3: " + e.getMessage());
+                current.setEndTime(now);
+                current.setLastModifiedTime(now);
+                jobStore.put(jobArn, current);
+                emitStateChangeEvent(current, region, accountId);
+                return;
+            }
+
             Instant completionTime = Instant.now();
+            current.setStatus(finalStatus);
             current.setEndTime(completionTime);
+            current.setLastModifiedTime(completionTime);
             current.setTotalRecordCount(total);
             current.setProcessedRecordCount(processed);
             current.setSuccessRecordCount(success);
@@ -586,9 +618,8 @@ public class BedrockService implements Resettable {
             if (msg != null) {
                 current.setMessage(msg);
             }
-        }, region, accountId);
-
-        if (transitioned) {
+            jobStore.put(jobArn, current);
+            emitStateChangeEvent(current, region, accountId);
             LOG.infov("Completed model invocation job {0} with status {1}", jobArn, finalStatus);
         }
     }

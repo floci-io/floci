@@ -11,7 +11,9 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.s3.model.*;
@@ -177,6 +179,15 @@ public class S3Service implements Resettable, ResourceProvider {
         this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, null, globalBucketNamespace);
+    }
+
+    /** Package-private constructor for testing IAM role authorization. */
+    S3Service(StorageBackend<String, Bucket> bucketStore,
+              StorageBackend<String, S3Object> objectStore,
+              Path dataRoot, boolean inMemory, IamService iamService) {
+        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+                dataRoot, inMemory, null, null, null, null, null, null, null,
+                null, "http://localhost:4566", new ObjectMapper(), false, iamService, false);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -590,6 +601,60 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void authorizeAnonymousGetObject(String bucketName, String key) {
         authorizeGetObject(bucketName, key, null, RequestAuthorization.unsigned());
+    }
+
+    /**
+     * Authorizes an IAM role principal to perform an action on an S3 bucket or object.
+     * Evaluates bucket policy and IAM role policies, respecting explicit Allow / Deny rules.
+     * Synthetic/unmodeled role ARNs without conflicting bucket policies are allowed.
+     */
+    public void authorizeRoleAccess(String roleArn, String bucketName, String key, String action) {
+        Bucket bucket = resolveBucket(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        String resourceArn = (key != null && !key.isBlank())
+                ? S3PublicAccessEvaluator.objectArn(bucketName, key)
+                : S3PublicAccessEvaluator.bucketArn(bucketName);
+
+        // 1. Evaluate Bucket Policy
+        S3PublicAccessEvaluator.PublicAccessDecision bucketDecision = S3PublicAccessEvaluator.PublicAccessDecision.NEUTRAL;
+        if (bucket.getPolicy() != null && !bucket.getPolicy().isBlank()) {
+            bucketDecision = S3PublicAccessEvaluator.principalPolicyDecision(
+                    objectMapper,
+                    bucket.getPolicy(),
+                    "AWS",
+                    roleArn,
+                    action,
+                    resourceArn,
+                    Map.of());
+            if (bucketDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
+                throw new AwsException("AccessDenied", "Access Denied", 403);
+            }
+        }
+
+        // 2. Evaluate IAM Role Policy (if role exists and has policies in IAM)
+        if (iamService != null && roleArn != null && !roleArn.isBlank()) {
+            try {
+                CallerContext caller = iamService.resolvePrincipalContext(roleArn);
+                if (caller != null && caller.identityPolicies() != null && !caller.identityPolicies().isEmpty()) {
+                    IamPolicyEvaluator evaluator = new IamPolicyEvaluator(objectMapper);
+                    IamPolicyEvaluator.SimulationDecision iamDecision =
+                            evaluator.simulatePrincipalPolicy(caller, action, resourceArn, Map.of());
+                    if (iamDecision == IamPolicyEvaluator.SimulationDecision.EXPLICIT_DENY) {
+                        throw new AwsException("AccessDenied", "Access Denied", 403);
+                    }
+                    if (iamDecision == IamPolicyEvaluator.SimulationDecision.IMPLICIT_DENY
+                            && bucketDecision != S3PublicAccessEvaluator.PublicAccessDecision.ALLOW) {
+                        throw new AwsException("AccessDenied", "Access Denied", 403);
+                    }
+                }
+            } catch (AwsException e) {
+                if ("AccessDenied".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                LOG.debugv("IAM role not found or could not resolve context for {0}: {1}", roleArn, e.getMessage());
+            }
+        }
     }
 
     public void authorizeCloudFrontOacGetObject(
