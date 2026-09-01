@@ -76,6 +76,37 @@ class S3ServiceTest {
     }
 
     @Test
+    void getBucketOwnerAccountId_returnsFallbackOwnerWhenBucketExists() {
+        // Without globalBucketNamespace the backend is a plain InMemoryStorage,
+        // so the service falls back to ownerId() ("000000000000" via RegionResolver default).
+        s3Service.createBucket("owner-bucket", "us-east-1");
+        String owner = s3Service.getBucketOwnerAccountId("owner-bucket");
+        assertNotNull(owner);
+    }
+
+    @Test
+    void getBucketOwnerAccountId_returnsNullForMissingBucket() {
+        assertNull(s3Service.getBucketOwnerAccountId("no-such-bucket"));
+    }
+
+    @Test
+    void getBucketOwnerAccountId_withGlobalNamespace_returnsOwningAccount() {
+        // Use a two-account setup with globalBucketNamespace enabled.
+        io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<io.github.hectorvent.floci.services.s3.model.Bucket> bucketStore =
+                io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.inMemory("account-A");
+        io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<io.github.hectorvent.floci.services.s3.model.S3Object> objectStore =
+                io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.inMemory("account-A");
+        S3Service svcA = new S3Service(bucketStore, objectStore, tempDir.resolve("s3-gbn"), true, true);
+        svcA.createBucket("gbn-bucket", "us-east-1");
+
+        // account-B context resolves the same bucket cross-account.
+        S3Service svcB = new S3Service(bucketStore, objectStore, tempDir.resolve("s3-gbn"), true, true);
+        String owner = svcB.getBucketOwnerAccountId("gbn-bucket");
+        // The bucket was created under account-A's partition, so the owner must be "account-A".
+        assertEquals("account-A", owner);
+    }
+
+    @Test
     void objectExistsReturnsFalseForMissingKey() {
         s3Service.createBucket("exists-bucket", "us-east-1");
         assertFalse(s3Service.objectExists("exists-bucket", "no-such-key"));

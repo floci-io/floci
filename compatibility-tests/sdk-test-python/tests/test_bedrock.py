@@ -108,6 +108,31 @@ class TestBedrockBatchInference:
         assert job["status"] in ["Stopping", "Stopped", "Failed"]
         assert "endTime" in job
 
+    def test_job_fails_when_input_bucket_does_not_exist(self, bedrock_client, unique_name):
+        """Test that a job reaches Failed status when the input bucket does not exist."""
+        import time
+
+        response = bedrock_client.create_model_invocation_job(
+            jobName=f"no-bucket-{unique_name}",
+            modelId="amazon.titan-text-express-v1",
+            roleArn="arn:aws:iam::000000000000:role/BedrockBatchRole",
+            inputDataConfig={"s3InputDataConfig": {"s3Uri": f"s3://no-such-bucket-{unique_name}/in.jsonl"}},
+            outputDataConfig={"s3OutputDataConfig": {"s3Uri": f"s3://no-such-bucket-{unique_name}/out"}},
+        )
+        job_arn = response["jobArn"]
+
+        terminal = {"Completed", "Failed", "Stopped", "Expired", "PartiallyCompleted"}
+        deadline = time.time() + 15
+        job = None
+        while time.time() < deadline:
+            job = bedrock_client.get_model_invocation_job(jobIdentifier=job_arn)
+            if job["status"] in terminal:
+                break
+            time.sleep(0.5)
+
+        assert job["status"] == "Failed"
+        assert "endTime" in job
+
     def test_batch_inference_execution_with_s3(self, bedrock_client, s3_client, test_bucket, unique_name):
         """Test full S3 batch inference execution including output and manifest files."""
         import time

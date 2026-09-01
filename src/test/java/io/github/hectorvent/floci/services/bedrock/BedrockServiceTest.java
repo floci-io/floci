@@ -33,10 +33,12 @@ import java.util.Collections;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -74,6 +76,10 @@ class BedrockServiceTest {
 
         bedrockRuntimeService = new BedrockRuntimeService(config, stubBackend, null);
         s3Service = mock(S3Service.class);
+        // headBucket succeeds by default (bucket exists); tests that need failure override this.
+        doNothing().when(s3Service).headBucket(any());
+        // Buckets belong to the same account as the roleArn used in createValidRequest.
+        when(s3Service.getBucketOwnerAccountId(any())).thenReturn(ACCOUNT_ID);
         eventBridgeService = mock(EventBridgeService.class);
 
         service = new BedrockService(
@@ -234,6 +240,44 @@ class BedrockServiceTest {
     }
 
     @Test
+    void createModelInvocationJob_inputBucketNotFound_fails() {
+        String inputUri = "s3://non-existent-bucket/file.jsonl";
+        String outputUri = "s3://test-output-bucket/results";
+
+        org.mockito.Mockito.doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist", 404))
+                .when(s3Service).headBucket(eq("non-existent-bucket"));
+
+        CreateModelInvocationJobRequest req = createValidRequest("bucket-not-found-job", inputUri, outputUri);
+        CreateModelInvocationJobResponse response = service.createModelInvocationJob(req, REGION);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            ModelInvocationJob job = service.getModelInvocationJob(response.jobArn(), REGION);
+            assertEquals(ModelInvocationJobStatus.FAILED, job.getStatus());
+            assertTrue(job.getMessage().contains("non-existent-bucket"));
+        });
+    }
+
+    @Test
+    void createModelInvocationJob_crossAccountBucket_fails() {
+        String inputUri = "s3://foreign-bucket/data.jsonl";
+        String outputUri = "s3://test-output-bucket/results";
+
+        // Bucket exists but belongs to a different account than the roleArn (000000000000).
+        when(s3Service.getBucketOwnerAccountId(eq("foreign-bucket"))).thenReturn("999999999999");
+
+        CreateModelInvocationJobRequest req = createValidRequest("cross-account-job", inputUri, outputUri);
+        CreateModelInvocationJobResponse response = service.createModelInvocationJob(req, REGION);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            ModelInvocationJob job = service.getModelInvocationJob(response.jobArn(), REGION);
+            assertEquals(ModelInvocationJobStatus.FAILED, job.getStatus());
+            assertTrue(job.getMessage().contains("Access denied"));
+            assertTrue(job.getMessage().contains("000000000000"));
+            assertTrue(job.getMessage().contains("999999999999"));
+        });
+    }
+
+    @Test
     void getModelInvocationJob_resolvesByIdArnOrName() {
         String inputUri = "s3://test-input-bucket/prompts.jsonl";
         String outputUri = "s3://test-output-bucket/results";
@@ -334,6 +378,17 @@ class BedrockServiceTest {
             );
             assertEquals(0, completedFilter.items().size()); // they failed because s3 wasn't mocked to return data for these, so they are FAILED
         });
+    }
+
+    @Test
+    void extractAccountIdFromRoleArn_tests() {
+        assertEquals("000000000000", BedrockService.extractAccountIdFromRoleArn(
+                "arn:aws:iam::000000000000:role/BedrockBatchRole"));
+        assertEquals("123456789012", BedrockService.extractAccountIdFromRoleArn(
+                "arn:aws:iam::123456789012:role/some-role"));
+        assertNull(BedrockService.extractAccountIdFromRoleArn(null));
+        assertNull(BedrockService.extractAccountIdFromRoleArn(""));
+        assertNull(BedrockService.extractAccountIdFromRoleArn("not-an-arn"));
     }
 
     @Test

@@ -227,4 +227,30 @@ describe('Bedrock Batch Inference', () => {
     expect(manifest['successRecordCount']).toBe(2);
     expect(manifest['errorRecordCount']).toBe(0);
   });
+
+  it('job reaches Failed status when the input bucket does not exist', async () => {
+    const jobName = uniqueName('no-bucket-job');
+    const missingBucket = uniqueName('no-such-bucket');
+
+    const createRes = await bedrock.send(
+      new CreateModelInvocationJobCommand({
+        jobName,
+        modelId: 'amazon.titan-text-express-v1',
+        roleArn: 'arn:aws:iam::000000000000:role/BedrockBatchRole',
+        inputDataConfig: { s3InputDataConfig: { s3Uri: `s3://${missingBucket}/in.jsonl` } },
+        outputDataConfig: { s3OutputDataConfig: { s3Uri: `s3://${missingBucket}/out` } },
+      })
+    );
+
+    const terminal = new Set(['Completed', 'Failed', 'Stopped', 'Expired', 'PartiallyCompleted']);
+    const deadline = Date.now() + 15_000;
+    let job = await bedrock.send(new GetModelInvocationJobCommand({ jobIdentifier: createRes.jobArn }));
+    while (!terminal.has(job.status as string) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      job = await bedrock.send(new GetModelInvocationJobCommand({ jobIdentifier: createRes.jobArn }));
+    }
+
+    expect(job.status).toBe('Failed');
+    expect(job.endTime).toBeDefined();
+  });
 });

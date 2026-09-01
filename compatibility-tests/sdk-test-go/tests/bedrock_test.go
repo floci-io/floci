@@ -291,4 +291,48 @@ func TestBedrockBatchInference(t *testing.T) {
 		assert.Equal(t, float64(2), manifest["successRecordCount"])
 		assert.Equal(t, float64(0), manifest["errorRecordCount"])
 	})
+
+	t.Run("JobFailsWhenInputBucketDoesNotExist", func(t *testing.T) {
+		jobName := fmt.Sprintf("go-no-bucket-%d", time.Now().UnixNano())
+		missingBucket := fmt.Sprintf("no-such-bucket-%d", time.Now().UnixMilli())
+
+		createOut, err := svc.CreateModelInvocationJob(ctx, &bedrock.CreateModelInvocationJobInput{
+			JobName: aws.String(jobName),
+			ModelId: aws.String("amazon.titan-text-express-v1"),
+			RoleArn: aws.String("arn:aws:iam::000000000000:role/BedrockBatchRole"),
+			InputDataConfig: &types.ModelInvocationJobInputDataConfigMemberS3InputDataConfig{
+				Value: types.ModelInvocationJobS3InputDataConfig{
+					S3Uri: aws.String(fmt.Sprintf("s3://%s/in.jsonl", missingBucket)),
+				},
+			},
+			OutputDataConfig: &types.ModelInvocationJobOutputDataConfigMemberS3OutputDataConfig{
+				Value: types.ModelInvocationJobS3OutputDataConfig{
+					S3Uri: aws.String(fmt.Sprintf("s3://%s/out", missingBucket)),
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		terminal := map[types.ModelInvocationJobStatus]bool{
+			types.ModelInvocationJobStatusCompleted:          true,
+			types.ModelInvocationJobStatusFailed:             true,
+			types.ModelInvocationJobStatusStopped:            true,
+			types.ModelInvocationJobStatusExpired:            true,
+			types.ModelInvocationJobStatusPartiallyCompleted: true,
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		var getOut *bedrock.GetModelInvocationJobOutput
+		for time.Now().Before(deadline) {
+			getOut, err = svc.GetModelInvocationJob(ctx, &bedrock.GetModelInvocationJobInput{
+				JobIdentifier: createOut.JobArn,
+			})
+			require.NoError(t, err)
+			if terminal[getOut.Status] {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		assert.Equal(t, string(types.ModelInvocationJobStatusFailed), string(getOut.Status))
+		assert.NotNil(t, getOut.EndTime)
+	})
 }

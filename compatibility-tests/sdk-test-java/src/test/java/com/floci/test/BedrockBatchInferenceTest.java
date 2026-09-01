@@ -195,6 +195,49 @@ class BedrockBatchInferenceTest {
     }
 
     @Test
+    void jobFailsWhenInputBucketDoesNotExist() {
+        String missingBucket = TestFixtures.uniqueName("no-such-bucket");
+        String jobName = TestFixtures.uniqueName("no-bucket-job");
+
+        CreateModelInvocationJobResponse createRes = bedrock.createModelInvocationJob(
+                CreateModelInvocationJobRequest.builder()
+                        .jobName(jobName)
+                        .modelId("amazon.titan-text-express-v1")
+                        .roleArn("arn:aws:iam::000000000000:role/BedrockBatchRole")
+                        .inputDataConfig(ModelInvocationJobInputDataConfig.builder()
+                                .s3InputDataConfig(ModelInvocationJobS3InputDataConfig.builder()
+                                        .s3Uri("s3://" + missingBucket + "/in.jsonl")
+                                        .build())
+                                .build())
+                        .outputDataConfig(ModelInvocationJobOutputDataConfig.builder()
+                                .s3OutputDataConfig(ModelInvocationJobS3OutputDataConfig.builder()
+                                        .s3Uri("s3://" + missingBucket + "/out")
+                                        .build())
+                                .build())
+                        .build());
+
+        String jobArn = createRes.jobArn();
+        Set<ModelInvocationJobStatus> terminalStatuses = Set.of(
+                ModelInvocationJobStatus.COMPLETED,
+                ModelInvocationJobStatus.FAILED,
+                ModelInvocationJobStatus.STOPPED,
+                ModelInvocationJobStatus.EXPIRED,
+                ModelInvocationJobStatus.PARTIALLY_COMPLETED);
+        long deadline = System.currentTimeMillis() + 15_000;
+        GetModelInvocationJobResponse job;
+        do {
+            job = bedrock.getModelInvocationJob(GetModelInvocationJobRequest.builder()
+                    .jobIdentifier(jobArn)
+                    .build());
+            if (terminalStatuses.contains(job.status())) break;
+            try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+        } while (System.currentTimeMillis() < deadline);
+
+        assertThat(job.status()).isEqualTo(ModelInvocationJobStatus.FAILED);
+        assertThat(job.endTime()).isNotNull();
+    }
+
+    @Test
     void batchInferenceExecutionWithS3() throws IOException {
         String inputKey = "prompts.jsonl";
         String outputPrefix = TestFixtures.uniqueName("batch-out");

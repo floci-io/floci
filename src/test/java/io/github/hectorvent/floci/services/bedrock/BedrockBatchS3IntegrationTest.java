@@ -189,7 +189,10 @@ class BedrockBatchS3IntegrationTest {
 
     @Test
     void executeBatchJob_missingInputS3ObjectFails() {
-        String outputBucket = "batch-fail-output-bucket";
+        // Input bucket exists but the key does not: job must fail with a clear message.
+        String inputBucket = "batch-missing-key-bucket";
+        String outputBucket = "batch-missing-key-out-bucket";
+        s3Service.createBucket(inputBucket, "us-east-1");
         s3Service.createBucket(outputBucket, "us-east-1");
 
         String jobArn = given()
@@ -197,13 +200,44 @@ class BedrockBatchS3IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "jobName": "missing-file-job",
+                  "jobName": "missing-key-job",
                   "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
                   "roleArn": "arn:aws:iam::000000000000:role/BedrockBatchRole",
-                  "inputDataConfig": {"s3InputDataConfig": {"s3Uri": "s3://non-existent-bucket/non-existent.jsonl"}},
+                  "inputDataConfig": {"s3InputDataConfig": {"s3Uri": "s3://%s/no-such-file.jsonl"}},
                   "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": "s3://%s/results"}}
                 }
-                """.formatted(outputBucket))
+                """.formatted(inputBucket, outputBucket))
+        .when()
+            .post("/model-invocation-job")
+        .then()
+            .statusCode(201)
+            .extract().jsonPath().getString("jobArn");
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/model-invocation-job/" + jobArn)
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("Failed"))
+            .body("endTime", notNullValue());
+    }
+
+    @Test
+    void executeBatchJob_missingInputBucketFails() {
+        // Neither bucket exists: executor must fail on headBucket and not proceed.
+        String jobArn = given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "jobName": "missing-bucket-s3-job",
+                  "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+                  "roleArn": "arn:aws:iam::000000000000:role/BedrockBatchRole",
+                  "inputDataConfig": {"s3InputDataConfig": {"s3Uri": "s3://no-such-bucket-xyz/in.jsonl"}},
+                  "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": "s3://no-such-bucket-xyz/out"}}
+                }
+                """)
         .when()
             .post("/model-invocation-job")
         .then()

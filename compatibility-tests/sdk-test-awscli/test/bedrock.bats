@@ -103,7 +103,38 @@ teardown() {
     [ -n "$end_time" ]
 }
 
-@test "Bedrock: batch inference execution with S3 and manifest" {
+@test "Bedrock: job fails when input bucket does not exist" {
+    MISSING_BUCKET="no-such-bucket-$(date +%s)-$$"
+    JOB_NAME="bats-no-bucket-$(date +%s)-$$"
+
+    run aws_cmd bedrock create-model-invocation-job \
+        --job-name "$JOB_NAME" \
+        --model-id "amazon.titan-text-express-v1" \
+        --role-arn "arn:aws:iam::000000000000:role/BedrockBatchRole" \
+        --input-data-config "{\"s3InputDataConfig\":{\"s3Uri\":\"s3://$MISSING_BUCKET/in.jsonl\"}}" \
+        --output-data-config "{\"s3OutputDataConfig\":{\"s3Uri\":\"s3://$MISSING_BUCKET/out\"}}"
+    assert_success
+
+    JOB_ARN=$(json_get "$output" '.jobArn')
+
+    # Poll until job reaches a terminal status (max 15s)
+    TERMINAL_STATUSES="Completed Failed Stopped Expired PartiallyCompleted"
+    DEADLINE=$(($(date +%s) + 15))
+    status=""
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        run aws_cmd bedrock get-model-invocation-job --job-identifier "$JOB_ARN"
+        assert_success
+        status=$(json_get "$output" '.status')
+        for ts in $TERMINAL_STATUSES; do
+            if [ "$status" = "$ts" ]; then break 2; fi
+        done
+        sleep 0.5
+    done
+
+    [ "$status" = "Failed" ]
+    end_time=$(json_get "$output" '.endTime')
+    [ -n "$end_time" ]
+}
     INPUT_KEY="prompts.jsonl"
     OUTPUT_PREFIX="bats-batch-out-$(date +%s)-$$"
     INPUT_URI="s3://$BUCKET/$INPUT_KEY"

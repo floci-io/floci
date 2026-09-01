@@ -122,6 +122,83 @@ class BedrockIntegrationTest {
     }
 
     @Test
+    void createModelInvocationJob_inputBucketMissing_jobFails() {
+        // Bucket is never created: the async executor must detect it and fail the job.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "jobName": "missing-bucket-job",
+                  "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+                  "roleArn": "arn:aws:iam::000000000000:role/BedrockRole",
+                  "inputDataConfig": {"s3InputDataConfig": {"s3Uri": "s3://this-bucket-does-not-exist/in.jsonl"}},
+                  "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": "s3://this-bucket-does-not-exist/out"}}
+                }
+                """)
+        .when()
+            .post("/model-invocation-job")
+        .then()
+            .statusCode(201);
+
+        // Retrieve the ARN from the listing (job name is unique per test run via setUp clear)
+        String jobArn = given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("nameContains", "missing-bucket-job")
+        .when()
+            .get("/model-invocation-jobs")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("invocationJobSummaries[0].jobArn");
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+            given()
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .get("/model-invocation-job/" + jobArn)
+            .then()
+                .statusCode(200)
+                .body("status", equalTo("Failed"))
+                .body("endTime", notNullValue())
+        );
+    }
+
+    @Test
+    void listModelInvocationJobs_regionalIsolation() {
+        s3Service.createBucket("region-isolation-b", "us-east-1");
+        s3Service.putObject("region-isolation-b", "p.jsonl",
+                "{}".getBytes(StandardCharsets.UTF_8), "application/jsonlines", java.util.Map.of());
+
+        // Create job scoped to us-east-1
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)  // credential encodes us-east-1
+            .body("""
+                {
+                  "jobName": "region-isolation-job",
+                  "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+                  "roleArn": "arn:aws:iam::000000000000:role/BedrockRole",
+                  "inputDataConfig": {"s3InputDataConfig": {"s3Uri": "s3://region-isolation-b/p.jsonl"}},
+                  "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": "s3://region-isolation-b/out"}}
+                }
+                """)
+        .when()
+            .post("/model-invocation-job")
+        .then()
+            .statusCode(201);
+
+        // List with a credential that signals eu-west-1: the job must not appear.
+        String euAuthHeader = "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-1/bedrock/aws4_request";
+        given()
+            .header("Authorization", euAuthHeader)
+        .when()
+            .get("/model-invocation-jobs")
+        .then()
+            .statusCode(200)
+            .body("invocationJobSummaries.findAll { it.jobName == 'region-isolation-job' }", hasSize(0));
+    }
+
+    @Test
     void getModelInvocationJob_notFound() {
         given()
             .header("Authorization", AUTH_HEADER)
