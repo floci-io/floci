@@ -542,6 +542,11 @@ class DynamoDbConcurrencyIntegrationTest {
         });
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
+        // CDC delivery is asynchronous (bounded best-effort retry queue): wait for the background drain to
+        // flush every buffered record before reading the shard, otherwise this reads a partial stream.
+        assertTrue(forwarder.awaitIdle(java.time.Duration.ofSeconds(10)),
+                "the CDC drain must flush all buffered records");
+
         // Paginated drain of the single shard.
         String shardId = kinesis.describeStream("cdc-stream", region).getShards().getFirst().getShardId();
         String iterator = kinesis.getShardIterator("cdc-stream", shardId, "TRIM_HORIZON", null, region);

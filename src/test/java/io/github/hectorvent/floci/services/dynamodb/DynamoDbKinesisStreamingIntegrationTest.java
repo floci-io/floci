@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.time.Duration;
 import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
@@ -26,9 +28,18 @@ class DynamoDbKinesisStreamingIntegrationTest {
     private static final String KINESIS_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static String kinesisStreamArn;
 
+    // CDC forwarding is asynchronous (bounded best-effort retry queue): after a write enqueues, the send
+    // happens on a background drain. Await it before reading the stream so these assertions are deterministic.
+    @Inject
+    KinesisStreamingForwarder forwarder;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    private void awaitCdcDelivery() {
+        forwarder.awaitIdle(Duration.ofSeconds(5));
     }
 
     @Test
@@ -178,6 +189,7 @@ class DynamoDbKinesisStreamingIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitCdcDelivery();
         String shardIterator = given()
             .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
             .contentType(KINESIS_CONTENT_TYPE)
@@ -248,6 +260,7 @@ class DynamoDbKinesisStreamingIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitCdcDelivery();
         String shardIterator = given()
             .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
             .contentType(KINESIS_CONTENT_TYPE)
@@ -292,6 +305,7 @@ class DynamoDbKinesisStreamingIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitCdcDelivery();
         String shardIterator = given()
             .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
             .contentType(KINESIS_CONTENT_TYPE)
