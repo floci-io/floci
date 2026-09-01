@@ -53,6 +53,7 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 | CreateResourceServer | Registers a resource server and scopes for a user pool. |
 | DescribeResourceServer | Returns a registered resource server. |
 | ListResourceServers | Lists resource servers for a user pool. |
+| UpdateResourceServer | Updates a resource server's name and scopes. |
 | DeleteResourceServer | Deletes a resource server from a user pool. |
 
 ### User Pool Domains
