@@ -134,6 +134,42 @@ class TestBedrockBatchInference:
         assert job["status"] == "Failed"
         assert "endTime" in job
 
+    def test_regional_job_isolation(self, bedrock_client, aws_config, client_config, test_bucket, unique_name):
+        """Test that jobs created in one region are not accessible or listed in another region."""
+        import boto3
+        job_name = f"reg-job-{unique_name}"
+        create_resp = bedrock_client.create_model_invocation_job(
+            jobName=job_name,
+            modelId="amazon.titan-text-express-v1",
+            roleArn="arn:aws:iam::000000000000:role/BedrockBatchRole",
+            inputDataConfig={"s3InputDataConfig": {"s3Uri": f"s3://{test_bucket}/reg-in.jsonl"}},
+            outputDataConfig={"s3OutputDataConfig": {"s3Uri": f"s3://{test_bucket}/reg-out"}},
+        )
+        job_arn = create_resp["jobArn"]
+
+        west2_config = dict(aws_config, region_name="us-west-2")
+        bedrock_west2 = boto3.client("bedrock", config=client_config, **west2_config)
+
+        with pytest.raises(ClientError) as exc_info:
+            bedrock_west2.get_model_invocation_job(jobIdentifier=job_arn)
+        assert exc_info.value.response["Error"]["Code"] in ["ResourceNotFoundException", "NotFoundException"]
+
+        list_resp = bedrock_west2.list_model_invocation_jobs()
+        job_names = [j["jobName"] for j in list_resp.get("invocationJobSummaries", [])]
+        assert job_name not in job_names
+
+    def test_cross_account_role_arn_rejected(self, bedrock_client, test_bucket, unique_name):
+        """Test that submitting a roleArn from another account fails validation."""
+        with pytest.raises(ClientError) as exc_info:
+            bedrock_client.create_model_invocation_job(
+                jobName=f"cross-role-{unique_name}",
+                modelId="amazon.titan-text-express-v1",
+                roleArn="arn:aws:iam::123456789012:role/OtherAccountRole",
+                inputDataConfig={"s3InputDataConfig": {"s3Uri": f"s3://{test_bucket}/in.jsonl"}},
+                outputDataConfig={"s3OutputDataConfig": {"s3Uri": f"s3://{test_bucket}/out"}},
+            )
+        assert exc_info.value.response["Error"]["Code"] in ["ValidationException", "ClientError"]
+
     def test_batch_inference_execution_with_s3(self, bedrock_client, s3_client, test_bucket, unique_name):
         """Test full S3 batch inference execution including output and manifest files."""
         import time

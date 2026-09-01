@@ -897,9 +897,13 @@ public final class TestFixtures {
     }
 
     public static BedrockClient bedrockClient() {
+        return bedrockClient(REGION);
+    }
+
+    public static BedrockClient bedrockClient(Region region) {
         return BedrockClient.builder()
                 .endpointOverride(ENDPOINT)
-                .region(REGION)
+                .region(region)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }

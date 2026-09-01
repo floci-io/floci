@@ -107,6 +107,119 @@ class S3ServiceTest {
     }
 
     @Test
+    void authorizeRoleAccess_unmodeledRole_allows() {
+        s3Service.createBucket("auth-bucket", "us-east-1");
+        assertDoesNotThrow(() -> s3Service.authorizeRoleAccess(
+                "arn:aws:iam::000000000000:role/SyntheticRole",
+                "auth-bucket",
+                "data/prompts.jsonl",
+                "s3:GetObject"
+        ));
+    }
+
+    @Test
+    void authorizeRoleAccess_missingBucket_throwsNoSuchBucket() {
+        AwsException ex = assertThrows(AwsException.class, () -> s3Service.authorizeRoleAccess(
+                "arn:aws:iam::000000000000:role/SyntheticRole",
+                "missing-bucket",
+                "data/prompts.jsonl",
+                "s3:GetObject"
+        ));
+        assertEquals(404, ex.getHttpStatus());
+        assertEquals("NoSuchBucket", ex.getErrorCode());
+    }
+
+    @Test
+    void authorizeRoleAccess_bucketPolicyDeny_throwsAccessDenied() {
+        s3Service.createBucket("deny-bucket", "us-east-1");
+        String denyPolicy = """
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Deny",
+                            "Principal": {
+                                "AWS": "arn:aws:iam::000000000000:role/DeniedRole"
+                            },
+                            "Action": "s3:GetObject",
+                            "Resource": "arn:aws:s3:::deny-bucket/*"
+                        }
+                    ]
+                }
+                """;
+        s3Service.putBucketPolicy("deny-bucket", denyPolicy);
+
+        AwsException ex = assertThrows(AwsException.class, () -> s3Service.authorizeRoleAccess(
+                "arn:aws:iam::000000000000:role/DeniedRole",
+                "deny-bucket",
+                "data/prompts.jsonl",
+                "s3:GetObject"
+        ));
+        assertEquals(403, ex.getHttpStatus());
+        assertEquals("AccessDenied", ex.getErrorCode());
+    }
+
+    @Test
+    void authorizeRoleAccess_iamServiceExplicitDeny_throwsAccessDenied() {
+        io.github.hectorvent.floci.services.iam.IamService iamService = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.iam.IamService.class);
+        String denyDoc = """
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Deny",
+                            "Action": "s3:GetObject",
+                            "Resource": "*"
+                        }
+                    ]
+                }
+                """;
+        org.mockito.Mockito.when(iamService.resolvePrincipalContext(org.mockito.ArgumentMatchers.eq("arn:aws:iam::000000000000:role/DeniedIamRole")))
+                .thenReturn(new io.github.hectorvent.floci.services.iam.model.CallerContext(List.of(denyDoc), null, null));
+
+        S3Service svcWithIam = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("s3-iam"), true, iamService);
+        svcWithIam.createBucket("iam-bucket", "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> svcWithIam.authorizeRoleAccess(
+                "arn:aws:iam::000000000000:role/DeniedIamRole",
+                "iam-bucket",
+                "data/prompts.jsonl",
+                "s3:GetObject"
+        ));
+        assertEquals(403, ex.getHttpStatus());
+        assertEquals("AccessDenied", ex.getErrorCode());
+    }
+
+    @Test
+    void authorizeRoleAccess_iamServiceAllow_succeeds() {
+        io.github.hectorvent.floci.services.iam.IamService iamService = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.iam.IamService.class);
+        String allowDoc = """
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": "s3:GetObject",
+                            "Resource": "arn:aws:s3:::iam-bucket/*"
+                        }
+                    ]
+                }
+                """;
+        org.mockito.Mockito.when(iamService.resolvePrincipalContext(org.mockito.ArgumentMatchers.eq("arn:aws:iam::000000000000:role/AllowedIamRole")))
+                .thenReturn(new io.github.hectorvent.floci.services.iam.model.CallerContext(List.of(allowDoc), null, null));
+
+        S3Service svcWithIam = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("s3-iam-allow"), true, iamService);
+        svcWithIam.createBucket("iam-bucket", "us-east-1");
+
+        assertDoesNotThrow(() -> svcWithIam.authorizeRoleAccess(
+                "arn:aws:iam::000000000000:role/AllowedIamRole",
+                "iam-bucket",
+                "data/prompts.jsonl",
+                "s3:GetObject"
+        ));
+    }
+
+    @Test
     void objectExistsReturnsFalseForMissingKey() {
         s3Service.createBucket("exists-bucket", "us-east-1");
         assertFalse(s3Service.objectExists("exists-bucket", "no-such-key"));

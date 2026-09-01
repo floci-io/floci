@@ -238,6 +238,64 @@ class BedrockBatchInferenceTest {
     }
 
     @Test
+    void regionalJobIsolation() {
+        String jobName = TestFixtures.uniqueName("regional-job");
+        CreateModelInvocationJobResponse createRes = bedrock.createModelInvocationJob(CreateModelInvocationJobRequest.builder()
+                .jobName(jobName)
+                .modelId("amazon.titan-text-express-v1")
+                .roleArn("arn:aws:iam::000000000000:role/BedrockBatchRole")
+                .inputDataConfig(ModelInvocationJobInputDataConfig.builder()
+                        .s3InputDataConfig(ModelInvocationJobS3InputDataConfig.builder()
+                                .s3Uri("s3://" + bucketName + "/reg-in.jsonl")
+                                .build())
+                        .build())
+                .outputDataConfig(ModelInvocationJobOutputDataConfig.builder()
+                        .s3OutputDataConfig(ModelInvocationJobS3OutputDataConfig.builder()
+                                .s3Uri("s3://" + bucketName + "/reg-out")
+                                .build())
+                        .build())
+                .build());
+
+        String jobArn = createRes.jobArn();
+
+        // Querying from us-west-2 should not find the job created in us-east-1
+        try (BedrockClient bedrockWest2 = TestFixtures.bedrockClient(software.amazon.awssdk.regions.Region.US_WEST_2)) {
+            assertThatThrownBy(() -> bedrockWest2.getModelInvocationJob(GetModelInvocationJobRequest.builder()
+                    .jobIdentifier(jobArn)
+                    .build()))
+                    .isInstanceOf(BedrockException.class);
+
+            ListModelInvocationJobsResponse listRes = bedrockWest2.listModelInvocationJobs(
+                    ListModelInvocationJobsRequest.builder().build());
+            List<String> jobNames = listRes.invocationJobSummaries().stream()
+                    .map(ModelInvocationJobSummary::jobName)
+                    .toList();
+            assertThat(jobNames).doesNotContain(jobName);
+        }
+    }
+
+    @Test
+    void roleArnFromAnotherAccountFailsValidation() {
+        String foreignRoleArn = "arn:aws:iam::123456789012:role/CrossAccountBatchRole";
+        assertThatThrownBy(() -> bedrock.createModelInvocationJob(CreateModelInvocationJobRequest.builder()
+                .jobName(TestFixtures.uniqueName("cross-role-job"))
+                .modelId("amazon.titan-text-express-v1")
+                .roleArn(foreignRoleArn)
+                .inputDataConfig(ModelInvocationJobInputDataConfig.builder()
+                        .s3InputDataConfig(ModelInvocationJobS3InputDataConfig.builder()
+                                .s3Uri("s3://" + bucketName + "/in.jsonl")
+                                .build())
+                        .build())
+                .outputDataConfig(ModelInvocationJobOutputDataConfig.builder()
+                        .s3OutputDataConfig(ModelInvocationJobS3OutputDataConfig.builder()
+                                .s3Uri("s3://" + bucketName + "/out")
+                                .build())
+                        .build())
+                .build()))
+                .isInstanceOf(BedrockException.class);
+    }
+
+    @Test
     void batchInferenceExecutionWithS3() throws IOException {
         String inputKey = "prompts.jsonl";
         String outputPrefix = TestFixtures.uniqueName("batch-out");

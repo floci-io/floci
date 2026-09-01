@@ -253,4 +253,41 @@ describe('Bedrock Batch Inference', () => {
     expect(job.status).toBe('Failed');
     expect(job.endTime).toBeDefined();
   });
+
+  it('enforces regional job isolation', async () => {
+    const jobName = uniqueName('regional-job');
+    const createRes = await bedrock.send(
+      new CreateModelInvocationJobCommand({
+        jobName,
+        modelId: 'amazon.titan-text-express-v1',
+        roleArn: 'arn:aws:iam::000000000000:role/BedrockBatchRole',
+        inputDataConfig: { s3InputDataConfig: { s3Uri: `s3://${bucketName}/reg-in.jsonl` } },
+        outputDataConfig: { s3OutputDataConfig: { s3Uri: `s3://${bucketName}/reg-out` } },
+      })
+    );
+
+    const bedrockWest2 = makeClient(BedrockClient, { region: 'us-west-2' });
+
+    await expect(
+      bedrockWest2.send(new GetModelInvocationJobCommand({ jobIdentifier: createRes.jobArn }))
+    ).rejects.toThrow();
+
+    const listRes = await bedrockWest2.send(new ListModelInvocationJobsCommand({}));
+    const names = (listRes.invocationJobSummaries ?? []).map((j) => j.jobName);
+    expect(names).not.toContain(jobName);
+  });
+
+  it('rejects cross-account role ARN', async () => {
+    await expect(
+      bedrock.send(
+        new CreateModelInvocationJobCommand({
+          jobName: uniqueName('cross-role-job'),
+          modelId: 'amazon.titan-text-express-v1',
+          roleArn: 'arn:aws:iam::123456789012:role/OtherAccountRole',
+          inputDataConfig: { s3InputDataConfig: { s3Uri: `s3://${bucketName}/in.jsonl` } },
+          outputDataConfig: { s3OutputDataConfig: { s3Uri: `s3://${bucketName}/out` } },
+        })
+      )
+    ).rejects.toThrow();
+  });
 });

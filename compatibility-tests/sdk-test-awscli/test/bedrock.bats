@@ -135,6 +135,8 @@ teardown() {
     end_time=$(json_get "$output" '.endTime')
     [ -n "$end_time" ]
 }
+
+@test "Bedrock: batch inference execution with S3" {
     INPUT_KEY="prompts.jsonl"
     OUTPUT_PREFIX="bats-batch-out-$(date +%s)-$$"
     INPUT_URI="s3://$BUCKET/$INPUT_KEY"
@@ -198,4 +200,39 @@ teardown() {
     [ "$processed" -eq 2 ]
     [ "$success" -eq 2 ]
     [ "$errors" -eq 0 ]
+}
+
+@test "Bedrock: regional job isolation" {
+    JOB_NAME="bats-reg-$(date +%s)-$$"
+    INPUT_URI="s3://$BUCKET/reg-in.jsonl"
+    OUTPUT_URI="s3://$BUCKET/reg-out"
+
+    run aws_cmd bedrock create-model-invocation-job \
+        --job-name "$JOB_NAME" \
+        --model-id "amazon.titan-text-express-v1" \
+        --role-arn "arn:aws:iam::000000000000:role/BedrockBatchRole" \
+        --input-data-config "{\"s3InputDataConfig\":{\"s3Uri\":\"$INPUT_URI\"}}" \
+        --output-data-config "{\"s3OutputDataConfig\":{\"s3Uri\":\"$OUTPUT_URI\"}}"
+    assert_success
+
+    JOB_ARN=$(json_get "$output" '.jobArn')
+
+    run aws_cmd bedrock get-model-invocation-job --job-identifier "$JOB_ARN" --region us-west-2
+    assert_failure
+
+    run aws_cmd bedrock list-model-invocation-jobs --region us-west-2
+    assert_success
+    found=$(echo "$output" | jq -r --arg n "$JOB_NAME" '.invocationJobSummaries | any(.jobName == $n)')
+    [ "$found" = "false" ]
+}
+
+@test "Bedrock: cross-account role ARN is rejected" {
+    JOB_NAME="bats-cross-role-$(date +%s)-$$"
+    run aws_cmd bedrock create-model-invocation-job \
+        --job-name "$JOB_NAME" \
+        --model-id "amazon.titan-text-express-v1" \
+        --role-arn "arn:aws:iam::123456789012:role/OtherAccountRole" \
+        --input-data-config "{\"s3InputDataConfig\":{\"s3Uri\":\"s3://$BUCKET/in.jsonl\"}}" \
+        --output-data-config "{\"s3OutputDataConfig\":{\"s3Uri\":\"s3://$BUCKET/out\"}}"
+    assert_failure
 }

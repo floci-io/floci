@@ -335,4 +335,60 @@ func TestBedrockBatchInference(t *testing.T) {
 		assert.Equal(t, string(types.ModelInvocationJobStatusFailed), string(getOut.Status))
 		assert.NotNil(t, getOut.EndTime)
 	})
+
+	t.Run("RegionalJobIsolation", func(t *testing.T) {
+		jobName := fmt.Sprintf("go-reg-%d", time.Now().UnixNano())
+		createOut, err := svc.CreateModelInvocationJob(ctx, &bedrock.CreateModelInvocationJobInput{
+			JobName: aws.String(jobName),
+			ModelId: aws.String("amazon.titan-text-express-v1"),
+			RoleArn: aws.String("arn:aws:iam::000000000000:role/BedrockBatchRole"),
+			InputDataConfig: &types.ModelInvocationJobInputDataConfigMemberS3InputDataConfig{
+				Value: types.ModelInvocationJobS3InputDataConfig{
+					S3Uri: aws.String(fmt.Sprintf("s3://%s/reg-in.jsonl", bucketName)),
+				},
+			},
+			OutputDataConfig: &types.ModelInvocationJobOutputDataConfigMemberS3OutputDataConfig{
+				Value: types.ModelInvocationJobS3OutputDataConfig{
+					S3Uri: aws.String(fmt.Sprintf("s3://%s/reg-out", bucketName)),
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		west2Svc := bedrock.NewFromConfig(testutil.Config(), func(o *bedrock.Options) {
+			o.Region = "us-west-2"
+		})
+
+		_, err = west2Svc.GetModelInvocationJob(ctx, &bedrock.GetModelInvocationJobInput{
+			JobIdentifier: createOut.JobArn,
+		})
+		assert.Error(t, err)
+
+		listOut, err := west2Svc.ListModelInvocationJobs(ctx, &bedrock.ListModelInvocationJobsInput{})
+		require.NoError(t, err)
+		var names []string
+		for _, j := range listOut.InvocationJobSummaries {
+			names = append(names, aws.ToString(j.JobName))
+		}
+		assert.NotContains(t, names, jobName)
+	})
+
+	t.Run("CrossAccountRoleArnRejected", func(t *testing.T) {
+		_, err := svc.CreateModelInvocationJob(ctx, &bedrock.CreateModelInvocationJobInput{
+			JobName: aws.String(fmt.Sprintf("go-cross-%d", time.Now().UnixNano())),
+			ModelId: aws.String("amazon.titan-text-express-v1"),
+			RoleArn: aws.String("arn:aws:iam::123456789012:role/OtherAccountRole"),
+			InputDataConfig: &types.ModelInvocationJobInputDataConfigMemberS3InputDataConfig{
+				Value: types.ModelInvocationJobS3InputDataConfig{
+					S3Uri: aws.String(fmt.Sprintf("s3://%s/in.jsonl", bucketName)),
+				},
+			},
+			OutputDataConfig: &types.ModelInvocationJobOutputDataConfigMemberS3OutputDataConfig{
+				Value: types.ModelInvocationJobS3OutputDataConfig{
+					S3Uri: aws.String(fmt.Sprintf("s3://%s/out", bucketName)),
+				},
+			},
+		})
+		assert.Error(t, err)
+	})
 }

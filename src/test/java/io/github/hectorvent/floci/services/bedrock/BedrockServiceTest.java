@@ -314,6 +314,89 @@ class BedrockServiceTest {
     }
 
     @Test
+    void createModelInvocationJob_roleAccessDeniedInput_fails() {
+        String inputBucket = "test-input-bucket";
+        String inputKey = "data/prompts.jsonl";
+        String inputUri = "s3://" + inputBucket + "/" + inputKey;
+        String outputUri = "s3://test-output-bucket/results";
+
+        org.mockito.Mockito.doThrow(new AwsException("AccessDenied", "Access Denied", 403))
+                .when(s3Service).authorizeRoleAccess(
+                        eq("arn:aws:iam::000000000000:role/BedrockBatchRole"),
+                        eq(inputBucket),
+                        eq(inputKey),
+                        eq("s3:GetObject")
+                );
+
+        CreateModelInvocationJobRequest req = createValidRequest("role-denied-in-job", inputUri, outputUri);
+        CreateModelInvocationJobResponse response = service.createModelInvocationJob(req, REGION);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            ModelInvocationJob job = service.getModelInvocationJob(response.jobArn(), REGION);
+            assertEquals(ModelInvocationJobStatus.FAILED, job.getStatus());
+            assertTrue(job.getMessage().contains("Access denied reading input S3 location"));
+        });
+    }
+
+    @Test
+    void createModelInvocationJob_roleAccessDeniedOutput_fails() {
+        String inputBucket = "test-input-bucket";
+        String inputKey = "data/prompts.jsonl";
+        String inputUri = "s3://" + inputBucket + "/" + inputKey;
+        String outputUri = "s3://test-output-bucket/results";
+
+        String jsonlContent = "{\"recordId\": \"rec-1\", \"modelInput\": {\"anthropic_version\": \"bedrock-2023-05-31\", \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Hello\"}]}]}}\n";
+        S3Object s3Object = new S3Object(inputBucket, inputKey, jsonlContent.getBytes(StandardCharsets.UTF_8), "application/jsonlines");
+        when(s3Service.getObject(eq(inputBucket), eq(inputKey))).thenReturn(s3Object);
+
+        org.mockito.Mockito.doThrow(new AwsException("AccessDenied", "Access Denied", 403))
+                .when(s3Service).authorizeRoleAccess(
+                        eq("arn:aws:iam::000000000000:role/BedrockBatchRole"),
+                        eq("test-output-bucket"),
+                        any(),
+                        eq("s3:PutObject")
+                );
+
+        CreateModelInvocationJobRequest req = createValidRequest("role-denied-out-job", inputUri, outputUri);
+        CreateModelInvocationJobResponse response = service.createModelInvocationJob(req, REGION);
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            ModelInvocationJob job = service.getModelInvocationJob(response.jobArn(), REGION);
+            assertEquals(ModelInvocationJobStatus.FAILED, job.getStatus());
+            assertTrue(job.getMessage().contains("Access denied writing output S3 location"));
+        });
+    }
+
+    @Test
+    void stopModelInvocationJob_stoppedJobNeverWritesOutput() {
+        String inputBucket = "slow-input-bucket-2";
+        String inputUri = "s3://" + inputBucket + "/data.jsonl";
+        String outputUri = "s3://test-output-bucket/results";
+
+        when(s3Service.getObject(eq(inputBucket), eq("data.jsonl"))).thenAnswer(inv -> {
+            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+            return new S3Object(inputBucket, "data.jsonl",
+                    "{\"recordId\": \"rec-1\", \"modelInput\": {\"anthropic_version\": \"bedrock-2023-05-31\", \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Hi\"}]}]}}\n"
+                            .getBytes(StandardCharsets.UTF_8), "application/jsonlines");
+        });
+
+        CreateModelInvocationJobRequest req = createValidRequest("stop-no-write-job", inputUri, outputUri);
+        CreateModelInvocationJobResponse response = service.createModelInvocationJob(req, REGION);
+
+        // Stop the job while it's in flight
+        service.stopModelInvocationJob(response.jobArn(), REGION);
+
+        // Wait to allow background worker to exit
+        try { Thread.sleep(400); } catch (InterruptedException ignored) {}
+
+        ModelInvocationJob job = service.getModelInvocationJob(response.jobArn(), REGION);
+        assertEquals(ModelInvocationJobStatus.STOPPED, job.getStatus());
+
+        // Verify S3 putObject was NEVER called
+        org.mockito.Mockito.verify(s3Service, org.mockito.Mockito.never()).putObject(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void stopModelInvocationJob_activeJob_transitionsToStoppedAndDoesNotGetOverwritten() {
         String inputBucket = "slow-input-bucket";
         String inputUri = "s3://" + inputBucket + "/data.jsonl";
