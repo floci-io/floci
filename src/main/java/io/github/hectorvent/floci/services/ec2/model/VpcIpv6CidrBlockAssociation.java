@@ -5,8 +5,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
  * An IPv6 CIDR block associated with a VPC. Separate from {@link VpcCidrBlockAssociation} because
- * AWS keeps the two in separate response members — {@code cidrBlockAssociationSet} and
- * {@code ipv6CidrBlockAssociationSet} — with different member names inside each, and a client
+ * AWS keeps the two in separate response members, {@code cidrBlockAssociationSet} and
+ * {@code ipv6CidrBlockAssociationSet}, with different member names inside each, and a client
  * reading one must not find IPv6 blocks in it.
  */
 @RegisterForReflection

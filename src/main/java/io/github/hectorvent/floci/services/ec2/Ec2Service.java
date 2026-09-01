@@ -2810,7 +2810,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
-     * Associates an Amazon-provided IPv6 block with an existing VPC — the AssociateVpcCidrBlock
+     * Associates an Amazon-provided IPv6 block with an existing VPC: the AssociateVpcCidrBlock
      * half of {@code AmazonProvidedIpv6CidrBlock}, which the Terraform provider issues when
      * assign_generated_ipv6_cidr_block is turned on for a VPC that already exists.
      */
@@ -2826,7 +2826,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /**
      * Allocates a /56 the way an Amazon-provided association looks on the wire. AWS hands out a
      * block from its own pool with no say from the caller, so the exact prefix is not something a
-     * client can predict or assert on — what matters is that one is returned at all, that it is a
+     * client can predict or assert on, what matters is that one is returned at all, that it is a
      * well-formed /56, and that it comes back unchanged on every later read.
      */
     private VpcIpv6CidrBlockAssociation amazonProvidedIpv6Association(String region) {

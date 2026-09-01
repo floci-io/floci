@@ -83,13 +83,13 @@ class Ec2VpcIpv6CidrBlockIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            // The element is present but empty — no association inside it.
+            // The element is present but empty, no association inside it.
             .body(not(containsString("<ipv6CidrBlock>")));
     }
 
     /**
      * Turning assign_generated_ipv6_cidr_block on for a VPC that already exists goes through
-     * AssociateVpcCidrBlock, not CreateVpc — the same flag on a different operation.
+     * AssociateVpcCidrBlock, not CreateVpc: the same flag on a different operation.
      */
     @Test
     void anExistingVpcCanBeGivenAnAmazonProvidedBlock() {
