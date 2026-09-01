@@ -15,8 +15,8 @@ import java.util.Optional;
 /**
  * Loads the shared mock-response configuration file referenced by {@code AI_MOCK_CONFIG}
  * or {@code floci.ai-mock-config-file}, used by the fixed-stub AI services (Textract,
- * Comprehend, Rekognition) to return a caller-configured response instead of their default
- * canned stub. The file is re-read when its modification time changes, so it can be edited
+ * Comprehend, Rekognition, Translate) to return a caller-configured response instead of their
+ * default canned stub. The file is re-read when its modification time changes, so it can be edited
  * without restarting the emulator — same mechanism as {@code SfnMockLoader}.
  * <p>
  * Unlike {@code SfnMockLoader} (where the mock configuration is the only way to run a
@@ -27,8 +27,8 @@ import java.util.Optional;
  * default response.
  * <p>
  * Config file shape: {@code {"<serviceKey>": {"<lookupKey>": {"<Action>": <response>}}}}.
- * See {@code docs/services/textract.md} / {@code comprehend.md} / {@code rekognition.md}
- * "Mock Responses" sections for each service's lookup-key convention.
+ * See {@code docs/services/textract.md} / {@code comprehend.md} / {@code rekognition.md} /
+ * {@code translate.md} "Mock Responses" sections for each service's lookup-key convention.
  */
 @ApplicationScoped
 public class AiMockConfigLoader {

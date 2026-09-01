@@ -190,7 +190,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**84 AWS services. Broad coverage. Free forever.**
+**85 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 

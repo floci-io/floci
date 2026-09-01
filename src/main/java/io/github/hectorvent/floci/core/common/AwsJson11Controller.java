@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.textract.TextractJsonHandler;
 import io.github.hectorvent.floci.services.comprehend.ComprehendJsonHandler;
 import io.github.hectorvent.floci.services.rekognition.RekognitionJsonHandler;
 import io.github.hectorvent.floci.services.transcribe.TranscribeJsonHandler;
+import io.github.hectorvent.floci.services.translate.TranslateJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -106,6 +107,7 @@ public class AwsJson11Controller {
     private final RekognitionJsonHandler rekognitionJsonHandler;
     private final PricingJsonHandler pricingJsonHandler;
     private final TranscribeJsonHandler transcribeJsonHandler;
+    private final TranslateJsonHandler translateJsonHandler;
     private final CostExplorerJsonHandler costExplorerJsonHandler;
     private final CurJsonHandler curJsonHandler;
     private final BcmDataExportsJsonHandler bcmDataExportsJsonHandler;
@@ -151,6 +153,7 @@ public class AwsJson11Controller {
                                RekognitionJsonHandler rekognitionJsonHandler,
                                PricingJsonHandler pricingJsonHandler,
                                TranscribeJsonHandler transcribeJsonHandler,
+                               TranslateJsonHandler translateJsonHandler,
                                CostExplorerJsonHandler costExplorerJsonHandler,
                                CurJsonHandler curJsonHandler,
                                BcmDataExportsJsonHandler bcmDataExportsJsonHandler,
@@ -200,6 +203,7 @@ public class AwsJson11Controller {
         this.rekognitionJsonHandler = rekognitionJsonHandler;
         this.pricingJsonHandler = pricingJsonHandler;
         this.transcribeJsonHandler = transcribeJsonHandler;
+        this.translateJsonHandler = translateJsonHandler;
         this.costExplorerJsonHandler = costExplorerJsonHandler;
         this.curJsonHandler = curJsonHandler;
         this.bcmDataExportsJsonHandler = bcmDataExportsJsonHandler;
@@ -280,6 +284,7 @@ public class AwsJson11Controller {
                 case "rekognition" -> rekognitionJsonHandler.handle(action, request, region);
                 case "pricing" -> pricingJsonHandler.handle(action, request, region);
                 case "transcribe" -> transcribeJsonHandler.handle(action, request, region);
+                case "translate" -> translateJsonHandler.handle(action, request, region);
                 case "ce" -> costExplorerJsonHandler.handle(action, request, region);
                 case "cur" -> curJsonHandler.handle(action, request, region);
                 case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);

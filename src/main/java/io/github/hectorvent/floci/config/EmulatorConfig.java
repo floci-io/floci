@@ -679,6 +679,7 @@ public interface EmulatorConfig {
         PricingServiceConfig pricing();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
+        TranslateServiceConfig translate();
         CostExplorerServiceConfig ce();
         CurServiceConfig cur();
         BcmDataExportsServiceConfig bcmDataExports();
@@ -1603,6 +1604,11 @@ public interface EmulatorConfig {
     }
 
     interface RekognitionServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface TranslateServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

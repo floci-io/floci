@@ -310,6 +310,8 @@ floci:
       enabled: true
     rekognition:
       enabled: true
+    translate:
+      enabled: true
     pricing:
       enabled: true
     ce:

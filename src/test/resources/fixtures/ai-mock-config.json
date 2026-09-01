@@ -38,5 +38,14 @@
         "LabelModelVersion": "1.0"
       }
     }
+  },
+  "translate": {
+    "Hello world": {
+      "TranslateText": {
+        "TranslatedText": "Hola mundo",
+        "SourceLanguageCode": "en",
+        "TargetLanguageCode": "es"
+      }
+    }
   }
 }
