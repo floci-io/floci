@@ -14,7 +14,7 @@ import io.quarkus.test.junit.QuarkusTest;
 /**
  * A NAT gateway's natGatewayAddressSet carried only an allocation id. aws_nat_gateway exposes
  * public_ip, private_ip and network_interface_id as resource outputs, and Gruntwork's VPC modules
- * re-export nat_gateway_public_ips, so the omission does not merely diff — it propagates empty
+ * re-export nat_gateway_public_ips, so the omission does not merely diff, it propagates empty
  * values into whatever consumes those outputs.
  */
 @QuarkusTest
@@ -105,8 +105,34 @@ class Ec2NatGatewayAddressIntegrationTest {
                     matchesRegex("10\\.94\\.1\\.\\d+"))
             .body("CreateNatGatewayResponse.natGateway.natGatewayAddressSet.item.networkInterfaceId",
                     startsWith("eni-"))
-            // No Elastic IP was requested, so there is none to report — and no association either.
+            // No Elastic IP was requested, so there is none to report, and no association either.
             .body(not(containsString("<publicIp>")))
             .body(not(containsString("<associationId>")));
+    }
+
+    /**
+     * A private gateway has no route to the internet and nothing to attach an Elastic IP to, so
+     * asking for both is refused rather than answered with an impossible public association.
+     */
+    @Test
+    void aPrivateGatewayCannotBeGivenAnElasticIp() {
+        String allocationId = given()
+            .formParam("Action", "AllocateAddress")
+            .formParam("Domain", "vpc")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AllocateAddressResponse.allocationId");
+
+        given()
+            .formParam("Action", "CreateNatGateway")
+            .formParam("SubnetId", subnetId())
+            .formParam("ConnectivityType", "private")
+            .formParam("AllocationId", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
     }
 }

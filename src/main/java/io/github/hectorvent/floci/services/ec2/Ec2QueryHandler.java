@@ -3899,7 +3899,7 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         // A gateway restored from a store written before addresses were modelled has none, but
-        // still knows its allocation id — report what it does know rather than an empty set.
+        // still knows its allocation id, report what it does know rather than an empty set.
         if (natGateway.getNatGatewayAddresses().isEmpty() && natGateway.getAllocationId() != null) {
             xml.start("item")
                     .elem("allocationId", natGateway.getAllocationId())

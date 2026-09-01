@@ -5195,7 +5195,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                        String connectivityType, List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
         Subnet subnet = requireSubnet(region, subnetId);
-        if (allocationId != null && !allocationId.isBlank()) {
+        boolean privateGateway = "private".equalsIgnoreCase(connectivityType);
+        if (privateGateway && isSet(allocationId)) {
+            // A private NAT gateway has no route to the internet and so nothing to attach an
+            // Elastic IP to. Accepting the pair would have the response report a public address
+            // on a gateway that cannot have one.
+            throw new AwsException("InvalidParameterCombination",
+                    "Elastic IP addresses cannot be associated with private NAT gateways.", 400);
+        }
+        if (isSet(allocationId)) {
             getRequiredAddress(region, allocationId);
         }
 
@@ -5218,7 +5226,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     /**
      * The address a NAT gateway reports. AWS gives every gateway an interface in its subnet with a
-     * private address, and a public one additionally carries the Elastic IP it was created with —
+     * private address, and a public one additionally carries the Elastic IP it was created with,
      * aws_nat_gateway exposes all three as resource outputs (public_ip, private_ip,
      * network_interface_id), and Gruntwork's VPC modules re-export nat_gateway_public_ips, so an
      * address carrying only an allocation id propagates empty values into dependent modules.
