@@ -32,7 +32,7 @@ public class KinesisStreamingForwarder {
     }
 
     public void forward(String eventName, JsonNode oldItem, JsonNode newItem,
-                        TableDefinition table, String region) {
+                        TableDefinition table, String region, String ownerAccountId) {
         List<KinesisStreamingDestination> destinations = table.getKinesisStreamingDestinations();
         if (destinations == null || destinations.isEmpty()) return;
 
@@ -51,7 +51,10 @@ public class KinesisStreamingForwarder {
                 String partitionKey = extractPartitionKey(keys, table);
                 String streamName = extractStreamName(dest.getStreamArn());
 
-                kinesisService.putRecord(streamName, data, partitionKey, region);
+                // Resolve against the table owner's account (a null owner falls back to ambient/default,
+                // preserving the previous single-account behavior). The TTL sweep and any other
+                // out-of-request-scope caller would otherwise write into the default account's stream.
+                kinesisService.putRecordForAccount(ownerAccountId, streamName, data, partitionKey, region);
                 LOG.debugv("Forwarded DynamoDB event to Kinesis stream {0}: {1} on {2}",
                         streamName, eventName, table.getTableName());
             } catch (Exception e) {

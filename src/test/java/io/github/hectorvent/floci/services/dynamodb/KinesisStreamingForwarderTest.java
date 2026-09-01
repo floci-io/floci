@@ -13,10 +13,17 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class KinesisStreamingForwarderTest {
+
+    private static final String ACCOUNT = "000000000000";
 
     private KinesisService kinesisService;
     private KinesisStreamingForwarder forwarder;
@@ -46,16 +53,30 @@ class KinesisStreamingForwarderTest {
     @Test
     void forwardsToActiveDestination() {
         TableDefinition table = createTable("test-table");
-        KinesisStreamingDestination dest = new KinesisStreamingDestination(
-                "arn:aws:kinesis:us-east-1:000000000000:stream/test-stream");
-        table.getKinesisStreamingDestinations().add(dest);
-
-        when(kinesisService.putRecord(anyString(), any(byte[].class), anyString(), anyString()))
+        table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/test-stream"));
+        when(kinesisService.putRecordForAccount(anyString(), anyString(), any(byte[].class), anyString(), anyString()))
                 .thenReturn("seq-1");
 
-        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1");
+        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1", ACCOUNT);
 
-        verify(kinesisService).putRecord(eq("test-stream"), any(byte[].class), eq("k1"), eq("us-east-1"));
+        verify(kinesisService).putRecordForAccount(eq(ACCOUNT), eq("test-stream"), any(byte[].class),
+                eq("k1"), eq("us-east-1"));
+    }
+
+    @Test
+    void forwardsUnderTheTableOwnerAccount() {
+        // The account is threaded through so an out-of-request-scope forward lands in the owner's stream.
+        TableDefinition table = createTable("test-table");
+        table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(
+                "arn:aws:kinesis:us-east-1:111111111111:stream/test-stream"));
+        when(kinesisService.putRecordForAccount(anyString(), anyString(), any(byte[].class), anyString(), anyString()))
+                .thenReturn("seq-1");
+
+        forwarder.forward("REMOVE", createItem("k1"), null, table, "us-east-1", "111111111111");
+
+        verify(kinesisService).putRecordForAccount(eq("111111111111"), eq("test-stream"), any(byte[].class),
+                eq("k1"), eq("us-east-1"));
     }
 
     @Test
@@ -66,7 +87,7 @@ class KinesisStreamingForwarderTest {
         dest.setDestinationStatus("DISABLED");
         table.getKinesisStreamingDestinations().add(dest);
 
-        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1");
+        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1", ACCOUNT);
 
         verifyNoInteractions(kinesisService);
     }
@@ -74,32 +95,27 @@ class KinesisStreamingForwarderTest {
     @Test
     void skipsWhenNoDestinations() {
         TableDefinition table = createTable("test-table");
-
-        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1");
-
+        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1", ACCOUNT);
         verifyNoInteractions(kinesisService);
     }
 
     @Test
     void continuesOnPutRecordFailure() {
         TableDefinition table = createTable("test-table");
-        KinesisStreamingDestination dest1 = new KinesisStreamingDestination(
-                "arn:aws:kinesis:us-east-1:000000000000:stream/stream-1");
-        KinesisStreamingDestination dest2 = new KinesisStreamingDestination(
-                "arn:aws:kinesis:us-east-1:000000000000:stream/stream-2");
-        table.getKinesisStreamingDestinations().add(dest1);
-        table.getKinesisStreamingDestinations().add(dest2);
+        table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/stream-1"));
+        table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/stream-2"));
 
-        when(kinesisService.putRecord(eq("stream-1"), any(byte[].class), anyString(), anyString()))
+        when(kinesisService.putRecordForAccount(anyString(), eq("stream-1"), any(byte[].class), anyString(), anyString()))
                 .thenThrow(new RuntimeException("stream-1 failed"));
-        when(kinesisService.putRecord(eq("stream-2"), any(byte[].class), anyString(), anyString()))
+        when(kinesisService.putRecordForAccount(anyString(), eq("stream-2"), any(byte[].class), anyString(), anyString()))
                 .thenReturn("seq-1");
 
-        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1");
+        forwarder.forward("INSERT", null, createItem("k1"), table, "us-east-1", ACCOUNT);
 
-        verify(kinesisService).putRecord(eq("stream-1"), any(byte[].class), anyString(), anyString());
-        verify(kinesisService).putRecord(eq("stream-2"), any(byte[].class), anyString(), anyString());
-        assertEquals(1L, forwarder.getForwardFailureCount(),
-                "the single failed forward must be counted");
+        verify(kinesisService).putRecordForAccount(anyString(), eq("stream-1"), any(byte[].class), anyString(), anyString());
+        verify(kinesisService).putRecordForAccount(anyString(), eq("stream-2"), any(byte[].class), anyString(), anyString());
+        assertEquals(1L, forwarder.getForwardFailureCount(), "the single failed forward must be counted");
     }
 }
