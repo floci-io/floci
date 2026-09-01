@@ -86,11 +86,9 @@ public class TransferService {
     }
 
     public synchronized void deleteServer(String serverId) {
-        Server server = getServer(serverId);
-        if (!"OFFLINE".equals(server.getState())) {
-            throw new AwsException("ConflictException",
-                    "Server must be in OFFLINE state to be deleted.", 409);
-        }
+        // AWS deletes a server in any state: the DeleteServer API defines no
+        // state precondition (and no ConflictException at all).
+        getServer(serverId);
         serverStore.delete(serverId);
         tagStore.delete("server/" + serverId);
         for (User user : userStore.scan(k -> k.startsWith(serverId + "/"))) {
