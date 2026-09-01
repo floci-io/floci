@@ -142,6 +142,19 @@ One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the tas
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
 when the task is scheduled.
 
+## Intrinsic arguments
+
+A `$.` reference passed to a `States.*` intrinsic must find something. An argument that matches
+nothing fails the execution with `States.Runtime`, as on AWS.
+
+One deviation. Indexing something that is not an array makes AWS leak its JSONPath library and
+write `Filter: [0] can only be applied to arrays. Current context is: 1`. Floci writes its own
+`The JsonPath argument for the field '$.other[0]' could not be found in the input ...` there.
+
+One gap. A reference path in the format template position of `States.Format` is taken literally
+rather than resolved, and nothing reports it. `States.Format($.tmpl, 1)` yields the string
+`$.tmpl`.
+
 ## JSONata nulls
 
 An expression that evaluates to JSON `null` produces a value, not a missing one. It keeps its key
