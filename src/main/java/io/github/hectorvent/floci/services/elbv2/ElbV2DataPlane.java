@@ -163,7 +163,36 @@ public class ElbV2DataPlane {
         }
     }
 
+    /**
+     * Ports Floci reserves for itself, which a load balancer listener must not take.
+     *
+     * <p>The emulator's own port is always reserved. With TLS enabled the TLS proxy also binds
+     * {@code floci.tls.aws-https-port} (443 by default), because CDK's custom-resource
+     * {@code cfn-response} callback hardcodes {@code https://} and ignores the port in the
+     * ResponseURL, so it always lands on 443.
+     *
+     * <p>Without this the two raced: whichever started first won. A stack restored from
+     * persistence could hand 443 to an ALB listener, which then answered CDK's callback in plain
+     * HTTP and hung every {@code Custom::} resource - and the reverse on a fresh start. Yielding
+     * here makes the outcome deterministic and keeps the emulator's own control path working. To
+     * give 443 to load balancers instead, set {@code floci.tls.aws-https-port=0} or disable TLS.
+     */
+    // Package-private for ElbV2ReservedPortTest.
+    boolean isReservedByFloci(int port) {
+        if (port == config.port()) {
+            return true;
+        }
+        return config.tls().enabled() && port == config.tls().awsHttpsPort();
+    }
+
     private HttpServer startPortServer(int port) {
+        if (isReservedByFloci(port)) {
+            // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
+            LOG.warnv("ELBv2 listener port {0} is reserved by Floci itself; the listener is "
+                    + "registered but serves no traffic. Set floci.tls.aws-https-port=0 (or "
+                    + "disable TLS) to free it.", String.valueOf(port));
+            return null;
+        }
         HttpServer server = vertx.createHttpServer(new HttpServerOptions()
                 .setHost("0.0.0.0")
                 .setPort(port));
