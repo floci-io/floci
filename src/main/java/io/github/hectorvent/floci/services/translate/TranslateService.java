@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 /**
- * Dummy response builder for Amazon Translate. Stateless — no machine translation is
+ * Dummy response builder for Amazon Translate. Stateless: no machine translation is
  * performed. {@code TranslateText} and {@code TranslateDocument} echo their input back
  * as the "translated" payload; {@code ListLanguages} returns a fixed catalog. Input
  * validation (required fields, known language codes, Text/document size limits, and the
@@ -24,7 +24,7 @@ import java.util.Set;
  * protocol compatibility rather than translation logic.
  * <p>
  * Callers can override the {@code TranslateText} default per exact {@code Text} value via
- * {@link AiMockConfigLoader} — see {@code docs/services/translate.md} "Mock Responses".
+ * {@link AiMockConfigLoader}; see {@code docs/services/translate.md} "Mock Responses".
  * {@code TranslateDocument} carries a binary payload with no stable lookup key, so mock
  * lookup is skipped for it (same treatment as a Bytes-backed Textract document).
  *
@@ -33,9 +33,9 @@ import java.util.Set;
 @ApplicationScoped
 public class TranslateService {
     private static final String SERVICE_KEY = "translate";
-    /** TranslateText input cap — real Translate rejects Text longer than 10,000 UTF-8 bytes. */
+    /** TranslateText input cap: real Translate rejects Text longer than 10,000 UTF-8 bytes. */
     private static final int MAX_TEXT_BYTES = 10_000;
-    /** TranslateDocument input cap — real Translate rejects a document larger than 100 KB. */
+    /** TranslateDocument input cap: real Translate rejects a document larger than 100 KB. */
     private static final int MAX_DOCUMENT_BYTES = 100 * 1024;
     /**
      * Longest base64 string that can decode to {@link #MAX_DOCUMENT_BYTES} (4 chars per 3
@@ -52,12 +52,12 @@ public class TranslateService {
     /**
      * DisplayLanguageCode enum accepted by ListLanguages. Matches the AWS API model; the
      * returned {@code LanguageName}s are always English here regardless of this value
-     * (documented deviation — real Translate localizes the names).
+     * (documented deviation: real Translate localizes the names).
      */
     private static final Set<String> SUPPORTED_DISPLAY_LANGUAGE_CODES = Set.of(
             "de", "en", "es", "fr", "it", "ja", "ko", "pt", "zh", "zh-TW");
     /**
-     * Curated subset of Translate's supported languages — enough to exercise an i18n
+     * Curated subset of Translate's supported languages, enough to exercise an i18n
      * pipeline without tracking AWS's full ~75-language list. Also the allow-list for
      * Source/TargetLanguageCode validation. Insertion order is preserved for ListLanguages.
      */
@@ -70,7 +70,7 @@ public class TranslateService {
         this.mockConfigLoader = mockConfigLoader;
     }
     /**
-     * TranslateText — echoes {@code Text} back as {@code TranslatedText}. A source code of
+     * TranslateText: echoes {@code Text} back as {@code TranslatedText}. A source code of
      * {@code auto} is reported back as {@code en} (the stub's fixed "detected" language).
      * Response shape: https://docs.aws.amazon.com/translate/latest/APIReference/API_TranslateText.html
      */
@@ -97,7 +97,7 @@ public class TranslateService {
         return Response.ok(root).build();
     }
     /**
-     * TranslateDocument — echoes the document bytes back unchanged as the translated
+     * TranslateDocument: echoes the document bytes back unchanged as the translated
      * document. Content is validated as base64 and size-checked, but never decoded for
      * translation. Real Translate only translates between English and another language, so
      * one of the two language codes must resolve to {@code en}.
@@ -145,7 +145,7 @@ public class TranslateService {
         return Response.ok(root).build();
     }
     /**
-     * ListLanguages — returns the full fixed catalog. Pagination inputs are accepted but
+     * ListLanguages: returns the full fixed catalog. Pagination inputs are accepted but
      * ignored (the catalog is small and static), so no {@code NextToken} is returned.
      * Response shape: https://docs.aws.amazon.com/translate/latest/APIReference/API_ListLanguages.html
      */
@@ -173,7 +173,7 @@ public class TranslateService {
                     fieldName + " is a required field.", 400);
         }
     }
-    /** Returns the code to report back — {@code auto} resolves to {@code en}. */
+    /** Returns the code to report back; {@code auto} resolves to {@code en}. */
     private String validateSourceLanguage(String code) {
         requireField(code, "SourceLanguageCode");
         if ("auto".equals(code)) {
@@ -197,7 +197,7 @@ public class TranslateService {
         if (value.length() <= ERROR_VALUE_PREVIEW_CHARS) {
             return value;
         }
-        return value.substring(0, ERROR_VALUE_PREVIEW_CHARS) + "…";
+        return value.substring(0, ERROR_VALUE_PREVIEW_CHARS) + "...";
     }
     private static Map<String, String> buildSupportedLanguages() {
         Map<String, String> languages = new LinkedHashMap<>();

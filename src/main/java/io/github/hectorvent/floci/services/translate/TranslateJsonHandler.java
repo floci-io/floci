@@ -47,7 +47,7 @@ public class TranslateJsonHandler {
     }
     /**
      * Extracts a string-typed field. A present-but-wrong-typed value is a shape/marshalling
-     * mismatch caught at the protocol layer before operation-specific validation — matching
+     * mismatch caught at the protocol layer before operation-specific validation, matching
      * {@link ComprehendJsonHandler}. It must not be silently coerced, nor conflated with a
      * missing field (a modeled business error handled in {@link TranslateService}).
      */

@@ -9,7 +9,7 @@ import static org.hamcrest.Matchers.*;
 /**
  * Integration tests for the Amazon Translate stub.
  * Validates AWS-compatible wire format using RestAssured.
- * Protocol: JSON 1.1 — Content-Type: application/x-amz-json-1.1,
+ * Protocol: JSON 1.1, Content-Type: application/x-amz-json-1.1,
  * X-Amz-Target: AWSShineFrontendService_20170701.&lt;Action&gt;
  */
 @QuarkusTest
