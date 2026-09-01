@@ -2291,7 +2291,8 @@ public class Ec2QueryHandler {
         String vpcId = p.getFirst("VpcId");
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
-        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az);
+        String azId = p.getFirst("AvailabilityZoneId");
+        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId);
         applyResourceTags(p, region, "subnet", subnet.getSubnetId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)

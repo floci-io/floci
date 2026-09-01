@@ -441,7 +441,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             subnet.setCidrBlock(cidrBlocks[i]);
             subnet.setState("available");
             subnet.setAvailabilityZone(region + azSuffixes[i]);
-            subnet.setAvailabilityZoneId(region + "-az" + (i + 1));
+            subnet.setAvailabilityZoneId(zoneIdForZoneName(region, region + azSuffixes[i]));
             subnet.setAvailableIpAddressCount(4091);
             subnet.setDefaultForAz(true);
             subnet.setMapPublicIpOnLaunch(true);
@@ -3020,12 +3020,74 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     // ─── Subnets ───────────────────────────────────────────────────────────────
 
+    /**
+     * The zone id Floci publishes for a zone name. AWS's real zone ids are opaque and per-account
+     * ({@code use1-az4}); Floci derives a deterministic one instead, and what matters is that
+     * every surface derives it the same way — DescribeAvailabilityZones, the seeded default
+     * subnets and CreateSubnet all come through here, so a subnet's zone id agrees with the zone
+     * list a client just read. A zone name that is not this region's {@code <region><letter>}
+     * keeps the first zone's id, which is what an unrecognised name resolved to before.
+     */
+    static String zoneIdForZoneName(String region, String zoneName) {
+        if (zoneName != null && zoneName.length() == region.length() + 1 && zoneName.startsWith(region)) {
+            char letter = Character.toLowerCase(zoneName.charAt(zoneName.length() - 1));
+            if (letter >= 'a' && letter <= 'z') {
+                return region + "-az" + (letter - 'a' + 1);
+            }
+        }
+        return region + "-az1";
+    }
+
+    /**
+     * Resolves the zone a new subnet lands in from whichever of AvailabilityZone and
+     * AvailabilityZoneId the caller supplied. Terraform's aws_subnet exposes both
+     * ({@code availability_zone} and {@code availability_zone_id}) and forbids setting both at
+     * once, so in practice exactly one arrives; a pair that disagrees is refused rather than
+     * silently resolved to one of them.
+     */
+    private String resolveSubnetZoneName(String region, String availabilityZone, String availabilityZoneId) {
+        if (!isSet(availabilityZoneId)) {
+            return isSet(availabilityZone) ? availabilityZone : region + "a";
+        }
+        String fromId = zoneNameForZoneId(region, availabilityZoneId);
+        if (isSet(availabilityZone) && !availabilityZone.equals(fromId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The availability zone '" + availabilityZone + "' does not match the availability zone ID '"
+                            + availabilityZoneId + "'", 400);
+        }
+        return fromId;
+    }
+
+    /** The inverse of {@link #zoneIdForZoneName}; a malformed id is refused rather than ignored. */
+    private static String zoneNameForZoneId(String region, String availabilityZoneId) {
+        String prefix = region + "-az";
+        if (availabilityZoneId.startsWith(prefix)) {
+            try {
+                int index = Integer.parseInt(availabilityZoneId.substring(prefix.length()));
+                if (index >= 1 && index <= 26) {
+                    return region + (char) ('a' + index - 1);
+                }
+            } catch (NumberFormatException ignored) {
+                // falls through to the same error a non-numeric suffix deserves
+            }
+        }
+        throw new AwsException("InvalidParameterValue",
+                "Invalid availability zone ID: '" + availabilityZoneId + "'", 400);
+    }
+
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
+        return createSubnet(region, vpcId, cidrBlock, availabilityZone, null);
+    }
+
+    public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone,
+                               String availabilityZoneId) {
         if (vpcId == null || vpcId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
         }
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
+
+        String zoneName = resolveSubnetZoneName(region, availabilityZone, availabilityZoneId);
 
         String subnetId = "subnet-" + randomHex(8);
         Subnet subnet = new Subnet();
@@ -3033,8 +3095,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         subnet.setVpcId(vpcId);
         subnet.setCidrBlock(cidrBlock);
         subnet.setState("available");
-        subnet.setAvailabilityZone(availabilityZone != null ? availabilityZone : region + "a");
-        subnet.setAvailabilityZoneId(region + "-az1");
+        subnet.setAvailabilityZone(zoneName);
+        subnet.setAvailabilityZoneId(zoneIdForZoneName(region, zoneName));
         subnet.setAvailableIpAddressCount(251);
         subnet.setOwnerId(accountId);
         subnet.setRegion(region);
@@ -5393,7 +5455,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             az.put("zoneName", region + suffix);
             az.put("state", "available");
             az.put("regionName", region);
-            az.put("zoneId", region + "-az" + (suffix.charAt(0) - 'a' + 1));
+            az.put("zoneId", zoneIdForZoneName(region, region + suffix));
             az.put("zoneType", "availability-zone");
             zones.add(az);
         }
