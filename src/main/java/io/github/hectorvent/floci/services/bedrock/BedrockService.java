@@ -164,10 +164,20 @@ public class BedrockService implements Resettable {
             throw new AwsException("ValidationException", "jobIdentifier is required.", 400);
         }
 
+        String effectiveRegion = region != null && !region.isBlank()
+                ? region : regionResolver.getDefaultRegion();
+
         Optional<ModelInvocationJob> job = jobStore.scan(k -> true).stream()
-                .filter(j -> jobIdentifier.equals(j.getJobArn())
-                        || jobIdentifier.equals(j.getJobId())
-                        || jobIdentifier.equals(j.getJobName()))
+                .filter(j -> {
+                    // Scope lookup to the requested region using the region encoded in the job ARN.
+                    String jobRegion = extractRegionFromArn(j.getJobArn());
+                    if (jobRegion != null && !jobRegion.equals(effectiveRegion)) {
+                        return false;
+                    }
+                    return jobIdentifier.equals(j.getJobArn())
+                            || jobIdentifier.equals(j.getJobId())
+                            || jobIdentifier.equals(j.getJobName());
+                })
                 .findFirst();
 
         return job.orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -210,8 +220,16 @@ public class BedrockService implements Resettable {
             String nextToken,
             String region) {
 
+        String effectiveRegion = region != null && !region.isBlank()
+                ? region : regionResolver.getDefaultRegion();
+
         List<ModelInvocationJob> matched = jobStore.scan(k -> true).stream()
                 .filter(job -> {
+                    // Scope list results to the requested region.
+                    String jobRegion = extractRegionFromArn(job.getJobArn());
+                    if (jobRegion != null && !jobRegion.equals(effectiveRegion)) {
+                        return false;
+                    }
                     if (statusEquals != null && job.getStatus() != statusEquals) {
                         return false;
                     }
@@ -293,6 +311,18 @@ public class BedrockService implements Resettable {
 
         if (s3Service == null) {
             failJob(job, "S3 service is not available", region, accountId);
+            return;
+        }
+
+        // Verify the caller-supplied input bucket is reachable within this emulator instance.
+        // Full IAM role assumption and cross-account S3 policy enforcement are not implemented;
+        // this check prevents accidentally reading buckets that have never been registered.
+        try {
+            s3Service.headBucket(inputLoc.bucket());
+        } catch (Exception e) {
+            if (isJobStopped(job)) return;
+            failJob(job, "Input S3 bucket does not exist or is not accessible: " + inputLoc.bucket(),
+                    region, accountId);
             return;
         }
 
@@ -399,6 +429,16 @@ public class BedrockService implements Resettable {
 
         String outputJsonlUri = "s3://" + outLoc.bucket() + "/" + outputJsonlKey;
 
+        // Verify the caller-supplied output bucket is reachable before writing.
+        try {
+            s3Service.headBucket(outLoc.bucket());
+        } catch (Exception e) {
+            if (isJobStopped(job)) return;
+            failJob(job, "Output S3 bucket does not exist or is not accessible: " + outLoc.bucket(),
+                    region, accountId);
+            return;
+        }
+
         try {
             String outputContent = String.join("\n", outputLines)
                     + (outputLines.isEmpty() ? "" : "\n");
@@ -433,6 +473,13 @@ public class BedrockService implements Resettable {
         job.setErrorRecordCount(errorCount);
         job.setInputTokenCount(totalInputTokens > 0 ? totalInputTokens : null);
         job.setOutputTokenCount(totalOutputTokens > 0 ? totalOutputTokens : null);
+
+        // Check whether a stop request arrived while records were being processed or output was
+        // being written.  If so, honour the stopped state instead of overwriting it with a
+        // completion/failure status derived from partial work.
+        if (isJobStopped(job)) {
+            return;
+        }
 
         if (totalCount == 0) {
             job.setStatus(ModelInvocationJobStatus.COMPLETED);
@@ -568,6 +615,20 @@ public class BedrockService implements Resettable {
             LOG.warnv("Failed to emit Bedrock EventBridge state change event for job {0}: {1}",
                     job.getJobArn(), e.getMessage());
         }
+    }
+
+    /**
+     * Extracts the region segment from a Bedrock job ARN.
+     * ARN format: {@code arn:aws:bedrock:<region>:<accountId>:model-invocation-job/<jobId>}
+     * Returns {@code null} when the ARN is missing or malformed.
+     */
+    static String extractRegionFromArn(String arn) {
+        if (arn == null || arn.isBlank()) {
+            return null;
+        }
+        String[] parts = arn.split(":", -1);
+        // parts[3] is the region in a standard AWS ARN
+        return (parts.length > 3 && !parts[3].isBlank()) ? parts[3] : null;
     }
 
     record S3Location(String bucket, String key) {}

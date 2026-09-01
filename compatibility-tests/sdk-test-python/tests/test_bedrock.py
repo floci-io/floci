@@ -97,7 +97,7 @@ class TestBedrockBatchInference:
         )
         job_arn = response["jobArn"]
 
-        # Stop the job — if it already reached a terminal status before stop arrived, skip stop
+        # Stop the job: if it already reached a terminal status before stop arrived, skip stop
         current = bedrock_client.get_model_invocation_job(jobIdentifier=job_arn)
         terminal = {"Completed", "Failed", "Stopped", "Expired", "PartiallyCompleted"}
         if current["status"] not in terminal:
