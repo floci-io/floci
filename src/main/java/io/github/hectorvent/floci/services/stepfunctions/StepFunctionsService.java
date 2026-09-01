@@ -1769,6 +1769,16 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             collectTopLevelReferences(statePath, stateDef, errors);
         }
 
+        // Structurally validate JSONPath Choice rules (comparator allowlist, exactly-one operator,
+        // per-family operand types, And/Or/Not shapes, Next placement). JSONata Choice uses a
+        // Condition string and is validated elsewhere.
+        if (choiceType && !stateIsJsonata && stateDef.path("Choices").isArray()) {
+            JsonNode choices = stateDef.path("Choices");
+            for (int i = 0; i < choices.size(); i++) {
+                ChoiceOperators.validateChoiceRule(statePath + "/Choices/" + i, choices.get(i), true, errors);
+            }
+        }
+
         if ("Map".equals(stateType)) {
             validateMapConcurrency(statePath, stateDef, stateIsJsonata, errors);
             if (stateDef.has("ItemReader")) {

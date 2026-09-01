@@ -1879,87 +1879,15 @@ public class AslExecutor {
     }
 
     private boolean evaluateCondition(JsonNode rule, JsonNode input) throws Exception {
-        // Logical operators
-        if (rule.has("And")) {
-            for (JsonNode sub : rule.get("And")) {
-                if (!evaluateCondition(sub, input)) return false;
-            }
-            return true;
+        // Comparator inventory, type-strict evaluation, and the missing-path/unknown-operator rules
+        // live in ChoiceOperators so the runtime and the CreateStateMachine validator share one source
+        // of truth. An undefined reference path or an unsupported comparator is a runtime error on AWS,
+        // not a silently-false fallthrough to the Default branch.
+        try {
+            return ChoiceOperators.evaluate(rule, path -> resolvePathNode(path, input));
+        } catch (ChoiceOperators.ChoiceEvaluationException e) {
+            throw new FailStateException("States.Runtime", e.getMessage());
         }
-        if (rule.has("Or")) {
-            for (JsonNode sub : rule.get("Or")) {
-                if (evaluateCondition(sub, input)) return true;
-            }
-            return false;
-        }
-        if (rule.has("Not")) {
-            return !evaluateCondition(rule.get("Not"), input);
-        }
-
-        String variable = rule.path("Variable").asText();
-        JsonNode value = resolvePath(variable, input);
-
-        if (rule.has("StringEquals")) {
-            return value.asText().equals(rule.get("StringEquals").asText());
-        }
-        if (rule.has("StringEqualsPath")) {
-            return value.asText().equals(resolvePath(rule.get("StringEqualsPath").asText(), input).asText());
-        }
-        if (rule.has("StringMatches")) {
-            return value.asText().matches(globToRegex(rule.get("StringMatches").asText()));
-        }
-        if (rule.has("NumericEquals")) {
-            return value.asDouble() == rule.get("NumericEquals").asDouble();
-        }
-        if (rule.has("NumericEqualsPath")) {
-            return value.asDouble() == resolvePath(rule.get("NumericEqualsPath").asText(), input).asDouble();
-        }
-        if (rule.has("NumericLessThan")) {
-            return value.asDouble() < rule.get("NumericLessThan").asDouble();
-        }
-        if (rule.has("NumericLessThanPath")) {
-            return value.asDouble() < resolvePath(rule.get("NumericLessThanPath").asText(), input).asDouble();
-        }
-        if (rule.has("NumericGreaterThan")) {
-            return value.asDouble() > rule.get("NumericGreaterThan").asDouble();
-        }
-        if (rule.has("NumericGreaterThanPath")) {
-            return value.asDouble() > resolvePath(rule.get("NumericGreaterThanPath").asText(), input).asDouble();
-        }
-        if (rule.has("NumericLessThanEquals")) {
-            return value.asDouble() <= rule.get("NumericLessThanEquals").asDouble();
-        }
-        if (rule.has("NumericGreaterThanEquals")) {
-            return value.asDouble() >= rule.get("NumericGreaterThanEquals").asDouble();
-        }
-        if (rule.has("BooleanEquals")) {
-            return value.asBoolean() == rule.get("BooleanEquals").asBoolean();
-        }
-        if (rule.has("BooleanEqualsPath")) {
-            return value.asBoolean() == resolvePath(rule.get("BooleanEqualsPath").asText(), input).asBoolean();
-        }
-        if (rule.has("IsNull")) {
-            boolean expectNull = rule.get("IsNull").asBoolean();
-            return value.isNull() == expectNull;
-        }
-        if (rule.has("IsPresent")) {
-            boolean expectPresent = rule.get("IsPresent").asBoolean();
-            // A field that exists with an explicit null value still counts as present in AWS, so
-            // resolve without collapsing missing into null: only a truly absent path is "not present".
-            boolean present = !resolvePathNode(variable, input).isMissingNode();
-            return present == expectPresent;
-        }
-        if (rule.has("IsString")) {
-            return value.isTextual() == rule.get("IsString").asBoolean();
-        }
-        if (rule.has("IsNumeric")) {
-            return value.isNumber() == rule.get("IsNumeric").asBoolean();
-        }
-        if (rule.has("IsBoolean")) {
-            return value.isBoolean() == rule.get("IsBoolean").asBoolean();
-        }
-
-        return false;
     }
 
     private StateResult executeWaitState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -3845,10 +3773,6 @@ public class AslExecutor {
             }
         }
         current.set(parts[parts.length - 1], value);
-    }
-
-    private String globToRegex(String glob) {
-        return "\\Q" + glob.replace("*", "\\E.*\\Q") + "\\E";
     }
 
     // ──────────────────────────── History helpers ────────────────────────────
