@@ -263,7 +263,9 @@ public class CloudWatchMetricsQueryHandler {
 
     private Response handleListTagsForResource(MultivaluedMap<String, String> params, String region) {
         String arn = params.getFirst("ResourceARN");
-        Map<String, String> tags = metricsService.listTagsForResource(arn, region);
+        Map<String, String> tags = CloudWatchDashboardsService.isDashboardArn(arn)
+                ? dashboardsService.listTagsForResource(arn, region)
+                : metricsService.listTagsForResource(arn, region);
         XmlBuilder xml = new XmlBuilder().start("Tags");
         tags.forEach((k, v) -> xml.start("member").elem("Key", k).elem("Value", v).end("member"));
         xml.end("Tags");
@@ -278,7 +280,11 @@ public class CloudWatchMetricsQueryHandler {
             if (key == null) break;
             tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
         }
-        metricsService.tagResource(arn, tags, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.tagResource(arn, tags, region);
+        } else {
+            metricsService.tagResource(arn, tags, region);
+        }
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", null)).build();
     }
 
@@ -290,15 +296,27 @@ public class CloudWatchMetricsQueryHandler {
             if (key == null) break;
             keys.add(key);
         }
-        metricsService.untagResource(arn, keys, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.untagResource(arn, keys, region);
+        } else {
+            metricsService.untagResource(arn, keys, region);
+        }
         return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", null)).build();
     }
 
     // ──────────────────────────── Dashboards ────────────────────────────
 
     private Response handlePutDashboard(MultivaluedMap<String, String> params, String region) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("Tags.member." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
+        }
         dashboardsService.putDashboard(params.getFirst("DashboardName"),
-                params.getFirst("DashboardBody"), region);
+                params.getFirst("DashboardBody"), tags, region);
         // DashboardValidationMessages is optional on the response shape, but AWS always
         // sends the list. It stays empty: the body is stored opaquely, so nothing here
         // inspects it and no validation warning can be produced.

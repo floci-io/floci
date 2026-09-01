@@ -157,4 +157,70 @@ class CloudWatchDashboardsIntegrationTest {
             .statusCode(200)
             .body("DashboardBody", equalTo("{}"));
     }
+    /**
+     * Tags supplied on PutDashboard have to be readable afterwards, and CloudWatch's tag
+     * operations take one ARN for every resource it owns, so the handler has to route a dashboard
+     * ARN to the dashboards service rather than the alarm store that answered before.
+     */
+    @Test
+    void tagsSuppliedOnPutAreReadableThroughListTagsForResource() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CW_SCOPE)
+            .formParam("Action", "PutDashboard")
+            .formParam("DashboardName", "tagged")
+            .formParam("DashboardBody", BODY)
+            .formParam("Tags.member.1.Key", "team")
+            .formParam("Tags.member.1.Value", "platform")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String arn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CW_SCOPE)
+            .formParam("Action", "GetDashboard")
+            .formParam("DashboardName", "tagged")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("GetDashboardResponse.GetDashboardResult.DashboardArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CW_SCOPE)
+            .formParam("Action", "ListTagsForResource")
+            .formParam("ResourceARN", arn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>team</Key>"))
+            .body(containsString("<Value>platform</Value>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CW_SCOPE)
+            .formParam("Action", "UntagResource")
+            .formParam("ResourceARN", arn)
+            .formParam("TagKeys.member.1", "team")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CW_SCOPE)
+            .formParam("Action", "ListTagsForResource")
+            .formParam("ResourceARN", arn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Key>team</Key>")));
+    }
+
 }

@@ -243,7 +243,9 @@ public class CloudWatchMetricsJsonHandler {
         String arn = request.has("ResourceARN") ? request.path("ResourceARN").asText() : request.path("ResourceArn").asText();
         if (arn.isEmpty()) arn = request.path("resourceArn").asText();
 
-        Map<String, String> tags = metricsService.listTagsForResource(arn, region);
+        Map<String, String> tags = CloudWatchDashboardsService.isDashboardArn(arn)
+                ? dashboardsService.listTagsForResource(arn, region)
+                : metricsService.listTagsForResource(arn, region);
         ArrayNode tagsArray = objectMapper.createArrayNode();
         tags.forEach((k, v) -> tagsArray.addObject().put("Key", k).put("Value", v));
         return Response.ok(objectMapper.createObjectNode().set("Tags", tagsArray)).build();
@@ -258,7 +260,11 @@ public class CloudWatchMetricsJsonHandler {
         if (tagsNode.isArray()) {
             tagsNode.forEach(t -> tags.put(t.path("Key").asText(), t.path("Value").asText()));
         }
-        metricsService.tagResource(arn, tags, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.tagResource(arn, tags, region);
+        } else {
+            metricsService.tagResource(arn, tags, region);
+        }
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -271,7 +277,11 @@ public class CloudWatchMetricsJsonHandler {
         if (keysNode.isArray()) {
             keysNode.forEach(k -> keys.add(k.asText()));
         }
-        metricsService.untagResource(arn, keys, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.untagResource(arn, keys, region);
+        } else {
+            metricsService.untagResource(arn, keys, region);
+        }
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -335,9 +345,15 @@ public class CloudWatchMetricsJsonHandler {
     // ──────────────────────────── Dashboards ────────────────────────────
 
     private Response handlePutDashboard(JsonNode request, String region) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        JsonNode tagsNode = request.path("Tags");
+        if (tagsNode.isArray()) {
+            tagsNode.forEach(t -> tags.put(t.path("Key").asText(), t.path("Value").asText()));
+        }
         dashboardsService.putDashboard(
                 request.path("DashboardName").asText(null),
                 request.path("DashboardBody").asText(null),
+                tags,
                 region);
         // DashboardValidationMessages is optional on the response shape, but AWS always
         // sends the list. It stays empty here: the body is stored opaquely, so nothing
