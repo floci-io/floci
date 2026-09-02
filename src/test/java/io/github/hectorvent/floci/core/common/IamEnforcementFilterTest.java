@@ -129,6 +129,44 @@ class IamEnforcementFilterTest {
     }
 
     @Test
+    void filterBuildsResourceArnForDynamoDbTable() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260902/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(accountResolver.resolve(auth)).thenReturn("000000000000");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:GetItem");
+        when(iamService.resolveCallerContext("ASIASESSION"))
+                .thenReturn(CallerContext.of(List.of("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"dynamodb:GetItem",
+                           "Resource":"arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"}
+                        ]}""")));
+        when(arnBuilder.build("dynamodb", containerRequest, "us-east-1", "000000000000"))
+                .thenReturn("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable");
+        when(evaluator.evaluate(
+                any(),
+                isNull(),
+                eq("dynamodb:GetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"),
+                isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+        when(conditionContextResolver.resolve("dynamodb", "dynamodb:GetItem", containerRequest))
+                .thenReturn(null);
+
+        IamEnforcementFilter filter = newFilter();
+
+        filter.filter(containerRequest);
+
+        verify(arnBuilder).build("dynamodb", containerRequest, "us-east-1", "000000000000");
+        verify(containerRequest, never()).abortWith(any());
+    }
+
+    @Test
     void getCallerIdentityBypassesPolicyEnforcement() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260720/us-east-1/sts/aws4_request, "

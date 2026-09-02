@@ -103,6 +103,21 @@ class IamEnforcementIntegrationTest {
     }
 
     @Test
+    void resourceArnPatternMatchesDynamoDbTable() {
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem",
+               "Resource":"arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"}
+            ]}""";
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(List.of(policy), "dynamodb:GetItem",
+                        "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(List.of(policy), "dynamodb:GetItem",
+                        "arn:aws:dynamodb:us-east-1:000000000000:table/OtherTable"));
+    }
+
+    @Test
     void actionListInStatement() {
         String policy = """
             {"Version":"2012-10-17","Statement":[
