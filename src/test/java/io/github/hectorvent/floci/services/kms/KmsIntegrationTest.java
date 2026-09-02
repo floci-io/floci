@@ -1430,13 +1430,18 @@ class KmsIntegrationTest {
                 .extract().path("PublicKey");
         assertEquals(44, Base64.getDecoder().decode(publicKey).length);
 
-        String message = Base64.getEncoder().encodeToString("message".getBytes(StandardCharsets.UTF_8));
-        for (String[] pair : List.of(new String[]{"ED25519_SHA_512", "RAW"}, new String[]{"ED25519_PH_SHA_512", "DIGEST"})) {
+        // ED25519_PH_SHA_512 takes one SHA-512 digest, so the two algorithms are given
+        // different payloads here the way a caller would send them.
+        byte[] raw = "message".getBytes(StandardCharsets.UTF_8);
+        String message = Base64.getEncoder().encodeToString(raw);
+        String digest = Base64.getEncoder().encodeToString(sha512(raw));
+        for (String[] pair : List.of(new String[]{"ED25519_SHA_512", "RAW", message},
+                new String[]{"ED25519_PH_SHA_512", "DIGEST", digest})) {
             String signature = given()
                     .header("X-Amz-Target", "TrentService.Sign")
                     .contentType(KMS_CONTENT_TYPE)
                     .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
-                            .formatted(keyId, message, pair[1], pair[0]))
+                            .formatted(keyId, pair[2], pair[1], pair[0]))
                     .when().post("/")
                     .then().statusCode(200)
                     .body("SigningAlgorithm", equalTo(pair[0]))
@@ -1447,7 +1452,7 @@ class KmsIntegrationTest {
                     .header("X-Amz-Target", "TrentService.Verify")
                     .contentType(KMS_CONTENT_TYPE)
                     .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"%s\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
-                            .formatted(keyId, message, pair[1], signature, pair[0]))
+                            .formatted(keyId, pair[2], pair[1], signature, pair[0]))
                     .when().post("/")
                     .then().statusCode(200)
                     .body("SignatureValid", equalTo(true));
@@ -1479,5 +1484,42 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo(error))
                 .body("message", equalTo(expectedMessage));
+    }
+
+    /**
+     * Real KMS checks that a DIGEST for ED25519_PH_SHA_512 is exactly one SHA-512 digest, on
+     * Sign and on Verify alike, and answers a wrong length with a ValidationException.
+     */
+    @ParameterizedTest
+    @CsvSource({"TrentService.Sign", "TrentService.Verify"})
+    void ed25519PrehashRejectsADigestOfTheWrongLength(String target) {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_NIST_EDWARDS25519\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String tooShort = Base64.getEncoder().encodeToString("not a sha-512 digest".getBytes(StandardCharsets.UTF_8));
+        String signature = Base64.getEncoder().encodeToString(new byte[64]);
+        given()
+                .header("X-Amz-Target", target)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"DIGEST\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"ED25519_PH_SHA_512\"}"
+                        .formatted(keyId, tooShort, signature))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Digest is invalid length for algorithm ED25519_PH_SHA_512."));
+    }
+
+    private static byte[] sha512(byte[] value) {
+        try {
+            return java.security.MessageDigest.getInstance("SHA-512").digest(value);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

@@ -782,6 +782,7 @@ public class KmsService implements ResourceProvider {
     // Legacy v1 (kms:<keyId>:<base64>) still accepted on Decrypt for persistent-store back-compat.
     private static final String BLOB_PREFIX_V2 = "kms:v2:";
     private static final String BLOB_PREFIX_V1 = "kms:";
+    private static final int SHA_512_DIGEST_BYTES = 64;
     private static final int NONCE_BYTES = 8;
     private static final int MIN_MAC_MESSAGE_BYTES = 1;
     private static final int MAX_MAC_MESSAGE_BYTES = 4096;
@@ -939,7 +940,7 @@ public class KmsService implements ResourceProvider {
 
         var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
         if (ed25519) {
-            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType);
+            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
         }
 
         try {
@@ -982,7 +983,7 @@ public class KmsService implements ResourceProvider {
 
         var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
         if (ed25519) {
-            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType);
+            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
         }
 
         try {
@@ -1191,10 +1192,13 @@ public class KmsService implements ResourceProvider {
      * Validates what an Ed25519 key accepts, matching the errors real KMS returns.
      *
      * <p>ED25519_SHA_512 only takes {@code MessageType=RAW} and ED25519_PH_SHA_512 only takes
-     * {@code MessageType=DIGEST}. Real KMS rejects the other pairing with a ValidationException
-     * and rejects any other signing algorithm with an InvalidKeyUsageException.
+     * {@code MessageType=DIGEST}, whose value has to be exactly one SHA-512 digest. Real KMS
+     * rejects the other pairing and a wrong digest length with a ValidationException, and rejects
+     * any other signing algorithm with an InvalidKeyUsageException. Sign and Verify both enforce
+     * all three.
      */
-    private static void validateEd25519Request(KmsKeySpec spec, String algorithm, KmsMessageType messageType) {
+    private static void validateEd25519Request(KmsKeySpec spec, String algorithm, KmsMessageType messageType,
+                                               byte[] message) {
         var algo = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
         if (algo != KmsKeySpec.Algorithm.ED25519_SHA_512 && algo != KmsKeySpec.Algorithm.ED25519_PH_SHA_512) {
             throw new AwsException("InvalidKeyUsageException",
@@ -1204,6 +1208,10 @@ public class KmsService implements ResourceProvider {
         if (messageType != required) {
             throw new AwsException("ValidationException",
                     "Message type " + messageType + " is incompatible with algorithm " + algorithm + ".", 400);
+        }
+        if (algo == KmsKeySpec.Algorithm.ED25519_PH_SHA_512 && message.length != SHA_512_DIGEST_BYTES) {
+            throw new AwsException("ValidationException",
+                    "Digest is invalid length for algorithm " + algorithm + ".", 400);
         }
     }
 

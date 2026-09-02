@@ -307,6 +307,26 @@ class TestKMSSigning:
                         SigningAlgorithm=algorithm,
                     )
                 assert excinfo.value.response["Error"]["Code"] == "ValidationException"
+
+            # A DIGEST for the pre-hash algorithm has to be one SHA-512 digest. Real KMS
+            # checks the length on Sign and on Verify.
+            with pytest.raises(ClientError) as excinfo:
+                kms_client.sign(
+                    KeyId=key_id,
+                    Message=b"not a sha-512 digest",
+                    MessageType="DIGEST",
+                    SigningAlgorithm="ED25519_PH_SHA_512",
+                )
+            assert "Digest is invalid length" in excinfo.value.response["Error"]["Message"]
+            with pytest.raises(ClientError) as excinfo:
+                kms_client.verify(
+                    KeyId=key_id,
+                    Message=b"not a sha-512 digest",
+                    MessageType="DIGEST",
+                    Signature=prehash_signature,
+                    SigningAlgorithm="ED25519_PH_SHA_512",
+                )
+            assert "Digest is invalid length" in excinfo.value.response["Error"]["Message"]
         finally:
             kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
 
