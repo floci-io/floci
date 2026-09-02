@@ -89,7 +89,10 @@ Known differences from AWS:
   `desiredCount` from that count; it is rejected for the Fargate launch type and for the
   `CODE_DEPLOY` / `EXTERNAL` controllers, as on AWS. Placement constraints are not evaluated.
 - `pendingCount` is always `0`, matching the top-level service field.
-- `forceNewDeployment` does not mint a new deployment `id`.
+- `forceNewDeployment` (with an unchanged task definition) mints a new deployment `id`
+  and rolls the running tasks: a replacement on the new deployment starts first, then
+  the task from the previous deployment is drained one reconciler tick later. The
+  `deployments` list still reports a single `PRIMARY` throughout.
 - `updatedAt` equals `createdAt`. AWS advances it as a rollout progresses; Floci has no
   intermediate rollout state to report.
 

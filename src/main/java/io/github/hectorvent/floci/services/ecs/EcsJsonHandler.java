@@ -488,9 +488,10 @@ public class EcsJsonHandler {
         Integer desiredCount = req.has("desiredCount") ? req.path("desiredCount").asInt() : null;
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
         String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
+        boolean forceNewDeployment = req.path("forceNewDeployment").asBoolean(false);
 
         EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount,
-                networkConfiguration, availabilityZoneRebalancing, region);
+                networkConfiguration, availabilityZoneRebalancing, forceNewDeployment, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));

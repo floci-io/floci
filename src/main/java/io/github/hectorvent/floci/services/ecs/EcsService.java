@@ -599,9 +599,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private EcsTask launchServiceTask(EcsCluster cluster, EcsServiceModel svc, LaunchType launchType,
                                        String containerInstanceArn, String region) {
         TaskDefinition taskDef = resolveTaskDefinitionOrThrow(svc.getTaskDefinition(), region);
-        return launchTasks(cluster, taskDef, 1, launchType, svc.getServiceName(), "ecs-svc",
+        EcsTask task = launchTasks(cluster, taskDef, 1, launchType, svc.getServiceName(), "ecs-svc",
                 containerInstanceArn, null, svc.getNetworkConfiguration(),
                 svc.getServiceArn(), region).getFirst();
+        task.setDeploymentId(deploymentId(svc));
+        return task;
     }
 
     public EcsTask stopTask(String clusterRef, String taskRef, String reason, String region) {
@@ -832,6 +834,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
         svc.setLastDeploymentAt(svc.getCreatedAt());
+        svc.setDeploymentId(newDeploymentId());
         if (tags != null && !tags.isEmpty()) {
             svc.setTags(new LinkedHashMap<>(tags));
         }
@@ -854,6 +857,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     public EcsServiceModel updateService(String clusterRef, String serviceName, String taskDefinition,
                                           Integer desiredCount, NetworkConfiguration networkConfiguration,
                                           String availabilityZoneRebalancing, String region) {
+        return updateService(clusterRef, serviceName, taskDefinition, desiredCount, networkConfiguration,
+                availabilityZoneRebalancing, false, region);
+    }
+
+    public EcsServiceModel updateService(String clusterRef, String serviceName, String taskDefinition,
+                                          Integer desiredCount, NetworkConfiguration networkConfiguration,
+                                          String availabilityZoneRebalancing, boolean forceNewDeployment,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
 
         serviceName = extractServiceName(serviceName);
@@ -879,11 +890,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         if (availabilityZoneRebalancing != null) {
             svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing);
         }
+        boolean taskDefChanged = false;
         if (taskDefinition != null) {
-            taskDefinition = resolveTaskDefinitionOrThrow(taskDefinition, region).getTaskDefinitionArn();
-            svc.setTaskDefinition(taskDefinition);
+            String resolvedArn = resolveTaskDefinitionOrThrow(taskDefinition, region).getTaskDefinitionArn();
+            taskDefChanged = !resolvedArn.equals(svc.getTaskDefinition());
+            svc.setTaskDefinition(resolvedArn);
+        }
+        if (taskDefChanged || forceNewDeployment) {
+            svc.setDeploymentId(newDeploymentId());
             svc.setLastDeploymentAt(Instant.now());
-            recordServiceDeployment(svc, taskDefinition, region);
+            recordServiceDeployment(svc, svc.getTaskDefinition(), region);
         }
         services.put(key, svc);
         return svc;
@@ -1462,6 +1478,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         return List.of(d);
     }
 
+    private static String newDeploymentId() {
+        return "ecs-svc/" + java.util.UUID.randomUUID().toString().replace("-", "");
+    }
+
     /**
      * A stable {@code ecs-svc/<id>} identifier derived from the service ARN and its task
      * definition. Deployments are derived per request, so a random id would differ on every
@@ -1470,6 +1490,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
      * while still rolling over when the task definition changes.
      */
     private String deploymentId(EcsServiceModel svc) {
+        if (svc.getDeploymentId() != null) {
+            return svc.getDeploymentId();
+        }
+        // Legacy fallback: services persisted before deploymentId was stored derive a stable
+        // id from the service ARN and task definition, so it still rolls over on a task-def change.
         String seed = svc.getServiceArn() + ":" + svc.getTaskDefinition();
         long hash = 0xcbf29ce484222325L;
         for (int i = 0; i < seed.length(); i++) {
@@ -1751,6 +1776,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
      * than by a name suffix, which would otherwise conflate same-named clusters across regions
      * or accounts.
      */
+    /**
+     * A task belongs to a superseded deployment. New tasks carry the service's deploymentId and
+     * are compared on that; tasks launched before the id was stamped (legacy state) fall back to
+     * the task-definition-ARN comparison, preserving the pre-existing rollout on a task-def change.
+     */
+    private static boolean isStaleForDeployment(EcsTask t, String currentDeploymentId,
+                                                String currentTaskDefinitionArn) {
+        if (t.getDeploymentId() != null) {
+            return !currentDeploymentId.equals(t.getDeploymentId());
+        }
+        return currentTaskDefinitionArn != null
+                && !currentTaskDefinitionArn.equals(t.getTaskDefinitionArn());
+    }
+
     private static boolean ownedBy(EcsTask task, EcsServiceModel svc, EcsCluster cluster) {
         return svc.getServiceArn() != null
                 && svc.getServiceArn().equals(task.getOwningServiceArn())
@@ -1776,14 +1815,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
                 .toList();
         long running = runningTasks.size();
-        // Tasks still on a previous task definition. AWS's ECS deployment controller rolls
-        // them: replacements on the service's current revision come up first, then the
-        // stale ones are drained, so UpdateService with a new taskDefinition actually
-        // changes what runs. Counting only current-revision tasks as "running" below is
-        // what makes the reconciler start the replacements.
+        String currentDeploymentId = deploymentId(svc);
         String currentTaskDefinitionArn = pinnedTaskDefinitionArn(svc, key, region);
         List<EcsTask> staleTasks = runningTasks.stream()
-                .filter(t -> !currentTaskDefinitionArn.equals(t.getTaskDefinitionArn()))
+                .filter(t -> isStaleForDeployment(t, currentDeploymentId, currentTaskDefinitionArn))
                 .toList();
         long current = running - staleTasks.size();
 

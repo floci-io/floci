@@ -18,6 +18,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -120,6 +122,42 @@ class EcsServiceRolloutTest {
         assertEquals(2, second.size());
         assertEquals(first.stream().map(EcsTask::getTaskArn).sorted().toList(),
                 second.stream().map(EcsTask::getTaskArn).sorted().toList());
+    }
+
+    @Test
+    void forceNewDeploymentSameTaskDefinitionMintsNewIdAndReplacesTasks() {
+        EcsService service = newMockModeService();
+        service.createCluster("force-cluster", REGION);
+        TaskDefinition rev1 = registerTaskDef(service, "force-fam", "app:1");
+        var created = service.createService("force-cluster", "force-svc", "force-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        String firstDeploymentId = created.getDeploymentId();
+        assertNotNull(firstDeploymentId, "createService assigns a deploymentId");
+
+        service.reconcileServices();
+        List<EcsTask> before = runningTasks(service);
+        assertEquals(1, before.size());
+        assertEquals(firstDeploymentId, before.getFirst().getDeploymentId());
+
+        // Same task definition, force flag set.
+        var updated = service.updateService("force-cluster", "force-svc", null, null, null,
+                null, true, REGION);
+        assertNotEquals(firstDeploymentId, updated.getDeploymentId(),
+                "forceNewDeployment mints a new deployment id");
+
+        // Tick 1: replacement on the new deployment comes up while desiredCount is still met.
+        service.reconcileServices();
+        assertEquals(2, runningTasks(service).size());
+
+        // Tick 2: the task from the old deployment is drained.
+        service.reconcileServices();
+        List<EcsTask> after = runningTasks(service);
+        assertEquals(1, after.size());
+        assertEquals(updated.getDeploymentId(), after.getFirst().getDeploymentId());
+
+        EcsTask stopped = service.describeTasks("force-cluster",
+                List.of(before.getFirst().getTaskArn()), REGION).getFirst();
+        assertEquals("STOPPED", stopped.getLastStatus());
     }
 
     private static List<EcsTask> runningTasks(EcsService service) {

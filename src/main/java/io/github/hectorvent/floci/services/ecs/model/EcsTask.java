@@ -30,6 +30,8 @@ public class EcsTask {
     private Instant startedAt;
     private Instant stoppedAt;
     private String startedBy;
+    /** The owning service's deploymentId when this task was launched; null for RunTask/StartTask and legacy tasks. */
+    private String deploymentId;
     private String stoppedReason;
     private List<Container> containers;
     private String containerInstanceArn;
@@ -79,6 +81,9 @@ public class EcsTask {
 
     public String getStartedBy() { return startedBy; }
     public void setStartedBy(String startedBy) { this.startedBy = startedBy; }
+
+    public String getDeploymentId() { return deploymentId; }
+    public void setDeploymentId(String deploymentId) { this.deploymentId = deploymentId; }
 
     /** The awsvpc network configuration the task was launched with, or null. Carried through from
      *  the RunTask request (including the ecs:runTask Step Functions integration) so it survives the
