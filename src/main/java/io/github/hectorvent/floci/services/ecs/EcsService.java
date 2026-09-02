@@ -69,6 +69,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private final EcsContainerManager containerManager;
     private final EcsLoadBalancerRegistrar lbRegistrar;
     private final StorageFactory storageFactory;
+    private final EcsEventPublisher eventPublisher;
     private final boolean dockerMode;
     private final String baseUrl;
     private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor(
@@ -112,13 +113,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
                       EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
-                      StorageFactory storageFactory) {
+                      StorageFactory storageFactory, EcsEventPublisher eventPublisher) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
         this.baseUrl = config.effectiveBaseUrl();
         this.lbRegistrar = lbRegistrar;
         this.storageFactory = storageFactory;
+        this.eventPublisher = eventPublisher;
     }
 
     @PostConstruct
@@ -564,6 +566,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                     cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
                     LOG.infov("Started ECS task (docker): {0}", taskArn);
                     registerTaskWithLoadBalancers(task, cluster, region);
+                    if (eventPublisher != null) {
+                        eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
+                    }
                 } catch (Exception e) {
                     LOG.errorv("Failed to start ECS task {0}: {1}", taskArn, e.getMessage());
                     task.setLastStatus(TaskStatus.STOPPED.name());
@@ -577,12 +582,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                             ? e.getMessage()
                             : "Failed to start: " + e.getMessage());
                     task.setStoppedAt(Instant.now());
+                    if (eventPublisher != null) {
+                        eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.STOPPED, region);
+                    }
                 }
             } else {
                 task.setLastStatus(TaskStatus.RUNNING.name());
                 task.setStartedAt(Instant.now());
                 cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
                 LOG.infov("Started ECS task (mock): {0}", taskArn);
+                if (eventPublisher != null) {
+                    eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
+                }
             }
 
             launched.add(task);
@@ -647,6 +658,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         }
 
         LOG.infov("Stopped ECS task: {0}", task.getTaskArn());
+        if (eventPublisher != null) {
+            eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
+        }
         return task;
     }
 
@@ -1627,6 +1641,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         }
 
         LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
+        if (eventPublisher != null) {
+            String region = null;
+            if (task.getTaskArn() != null) {
+                try {
+                    region = AwsArnUtils.parse(task.getTaskArn()).region();
+                } catch (Exception ignored) {
+                }
+            }
+            if (region == null || region.isBlank()) {
+                region = regionResolver != null ? regionResolver.getDefaultRegion() : "us-east-1";
+            }
+            eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
+        }
     }
 
     private void reconcileStoppedTask(String taskArn) {

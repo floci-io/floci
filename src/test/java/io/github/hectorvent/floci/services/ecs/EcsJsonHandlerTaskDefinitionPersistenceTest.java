@@ -125,7 +125,8 @@ class EcsJsonHandlerTaskDefinitionPersistenceTest {
                 mock(EcsContainerManager.class),
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                storage);
+                storage,
+                null);
         service.initializeStorage();
         return service;
     }

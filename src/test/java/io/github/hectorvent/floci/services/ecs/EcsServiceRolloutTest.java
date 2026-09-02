@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -21,8 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -160,6 +164,23 @@ class EcsServiceRolloutTest {
         assertEquals("STOPPED", stopped.getLastStatus());
     }
 
+    @Test
+    void serviceTaskStartAndStopEmitTaskStateChangeLadders() {
+        EcsEventPublisher publisher = mock(EcsEventPublisher.class);
+        EcsService service = newMockModeService(publisher);
+        service.createCluster("evt-cluster", REGION);
+        registerTaskDef(service, "evt-fam", "app:1");
+        service.createService("evt-cluster", "evt-svc", "evt-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION);
+
+        service.reconcileServices();
+        verify(publisher).emitTaskLadder(any(), eq(TaskStatus.PENDING), eq(TaskStatus.RUNNING), eq(REGION));
+
+        String taskArn = runningTasks(service).getFirst().getTaskArn();
+        service.stopTask("evt-cluster", taskArn, "test", REGION);
+        verify(publisher).emitTaskLadder(any(), eq(TaskStatus.RUNNING), eq(TaskStatus.STOPPED), eq(REGION));
+    }
+
     private static List<EcsTask> runningTasks(EcsService service) {
         return service.describeTasks(null, service.listTasks(null, null, null, null, REGION), REGION).stream()
                 .filter(t -> "RUNNING".equals(t.getLastStatus()))
@@ -175,6 +196,10 @@ class EcsServiceRolloutTest {
     }
 
     private static EcsService newMockModeService() {
+        return newMockModeService(null);
+    }
+
+    private static EcsService newMockModeService(EcsEventPublisher publisher) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(true);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -183,7 +208,8 @@ class EcsServiceRolloutTest {
                 mock(EcsContainerManager.class),
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory());
+                new InMemoryStorageFactory(),
+                publisher);
         service.initializeStorage();
         return service;
     }
