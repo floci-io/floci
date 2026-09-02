@@ -2802,6 +2802,25 @@ public class CloudFrontController {
         }
     }
 
+    private static int parseAssociationsQuantity(String value) {
+        try {
+            int quantity = Integer.parseInt(value.trim());
+            if (quantity < 0) {
+                throw new NumberFormatException("negative quantity");
+            }
+            return quantity;
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidArgument",
+                    "The association Quantity must be a non-negative integer.", 400);
+        }
+    }
+
+    private static void validateAssociationsQuantity(Integer declared, int itemCount) {
+        if (declared != null && declared != itemCount) {
+            throw inconsistentQuantities();
+        }
+    }
+
     private DefaultCacheBehavior parseDefaultCacheBehavior(String body) {
         DefaultCacheBehavior dcb = new DefaultCacheBehavior();
         if (body == null || body.isEmpty()) {
@@ -2823,6 +2842,8 @@ public class CloudFrontController {
             Map<String, String> currentFunctionAssociation = null;
             List<Map<String, Object>> lambdaAssociations = new ArrayList<>();
             List<Map<String, String>> functionAssociations = new ArrayList<>();
+            Integer lambdaAssociationsQuantity = null;
+            Integer functionAssociationsQuantity = null;
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -2831,35 +2852,47 @@ public class CloudFrontController {
                     switch (local) {
                         case "DefaultCacheBehavior" -> inDcb = true;
                         case "LambdaFunctionAssociations" -> {
-                            if (inDcb) inLambdaAssociations = true;
+                            if (inDcb) {
+                                inLambdaAssociations = true;
+                            }
                         }
                         case "FunctionAssociations" -> {
-                            if (inDcb) inFunctionAssociations = true;
+                            if (inDcb) {
+                                inFunctionAssociations = true;
+                            }
                         }
                         case "LambdaFunctionAssociation" -> {
-                            if (inLambdaAssociations) currentLambdaAssociation = new LinkedHashMap<>();
+                            if (inLambdaAssociations) {
+                                currentLambdaAssociation = new LinkedHashMap<>();
+                            }
                         }
                         case "FunctionAssociation" -> {
-                            if (inFunctionAssociations) currentFunctionAssociation = new LinkedHashMap<>();
+                            if (inFunctionAssociations) {
+                                currentFunctionAssociation = new LinkedHashMap<>();
+                            }
                         }
                         case "LambdaFunctionARN" -> {
-                            if (currentLambdaAssociation != null)
+                            if (currentLambdaAssociation != null) {
                                 currentLambdaAssociation.put("LambdaFunctionARN", r.getElementText());
+                            }
                         }
                         case "FunctionARN" -> {
-                            if (currentFunctionAssociation != null)
+                            if (currentFunctionAssociation != null) {
                                 currentFunctionAssociation.put("FunctionARN", r.getElementText());
+                            }
                         }
                         case "IncludeBody" -> {
-                            if (currentLambdaAssociation != null)
+                            if (currentLambdaAssociation != null) {
                                 currentLambdaAssociation.put(
                                         "IncludeBody", "true".equalsIgnoreCase(r.getElementText()));
+                            }
                         }
                         case "EventType" -> {
-                            if (currentLambdaAssociation != null)
+                            if (currentLambdaAssociation != null) {
                                 currentLambdaAssociation.put("EventType", r.getElementText());
-                            else if (currentFunctionAssociation != null)
+                            } else if (currentFunctionAssociation != null) {
                                 currentFunctionAssociation.put("EventType", r.getElementText());
+                            }
                         }
                         case "TrustedKeyGroups" -> {
                             if (inDcb) {
@@ -2877,6 +2910,12 @@ public class CloudFrontController {
                             if (inTrustedKeyGroups) {
                                 trustedKeyGroupsQuantity =
                                         parseTrustedKeyGroupsQuantity(r.getElementText());
+                            } else if (inLambdaAssociations && currentLambdaAssociation == null) {
+                                lambdaAssociationsQuantity =
+                                        parseAssociationsQuantity(r.getElementText());
+                            } else if (inFunctionAssociations && currentFunctionAssociation == null) {
+                                functionAssociationsQuantity =
+                                        parseAssociationsQuantity(r.getElementText());
                             }
                         }
                         case "KeyGroup" -> {
@@ -2948,6 +2987,8 @@ public class CloudFrontController {
             if (!trustedKeyGroups.isEmpty()) {
                 dcb.setTrustedKeyGroups(trustedKeyGroups);
             }
+            validateAssociationsQuantity(lambdaAssociationsQuantity, lambdaAssociations.size());
+            validateAssociationsQuantity(functionAssociationsQuantity, functionAssociations.size());
             validateLambdaFunctionAssociations(lambdaAssociations);
             validateFunctionAssociations(functionAssociations);
             if (!lambdaAssociations.isEmpty()) {
@@ -3002,6 +3043,8 @@ public class CloudFrontController {
             Map<String, String> currentFunctionAssociation = null;
             List<Map<String, Object>> lambdaAssociations = new ArrayList<>();
             List<Map<String, String>> functionAssociations = new ArrayList<>();
+            Integer lambdaAssociationsQuantity = null;
+            Integer functionAssociationsQuantity = null;
 
             while (r.hasNext()) {
                 int event = r.next();
@@ -3020,38 +3063,52 @@ public class CloudFrontController {
                                 trustedKeyGroups = new ArrayList<>();
                                 lambdaAssociations = new ArrayList<>();
                                 functionAssociations = new ArrayList<>();
+                                lambdaAssociationsQuantity = null;
+                                functionAssociationsQuantity = null;
                             }
                         }
                         case "LambdaFunctionAssociations" -> {
-                            if (inCacheBehavior) inLambdaAssociations = true;
+                            if (inCacheBehavior) {
+                                inLambdaAssociations = true;
+                            }
                         }
                         case "FunctionAssociations" -> {
-                            if (inCacheBehavior) inFunctionAssociations = true;
+                            if (inCacheBehavior) {
+                                inFunctionAssociations = true;
+                            }
                         }
                         case "LambdaFunctionAssociation" -> {
-                            if (inLambdaAssociations) currentLambdaAssociation = new LinkedHashMap<>();
+                            if (inLambdaAssociations) {
+                                currentLambdaAssociation = new LinkedHashMap<>();
+                            }
                         }
                         case "FunctionAssociation" -> {
-                            if (inFunctionAssociations) currentFunctionAssociation = new LinkedHashMap<>();
+                            if (inFunctionAssociations) {
+                                currentFunctionAssociation = new LinkedHashMap<>();
+                            }
                         }
                         case "LambdaFunctionARN" -> {
-                            if (currentLambdaAssociation != null)
+                            if (currentLambdaAssociation != null) {
                                 currentLambdaAssociation.put("LambdaFunctionARN", r.getElementText());
+                            }
                         }
                         case "FunctionARN" -> {
-                            if (currentFunctionAssociation != null)
+                            if (currentFunctionAssociation != null) {
                                 currentFunctionAssociation.put("FunctionARN", r.getElementText());
+                            }
                         }
                         case "IncludeBody" -> {
-                            if (currentLambdaAssociation != null)
+                            if (currentLambdaAssociation != null) {
                                 currentLambdaAssociation.put(
                                         "IncludeBody", "true".equalsIgnoreCase(r.getElementText()));
+                            }
                         }
                         case "EventType" -> {
-                            if (currentLambdaAssociation != null)
+                            if (currentLambdaAssociation != null) {
                                 currentLambdaAssociation.put("EventType", r.getElementText());
-                            else if (currentFunctionAssociation != null)
+                            } else if (currentFunctionAssociation != null) {
                                 currentFunctionAssociation.put("EventType", r.getElementText());
+                            }
                         }
                         case "TrustedKeyGroups" -> {
                             if (inCacheBehavior) {
@@ -3069,6 +3126,12 @@ public class CloudFrontController {
                             if (inTrustedKeyGroups) {
                                 trustedKeyGroupsQuantity =
                                         parseTrustedKeyGroupsQuantity(r.getElementText());
+                            } else if (inLambdaAssociations && currentLambdaAssociation == null) {
+                                lambdaAssociationsQuantity =
+                                        parseAssociationsQuantity(r.getElementText());
+                            } else if (inFunctionAssociations && currentFunctionAssociation == null) {
+                                functionAssociationsQuantity =
+                                        parseAssociationsQuantity(r.getElementText());
                             }
                         }
                         case "KeyGroup" -> {
@@ -3136,6 +3199,10 @@ public class CloudFrontController {
                                 if (!trustedKeyGroups.isEmpty()) {
                                     current.setTrustedKeyGroups(trustedKeyGroups);
                                 }
+                                validateAssociationsQuantity(
+                                        lambdaAssociationsQuantity, lambdaAssociations.size());
+                                validateAssociationsQuantity(
+                                        functionAssociationsQuantity, functionAssociations.size());
                                 validateLambdaFunctionAssociations(lambdaAssociations);
                                 validateFunctionAssociations(functionAssociations);
                                 if (!lambdaAssociations.isEmpty()) {

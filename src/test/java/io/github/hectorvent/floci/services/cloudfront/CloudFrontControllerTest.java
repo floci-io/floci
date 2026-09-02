@@ -219,6 +219,24 @@ class CloudFrontControllerTest {
         }
     }
 
+    @Test
+    void lambdaFunctionAssociationsQuantityMismatchIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("""
+                <LambdaFunctionAssociations><Quantity>2</Quantity><Items><LambdaFunctionAssociation>
+                  <LambdaFunctionARN>arn:aws:lambda:us-east-1:000000000000:function:edge-fn:1</LambdaFunctionARN>
+                  <EventType>viewer-request</EventType>
+                </LambdaFunctionAssociation></Items></LambdaFunctionAssociations>
+                """);
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InconsistentQuantities"));
+        }
+    }
+
     private static String distributionConfigBody(String defaultCacheBehaviorExtra) {
         return """
                 <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
