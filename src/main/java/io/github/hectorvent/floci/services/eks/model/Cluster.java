@@ -65,6 +65,14 @@ public class Cluster {
     @JsonIgnore
     private int hostPort;
 
+    /**
+     * Resolved Docker container/volume name for this cluster's k3s resources. In-memory only
+     * (never part of the AWS response shape): assigned when the container is started, or
+     * re-resolved deterministically from surviving Docker resources on restore.
+     */
+    @JsonIgnore
+    private String dockerName;
+
     public Cluster() {}
 
     public String getName() { return name; }
@@ -117,4 +125,7 @@ public class Cluster {
 
     public int getHostPort() { return hostPort; }
     public void setHostPort(int hostPort) { this.hostPort = hostPort; }
+
+    public String getDockerName() { return dockerName; }
+    public void setDockerName(String dockerName) { this.dockerName = dockerName; }
 }

@@ -40,6 +40,28 @@
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_COMPREHEND_ENABLED` | `true` | Enable or disable the service |
+| `AI_MOCK_CONFIG` | unset | Path to a shared mock-response config file — see "Mock Responses" below |
+
+## Mock Responses
+
+The default stub responses above are the same for every call. To exercise application
+logic that branches on detection results (e.g. "escalate if sentiment is NEGATIVE"), point
+`AI_MOCK_CONFIG` at a JSON file shared across Comprehend, Textract, and Rekognition:
+
+```json
+{
+  "comprehend": {
+    "I am furious about this outage": {
+      "DetectSentiment": { "Sentiment": "NEGATIVE", "SentimentScore": { "Positive": 0.0, "Negative": 0.95, "Neutral": 0.05, "Mixed": 0.0 } }
+    }
+  }
+}
+```
+
+The lookup key is the **exact `Text` value** sent in the request. The file is re-read when
+its modification time changes, so it can be edited without restarting the emulator. A
+missing file, an unset `AI_MOCK_CONFIG`, or no matching entry all fall back to the default
+stub — mocking is opt-in and never breaks a call that isn't using it.
 
 ## Examples
 

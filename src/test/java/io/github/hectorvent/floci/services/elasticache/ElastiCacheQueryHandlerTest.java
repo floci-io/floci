@@ -287,6 +287,57 @@ class ElastiCacheQueryHandlerTest {
         assertTrue(body.contains("<ARN>arn:aws:elasticache:us-east-1:000000000000:replicationgroup:g1</ARN>"), body);
     }
 
+    /**
+     * A group created with TransitEncryptionEnabled=true and no auth token is recorded as
+     * AuthMode.IAM. Reporting the auth-token flag as TransitEncryptionEnabled answered false for
+     * it, which Terraform reads back on every plan as drift on transit_encryption_enabled.
+     */
+    @Test
+    void describeReplicationGroups_reportsTransitEncryptionWithoutAnAuthToken() {
+        ReplicationGroup g = new ReplicationGroup("g1", "d", ReplicationGroupStatus.AVAILABLE,
+                AuthMode.IAM, new Endpoint("localhost", 6379), Instant.now(), 6379);
+        when(service.listReplicationGroups("g1")).thenReturn(List.of(g));
+        MultivaluedMap<String, String> p = params();
+        p.add("ReplicationGroupId", "g1");
+
+        String body = (String) handler.handle("DescribeReplicationGroups", p, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"), body);
+        // ... and it is still distinct from AuthTokenEnabled, which only a token sets.
+        assertTrue(body.contains("<AuthTokenEnabled>false</AuthTokenEnabled>"), body);
+    }
+
+    @Test
+    void describeReplicationGroups_reportsNoTransitEncryptionForAPlainGroup() {
+        when(service.listReplicationGroups("g1")).thenReturn(List.of(group("g1")));
+        MultivaluedMap<String, String> p = params();
+        p.add("ReplicationGroupId", "g1");
+
+        String body = (String) handler.handle("DescribeReplicationGroups", p, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<TransitEncryptionEnabled>false</TransitEncryptionEnabled>"), body);
+    }
+
+    /**
+     * The member-cluster view of the same group reported AtRestEncryptionEnabled as a hardcoded
+     * false, so DescribeCacheClusters contradicted DescribeReplicationGroups about one group.
+     */
+    @Test
+    void describeCacheClusters_reportTheGroupsRealEncryptionFlags() {
+        ReplicationGroup group = new ReplicationGroup("grp", "d", ReplicationGroupStatus.AVAILABLE,
+                AuthMode.IAM, new Endpoint("localhost", 6379), Instant.now(), 6379);
+        group.setAtRestEncryptionEnabled(true);
+        when(service.listMemberCacheClusters("grp-0001-001")).thenReturn(List.of(
+                new ElastiCacheService.MemberCacheCluster(group, "grp-0001-001", 6379, true)));
+
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("CacheClusterId", "grp-0001-001");
+        String body = (String) handler.handle("DescribeCacheClusters", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"), body);
+        assertTrue(body.contains("<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>"), body);
+    }
+
     @Test
     void listTagsForResource_readsAReplicationGroupByItsArn() {
         ReplicationGroup g = group("g1");

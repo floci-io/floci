@@ -1,18 +1,26 @@
 package io.github.hectorvent.floci.services.comprehend;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AiMockConfigLoader;
 import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
+import java.util.Optional;
 import java.util.Set;
 /**
  * Dummy response builder for Amazon Comprehend. Stateless — every sync Detect*
  * action ignores the actual Text content and returns a fixed but AWS-shaped
- * response. Input validation (Text/LanguageCode required, supported language
- * codes) still follows real Comprehend behavior, since that is protocol
+ * response by default. Input validation (Text/LanguageCode required, supported
+ * language codes) still follows real Comprehend behavior, since that is protocol
  * compatibility rather than NLP logic.
+ * <p>
+ * Callers can override the default stub per exact {@code Text} value via
+ * {@link AiMockConfigLoader} — see {@code docs/services/comprehend.md}
+ * "Mock Responses". Lookup happens after input validation, so a malformed
+ * request still gets a real validation error rather than a silently-matched mock.
  * <p>
  * Real detection logic (lexicon/regex based) is a planned follow-up; see the
  * tracking issue for scope.
@@ -21,6 +29,7 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class ComprehendService {
+    private static final String SERVICE_KEY = "comprehend";
     /** Languages accepted by DetectSentiment/DetectKeyPhrases. */
     private static final Set<String> SUPPORTED_LANGUAGE_CODES = Set.of(
             "en", "es", "fr", "de", "it", "pt", "ar", "hi", "ja", "ko", "zh", "zh-TW");
@@ -31,9 +40,11 @@ public class ComprehendService {
      */
     private static final Set<String> PII_SUPPORTED_LANGUAGE_CODES = Set.of("en", "es");
     private final ObjectMapper objectMapper;
+    private final AiMockConfigLoader mockConfigLoader;
     @Inject
-    public ComprehendService(ObjectMapper objectMapper) {
+    public ComprehendService(ObjectMapper objectMapper, AiMockConfigLoader mockConfigLoader) {
         this.objectMapper = objectMapper;
+        this.mockConfigLoader = mockConfigLoader;
     }
     /**
      * DetectSentiment — always returns NEUTRAL with flat confidence scores.
@@ -42,6 +53,10 @@ public class ComprehendService {
     public Response detectSentiment(String text, String languageCode) {
         requireText(text);
         requireLanguageCode(languageCode, SUPPORTED_LANGUAGE_CODES);
+        Optional<JsonNode> mock = mockConfigLoader.lookup(SERVICE_KEY, text, "DetectSentiment");
+        if (mock.isPresent()) {
+            return Response.ok(mock.get()).build();
+        }
         ObjectNode root = objectMapper.createObjectNode();
         root.put("Sentiment", "NEUTRAL");
         ObjectNode score = root.putObject("SentimentScore");
@@ -58,6 +73,10 @@ public class ComprehendService {
     public Response detectKeyPhrases(String text, String languageCode) {
         requireText(text);
         requireLanguageCode(languageCode, SUPPORTED_LANGUAGE_CODES);
+        Optional<JsonNode> mock = mockConfigLoader.lookup(SERVICE_KEY, text, "DetectKeyPhrases");
+        if (mock.isPresent()) {
+            return Response.ok(mock.get()).build();
+        }
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode keyPhrases = root.putArray("KeyPhrases");
         ObjectNode phrase = keyPhrases.addObject();
@@ -73,6 +92,10 @@ public class ComprehendService {
      */
     public Response detectDominantLanguage(String text) {
         requireText(text);
+        Optional<JsonNode> mock = mockConfigLoader.lookup(SERVICE_KEY, text, "DetectDominantLanguage");
+        if (mock.isPresent()) {
+            return Response.ok(mock.get()).build();
+        }
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode languages = root.putArray("Languages");
         ObjectNode language = languages.addObject();
@@ -88,6 +111,10 @@ public class ComprehendService {
     public Response detectPiiEntities(String text, String languageCode) {
         requireText(text);
         requireLanguageCode(languageCode, PII_SUPPORTED_LANGUAGE_CODES);
+        Optional<JsonNode> mock = mockConfigLoader.lookup(SERVICE_KEY, text, "DetectPiiEntities");
+        if (mock.isPresent()) {
+            return Response.ok(mock.get()).build();
+        }
         ObjectNode root = objectMapper.createObjectNode();
         root.putArray("Entities");
         return Response.ok(root).build();
@@ -99,6 +126,10 @@ public class ComprehendService {
     public Response containsPiiEntities(String text, String languageCode) {
         requireText(text);
         requireLanguageCode(languageCode, PII_SUPPORTED_LANGUAGE_CODES);
+        Optional<JsonNode> mock = mockConfigLoader.lookup(SERVICE_KEY, text, "ContainsPiiEntities");
+        if (mock.isPresent()) {
+            return Response.ok(mock.get()).build();
+        }
         ObjectNode root = objectMapper.createObjectNode();
         root.putArray("Labels");
         return Response.ok(root).build();

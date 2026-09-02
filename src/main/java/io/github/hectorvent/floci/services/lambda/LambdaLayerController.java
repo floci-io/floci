@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import jakarta.inject.Inject;
@@ -14,13 +15,13 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -31,11 +32,14 @@ import java.util.Map;
  * GetLayerVersion:      GET    /2018-10-31/layers/{LayerName}/versions/{VersionNumber}
  * DeleteLayerVersion:   DELETE /2018-10-31/layers/{LayerName}/versions/{VersionNumber}
  * ListLayers:           GET    /2018-10-31/layers
+ * GetLayerVersionByArn: GET    /2018-10-31/layers?find=LayerVersion&Arn={arn}
  */
 @Path("/2018-10-31")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class LambdaLayerController {
+
+    private static final String FIND_LAYER_VERSION = "LayerVersion";
 
     private final ObjectMapper objectMapper;
     private final LambdaLayerService layerService;
@@ -64,14 +68,20 @@ public class LambdaLayerController {
     @GET
     @Path("/layers/{layerName}/versions")
     public Response listLayerVersions(@PathParam("layerName") String layerName,
+                                      @QueryParam("CompatibleRuntime") String compatibleRuntime,
+                                      @QueryParam("CompatibleArchitecture") String compatibleArchitecture,
+                                      @QueryParam("MaxItems") String maxItems,
+                                      @QueryParam("Marker") String marker,
                                       @Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
-        List<LambdaLayerVersion> versions = layerService.listLayerVersions(region, layerName);
+        PaginatedResult<LambdaLayerVersion> result = layerService.listLayerVersions(
+                region, layerName, compatibleRuntime, compatibleArchitecture, maxItems, marker);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode arr = root.putArray("LayerVersions");
-        for (LambdaLayerVersion lv : versions) {
+        for (LambdaLayerVersion lv : result.items()) {
             arr.add(buildLayerVersionSummary(lv));
         }
+        putNextMarker(root, result.nextToken());
         return Response.ok(root).build();
     }
 
@@ -96,14 +106,33 @@ public class LambdaLayerController {
         return Response.noContent().build();
     }
 
+    /**
+     * ListLayers, and GetLayerVersionByArn when {@code find=LayerVersion}. AWS gives the two
+     * actions the same method and path, and JAX-RS cannot route on a query parameter. The match
+     * is case-sensitive; any other value is a ListLayers call.
+     */
     @GET
     @Path("/layers")
-    public Response listLayers(@Context HttpHeaders headers) {
+    public Response listLayers(@QueryParam("find") String find,
+                               @QueryParam("Arn") String arn,
+                               @QueryParam("CompatibleRuntime") String compatibleRuntime,
+                               @QueryParam("CompatibleArchitecture") String compatibleArchitecture,
+                               @QueryParam("MaxItems") String maxItems,
+                               @QueryParam("Marker") String marker,
+                               @Context HttpHeaders headers,
+                               @Context UriInfo uriInfo) {
+        if (FIND_LAYER_VERSION.equals(find)) {
+            LambdaLayerVersion lv = layerService.getLayerVersionByArn(arn);
+            // The layer's own region, not the caller's: tasksLocation resolves the bucket from it.
+            String layerRegion = AwsArnUtils.parse(lv.getLayerVersionArn()).region();
+            return Response.ok(buildLayerVersionResponse(lv, layerRegion, uriInfo)).build();
+        }
         String region = regionResolver.resolveRegion(headers);
-        List<LambdaLayerVersion> layers = layerService.listLayers(region);
+        PaginatedResult<LambdaLayerVersion> result = layerService.listLayers(
+                region, compatibleRuntime, compatibleArchitecture, maxItems, marker);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode arr = root.putArray("Layers");
-        for (LambdaLayerVersion lv : layers) {
+        for (LambdaLayerVersion lv : result.items()) {
             ObjectNode layerNode = objectMapper.createObjectNode();
             layerNode.put("LayerName", lv.getLayerName());
             layerNode.put("LayerArn", lv.getLayerArn());
@@ -123,7 +152,17 @@ public class LambdaLayerController {
             }
             arr.add(layerNode);
         }
+        putNextMarker(root, result.nextToken());
         return Response.ok(root).build();
+    }
+
+    /** AWS always emits NextMarker, null on the last page rather than omitting the field. */
+    private static void putNextMarker(ObjectNode root, String nextMarker) {
+        if (nextMarker == null) {
+            root.putNull("NextMarker");
+        } else {
+            root.put("NextMarker", nextMarker);
+        }
     }
 
     private ObjectNode buildLayerVersionResponse(LambdaLayerVersion lv, String region, UriInfo uriInfo) {

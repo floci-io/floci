@@ -12,11 +12,18 @@ PYTHON ?= python3
 
 docs-sync: ## Regenerate the action tables in docs/services from handler source (in place)
 	$(PYTHON) tools/docs/regen_action_docs.py
+	$(PYTHON) tools/docs/regen_cfn_resource_types.py
 
 docs-check: ## CI gate: regenerate and fail if anything is stale, unregistered, or undocumented
 	@$(PYTHON) tools/docs/regen_action_docs.py --strict || { \
 		echo ""; \
 		echo "error: action-table regeneration reported problems (see warnings above)."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/docs/regen_cfn_resource_types.py --strict || { \
+		echo ""; \
+		echo "error: the CloudFormation resource-type table is stale or reported problems."; \
+		echo "       Run 'make docs-sync' and commit the result."; \
 		exit 1; \
 	}
 	@git diff --exit-code -- docs/ || { \

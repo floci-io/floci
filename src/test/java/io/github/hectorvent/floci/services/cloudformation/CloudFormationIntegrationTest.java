@@ -2461,6 +2461,65 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_schedulerScheduleGroup_isActuallyProvisioned() {
+        // github.com/floci-io/floci/issues/2396: AWS::Scheduler::ScheduleGroup fell through to the
+        // generic stub, so the stack reported CREATE_COMPLETE with a fake physical id and the group
+        // never actually existed. GetScheduleGroup used to return ResourceNotFoundException here.
+        // ArnParam pins Fn::GetAtt MyGroup.Arn against the group's actual ARN, so an omission or
+        // rename of the provisioner's Arn attribute fails this test rather than only the direct
+        // GetScheduleGroup check below (Greptile review on PR #2796).
+        String template = """
+            {
+              "Resources": {
+                "MyGroup": {
+                  "Type": "AWS::Scheduler::ScheduleGroup",
+                  "Properties": {
+                    "Name": "group-repro"
+                  }
+                },
+                "ArnParam": {
+                  "Type": "AWS::SSM::Parameter",
+                  "Properties": {
+                    "Name": "/app/schedule-group-arn",
+                    "Type": "String",
+                    "Value": {"Fn::GetAtt": ["MyGroup", "Arn"]}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "SchedulerGroupStack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/schedule-groups/group-repro")
+        .then()
+            .statusCode(200)
+            .body(containsString("group-repro"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {"Name": "/app/schedule-group-arn", "WithDecryption": true}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Value", equalTo("arn:aws:scheduler:us-east-1:000000000000:schedule-group/group-repro"));
+    }
+
+    @Test
     void createStack_multipleUnnamedResources_uniqueNames() {
         // Multiple resources of same type without names get unique auto-generated names
         String template = """
@@ -5064,6 +5123,84 @@ class CloudFormationIntegrationTest {
             .body("item[0].id", equalTo(authorizerId))
             .body("item[0].name", equalTo("MyTokenAuth"))
             .body("item[0].type", equalTo("TOKEN"));
+    }
+
+    // A native AWS::ApiGateway::RestApi's Body is not SAM-only: the same provisioner materializes
+    // it for a hand-written template, so a declared Body must create the resources and methods
+    // its OpenAPI document describes, not sit ignored as it did before.
+    @Test
+    void createStack_withApiGatewayRestApiBody_createsMethodFromOpenApiDocument() {
+        String stackName = "cfn-apigw-restapi-body-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-restapi-body-api",
+                    "Body": {
+                      "openapi": "3.0.1",
+                      "paths": {
+                        "/hello": {
+                          "get": {
+                            "x-amazon-apigateway-integration": { "type": "MOCK" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+
+        String helloResourceId = given()
+        .when()
+            .get("/restapis/" + apiId + "/resources")
+        .then()
+            .statusCode(200)
+            .body("item.path", hasItem("/hello"))
+            .extract()
+            .path("item.find { it.path == '/hello' }.id");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + helloResourceId + "/methods/GET/integration")
+        .then()
+            .statusCode(200)
+            .body("type", equalTo("MOCK"));
     }
 
     // ── Issue #1163: AWS::ApiGateway::Deployment with inline StageName creates the stage ──

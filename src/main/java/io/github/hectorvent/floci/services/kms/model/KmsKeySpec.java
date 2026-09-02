@@ -18,7 +18,7 @@ public enum KmsKeySpec {
     ECC_NIST_P256(KeyType.ECC, Algorithm.ECDSA_SHA_256,"secp256r1"),
     ECC_NIST_P384(KeyType.ECC, Algorithm.ECDSA_SHA_384,"secp384r1"),
     ECC_NIST_P521(KeyType.ECC, Algorithm.ECDSA_SHA_512, "secp521r1"),
-    ECC_NIST_EDWARDS25519(KeyType.ECC, List.of(Algorithm.ED25519_SHA_512, Algorithm.ED25519_PH_SHA_512),"secp521r1"),
+    ECC_NIST_EDWARDS25519(KeyType.ED25519, List.of(Algorithm.ED25519_SHA_512, Algorithm.ED25519_PH_SHA_512)),
     ECC_SECG_P256K1(KeyType.ECC, Algorithm.ECDSA_SHA_256,"secp256k1"),
 
     HMAC_224(KeyType.HMAC, Algorithm.HMAC_SHA_224),
@@ -80,7 +80,7 @@ public enum KmsKeySpec {
         return curveName;
     }
     public enum KeyType {
-        RSA, ECC, SYMMETRIC, HMAC, ML_DSA, SM2
+        RSA, ECC, ED25519, SYMMETRIC, HMAC, ML_DSA, SM2
     }
 
     private static List<Algorithm> getRsaAlgos() {

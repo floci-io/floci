@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -14,7 +16,61 @@ import java.util.UUID;
  * so extracted provisioners produce byte-identical physical ids and resolved values.
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
-                               String accountId, String stackName) {
+                               String accountId, String stackName, String priorPhysicalId) {
+
+    /** A context for a first-time create, with no prior physical id. */
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName) {
+        this(engine, region, accountId, stackName, null);
+    }
+
+    /**
+     * Whether this logical resource already had a physical id from an earlier successful provision,
+     * i.e. {@code provision} is running as the update path rather than the create path.
+     *
+     * <p>Captured when the context is built rather than read from the {@code StackResource},
+     * because {@code provision} assigns the new physical id onto that resource as it works: a
+     * resource-derived check flips from false to true mid-method and silently changes meaning.
+     *
+     * <p>Two things this does not mean. It is not "the stack is being updated" (a resource added by
+     * an UpdateStack reads false, correctly). And it is not "AWS would update rather than replace"
+     * — a replacing update still arrives here with the old physical id, so a provisioner treating
+     * this as "reuse the existing entity" must still reject or replace on createOnly properties.
+     */
+    public boolean isUpdate() {
+        return priorPhysicalId != null && !priorPhysicalId.isBlank();
+    }
+
+    /**
+     * Resolves a CloudFormation {@code [{Key, Value}]} tag list to a map, preserving template
+     * order. The whole node is resolved first so an {@code Fn::If} wrapping the list works, not
+     * just intrinsics inside each entry. Entries whose key resolves blank are skipped and a
+     * missing value becomes {@code ""}; an absent or non-array property yields an empty map, never
+     * null.
+     *
+     * <p>Deliberately does not validate. Callers needing AWS's tag rules (the 50-tag cap, the
+     * reserved {@code aws:} prefix) keep their own validating parse, and callers using null to mean
+     * "the template said nothing, leave stored tags alone" must keep that distinction themselves.
+     */
+    public Map<String, String> resolveTags(JsonNode props, String name) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (props == null || !props.has(name)) {
+            return tags;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(name));
+        if (resolved == null || !resolved.isArray()) {
+            return tags;
+        }
+        for (JsonNode tag : resolved) {
+            String key = engine.resolve(tag.path("Key"));
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            String value = engine.resolve(tag.path("Value"));
+            tags.put(key, value == null ? "" : value);
+        }
+        return tags;
+    }
 
     /** Resolves an optional property through the engine, or null when absent/explicitly null. */
     public String resolveOptional(JsonNode props, String name) {

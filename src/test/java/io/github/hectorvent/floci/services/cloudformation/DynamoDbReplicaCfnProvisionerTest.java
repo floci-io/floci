@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,11 +30,10 @@ class DynamoDbReplicaCfnProvisionerTest {
     @BeforeEach
     void setUp() {
         dynamoDbService = mock(DynamoDbService.class);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, dynamoDbService, null, null, null, null, null, null,
-                null, null, null, null, null, null, mapper, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null,
-                new CloudFormationResourceRegistry(List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .dynamoDb(dynamoDbService)
+                .objectMapper(mapper)
+                .build();
     }
 
     @Test

@@ -547,8 +547,10 @@ class DynamoDbConformanceChangesTest {
     void queryWithQueryFilter() {
         QueryResponse resp = ddb.query(QueryRequest.builder()
                 .tableName(TABLE)
-                .keyConditionExpression("pk = :pk")
-                .expressionAttributeValues(Map.of(":pk", av("p1")))
+                .keyConditions(Map.of("pk", Condition.builder()
+                        .comparisonOperator(ComparisonOperator.EQ)
+                        .attributeValueList(av("p1"))
+                        .build()))
                 .queryFilter(Map.of("name", Condition.builder()
                         .comparisonOperator(ComparisonOperator.EQ)
                         .attributeValueList(av("Item-0"))

@@ -7,7 +7,11 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Column;
+import io.github.hectorvent.floci.services.glue.model.Crawler;
+import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Job;
+import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
@@ -62,6 +66,8 @@ public class GlueService {
     private final StorageBackend<String, Partition> partitionStore;
     private final StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore;
     private final StorageBackend<String, UserDefinedFunction> functionStore;
+    private final StorageBackend<String, Job> jobStore;
+    private final StorageBackend<String, Crawler> crawlerStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -79,6 +85,8 @@ public class GlueService {
         this.partitionColumnStatisticsStore = storageFactory.create(
                 "glue", "partition_column_statistics.json", new TypeReference<>() {});
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
+        this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
+        this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -91,6 +99,8 @@ public class GlueService {
                 StorageBackend<String, Partition> partitionStore,
                 StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore,
                 StorageBackend<String, UserDefinedFunction> functionStore,
+                StorageBackend<String, Job> jobStore,
+                StorageBackend<String, Crawler> crawlerStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService) {
@@ -101,6 +111,8 @@ public class GlueService {
         this.partitionStore = partitionStore;
         this.partitionColumnStatisticsStore = partitionColumnStatisticsStore;
         this.functionStore = functionStore;
+        this.jobStore = jobStore;
+        this.crawlerStore = crawlerStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -840,6 +852,14 @@ public class GlueService {
         return regionResolver.buildArn("glue", region, "database/" + databaseName);
     }
 
+    private String jobArn(String region, String jobName) {
+        return regionResolver.buildArn("glue", region, "job/" + jobName);
+    }
+
+    private String crawlerArn(String region, String crawlerName) {
+        return regionResolver.buildArn("glue", region, "crawler/" + crawlerName);
+    }
+
     private static Pattern compileFunctionPattern(String pattern) {
         if (pattern == null) {
             return Pattern.compile(".*");
@@ -1004,4 +1024,312 @@ public class GlueService {
         return source != null ? new LinkedHashMap<>(source) : null;
     }
 
+    private void validateRequired(String value, String fieldName) {
+        if (value == null || value.isBlank()) {
+            throw new AwsException("InvalidInputException", fieldName + " is required.", 400);
+        }
+    }
+
+    private void validateRequired(Object value, String fieldName) {
+        if (value == null) {
+            throw new AwsException("InvalidInputException", fieldName + " is required.", 400);
+        }
+    }
+
+    public void createJob(Job job) {
+        createJob(job, null, regionResolver.getDefaultRegion());
+    }
+
+    public void createJob(Job job, Map<String, String> tags, String region) {
+        validateRequired(job.getName(), "Name");
+        validateRequired(job.getRole(), "Role");
+        validateRequired(job.getCommand(), "Command");
+        
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String name = job.getName();
+        if (jobStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Job " + name + " already exists.", 400);
+        }
+        
+        if (job.getGlueVersion() == null) {
+            job.setGlueVersion("5.1");
+        }
+        if (job.getTimeout() == null) {
+            try {
+                double version = Double.parseDouble(job.getGlueVersion());
+                job.setTimeout(version >= 5.0 ? 480 : 2880);
+            } catch (NumberFormatException e) {
+                job.setTimeout(2880);
+            }
+        }
+        
+        Instant now = Instant.now();
+        job.setCreatedOn(now);
+        job.setLastModifiedOn(now);
+        jobStore.put(name, job);
+        if (tags != null && !tags.isEmpty()) {
+            resourceGroupsTaggingService.tagResources(List.of(jobArn(region, name)), tags, region);
+        }
+        LOG.infov("Created Glue Job: {0}", name);
+    }
+
+    public Job getJob(String name) {
+        validateRequired(name, "JobName");
+        return jobStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
+    }
+
+    public List<Job> getJobs() {
+        return jobStore.scan(k -> true);
+    }
+
+    public Page<Job> getJobs(Integer maxResults, String nextToken) {
+        List<Job> all = jobStore.scan(k -> true);
+        all.sort(Comparator.comparing(Job::getName));
+        return paginate(all, maxResults, nextToken);
+    }
+
+    public void updateJob(String name, JobUpdate update) {
+        validateRequired(name, "JobName");
+        validateRequired(update, "JobUpdate");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String normalizedName = name;
+        Job existing = jobStore.get(normalizedName)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
+
+        // UpdateJob replaces unspecified configuration with nulls (full replacement) rather than merging.
+        // This is deliberate and matches AWS behavior. We only copy fields that the user cannot specify.
+        Job updated = new Job();
+        updated.setName(existing.getName());
+        updated.setCreatedOn(existing.getCreatedOn());
+        updated.setProfileName(existing.getProfileName());
+        updated.setLastModifiedOn(Instant.now());
+
+        updated.setAllocatedCapacity(update.getAllocatedCapacity());
+        updated.setCodeGenConfigurationNodes(update.getCodeGenConfigurationNodes());
+        updated.setCommand(update.getCommand());
+        updated.setConnections(update.getConnections());
+        updated.setDefaultArguments(update.getDefaultArguments());
+        updated.setDescription(update.getDescription());
+        updated.setExecutionClass(update.getExecutionClass());
+        updated.setExecutionProperty(update.getExecutionProperty());
+        updated.setGlueVersion(update.getGlueVersion());
+        updated.setJobMode(update.getJobMode());
+        updated.setJobRunQueuingEnabled(update.getJobRunQueuingEnabled());
+        updated.setLogUri(update.getLogUri());
+        updated.setMaintenanceWindow(update.getMaintenanceWindow());
+        updated.setMaxCapacity(update.getMaxCapacity());
+        updated.setMaxRetries(update.getMaxRetries());
+        updated.setNonOverridableArguments(update.getNonOverridableArguments());
+        updated.setNotificationProperty(update.getNotificationProperty());
+        updated.setNumberOfWorkers(update.getNumberOfWorkers());
+        updated.setRole(update.getRole());
+        updated.setSecurityConfiguration(update.getSecurityConfiguration());
+        updated.setSourceControlDetails(update.getSourceControlDetails());
+        updated.setTimeout(update.getTimeout());
+        updated.setWorkerType(update.getWorkerType());
+
+        jobStore.put(normalizedName, updated);
+        LOG.infov("Updated Glue Job: {0}", normalizedName);
+    }
+
+    public void deleteJob(String name, String region) {
+        validateRequired(name, "JobName");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String normalizedName = name;
+        if (jobStore.get(normalizedName).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400);
+        }
+        jobStore.delete(normalizedName);
+        resourceGroupsTaggingService.deleteResources(List.of(jobArn(region, normalizedName)), region);
+        LOG.infov("Deleted Glue Job: {0}", name);
+    }
+
+    public void createCrawler(Crawler crawler) {
+        createCrawler(crawler, null, regionResolver.getDefaultRegion());
+    }
+
+    public void createCrawler(Crawler crawler, Map<String, String> tags, String region) {
+        validateRequired(crawler.getName(), "Name");
+        validateRequired(crawler.getRole(), "Role");
+        validateRequired(crawler.getTargets(), "Targets");
+        
+        CrawlerTargets t = crawler.getTargets();
+        boolean hasTargets = (t.getS3Targets() != null && !t.getS3Targets().isEmpty()) ||
+                             (t.getJdbcTargets() != null && !t.getJdbcTargets().isEmpty()) ||
+                             (t.getDynamoDBTargets() != null && !t.getDynamoDBTargets().isEmpty()) ||
+                             (t.getCatalogTargets() != null && !t.getCatalogTargets().isEmpty()) ||
+                             (t.getDeltaTargets() != null && !t.getDeltaTargets().isEmpty()) ||
+                             (t.getIcebergTargets() != null && !t.getIcebergTargets().isEmpty()) ||
+                             (t.getMongoDBTargets() != null && !t.getMongoDBTargets().isEmpty()) ||
+                             (t.getHudiTargets() != null && !t.getHudiTargets().isEmpty());
+        if (!hasTargets) {
+            throw new AwsException("InvalidInputException", "At least one crawl target must be specified.", 400);
+        }
+
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String name = crawler.getName();
+        if (crawlerStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Crawler " + name + " already exists.", 400);
+        }
+        Instant now = Instant.now();
+        crawler.setCreationTime(now);
+        crawler.setLastUpdated(now);
+        crawler.setState("READY");
+        crawler.setVersion(1L);
+        crawlerStore.put(name, crawler);
+        if (tags != null && !tags.isEmpty()) {
+            resourceGroupsTaggingService.tagResources(List.of(crawlerArn(region, name)), tags, region);
+        }
+        LOG.infov("Created Glue Crawler: {0}", name);
+    }
+
+    public Crawler getCrawler(String name) {
+        validateRequired(name, "Name");
+        return crawlerStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400));
+    }
+
+    public List<Crawler> getCrawlers() {
+        return crawlerStore.scan(k -> true);
+    }
+
+    public Page<Crawler> getCrawlers(Integer maxResults, String nextToken) {
+        List<Crawler> all = crawlerStore.scan(k -> true);
+        all.sort(Comparator.comparing(Crawler::getName));
+        return paginate(all, maxResults, nextToken);
+    }
+
+    public void updateCrawler(Crawler update) {
+        validateRequired(update.getName(), "Name");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String name = update.getName();
+        Crawler existing = crawlerStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + update.getName() + " not found.", 400));
+
+        Crawler updated = new Crawler();
+        updated.setName(existing.getName());
+        updated.setCreationTime(existing.getCreationTime());
+        updated.setLastUpdated(Instant.now());
+        updated.setState(existing.getState());
+        updated.setVersion((existing.getVersion() == null ? 1L : existing.getVersion()) + 1L);
+
+        updated.setClassifiers(update.getClassifiers() != null ? update.getClassifiers() : existing.getClassifiers());
+        updated.setConfiguration(update.getConfiguration() != null ? update.getConfiguration() : existing.getConfiguration());
+        updated.setCrawlerSecurityConfiguration(update.getCrawlerSecurityConfiguration() != null ? update.getCrawlerSecurityConfiguration() : existing.getCrawlerSecurityConfiguration());
+        updated.setDatabaseName(update.getDatabaseName() != null ? update.getDatabaseName() : existing.getDatabaseName());
+        updated.setDescription(update.getDescription() != null ? update.getDescription() : existing.getDescription());
+        updated.setLakeFormationConfiguration(update.getLakeFormationConfiguration() != null ? update.getLakeFormationConfiguration() : existing.getLakeFormationConfiguration());
+        updated.setLineageConfiguration(update.getLineageConfiguration() != null ? update.getLineageConfiguration() : existing.getLineageConfiguration());
+        updated.setRecrawlPolicy(update.getRecrawlPolicy() != null ? update.getRecrawlPolicy() : existing.getRecrawlPolicy());
+        updated.setRole(update.getRole() != null ? update.getRole() : existing.getRole());
+        updated.setSchedule(update.getSchedule() != null ? update.getSchedule() : existing.getSchedule());
+        updated.setSchemaChangePolicy(update.getSchemaChangePolicy() != null ? update.getSchemaChangePolicy() : existing.getSchemaChangePolicy());
+        updated.setTablePrefix(update.getTablePrefix() != null ? update.getTablePrefix() : existing.getTablePrefix());
+        updated.setTargets(update.getTargets() != null ? update.getTargets() : existing.getTargets());
+
+        crawlerStore.put(name, updated);
+        LOG.infov("Updated Glue Crawler: {0}", name);
+    }
+
+    public void deleteCrawler(String name, String region) {
+        validateRequired(name, "Name");
+        // Jobs and crawlers skip normalizeName because AWS preserves their case
+        String normalizedName = name;
+        if (crawlerStore.get(normalizedName).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400);
+        }
+        crawlerStore.delete(normalizedName);
+        resourceGroupsTaggingService.deleteResources(List.of(crawlerArn(region, normalizedName)), region);
+        LOG.infov("Deleted Glue Crawler: {0}", name);
+    }
+
+    public void tagResource(String arn, Map<String, String> tags, String region) {
+        validateArn(arn);
+        if (arn.contains(":registry/") || arn.contains(":schema/")) {
+            schemaRegistryService.tagResource(arn, tags);
+        } else {
+            validateResourceExists(arn);
+            resourceGroupsTaggingService.tagResources(List.of(arn), tags, region);
+        }
+    }
+
+    public void untagResource(String arn, List<String> tagKeys, String region) {
+        validateArn(arn);
+        if (arn.contains(":registry/") || arn.contains(":schema/")) {
+            schemaRegistryService.untagResource(arn, tagKeys);
+        } else {
+            validateResourceExists(arn);
+            resourceGroupsTaggingService.untagResources(List.of(arn), tagKeys, region);
+        }
+    }
+
+    public Map<String, String> getTags(String arn, String region) {
+        validateArn(arn);
+        if (arn.contains(":registry/") || arn.contains(":schema/")) {
+            return schemaRegistryService.getTags(arn);
+        } else {
+            validateResourceExists(arn);
+            return resourceGroupsTaggingService.getTagsForResource(region, arn);
+        }
+    }
+
+    private void validateArn(String arn) {
+        if (arn == null || !arn.startsWith("arn:")) {
+            throw new AwsException("InvalidInputException", "Invalid ARN", 400);
+        }
+    }
+
+    private void validateResourceExists(String arn) {
+        String[] parts = arn.split(":");
+        if (parts.length >= 6) {
+            String resource = parts[5];
+            if (resource.startsWith("job/")) {
+                getJob(resource.substring(4));
+                return;
+            } else if (resource.startsWith("crawler/")) {
+                getCrawler(resource.substring(8));
+                return;
+            } else if (resource.startsWith("database/")) {
+                getDatabase(resource.substring(9));
+                return;
+            } else if (resource.startsWith("table/")) {
+                String[] tableParts = resource.substring(6).split("/");
+                if (tableParts.length >= 2) {
+                    getTable(tableParts[0], tableParts[1]);
+                    return;
+                }
+            } else if (resource.startsWith("userDefinedFunction/")) {
+                String[] funcParts = resource.substring(20).split("/");
+                if (funcParts.length >= 2) {
+                    getUserDefinedFunction(funcParts[0], funcParts[1]);
+                    return;
+                }
+            }
+        }
+        throw new AwsException("EntityNotFoundException", "Resource " + arn + " not found or not supported.", 400);
+    }
+
+    public record Page<T>(List<T> items, String nextToken) {}
+
+    private <T> Page<T> paginate(List<T> all, Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 1000", 400);
+        }
+        int limit = maxResults == null ? 100 : maxResults;
+        int start = 0;
+        if (nextToken != null && !nextToken.isBlank()) {
+            try {
+                start = Integer.parseInt(nextToken);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidInputException", "Invalid NextToken", 400);
+            }
+        }
+        if (start < 0 || start > all.size()) {
+            throw new AwsException("InvalidInputException", "Invalid NextToken", 400);
+        }
+        int end = Math.min(start + limit, all.size());
+        String newToken = end < all.size() ? String.valueOf(end) : null;
+        return new Page<>(List.copyOf(all.subList(start, end)), newToken);
+    }
 }

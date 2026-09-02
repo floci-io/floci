@@ -58,6 +58,55 @@ class KinesisAnalyticsV2ServiceTest {
     }
 
     @Test
+    void createApplicationRejectsNamesOutsideAwsCharsetAndLength() {
+        // AWS ApplicationName Pattern: [a-zA-Z0-9_.-]+, 1-128 chars. Rejecting this at the API
+        // boundary (matching real AWS) is also what keeps a name containing '%', '"', '\', or '$'
+        // from ever reaching FlinkContainerManager's generated log4j2 CloudWatch-log-format pattern,
+        // where those characters would otherwise be a log4j2 conversion-specifier/Lookup or JSON
+        // injection risk.
+        for (String badName : List.of("has spaces", "quote\"here", "percent%here", "dollar${x}",
+                "back\\slash", "a".repeat(129))) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> service.createApplication(badName, "FLINK-1_18", ROLE, null, null));
+            assertEquals("InvalidArgumentException", ex.getErrorCode());
+        }
+    }
+
+    @Test
+    void startApplicationRejectsLegacyStatePersistedBeforeNameValidationExisted() {
+        // Simulates an application created by a floci build older than
+        // createApplicationRejectsNamesOutsideAwsCharsetAndLength's check, by writing directly to
+        // storage (bypassing createApplication). startApplication must still reject it rather than
+        // silently generating a CloudWatch-log applicationARN that either drops the '$' (mismatching
+        // the real ApplicationARN) or, if some future change stopped dropping it, resolves it as a
+        // log4j2 Lookup.
+        AccountAwareStorageBackend<FlinkApplication> store =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        Mockito.doReturn(store).when(storageFactory)
+                .create(Mockito.anyString(), Mockito.anyString(), Mockito.any());
+
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        var kaConfig = Mockito.mock(EmulatorConfig.KinesisAnalyticsServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.kinesisAnalytics()).thenReturn(kaConfig);
+        when(kaConfig.mock()).thenReturn(true);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+
+        KinesisAnalyticsV2Service legacyState = new KinesisAnalyticsV2Service(
+                storageFactory, config, regionResolver, Mockito.mock(FlinkContainerManager.class));
+        FlinkApplication legacyApp = new FlinkApplication("dollar${x}",
+                "arn:aws:kinesisanalytics:us-east-1:000000000000:application/dollar${x}",
+                "FLINK-1_18", ROLE, "STREAMING");
+        store.putForAccount("000000000000", "dollar${x}", legacyApp);
+
+        AwsException ex = assertThrows(AwsException.class, () -> legacyState.startApplication("dollar${x}"));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
     void createApplicationRequiresRuntimeEnvironment() {
         assertThrows(AwsException.class,
                 () -> service.createApplication("demo", null, ROLE, null, null));

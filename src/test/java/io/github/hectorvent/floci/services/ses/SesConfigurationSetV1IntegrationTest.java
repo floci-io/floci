@@ -8,6 +8,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 
 /**
  * Integration tests for SES V1 Query-protocol ConfigurationSet CRUD.
@@ -251,5 +252,108 @@ class SesConfigurationSetV1IntegrationTest {
             .body(containsString("<Code>ValidationError</Code>"))
             .body(containsString("deliveryOptions.tlsPolicy"))
             .body(containsString("[Optional, Require]"));
+    }
+
+    /**
+     * The write path already stored the TLS policy — v2 {@code GetConfigurationSet} returned it —
+     * but the v1 projection never read it back, so the Terraform provider re-added the block on
+     * every plan. Order 11 above sets a policy and never describes it, which is how the gap
+     * survived; this covers the read.
+     */
+    @Test
+    @Order(14)
+    void describeConfigurationSetReturnsDeliveryOptions() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSet")
+            .formParam("ConfigurationSet.Name", "v1-cs-delivery-readback")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Never set: AWS omits the member even when it is explicitly requested.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DescribeConfigurationSet")
+            .formParam("ConfigurationSetName", "v1-cs-delivery-readback")
+            .formParam("ConfigurationSetAttributeNames.member.1", "deliveryOptions")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<DeliveryOptions>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "PutConfigurationSetDeliveryOptions")
+            .formParam("ConfigurationSetName", "v1-cs-delivery-readback")
+            .formParam("DeliveryOptions.TlsPolicy", "Require")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // V1 spells it Require, not the V2 REQUIRE that is stored internally.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DescribeConfigurationSet")
+            .formParam("ConfigurationSetName", "v1-cs-delivery-readback")
+            .formParam("ConfigurationSetAttributeNames.member.1", "deliveryOptions")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<DeliveryOptions>"))
+            .body(containsString("<TlsPolicy>Require</TlsPolicy>"));
+
+        // Gated on the attribute name: without it the member stays out, as AWS does.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DescribeConfigurationSet")
+            .formParam("ConfigurationSetName", "v1-cs-delivery-readback")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<DeliveryOptions>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "PutConfigurationSetDeliveryOptions")
+            .formParam("ConfigurationSetName", "v1-cs-delivery-readback")
+            .formParam("DeliveryOptions.TlsPolicy", "Optional")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DescribeConfigurationSet")
+            .formParam("ConfigurationSetName", "v1-cs-delivery-readback")
+            .formParam("ConfigurationSetAttributeNames.member.1", "deliveryOptions")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<TlsPolicy>Optional</TlsPolicy>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DeleteConfigurationSet")
+            .formParam("ConfigurationSetName", "v1-cs-delivery-readback")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }

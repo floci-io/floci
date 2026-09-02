@@ -170,9 +170,17 @@ public class FlinkContainerManager {
             jmSpec.withExposedPort(JOBMANAGER_REST_PORT);
         }
 
+        ContainerSpec jmBuiltSpec = jmSpec.build();
         ContainerInfo jm;
         try {
-            jm = lifecycleManager.createAndStart(jmSpec.build());
+            String jmContainerId = lifecycleManager.create(jmBuiltSpec);
+            // Written before start (not via the post-start copyFileIntoContainer used for
+            // application_properties.json below) because log4j2 reads its config file at JVM
+            // startup -- copying it in after the process is already running would be too late for
+            // anything the JobManager logs from its own boot onward.
+            copyFileIntoContainer(jmContainerId, "/opt/flink/conf", "log4j-console.properties",
+                    msfStyleLog4j2Config(app), true);
+            jm = lifecycleManager.startCreated(jmContainerId, jmBuiltSpec);
         } catch (RuntimeException e) {
             lifecycleManager.removeIfExists(jmName);
             throw e;
@@ -202,7 +210,10 @@ public class FlinkContainerManager {
                             regionResolver.getDefaultRegion()))
                     .build();
             try {
-                ContainerInfo tm = lifecycleManager.createAndStart(tmSpec);
+                String tmContainerId = lifecycleManager.create(tmSpec);
+                copyFileIntoContainer(tmContainerId, "/opt/flink/conf", "log4j-console.properties",
+                        msfStyleLog4j2Config(app), true);
+                ContainerInfo tm = lifecycleManager.startCreated(tmContainerId, tmSpec);
                 app.setTaskManagerContainerId(tm.containerId());
                 taskManagerIds.put(app.getApplicationName(), tm.containerId());
             } catch (RuntimeException e) {
@@ -249,7 +260,88 @@ public class FlinkContainerManager {
         }
     }
 
+    /** Builds a log4j2 {@code log4j-console.properties} that makes the JobManager/TaskManager emit
+     *  one JSON object per log line, matching the schema real Managed Service for Apache Flink
+     *  writes to CloudWatch Logs (applicationARN/applicationVersionId/locationInformation/logger/
+     *  message/messageSchemaVersion/messageType/threadName/throwableInformation) -- so a JAR relying
+     *  on that shape for its own log-based tests sees the same thing here as on real MSF. Overwrites
+     *  the stock image's default (non-JSON) config entirely; not re-applied on {@link #redeployCode},
+     *  so applicationVersionId in already-emitted log lines does not advance across an in-place code
+     *  update (the JobManager/TaskManager JVMs, and therefore log4j2, are not restarted for that --
+     *  matching real MSF, which also keeps the same processes running across an UpdateApplication).
+     *  Package-private (not private) so FlinkContainerManagerTest can assert on the pattern shape
+     *  directly. */
+    byte[] msfStyleLog4j2Config(FlinkApplication app) {
+        String pattern = "{"
+                + "\"applicationARN\":\"%enc{"
+                + literalForLog4j2Pattern(String.valueOf(app.getApplicationArn())) + "}{JSON}\","
+                + "\"applicationVersionId\":\"%enc{"
+                + literalForLog4j2Pattern(String.valueOf(app.getApplicationVersionId())) + "}{JSON}\","
+                + "\"locationInformation\":\"%C.%M(%F:%L)\","
+                + "\"logger\":\"%logger\","
+                + "\"message\":\"%enc{%message}{JSON}\","
+                + "\"messageSchemaVersion\":\"1\","
+                + "\"messageType\":\"%level\","
+                + "\"threadName\":\"%enc{%thread}{JSON}\","
+                + "\"throwableInformation\":\"%enc{%ex}{JSON}\""
+                + "}%n";
+        String properties = "rootLogger.level = INFO\n"
+                + "rootLogger.appenderRef.console.ref = ConsoleAppender\n"
+                + "appender.console.type = Console\n"
+                + "appender.console.name = ConsoleAppender\n"
+                + "appender.console.layout.type = PatternLayout\n"
+                + "appender.console.layout.pattern = " + pattern + "\n";
+        return properties.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** Escapes an application-supplied value (e.g. the ARN, built from the caller's ApplicationName --
+     *  {@link io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsV2Service} restricts
+     *  that to AWS's own {@code [a-zA-Z0-9_.-]} charset, but this stays defensive in case some other
+     *  caller ever feeds it something else) so it can be embedded as literal text inside a log4j2
+     *  {@code PatternLayout} pattern written to a {@code .properties} file: doubles {@code %} so
+     *  log4j2's pattern parser can't interpret it as the start of a conversion specifier, drops
+     *  {@code $} so it can't start a {@code ${...}} Lookup (log4j2 resolves those against config
+     *  values -- including this pattern -- at config-load time, so an unescaped one could leak an
+     *  environment variable or system property into every log line; doubling it like {@code %} only
+     *  defers the lookup to render time rather than neutralizing it, so it isn't a safe escape here),
+     *  then backslash-escapes control characters so the value survives
+     *  {@code java.util.Properties}-style parsing of the config file intact. The surrounding
+     *  {@code %enc{...}{JSON}} wrapper (already used for %message/%thread/%ex above) then JSON-escapes
+     *  the resulting literal at log time, so quotes/backslashes in the original value can't break the
+     *  emitted JSON. */
+    private static String literalForLog4j2Pattern(String value) {
+        String percentEscaped = value.replace("%", "%%");
+        StringBuilder escaped = new StringBuilder(percentEscaped.length());
+        for (int i = 0; i < percentEscaped.length(); i++) {
+            char c = percentEscaped.charAt(i);
+            switch (c) {
+                case '\\' -> escaped.append("\\\\");
+                case '$' -> { /* dropped: see method Javadoc -- can't be escaped to a safe literal */ }
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        escaped.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        escaped.append(c);
+                    }
+                }
+            }
+        }
+        return escaped.toString();
+    }
+
     private void copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content) {
+        copyFileIntoContainer(containerId, remoteDir, relativePath, content, false);
+    }
+
+    /** @param required when {@code true}, a failed copy is rethrown instead of only logged, so a
+     *  caller for whom the file is not optional (e.g. the log4j2 config that this cluster's whole
+     *  CloudWatch-log-shape guarantee depends on) fails the start instead of silently running with
+     *  the stock config. */
+    private void copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content,
+            boolean required) {
         if (containerId == null) {
             return;
         }
@@ -260,6 +352,10 @@ public class FlinkContainerManager {
                     .withRemotePath(remoteDir)
                     .exec();
         } catch (Exception e) {
+            if (required) {
+                throw new IllegalStateException(
+                        "Could not copy " + relativePath + " into Flink container " + containerId, e);
+            }
             LOG.warnv("Could not copy {0} into Flink container {1}: {2}", relativePath, containerId, e.getMessage());
         }
     }

@@ -108,7 +108,12 @@ public class Ec2NetworkAclCfnProvisioner implements CfnResourceProvisioner {
                 // the same key is an update. replace=false would raise NetworkAclEntryAlreadyExists
                 // on every stack update.
                 from, to, true);
-        r.setPhysicalId(aclId + "|" + ruleNumber + "|" + (egress ? "egress" : "ingress"));
+        String entryId = aclId + "|" + ruleNumber + "|" + (egress ? "egress" : "ingress");
+        r.setPhysicalId(entryId);
+        // Id is the type's primaryIdentifier and its only readOnlyProperty, so Fn::GetAtt Id must
+        // agree with what Ref returns. Without it the reference resolves to the literal
+        // "LogicalId.Id", which reads as a successful lookup.
+        r.getAttributes().put("Id", entryId);
     }
 
     private void provisionSubnetNetworkAclAssociation(StackResource r, JsonNode props, ProvisionContext ctx) {

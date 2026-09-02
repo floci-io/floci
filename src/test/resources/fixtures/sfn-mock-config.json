@@ -11,6 +11,11 @@
       "TestCases": {
         "MockedApiRealDdb": { "Call API": "Ok200" }
       }
+    },
+    "sfn-mock-skip-test": {
+      "TestCases": {
+        "EmptyUnusedResponse": { "Skip": "Empty", "Run": "Ok200" }
+      }
     }
   },
   "MockedResponses": {
@@ -23,6 +28,7 @@
     "ThrowThenOk": {
       "0": { "Throw": { "Error": "ApiGateway.429", "Cause": "Too many requests" } },
       "1-2": { "Return": { "StatusCode": 200, "ResponseBody": { "retried": true } } }
-    }
+    },
+    "Empty": {}
   }
 }

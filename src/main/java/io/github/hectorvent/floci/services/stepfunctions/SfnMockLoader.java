@@ -121,14 +121,15 @@ public class SfnMockLoader {
         return root;
     }
 
+    /**
+     * An entry with no attempts stays empty instead of being rejected. Step Functions Local
+     * treats it as a lookup that finds nothing, so the execution starts and fails with
+     * {@code States.Runtime} only if the state that names it is entered.
+     */
     private List<MockedResponseStep> parseSteps(String responseKey, JsonNode responseNode) {
         var steps = new ArrayList<MockedResponseStep>();
         responseNode.fields().forEachRemaining(
                 entry -> steps.add(parseStep(responseKey, entry.getKey(), entry.getValue())));
-        if (steps.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "Mocked response '" + responseKey + "' must define at least one attempt entry", 400);
-        }
         steps.sort(Comparator.comparingInt(MockedResponseStep::fromAttempt));
         return List.copyOf(steps);
     }

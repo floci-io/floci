@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -41,7 +42,11 @@ class CloudWatchMetricsJsonHandlerTest {
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, "000000000000")
         );
-        handler = new CloudWatchMetricsJsonHandler(service, MAPPER);
+        CloudWatchDashboardsService dashboardsService = new CloudWatchDashboardsService(
+                new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000")
+        );
+        handler = new CloudWatchMetricsJsonHandler(service, dashboardsService, MAPPER);
     }
 
     /**

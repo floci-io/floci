@@ -271,11 +271,11 @@ monolith being dismantled; new types go in per-service provisioners under
 
 1. Add the type to the existing `<Service>CfnProvisioner`, or create one:
    `@ApplicationScoped`, injecting only the service it wraps. CDI discovery via
-   `CloudFormationResourceRegistry` handles registration — no manual wiring, but a
+   `CloudFormationResourceRegistry` handles registration: no manual wiring, but a
    missing `@ApplicationScoped` silently means the type is never provisioned.
 2. `resourceTypes()` lists the `AWS::*` types; `provision(resource, props, ctx)`
    does the work, switching on `resource.getResourceType()` when it serves several.
-3. Set **both** reference mechanisms — they are separate:
+3. Set **both** reference mechanisms. They are separate:
    - `resource.setPhysicalId(...)` backs `Ref`
    - `resource.getAttributes().put(...)` backs `Fn::GetAtt`, one entry per attribute
    Omitting an attribute does not fail; `Fn::GetAtt` resolves to the literal
@@ -283,17 +283,36 @@ monolith being dismantled; new types go in per-service provisioners under
    `local/aws/cfn-resource-schemas/us-east-1/` (`readOnlyProperties`), and validate
    `required` from the same file.
 4. **`provision` serves create *and* update.** On `UpdateStack` it is re-invoked with
-   the prior physical id and attributes already populated on the resource. Branch on
-   that instead of creating unconditionally.
-5. Override `delete(...)` when the type has a backing delete; tolerate already-deleted.
-6. Tests: focused unit test mocking one service (`SqsCfnProvisionerTest` is the
+   the prior physical id and attributes already populated on the resource. Branch with
+   `ctx.isUpdate()` / `ctx.priorPhysicalId()`, not by reading the id off the resource:
+   `provision` assigns the new id as it runs, so a resource-derived check flips
+   mid-method.
+5. Override `delete(...)` when the type has a backing delete; tolerate already-deleted
+   via `CfnDeletes.safeDelete`, passing the specific "already gone" error codes. Never
+   a catch-all: a real failure such as `BucketNotEmpty` must propagate so the stack
+   reports `DELETE_FAILED`. When the delete needs a create-time attribute rather than
+   just the physical id, override `delete(StackResource, String)`.
+6. **Register in `src/test/resources/cloudformation/supported-resource-types.tsv`**
+   (`type<TAB>Owner`). `CfnResourceInventoryTest` diffs that file against the
+   CDI-resolved registry, so it also catches a missing `@ApplicationScoped`.
+7. **Add the provisioner to `CfnProvisionerFixture.inferredProvisioners()`** when it
+   takes a single service, or a fixture test naming that service silently falls through
+   to the stub arm.
+8. Tests: focused unit test mocking one service (`SqsCfnProvisioner`'s test is the
    pattern) plus an integration test asserting the **exact `Fn::GetAtt` keys**. An
    unmapped type is stubbed as `CREATE_COMPLETE` with a fake ARN, so asserting status
-   alone cannot detect a type that was never wired.
-7. Update the resource-type table in `docs/services/cloudformation.md`.
+   alone cannot detect a type that was never wired. Note the engine's constructor is
+   package-private, so tests in `provisioners/` mock it.
+9. Run `make docs-sync` and commit the result. The resource-type table in
+   `docs/services/cloudformation.md` is **generated** from the step-6 inventory; hand
+   edits fail `docs-check`. Labels, ordering and notes live in
+   `tools/docs/cfn_resource_types.yaml`.
+10. A schema `readOnlyProperties` entry you cannot set goes in
+    `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with a reason;
+    `CfnSchemaCoverageTest` requires every unset attribute to be fixed or recorded.
 
 References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
-(update-in-place and replacement).
+(update-in-place and replacement), `LogsCfnProvisioner` (reconcile-vs-replace update).
 
 ---
 
@@ -308,6 +327,10 @@ References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
 - Use modern Java features only when they improve clarity
 
 ---
+
+## Documentation Style
+
+- No em-dashes anywhere, in any content. Use colons, commas, or periods.
 
 ## Logging
 
@@ -383,6 +406,11 @@ Treat release workflows as critical infrastructure.
   per-service provisioner
 - Setting a CloudFormation resource's physical id but not its `Fn::GetAtt`
   attributes (they are two separate mechanisms, and the miss is silent)
+- Hand-editing the resource-type table in `docs/services/cloudformation.md`, which is
+  generated, run `make docs-sync` instead
+- Adding a CloudFormation provisioner without a row in
+  `supported-resource-types.tsv` or an entry in `CfnProvisionerFixture`, either of
+  which leaves a type quietly served by the stub arm
 
 ---
 

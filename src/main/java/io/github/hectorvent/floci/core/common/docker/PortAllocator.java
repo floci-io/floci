@@ -1,10 +1,16 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerPort;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
 
@@ -22,6 +28,22 @@ public class PortAllocator {
     // Prevents TOCTOU races when multiple containers are launched concurrently.
     private final Set<Integer> reserved = new ConcurrentSkipListSet<>();
 
+    // Nullable: the no-arg constructor below (used throughout this class's own
+    // test suite, and by any caller that predates this field) leaves it null,
+    // which keeps isPortBoundByAnyContainer a no-op and this class's behavior
+    // toward every existing caller byte-identical. Only the CDI-managed
+    // instance - built via the @Inject constructor - ever has one.
+    private final DockerClient dockerClient;
+
+    public PortAllocator() {
+        this(null);
+    }
+
+    @Inject
+    public PortAllocator(DockerClient dockerClient) {
+        this.dockerClient = dockerClient;
+    }
+
     /**
      * Atomically finds and reserves a free TCP port within the specified range.
      * The port is held in-memory until {@link #release(int)} is called, preventing
@@ -33,8 +55,13 @@ public class PortAllocator {
      * @throws RuntimeException if no free port is available in the range
      */
     public synchronized int allocate(int basePort, int maxPort) {
+        // One Docker API round-trip per allocation, not one per candidate: the
+        // snapshot is only as fresh as the moment allocate() started either way,
+        // and this loop runs inside a lock every consumer of the shared
+        // allocator blocks on.
+        Set<Integer> published = publishedHostPorts();
         for (int port = basePort; port <= maxPort; port++) {
-            if (!reserved.contains(port) && isPortFree(port)) {
+            if (!reserved.contains(port) && !published.contains(port) && isPortFree(port)) {
                 reserved.add(port);
                 LOG.debugv("Allocated port {0} from range {1}-{2}", String.valueOf(port), String.valueOf(basePort), String.valueOf(maxPort));
                 return port;
@@ -83,6 +110,17 @@ public class PortAllocator {
     /**
      * Checks if a specific port is currently free.
      *
+     * <p>This binds a {@link ServerSocket} in floci's OWN network namespace. That
+     * namespace is meaningful when floci itself runs as a bare process, but floci
+     * normally runs inside its own Docker container, where every other network
+     * namespace on the host - in particular a SIBLING container's own {@code -p
+     * hostPort:containerPort} publication (an EKS cluster's k3s container, an
+     * MSK broker, an ECR registry mirror) - is completely invisible to this
+     * check: "is port free" here can only ever mean "free inside my own
+     * container," which is not the question a caller allocating a HOST port for
+     * a sibling container is actually asking. See {@link #publishedHostPorts}
+     * for the other half {@link #allocate} needs to answer that question for real.
+     *
      * @param port the port to check
      * @return true if the port is available, false otherwise
      */
@@ -92,6 +130,53 @@ public class PortAllocator {
             return true;
         } catch (IOException e) {
             return false;
+        }
+    }
+
+    /**
+     * Snapshots every host port ANY Docker container currently publishes
+     * (running or not - a container mid-{@code docker run} that has not
+     * started yet, the shape a losing race between two sibling k3s containers
+     * takes, still holds its port binding). This is what {@link #isPortFree}
+     * cannot see from inside floci's own container network namespace, and why
+     * {@link #allocate} checks both: a host running two floci instances that
+     * each manage their own sibling containers on the SAME Docker host - two
+     * independently-started EKS real-mode clusters both allocating host port
+     * 6500 for their own k3s API server container, because each floci
+     * instance's own in-process/in-namespace check saw its OWN container as
+     * having nothing bound - is exactly the case this closes. One Docker API
+     * call per invocation; {@link #allocate} calls it once per allocation and
+     * checks every candidate against the returned snapshot.
+     *
+     * <p>Returns an empty set (never blocks allocation) when this instance was
+     * built without a {@link DockerClient} - the no-arg constructor's own
+     * contract, unchanged for every caller that predates this method - or when
+     * the Docker API call itself fails, matching {@link #isPortFree}'s own
+     * fail-permissive posture for a probe that could not be completed.
+     */
+    Set<Integer> publishedHostPorts() {
+        if (dockerClient == null) {
+            return Set.of();
+        }
+        try {
+            List<Container> containers = dockerClient.listContainersCmd().withShowAll(true).exec();
+            Set<Integer> published = new HashSet<>();
+            for (Container c : containers) {
+                ContainerPort[] ports = c.getPorts();
+                if (ports == null) {
+                    continue;
+                }
+                for (ContainerPort p : ports) {
+                    Integer publicPort = p.getPublicPort();
+                    if (publicPort != null) {
+                        published.add(publicPort);
+                    }
+                }
+            }
+            return published;
+        } catch (Exception e) {
+            LOG.debugv("Error checking Docker port bindings: {0}", e.getMessage());
+            return Set.of();
         }
     }
 }

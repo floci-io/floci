@@ -146,6 +146,24 @@ class SfnMockLoaderTest {
     }
 
     @Test
+    void acceptsMockedResponseWithNoAttemptEntries() throws IOException {
+        var testCase = loader("""
+                {
+                  "StateMachines": {
+                    "Test": { "TestCases": { "Case": { "Skipped": "Empty", "Call API": "Ok" } } }
+                  },
+                  "MockedResponses": {
+                    "Empty": {},
+                    "Ok": { "0": { "Return": { "StatusCode": 200 } } }
+                  }
+                }
+                """).requireTestCase("Test", "Case");
+
+        assertTrue(testCase.stateResponses().get("Skipped").isEmpty());
+        assertEquals(1, testCase.stateResponses().get("Call API").size());
+    }
+
+    @Test
     void reportsMissingFile() {
         var loader = new SfnMockLoader(
                 Optional.of(tempDir.resolve("absent.json").toString()), new ObjectMapper());

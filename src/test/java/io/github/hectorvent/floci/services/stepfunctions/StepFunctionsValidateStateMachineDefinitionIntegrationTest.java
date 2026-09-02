@@ -1,12 +1,18 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -28,6 +34,8 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     private static final String CT = "application/x-amz-json-1.0";
     private static final String TARGET = "AWSStepFunctions.ValidateStateMachineDefinition";
     private static final String LIST_TARGET = "AWSStepFunctions.ListStateMachines";
+    private static final String CREATE_TARGET = "AWSStepFunctions.CreateStateMachine";
+    private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/service-role/sfn";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     // ASL with the inner double-quotes already JSON-escaped, so it embeds cleanly
@@ -92,9 +100,56 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    // A one-state Pass machine whose Output holds the given JSONata expression. The ObjectMapper
+    // escapes the quotes and braces the expressions carry into a valid JSON string.
+    private static String outputExpressionDefinition(String expression) {
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        root.put("QueryLanguage", "JSONata");
+        root.put("StartAt", "Main");
+        ObjectNode main = root.putObject("States").putObject("Main");
+        main.put("Type", "Pass");
+        main.put("Output", "{% " + expression + " %}");
+        main.put("End", true);
+        return root.toString();
+    }
+
+    // A Task whose Catch entry holds the given JSONata expression in its own Output or Assign,
+    // the one place AWS resolves $states.errorOutput.
+    private static String catchDefinition(String catcherField, String expression) {
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        root.put("QueryLanguage", "JSONata");
+        root.put("StartAt", "Main");
+        ObjectNode states = root.putObject("States");
+        ObjectNode main = states.putObject("Main");
+        main.put("Type", "Task");
+        main.put("Resource", "arn:aws:states:::lambda:invoke");
+        main.put("Next", "Handled");
+        ObjectNode catcher = main.putArray("Catch").addObject();
+        catcher.putArray("ErrorEquals").add("States.ALL");
+        catcher.put("Next", "Handled");
+        if ("Assign".equals(catcherField)) {
+            catcher.putObject("Assign").put("lastError", "{% " + expression + " %}");
+        } else {
+            catcher.put(catcherField, "{% " + expression + " %}");
+        }
+        states.putObject("Handled").put("Type", "Pass").put("End", true);
+        return root.toString();
+    }
+
     private static Response validateDefinition(String definition) {
         String body = OBJECT_MAPPER.createObjectNode().put("definition", definition).toString();
         return given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(body)
+                .when().post("/");
+    }
+
+    private static Response createStateMachine(String name, String definition) {
+        String body = OBJECT_MAPPER.createObjectNode()
+                .put("name", name)
+                .put("definition", definition)
+                .put("roleArn", ROLE_ARN)
+                .toString();
+        return given().contentType(CT).header("X-Amz-Target", CREATE_TARGET)
                 .body(body)
                 .when().post("/");
     }
@@ -140,6 +195,90 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                   }
                 }
                 """.replace("__RESULT_WRITER__", resultWriter);
+    }
+
+    // Every (expression, message) pair here was run through
+    // `aws stepfunctions validate-state-machine-definition --region us-east-1`: the message is
+    // AWS's INVALID_JSONATA_EXPRESSION text, which is floci's own parser message with its
+    // "S0xxx: " code prefix stripped.
+    private static Stream<Arguments> invalidJsonataExpressions() {
+        return Stream.of(
+                Arguments.of("a[1,2)", "Expected \"]\", got \",\""),
+                Arguments.of("\"unterminated", "String literal must be terminated by a matching quote"),
+                Arguments.of("1 +", "Unexpected end of expression"),
+                Arguments.of("{\"a\":}", "The symbol \"}\" cannot be used as a unary operator"),
+                Arguments.of("$x :=", "Unexpected end of expression"),
+                Arguments.of("$match(\"a\", /abc", "No terminating / in regular expression"),
+                Arguments.of("phone %.other", "The symbol \".\" cannot be used as a unary operator"),
+                Arguments.of("", "Unexpected end of expression"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidJsonataExpressions")
+    void unparsableJsonataExpression_returnsFailWithInvalidJsonataExpression(
+            String expression, String expectedMessage) {
+        validateDefinition(outputExpressionDefinition(expression))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("INVALID_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", equalTo(expectedMessage))
+                .body("diagnostics[0].location", equalTo("/States/Main/Output"));
+    }
+
+    @Test
+    void jsonataParseErrorMessageContainingAtStatesSlash_keepsLiteralTextAndFieldLocation() {
+        // The malformed literal itself contains " at /States/GHOST". Splitting the flat marker on
+        // the FIRST " at /States/..." match would truncate the message there and invent a location
+        // from the literal text instead of the field's own.
+        validateDefinition(outputExpressionDefinition("[1 \"zz at /States/GHOST\"]"))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("INVALID_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", containsString("zz at /States/GHOST"))
+                .body("diagnostics[0].location", equalTo("/States/Main/Output"));
+    }
+
+    @Test
+    void doubleDollarReference_returnsFailWithUnsupportedJsonataExpression() {
+        validateDefinition(outputExpressionDefinition("$$"))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("UNSUPPORTED_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", equalTo("Reference to '$$' is not supported."))
+                .body("diagnostics[0].location", equalTo("/States/Main/Output"));
+    }
+
+    @Test
+    void statesErrorOutputOutsideCatch_returnsFailWithUnsupportedJsonataExpression() {
+        validateDefinition(outputExpressionDefinition("$states.errorOutput"))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("UNSUPPORTED_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", equalTo("Field '$states.errorOutput' does not exist."))
+                .body("diagnostics[0].location", equalTo("/States/Main/Output"));
+    }
+
+    @Test
+    void statesErrorOutputInsideCatchOutput_isAccepted() {
+        validateDefinition(catchDefinition("Output", "$states.errorOutput"))
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void statesErrorOutputInsideCatchAssign_isAccepted() {
+        validateDefinition(catchDefinition("Assign", "$states.errorOutput"))
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
     }
 
     @Test
@@ -616,6 +755,455 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void loopWithNoTerminalState_returnsFailWithMissingEndState() {
+        String def = """
+                {"StartAt":"A","States":{
+                  "A":{"Type":"Pass","Next":"B"},
+                  "B":{"Type":"Pass","Next":"A"}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_END_STATE"))
+                .body("diagnostics[0].message", equalTo("Workflow has no terminal state"))
+                .body("diagnostics[0].location", nullValue());
+    }
+
+    @Test
+    void missingEndStateSuppressesUnreachableStateDiagnosticForOtherStates() {
+        // Same loop as above, plus a state nothing routes to. If MISSING_END_STATE did not
+        // suppress the reachability walk, "Unused" would also be reported as not reachable.
+        String def = """
+                {"StartAt":"A","States":{
+                  "A":{"Type":"Pass","Next":"B"},
+                  "B":{"Type":"Pass","Next":"A"},
+                  "Unused":{"Type":"Pass","Next":"A"}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_END_STATE"));
+    }
+
+    @Test
+    void missingEndStateCoexistsWithADanglingTargetInAWSOrder() {
+        // MISSING_END_STATE only suppresses the unreachable-state half of the reachability walk:
+        // a dangling Next target is a separate, independent check and still fires. Measured
+        // against real AWS: both diagnostics come back in the same response, dangling target
+        // first and MISSING_END_STATE second.
+        String def = """
+                {"StartAt":"A","States":{"A":{"Type":"Pass","Next":"NOPE"}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("Missing 'Next' target: NOPE"))
+                .body("diagnostics[0].location", equalTo("/States/A/Next"))
+                .body("diagnostics[1].code", equalTo("MISSING_END_STATE"))
+                .body("diagnostics[1].message", equalTo("Workflow has no terminal state"))
+                .body("diagnostics[1].location", nullValue());
+    }
+
+    @Test
+    void unreachableTerminalStateAddedToLoop_returnsFailWithMissingTransitionTarget() {
+        // Adding an unreachable terminal to the same loop gives a state a top-level state has:
+        // MISSING_END_STATE no longer applies, and the reachability walk now runs and catches C.
+        String def = """
+                {"StartAt":"A","States":{
+                  "A":{"Type":"Pass","Next":"B"},
+                  "B":{"Type":"Pass","Next":"A"},
+                  "C":{"Type":"Pass","End":true}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("State \"C\" is not reachable."))
+                .body("diagnostics[0].location", equalTo("/States/C"));
+    }
+
+    @Test
+    void nestedLoopWithNoTerminalState_isAcceptedBecauseMissingEndStateIsTopLevelOnly() {
+        String def = """
+                {"StartAt":"M","States":{"M":{"Type":"Map","ItemsPath":"$.items",
+                  "ItemProcessor":{"StartAt":"A","States":{
+                    "A":{"Type":"Pass","Next":"B"},
+                    "B":{"Type":"Pass","Next":"A"}
+                  }},
+                  "End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void timeoutSecondsOnMap_returnsFailWithSchemaError() {
+        String def = """
+                {"StartAt":"M","States":{"M":{"Type":"Map","TimeoutSeconds":5,"ItemsPath":"$.items",
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},
+                    "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":25,"End":true}}},
+                  "End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'TimeoutSeconds' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/M"));
+    }
+
+    @Test
+    void timeoutSecondsOnParallel_returnsFailWithSchemaError() {
+        String def = """
+                {"StartAt":"P","States":{"P":{"Type":"Parallel","TimeoutSeconds":5,
+                  "Branches":[{"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":25,"End":true}}}],
+                  "End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'TimeoutSeconds' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/P"));
+    }
+
+    @Test
+    void timeoutSecondsAcceptedOnTask() {
+        String def = """
+                {"StartAt":"T","States":{"T":{"Type":"Task",
+                  "Resource":"arn:aws:states:::lambda:invoke","TimeoutSeconds":5,"End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void timeoutSecondsRejectedOnPass() {
+        // Same rule as Map and Parallel above, generalized to a state type that never carries it.
+        String def = """
+                {"StartAt":"X","States":{"X":{"Type":"Pass","TimeoutSeconds":5,"End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'TimeoutSeconds' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/X"));
+    }
+
+    @Test
+    void catchRejectedOnPass() {
+        String def = """
+                {"StartAt":"X","States":{"X":{"Type":"Pass","End":true,
+                  "Catch":[{"ErrorEquals":["States.ALL"],"Next":"X"}]}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'Catch' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/X"));
+    }
+
+    @Test
+    void retryRejectedOnWait() {
+        String def = """
+                {"StartAt":"X","States":{"X":{"Type":"Wait","Seconds":1,"End":true,
+                  "Retry":[{"ErrorEquals":["States.ALL"]}]}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'Retry' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/X"));
+    }
+
+    @Test
+    void passWithTimeoutSecondsCatchAndRetry_returnsDiagnosticsInFixedOrder() {
+        // Three disallowed fields on the same state, declared here in yet another order, must
+        // still come back TimeoutSeconds, Catch, Retry: the old Map.of-backed rule table iterated
+        // in a JVM-salted order, so this sequence was only probabilistically correct before.
+        String def = """
+                {"StartAt":"X","States":{"X":{"Type":"Pass","End":true,
+                  "Retry":[{"ErrorEquals":["States.ALL"]}],
+                  "TimeoutSeconds":5,
+                  "Catch":[{"ErrorEquals":["States.ALL"],"Next":"X"}]}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(3))
+                .body("diagnostics[0].message", equalTo("Field 'TimeoutSeconds' is not supported"))
+                .body("diagnostics[1].message", equalTo("Field 'Catch' is not supported"))
+                .body("diagnostics[2].message", equalTo("Field 'Retry' is not supported"));
+    }
+
+    @Test
+    void catchAndRetryAcceptedOnTaskParallelAndMap() {
+        String def = """
+                {"StartAt":"T","States":{
+                  "T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke",
+                       "Catch":[{"ErrorEquals":["States.ALL"],"Next":"Done"}],
+                       "Retry":[{"ErrorEquals":["States.ALL"]}],"Next":"Par"},
+                  "Par":{"Type":"Parallel",
+                       "Catch":[{"ErrorEquals":["States.ALL"],"Next":"Done"}],
+                       "Retry":[{"ErrorEquals":["States.ALL"]}],
+                       "Branches":[{"StartAt":"B","States":{"B":{"Type":"Pass","End":true}}}],
+                       "Next":"M"},
+                  "M":{"Type":"Map","ItemsPath":"$.items",
+                       "Catch":[{"ErrorEquals":["States.ALL"],"Next":"Done"}],
+                       "Retry":[{"ErrorEquals":["States.ALL"]}],
+                       "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                       "Next":"Done"},
+                  "Done":{"Type":"Succeed"}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void catchRejectedOnPassEvenWhenJsonata() {
+        // QueryLanguage does not change which state types accept Catch: measured against real
+        // AWS, a JSONata Pass state with a Catch still fails SCHEMA_VALIDATION_FAILED, the same
+        // as in JSONPath mode.
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"X","States":{"X":{"Type":"Pass","End":true,
+                  "Catch":[{"ErrorEquals":["States.ALL"],"Next":"X"}]}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'Catch' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/X"));
+    }
+
+    @Test
+    void danglingNextTarget_returnsFailAtNextLocation() {
+        String def = """
+                {"StartAt":"A","States":{
+                  "A":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Next":"Ghost",
+                       "Catch":[{"ErrorEquals":["States.ALL"],"Next":"Z"}]},
+                  "Z":{"Type":"Pass","End":true}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("Missing 'Next' target: Ghost"))
+                .body("diagnostics[0].location", equalTo("/States/A/Next"));
+    }
+
+    @Test
+    void danglingChoiceNextTarget_returnsFailAtChoicesLocation() {
+        String def = """
+                {"StartAt":"C","States":{
+                  "C":{"Type":"Choice",
+                       "Choices":[{"Variable":"$.x","IsPresent":true,"Next":"Ghost"}],
+                       "Default":"Z"},
+                  "Z":{"Type":"Pass","End":true}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("Missing 'Next' target: Ghost"))
+                .body("diagnostics[0].location", equalTo("/States/C/Choices[0]/Next"));
+    }
+
+    @Test
+    void danglingChoiceDefaultTarget_returnsFailAtDefaultLocation() {
+        String def = """
+                {"StartAt":"A","States":{
+                  "A":{"Type":"Choice",
+                       "Choices":[{"Variable":"$.x","IsPresent":true,"Next":"Z"}],
+                       "Default":"Ghost"},
+                  "Z":{"Type":"Pass","End":true}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("Missing 'Next' target: Ghost"))
+                .body("diagnostics[0].location", equalTo("/States/A/Default"));
+    }
+
+    @Test
+    void danglingCatchNextTarget_returnsFailAtCatchLocation() {
+        String def = """
+                {"StartAt":"T","States":{"T":{"Type":"Task",
+                  "Resource":"arn:aws:states:::lambda:invoke",
+                  "Catch":[{"ErrorEquals":["States.ALL"],"Next":"Ghost"}],
+                  "End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("Missing 'Next' target: Ghost"))
+                .body("diagnostics[0].location", equalTo("/States/T/Catch[0]/Next"));
+    }
+
+    @Test
+    void unreachableStateInsideItemProcessor_returnsFailAtStructuredPath() {
+        String def = """
+                {"StartAt":"M","States":{"M":{"Type":"Map","ItemsPath":"$.items",
+                  "ItemProcessor":{"StartAt":"W","States":{
+                    "W":{"Type":"Pass","End":true},
+                    "Ghost":{"Type":"Pass","End":true}
+                  }},
+                  "End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("State \"Ghost\" is not reachable."))
+                .body("diagnostics[0].location", equalTo("/States/M/ItemProcessor/States/Ghost"));
+    }
+
+    @Test
+    void unreachableStateInsideParallelBranch_returnsFailAtStructuredPath() {
+        String def = """
+                {"StartAt":"P","States":{"P":{"Type":"Parallel",
+                  "Branches":[{"StartAt":"W","States":{
+                    "W":{"Type":"Pass","End":true},
+                    "Ghost":{"Type":"Pass","End":true}
+                  }}],
+                  "End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("State \"Ghost\" is not reachable."))
+                .body("diagnostics[0].location", equalTo("/States/P/Branches[0]/States/Ghost"));
+    }
+
+    @Test
+    void unreachableStateWithSlashInName_returnsFullNameInMessage() {
+        // Recovering the state name by taking the text after the last '/' in the location
+        // truncates a name that itself contains a slash. The name must survive whole.
+        String def = """
+                {"StartAt":"Start","States":{
+                  "Start":{"Type":"Pass","End":true},
+                  "a/b":{"Type":"Pass","End":true}
+                }}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("State \"a/b\" is not reachable."))
+                .body("diagnostics[0].location", equalTo("/States/a/b"));
+    }
+
+    @Test
+    void danglingStartAtTopLevel_returnsMissingTransitionTargetAndUnreachableStates() {
+        // StartAt is a transition target like any other: a name that resolves to no state is a
+        // MISSING_TRANSITION_TARGET at /StartAt, and the walk then starts from nothing, so every
+        // other state in the container is reported unreachable too.
+        String def = """
+                {"StartAt":"Nope","States":{"A":{"Type":"Pass","End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("Missing 'Next' target: Nope"))
+                .body("diagnostics[0].location", equalTo("/StartAt"))
+                .body("diagnostics[1].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[1].message", equalTo("State \"A\" is not reachable."))
+                .body("diagnostics[1].location", equalTo("/States/A"));
+    }
+
+    @Test
+    void danglingStartAtInsideItemProcessor_returnsFailAtStructuredPaths() {
+        String def = """
+                {"StartAt":"M","States":{"M":{"Type":"Map","ItemsPath":"$.items",
+                  "ItemProcessor":{"StartAt":"Nope","States":{
+                    "A":{"Type":"Pass","End":true}
+                  }},
+                  "End":true}}}
+                """;
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[0].message", equalTo("Missing 'Next' target: Nope"))
+                .body("diagnostics[0].location", equalTo("/States/M/ItemProcessor/StartAt"))
+                .body("diagnostics[1].code", equalTo("MISSING_TRANSITION_TARGET"))
+                .body("diagnostics[1].message", equalTo("State \"A\" is not reachable."))
+                .body("diagnostics[1].location", equalTo("/States/M/ItemProcessor/States/A"));
+    }
+
+    @Test
+    void createStateMachineRefusesLoopWithNoTerminalState() {
+        String def = """
+                {"StartAt":"A","States":{
+                  "A":{"Type":"Pass","Next":"B"},
+                  "B":{"Type":"Pass","Next":"A"}
+                }}
+                """;
+        createStateMachine("no-terminal-" + System.nanoTime(), def)
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidDefinition"))
+                .body("message", equalTo("Invalid State Machine Definition: "
+                        + "'MISSING_END_STATE: Workflow has no terminal state at null'"));
+    }
+
+    @Test
+    void createStateMachineRefusesTimeoutSecondsOnParallel() {
+        // Once this is refused at CreateStateMachine, no definition that reaches execution can
+        // carry a Parallel TimeoutSeconds — the AslExecutor branch that read it is unreachable.
+        String def = """
+                {"StartAt":"P","States":{"P":{"Type":"Parallel","TimeoutSeconds":5,
+                  "Branches":[{"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":25,"End":true}}}],
+                  "End":true}}}
+                """;
+        createStateMachine("parallel-timeout-" + System.nanoTime(), def)
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidDefinition"))
+                .body("message", equalTo("Invalid State Machine Definition: "
+                        + "'SCHEMA_VALIDATION_FAILED: Field 'TimeoutSeconds' is not supported "
+                        + "at /States/P'"));
     }
 
     private static String mapDefinition(String topLevelFields, String concurrencyFields) {

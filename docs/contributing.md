@@ -2,13 +2,13 @@
 
 Floci is MIT licensed and welcomes contributions of all kinds.
 
-**Join us on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw)** — the fastest way to reach maintainers for questions, design tradeoffs, or feedback on an approach before you build it.
+**Join us on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw)**: the fastest way to reach maintainers for questions, design tradeoffs, or feedback on an approach before you build it.
 
 ## Ways to Help 
 
-- **Bug reports** — open a [GitHub issue](https://github.com/floci-io/floci/issues/new?template=bug_report.md) with a minimal reproduction
-- **Missing API actions** — open a [feature request](https://github.com/floci-io/floci/issues/new?template=feature_request.md)
-- **Pull requests** — new service actions, bug fixes, documentation improvements
+- **Bug reports**: open a [GitHub issue](https://github.com/floci-io/floci/issues/new?template=bug_report.md) with a minimal reproduction
+- **Missing API actions**: open a [feature request](https://github.com/floci-io/floci/issues/new?template=feature_request.md)
+- **Pull requests**: new service actions, bug fixes, documentation improvements
 
 ## Development Setup
 
@@ -30,7 +30,7 @@ mvn test -Dtest=SsmIntegrationTest#putParameter
 
 ## Commit Message Format
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/) — required for semantic-release to generate the changelog and version bumps automatically.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/), required for semantic-release to generate the changelog and version bumps automatically.
 
 > **The PR title is validated automatically by CI** and must follow this format, since it becomes the squash-merge commit message that semantic-release reads.
 
@@ -100,7 +100,13 @@ Quick summary:
 - [ ] New or updated integration test added
 - [ ] Commit messages follow Conventional Commits
 
-Please keep at most **5 open PRs** at a time — a bot leaves an advisory note (label `over-pr-limit`) on PRs opened beyond that. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-guidelines) for details.
+Please keep at most **5 open PRs** at a time. A bot leaves an advisory note (label `over-pr-limit`) on PRs opened beyond that. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-guidelines) for details.
+
+## Releases
+
+Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does not cut a release: the change rides the next train, and reaches the `nightly` image on the next nightly build.
+
+Maintainers cut releases from `main` with the Release Cut workflow, which runs semantic-release over the Conventional Commits since the last tag. That is why the commit type matters: `feat:` and `fix:` move the version, `docs:` and `chore:` do not. `CHANGELOG.md` is generated from those messages and is not edited by hand; a genuine correction goes in a PR carrying the `changelog-edit` label.
 
 ## Reporting Security Issues
 

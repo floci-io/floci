@@ -32,7 +32,7 @@ public class Ec2QueryHandler {
     private static final List<String> UNSUPPORTED_ROUTE_TARGETS = List.of(
             "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId", "InstanceId",
             "LocalGatewayId", "NetworkInterfaceId", "OdbNetworkArn",
-            "TransitGatewayId", "VpcEndpointId", "VpcPeeringConnectionId");
+            "TransitGatewayId", "VpcEndpointId");
 
     /** The gateway id a route table's built-in route carries (see Ec2Service#createRouteTable). */
     private static final String LOCAL_GATEWAY_ID = "local";
@@ -188,6 +188,12 @@ public class Ec2QueryHandler {
                 case "DeleteRouteTable" -> handleDeleteRouteTable(params, region);
                 case "AssociateRouteTable" -> handleAssociateRouteTable(params, region);
                 case "DisassociateRouteTable" -> handleDisassociateRouteTable(params, region);
+                case "CreateVpcPeeringConnection" -> handleCreateVpcPeeringConnection(params, region);
+                case "AcceptVpcPeeringConnection" -> handleAcceptVpcPeeringConnection(params, region);
+                case "DescribeVpcPeeringConnections" -> handleDescribeVpcPeeringConnections(params, region);
+                case "ModifyVpcPeeringConnectionOptions" -> handleModifyVpcPeeringConnectionOptions(params, region);
+                case "DeleteVpcPeeringConnection" -> handleDeleteVpcPeeringConnection(params, region);
+
                 case "CreateRoute" -> handleCreateRoute(params, region);
                 case "ReplaceRoute" -> handleReplaceRoute(params, region);
                 case "DeleteRoute" -> handleDeleteRoute(params, region);
@@ -226,6 +232,10 @@ public class Ec2QueryHandler {
                 case "DeleteLaunchTemplate" -> handleDeleteLaunchTemplate(params, region);
                 // Network Interfaces
                 case "DescribeNetworkInterfaces" -> handleDescribeNetworkInterfaces(params, region);
+                case "CreateNetworkInterface" -> handleCreateNetworkInterface(params, region);
+                case "DeleteNetworkInterface" -> handleDeleteNetworkInterface(params, region);
+                case "AttachNetworkInterface" -> handleAttachNetworkInterface(params, region);
+                case "DetachNetworkInterface" -> handleDetachNetworkInterface(params, region);
                 // Volumes
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
@@ -603,6 +613,10 @@ public class Ec2QueryHandler {
         if (subnetId == null) {
             subnetId = p.getFirst("NetworkInterface.1.SubnetId");
         }
+        // floci-kt9: override-default-eni hands RunInstances a pre-existing standalone ENI as
+        // the instance's primary interface (network_interface { network_interface_id = ... }).
+        String networkInterfaceId = p.getFirst("NetworkInterface.1.NetworkInterfaceId");
+        int networkInterfaceDeviceIndex = parseIntParam(p, "NetworkInterface.1.DeviceIndex", 0);
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -615,17 +629,25 @@ public class Ec2QueryHandler {
 
         String iamInstanceProfileArn = resolveIamInstanceProfileArn(p);
 
-        // Parse TagSpecifications
+        // Parse TagSpecifications. AWS applies each specification to exactly the resource
+        // type it names, so the interfaces RunInstances creates are tagged only by a
+        // ResourceType=network-interface specification - never by the instance's own tags.
         List<Tag> instanceTags = new ArrayList<>();
+        List<Tag> networkInterfaceTags = new ArrayList<>();
         for (int i = 1; ; i++) {
             String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
             if (resType == null) break;
-            if ("instance".equals(resType)) {
+            List<Tag> target = switch (resType) {
+                case "instance" -> instanceTags;
+                case "network-interface" -> networkInterfaceTags;
+                default -> null;
+            };
+            if (target != null) {
                 for (int j = 1; ; j++) {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
                     String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    instanceTags.add(new Tag(k, v));
+                    target.add(new Tag(k, v));
                 }
             }
         }
@@ -651,7 +673,17 @@ public class Ec2QueryHandler {
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp);
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex);
+
+        if (!networkInterfaceTags.isEmpty()) {
+            List<String> eniIds = new ArrayList<>();
+            for (Instance inst : res.getInstances()) {
+                inst.getNetworkInterfaces().forEach(eni -> eniIds.add(eni.getNetworkInterfaceId()));
+            }
+            if (!eniIds.isEmpty()) {
+                service.createTags(region, eniIds, networkInterfaceTags);
+            }
+        }
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -945,7 +977,8 @@ public class Ec2QueryHandler {
 
     private Response handleCreateVpc(MultivaluedMap<String, String> p, String region) {
         String cidrBlock = p.getFirst("CidrBlock");
-        Vpc vpc = service.createVpc(region, cidrBlock, false);
+        boolean amazonProvidedIpv6 = "true".equalsIgnoreCase(p.getFirst("AmazonProvidedIpv6CidrBlock"));
+        Vpc vpc = service.createVpc(region, cidrBlock, false, amazonProvidedIpv6);
         List<Tag> vpcTags = new ArrayList<>();
         for (int i = 1; ; i++) {
             String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
@@ -2241,6 +2274,18 @@ public class Ec2QueryHandler {
     private Response handleAssociateVpcCidrBlock(MultivaluedMap<String, String> p, String region) {
         String vpcId = p.getFirst("VpcId");
         String cidrBlock = p.getFirst("CidrBlock");
+        if ("true".equalsIgnoreCase(p.getFirst("AmazonProvidedIpv6CidrBlock"))) {
+            VpcIpv6CidrBlockAssociation ipv6 = service.associateAmazonProvidedIpv6CidrBlock(region, vpcId);
+            XmlBuilder ipv6Xml = new XmlBuilder()
+                    .start("AssociateVpcCidrBlockResponse", AwsNamespaces.EC2)
+                    .elem("requestId", UUID.randomUUID().toString())
+                    .elem("vpcId", vpcId)
+                    .start("ipv6CidrBlockAssociation")
+                    .raw(vpcIpv6AssociationXml(ipv6))
+                    .end("ipv6CidrBlockAssociation")
+                    .end("AssociateVpcCidrBlockResponse");
+            return xmlResponse(ipv6Xml.build());
+        }
         VpcCidrBlockAssociation assoc = service.associateVpcCidrBlock(region, vpcId, cidrBlock);
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateVpcCidrBlockResponse", AwsNamespaces.EC2)
@@ -2255,6 +2300,16 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private String vpcIpv6AssociationXml(VpcIpv6CidrBlockAssociation assoc) {
+        return new XmlBuilder()
+                .elem("associationId", assoc.getAssociationId())
+                .elem("ipv6CidrBlock", assoc.getIpv6CidrBlock())
+                .start("ipv6CidrBlockState").elem("state", assoc.getIpv6CidrBlockState()).end("ipv6CidrBlockState")
+                .elem("ipv6Pool", assoc.getIpv6Pool())
+                .elem("networkBorderGroup", assoc.getNetworkBorderGroup())
+                .build();
+    }
+
     private Response handleDisassociateVpcCidrBlock(MultivaluedMap<String, String> p, String region) {
         String associationId = p.getFirst("AssociationId");
         service.disassociateVpcCidrBlock(region, associationId);
@@ -2267,7 +2322,8 @@ public class Ec2QueryHandler {
         String vpcId = p.getFirst("VpcId");
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
-        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az);
+        String azId = p.getFirst("AvailabilityZoneId");
+        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId);
         applyResourceTags(p, region, "subnet", subnet.getSubnetId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
@@ -2897,7 +2953,8 @@ public class Ec2QueryHandler {
         // unimplemented), but the id the caller sent is stored and reported back so an IPv6
         // egress route is not silently rewritten into a targetless one.
         String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
-        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId);
+        String pcxId = p.getFirst("VpcPeeringConnectionId");
+        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId, pcxId);
         return booleanResponse("CreateRoute");
     }
 
@@ -2917,16 +2974,17 @@ public class Ec2QueryHandler {
         String destPrefixList = p.getFirst("DestinationPrefixListId");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
+        String pcxId = p.getFirst("VpcPeeringConnectionId");
         // Resetting a route to the local target is expressible: `local` is the gateway id the
         // route table's built-in route already carries, so it needs no new field on Route.
         if (Boolean.parseBoolean(p.getFirst("LocalTarget"))) {
-            if (gwId != null || natGwId != null) {
+            if (gwId != null || natGwId != null || pcxId != null) {
                 throw new AwsException("InvalidParameterCombination",
                         "ReplaceRoute takes exactly one target.", 400);
             }
             gwId = LOCAL_GATEWAY_ID;
         }
-        service.replaceRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId);
+        service.replaceRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, pcxId);
         return booleanResponse("ReplaceRoute");
     }
 
@@ -2937,6 +2995,113 @@ public class Ec2QueryHandler {
         String destPrefixList = p.getFirst("DestinationPrefixListId");
         service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList);
         return booleanResponse("DeleteRoute");
+    }
+
+    // ─── VPC Peering Connection handlers ────────────────────────────────────────
+
+    private Response handleCreateVpcPeeringConnection(MultivaluedMap<String, String> p, String region) {
+        String vpcId = p.getFirst("VpcId");
+        String peerVpcId = p.getFirst("PeerVpcId");
+        String peerOwnerId = p.getFirst("PeerOwnerId");
+        String peerRegion = p.getFirst("PeerRegion");
+        List<Tag> pcxTags = parseTagsForResource(p, "vpc-peering-connection");
+        VpcPeeringConnection pcx = service.createVpcPeeringConnection(region, vpcId, peerVpcId, peerOwnerId,
+                peerRegion, pcxTags);
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateVpcPeeringConnectionResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcPeeringConnection").raw(vpcPeeringConnectionXml(pcx)).end("vpcPeeringConnection")
+                .end("CreateVpcPeeringConnectionResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleAcceptVpcPeeringConnection(MultivaluedMap<String, String> p, String region) {
+        VpcPeeringConnection pcx = service.acceptVpcPeeringConnection(region, p.getFirst("VpcPeeringConnectionId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AcceptVpcPeeringConnectionResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcPeeringConnection").raw(vpcPeeringConnectionXml(pcx)).end("vpcPeeringConnection")
+                .end("AcceptVpcPeeringConnectionResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpcPeeringConnections(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "VpcPeeringConnectionId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<VpcPeeringConnection> connections = service.describeVpcPeeringConnections(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpcPeeringConnectionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcPeeringConnectionSet");
+        for (VpcPeeringConnection pcx : connections) {
+            xml.start("item").raw(vpcPeeringConnectionXml(pcx)).end("item");
+        }
+        xml.end("vpcPeeringConnectionSet").end("DescribeVpcPeeringConnectionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyVpcPeeringConnectionOptions(MultivaluedMap<String, String> p, String region) {
+        String pcxId = p.getFirst("VpcPeeringConnectionId");
+        Boolean accepterDns = parseOptionalBoolean(
+                p.getFirst("AccepterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc"),
+                "AccepterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc");
+        Boolean requesterDns = parseOptionalBoolean(
+                p.getFirst("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc"),
+                "RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc");
+        VpcPeeringConnection pcx = service.modifyVpcPeeringConnectionOptions(region, pcxId, accepterDns, requesterDns);
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyVpcPeeringConnectionOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("accepterPeeringConnectionOptions")
+                .elem("allowDnsResolutionFromRemoteVpc", String.valueOf(pcx.isAccepterAllowRemoteVpcDnsResolution()))
+                .end("accepterPeeringConnectionOptions")
+                .start("requesterPeeringConnectionOptions")
+                .elem("allowDnsResolutionFromRemoteVpc", String.valueOf(pcx.isRequesterAllowRemoteVpcDnsResolution()))
+                .end("requesterPeeringConnectionOptions")
+                .end("ModifyVpcPeeringConnectionOptionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteVpcPeeringConnection(MultivaluedMap<String, String> p, String region) {
+        service.deleteVpcPeeringConnection(region, p.getFirst("VpcPeeringConnectionId"));
+        return booleanResponse("DeleteVpcPeeringConnection");
+    }
+
+    private String vpcPeeringConnectionXml(VpcPeeringConnection pcx) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("vpcPeeringConnectionId", pcx.getVpcPeeringConnectionId());
+        xml.raw(vpcPeeringConnectionVpcInfoXml("requesterVpcInfo", pcx.getRequesterVpcInfo(),
+                pcx.isRequesterAllowRemoteVpcDnsResolution()));
+        xml.raw(vpcPeeringConnectionVpcInfoXml("accepterVpcInfo", pcx.getAccepterVpcInfo(),
+                pcx.isAccepterAllowRemoteVpcDnsResolution()));
+        if (pcx.getStatus() != null) {
+            xml.start("status")
+                    .elem("code", pcx.getStatus().getCode())
+                    .elem("message", pcx.getStatus().getMessage())
+                    .end("status");
+        }
+        xml.raw(tagSetXml(pcx.getTags()));
+        return xml.build();
+    }
+
+    private String vpcPeeringConnectionVpcInfoXml(String elementName, VpcPeeringConnectionVpcInfo info,
+            boolean allowRemoteVpcDnsResolution) {
+        if (info == null) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start(elementName)
+                .elem("vpcId", info.getVpcId())
+                .elem("ownerId", info.getOwnerId())
+                .elem("region", info.getRegion());
+        if (info.getCidrBlock() != null) {
+            xml.elem("cidrBlock", info.getCidrBlock());
+        }
+        xml.start("peeringOptions")
+                .elem("allowDnsResolutionFromRemoteVpc", String.valueOf(allowRemoteVpcDnsResolution))
+                .end("peeringOptions");
+        xml.end(elementName);
+        return xml.build();
     }
 
     // ─── Network ACL handlers ─────────────────────────────────────────────────
@@ -3342,61 +3507,7 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("networkInterfaceSet");
         for (NetworkInterface ni : nis) {
-            xml.start("item")
-                    .elem("networkInterfaceId", ni.getNetworkInterfaceId())
-                    .elem("subnetId", ni.getSubnetId())
-                    .elem("vpcId", ni.getVpcId())
-                    .elem("availabilityZone", ni.getAvailabilityZone())
-                    .elem("description", ni.getDescription())
-                    .elem("ownerId", ni.getOwnerId())
-                    .elem("status", ni.getStatus())
-                    .elem("interfaceType", ni.getInterfaceType())
-                    .elem("macAddress", ni.getMacAddress())
-                    .elem("privateIpAddress", ni.getPrivateIpAddress())
-                    .elem("privateDnsName", ni.getPrivateDnsName())
-                    .elem("sourceDestCheck", String.valueOf(ni.isSourceDestCheck()))
-                    .start("groupSet");
-            for (GroupIdentifier gi : ni.getGroups()) {
-                xml.start("item")
-                        .elem("groupId", gi.getGroupId())
-                        .elem("groupName", gi.getGroupName())
-                        .end("item");
-            }
-            xml.end("groupSet");
-            // Phase 3: tagSet from instance tags
-            xml.raw(tagSetXml(ni.getTagSet()));
-            if (ni.getAttachment() != null) {
-                xml.start("attachment")
-                        .elem("attachmentId", ni.getAttachment().getAttachmentId())
-                        .elem("deviceIndex", String.valueOf(ni.getAttachment().getDeviceIndex()))
-                        .elem("status", ni.getAttachment().getStatus())
-                        .elem("attachTime", ni.getAttachment().getAttachTime())
-                        .elem("deleteOnTermination", String.valueOf(ni.getAttachment().isDeleteOnTermination()))
-                        .elem("instanceId", ni.getAttachment().getInstanceId())
-                        .elem("instanceOwnerId", ni.getAttachment().getInstanceOwnerId())
-                        .end("attachment");
-            }
-            // Phase 3: privateIpAddressesSet with association
-            if (!ni.getPrivateIpAddresses().isEmpty()) {
-                xml.start("privateIpAddressesSet");
-                for (NetworkInterfacePrivateIpAddress ip : ni.getPrivateIpAddresses()) {
-                    xml.start("item")
-                            .elem("privateIpAddress", ip.getPrivateIpAddress())
-                            .elem("privateDnsName", ip.getPrivateDnsName())
-                            .elem("primary", String.valueOf(ip.isPrimary()));
-                    if (ip.getAssociation() != null) {
-                        xml.start("association")
-                                .elem("publicIp", ip.getAssociation().getPublicIp())
-                                .elem("allocationId", ip.getAssociation().getAllocationId())
-                                .elem("associationId", ip.getAssociation().getAssociationId())
-                                .elem("ipOwnerId", ip.getAssociation().getIpOwnerId())
-                                .end("association");
-                    }
-                    xml.end("item");
-                }
-                xml.end("privateIpAddressesSet");
-            }
-            xml.end("item");
+            xml.start("item").raw(networkInterfaceXml(ni)).end("item");
         }
         xml.end("networkInterfaceSet");
         if (result.nextToken() != null) {
@@ -3404,6 +3515,118 @@ public class Ec2QueryHandler {
         }
         xml.end("DescribeNetworkInterfacesResponse");
         return xmlResponse(xml.build());
+    }
+
+    /** Shared field emission for a {@code networkInterface} item, used by Describe and Create. */
+    private String networkInterfaceXml(NetworkInterface ni) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("networkInterfaceId", ni.getNetworkInterfaceId())
+                .elem("subnetId", ni.getSubnetId())
+                .elem("vpcId", ni.getVpcId())
+                .elem("availabilityZone", ni.getAvailabilityZone())
+                .elem("description", ni.getDescription())
+                .elem("ownerId", ni.getOwnerId())
+                .elem("status", ni.getStatus())
+                .elem("interfaceType", ni.getInterfaceType())
+                .elem("macAddress", ni.getMacAddress())
+                .elem("privateIpAddress", ni.getPrivateIpAddress())
+                .elem("privateDnsName", ni.getPrivateDnsName())
+                .elem("sourceDestCheck", String.valueOf(ni.isSourceDestCheck()))
+                .start("groupSet");
+        for (GroupIdentifier gi : ni.getGroups()) {
+            xml.start("item")
+                    .elem("groupId", gi.getGroupId())
+                    .elem("groupName", gi.getGroupName())
+                    .end("item");
+        }
+        xml.end("groupSet");
+        xml.raw(tagSetXml(ni.getTagSet()));
+        if (ni.getAttachment() != null) {
+            xml.start("attachment")
+                    .elem("attachmentId", ni.getAttachment().getAttachmentId())
+                    .elem("deviceIndex", String.valueOf(ni.getAttachment().getDeviceIndex()))
+                    .elem("status", ni.getAttachment().getStatus())
+                    .elem("attachTime", ni.getAttachment().getAttachTime())
+                    .elem("deleteOnTermination", String.valueOf(ni.getAttachment().isDeleteOnTermination()))
+                    .elem("instanceId", ni.getAttachment().getInstanceId())
+                    .elem("instanceOwnerId", ni.getAttachment().getInstanceOwnerId())
+                    .end("attachment");
+        }
+        if (!ni.getPrivateIpAddresses().isEmpty()) {
+            xml.start("privateIpAddressesSet");
+            for (NetworkInterfacePrivateIpAddress ip : ni.getPrivateIpAddresses()) {
+                xml.start("item")
+                        .elem("privateIpAddress", ip.getPrivateIpAddress())
+                        .elem("privateDnsName", ip.getPrivateDnsName())
+                        .elem("primary", String.valueOf(ip.isPrimary()));
+                if (ip.getAssociation() != null) {
+                    xml.start("association")
+                            .elem("publicIp", ip.getAssociation().getPublicIp())
+                            .elem("allocationId", ip.getAssociation().getAllocationId())
+                            .elem("associationId", ip.getAssociation().getAssociationId())
+                            .elem("ipOwnerId", ip.getAssociation().getIpOwnerId())
+                            .end("association");
+                }
+                xml.end("item");
+            }
+            xml.end("privateIpAddressesSet");
+        }
+        return xml.build();
+    }
+
+    private Response handleCreateNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        String subnetId = p.getFirst("SubnetId");
+        String description = p.getFirst("Description");
+        String privateIpAddress = p.getFirst("PrivateIpAddress");
+        List<String> privateIpAddresses = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String addr = p.getFirst("PrivateIpAddresses." + i + ".PrivateIpAddress");
+            if (addr == null) {
+                break;
+            }
+            privateIpAddresses.add(addr);
+        }
+        List<String> securityGroupIds = getList(p, "SecurityGroupId");
+        if (securityGroupIds.isEmpty()) {
+            securityGroupIds = getList(p, "Groups.SecurityGroupId");
+        }
+        List<Tag> tagList = parseTagsForResource(p, "network-interface");
+
+        NetworkInterface ni = service.createNetworkInterface(region, subnetId, description,
+                privateIpAddress, privateIpAddresses, securityGroupIds, tagList);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateNetworkInterfaceResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("networkInterface").raw(networkInterfaceXml(ni)).end("networkInterface")
+                .end("CreateNetworkInterfaceResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        service.deleteNetworkInterface(region, p.getFirst("NetworkInterfaceId"));
+        return booleanResponse("DeleteNetworkInterface");
+    }
+
+    private Response handleAttachNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        String networkInterfaceId = p.getFirst("NetworkInterfaceId");
+        String instanceId = p.getFirst("InstanceId");
+        int deviceIndex = parseIntParam(p, "DeviceIndex", 0);
+        NetworkInterfaceAttachment attachment =
+                service.attachNetworkInterface(region, networkInterfaceId, instanceId, deviceIndex);
+        XmlBuilder xml = new XmlBuilder()
+                .start("AttachNetworkInterfaceResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("attachmentId", attachment.getAttachmentId())
+                .end("AttachNetworkInterfaceResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDetachNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        String attachmentId = p.getFirst("AttachmentId");
+        boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
+        service.detachNetworkInterface(region, attachmentId, force);
+        return booleanResponse("DetachNetworkInterface");
     }
 
     // ─── XML fragment builders ────────────────────────────────────────────────
@@ -3584,7 +3807,12 @@ public class Ec2QueryHandler {
                     .start("cidrBlockState").elem("state", assoc.getCidrBlockState()).end("cidrBlockState")
                     .end("item");
         }
-        xml.end("cidrBlockAssociationSet")
+        xml.end("cidrBlockAssociationSet");
+        xml.start("ipv6CidrBlockAssociationSet");
+        for (VpcIpv6CidrBlockAssociation assoc : vpc.getIpv6CidrBlockAssociationSet()) {
+            xml.start("item").raw(vpcIpv6AssociationXml(assoc)).end("item");
+        }
+        xml.end("ipv6CidrBlockAssociationSet")
                 .raw(tagSetXml(vpc.getTags()));
         return xml.build();
     }
@@ -3682,6 +3910,7 @@ public class Ec2QueryHandler {
                     .elem("gatewayId", r.getGatewayId())
                     .elem("natGatewayId", r.getNatGatewayId())
                     .elem("egressOnlyInternetGatewayId", r.getEgressOnlyInternetGatewayId())
+                    .elem("vpcPeeringConnectionId", r.getVpcPeeringConnectionId())
                     .elem("state", r.getState())
                     .elem("origin", r.getOrigin())
                     .end("item");
@@ -3746,15 +3975,32 @@ public class Ec2QueryHandler {
         if (natGateway.getCreateTime() != null) {
             xml.elem("createTime", ISO_FMT.format(natGateway.getCreateTime()));
         }
-        if (natGateway.getAllocationId() != null) {
-            xml.start("natGatewayAddressSet")
-                    .start("item")
-                    .elem("allocationId", natGateway.getAllocationId())
-                    .end("item")
-                    .end("natGatewayAddressSet");
-        } else {
-            xml.start("natGatewayAddressSet").end("natGatewayAddressSet");
+        xml.start("natGatewayAddressSet");
+        for (NatGatewayAddress address : natGateway.getNatGatewayAddresses()) {
+            xml.start("item");
+            if (address.getAllocationId() != null) {
+                xml.elem("allocationId", address.getAllocationId());
+            }
+            if (address.getAssociationId() != null) {
+                xml.elem("associationId", address.getAssociationId());
+            }
+            xml.elem("networkInterfaceId", address.getNetworkInterfaceId())
+                    .elem("privateIp", address.getPrivateIp());
+            if (address.getPublicIp() != null) {
+                xml.elem("publicIp", address.getPublicIp());
+            }
+            xml.elem("isPrimary", String.valueOf(address.isPrimary()))
+                    .elem("status", address.getStatus())
+                    .end("item");
         }
+        // A gateway restored from a store written before addresses were modelled has none, but
+        // still knows its allocation id, report what it does know rather than an empty set.
+        if (natGateway.getNatGatewayAddresses().isEmpty() && natGateway.getAllocationId() != null) {
+            xml.start("item")
+                    .elem("allocationId", natGateway.getAllocationId())
+                    .end("item");
+        }
+        xml.end("natGatewayAddressSet");
         xml.raw(tagSetXml(natGateway.getTags()));
         return xml.build();
     }

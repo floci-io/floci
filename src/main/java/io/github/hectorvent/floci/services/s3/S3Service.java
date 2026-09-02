@@ -56,6 +56,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
+    private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
@@ -481,6 +482,9 @@ public class S3Service implements Resettable, ResourceProvider {
             String versionId = UUID.randomUUID().toString();
             object.setVersionId(versionId);
             object.setLatest(true);
+            // Doubles as this object's dataGeneration token (see the field's javadoc on
+            // S3Object) - reusing versionId needs no extra random value.
+            object.setDataGeneration(versionId);
 
             // Check lock protection on the current latest before overwriting
             String latestKey = objectKey(bucketName, key);
@@ -500,20 +504,29 @@ public class S3Service implements Resettable, ResourceProvider {
                     effectiveOptions.getRetainUntilDate(),
                     effectiveOptions.getLegalHoldStatus());
 
+            // Write the body before publishing metadata: getObject's optimistic read (see
+            // getLatestObject) relies on a generation only ever becoming visible in objectStore
+            // once its file is fully on disk, or a reader could see the new dataGeneration and
+            // still read the previous write's bytes underneath it. Write the fresh, not-yet-
+            // referenced versioned file first and the shared canonical file last: if the
+            // versioned write fails, the canonical file - which unlocked GETs already associate
+            // with the still-unpublished previous generation - is never touched, so a concurrent
+            // GET can't observe corrupted "latest" bytes paired with the old metadata.
+            writeVersionedFile(bucketName, key, versionId, data);
+            writeFile(bucketName, key, data);
+            // Release the cached payload before publishing: once objectStore.put makes this
+            // instance visible to other threads, a concurrent getObject can hold a reference to
+            // it (copyObject reads getData() without any lock) and race this null-out otherwise.
+            object.setData(null);
             // Store versioned copy and update latest pointer
             objectStore.put(versionedKey(bucketName, key, versionId), object);
             objectStore.put(latestKey, object);
-            writeFile(bucketName, key, data);
-            writeVersionedFile(bucketName, key, versionId, data);
             LOG.debugv("Put versioned object: {0}/{1} v={2} ({3} bytes)", bucketName, key, versionId, data.length);
         } else {
+            S3Object prev = objectStore.get(objectKey(bucketName, key)).orElse(null);
             // Check lock protection on the existing object before overwriting
-            if (bucket.isObjectLockEnabled()) {
-                objectStore.get(objectKey(bucketName, key)).ifPresent(prev -> {
-                    if (!prev.isDeleteMarker()) {
-                        checkLockProtection(prev, false);
-                    }
-                });
+            if (bucket.isObjectLockEnabled() && prev != null && !prev.isDeleteMarker()) {
+                checkLockProtection(prev, false);
             }
 
             // Apply lock fields from request or bucket default
@@ -522,12 +535,20 @@ public class S3Service implements Resettable, ResourceProvider {
                     effectiveOptions.getRetainUntilDate(),
                     effectiveOptions.getLegalHoldStatus());
 
-            objectStore.put(objectKey(bucketName, key), object);
+            // A fresh per-write token, compared by getObject's optimistic read against a
+            // later re-read of this same field to detect a concurrent overwrite - see the
+            // dataGeneration javadoc on S3Object.
+            object.setDataGeneration(UUID.randomUUID().toString());
+
+            // Write the body before publishing metadata - see the comment in the versioned
+            // branch above; the same ordering requirement applies here.
             writeFile(bucketName, key, data);
+            // Release the cached payload before publishing - see the comment in the versioned
+            // branch above; the same race applies here.
+            object.setData(null);
+            objectStore.put(objectKey(bucketName, key), object);
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, data.length);
         }
-        // Release cached payload reference - data is now persisted to disk (or to memoryDataStore in inMemory mode)
-        object.setData(null);
         return object;
     }
 
@@ -884,15 +905,60 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public S3Object getObject(String bucketName, String key, String versionId) {
-        S3Object obj = getObjectMetadata(bucketName, key, versionId);
-
-        // Read from versioned file if available, otherwise from latest
         if (versionId != null) {
+            // An explicit version's file is immutable once written (see storeObjectInternal) and
+            // never reused by a later PUT, so this pairing can never race a concurrent overwrite.
+            S3Object obj = getObjectMetadata(bucketName, key, versionId);
             obj.setData(readVersionedFile(bucketName, key, versionId));
-        } else {
-            obj.setData(readFile(bucketName, key));
+            return obj;
         }
-        return obj;
+        return getLatestObject(bucketName, key);
+    }
+
+    /**
+     * Reads the "latest" object without locking against a concurrent overwrite for the
+     * (potentially slow) metadata read or file read, while still never pairing one write's
+     * metadata with another write's bytes. storeObjectInternal stamps every write with a fresh,
+     * random dataGeneration and, critically, always finishes writing the file for that generation
+     * before publishing metadata that names it (see the write-ordering comment in
+     * storeObjectInternal) - so a generation can only become visible in objectStore once its
+     * bytes are already on disk. This is a seqlock-style optimistic read: read the metadata, read
+     * the file, then re-read the metadata's dataGeneration under the bucket monitor and compare it
+     * to the first read. That re-read can only happen either fully before or fully after any
+     * single write's monitor-held publish, so an unchanged token proves no write completed while
+     * this read was in flight; combined with the write-before-publish ordering, that also proves
+     * the file read - which happened after the first metadata read, and therefore after that
+     * generation's file was already written - cannot have observed an earlier, stale generation's
+     * bytes. A change (or a concurrent delete) means an overwrite landed mid-read, so the whole
+     * read is retried. Objects written before this scheme existed have no dataGeneration recorded;
+     * since nothing can concurrently overwrite a key without immediately stamping one, a null
+     * token is only ever observed when untouched, and untouched means nothing to race against.
+     */
+    private S3Object getLatestObject(String bucketName, String key) {
+        Bucket bucket = resolveBucket(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        String storeKey = objectKey(bucketName, key);
+        // A genuine race only ever needs a retry or two; this bound exists so a resolution bug
+        // (the recheck disagreeing with getObjectMetadata about where this key lives) fails loudly
+        // with a clear error instead of spinning forever re-reading the file and exhausting the heap.
+        for (int attempt = 0; attempt < 10_000; attempt++) {
+            S3Object obj = getObjectMetadata(bucketName, key, null);
+            byte[] data = readFile(bucketName, key);
+            synchronized (bucket) {
+                S3Object current = resolveObject(storeKey).orElse(null);
+                if (current != null && !current.isDeleteMarker()
+                        && Objects.equals(current.getDataGeneration(), obj.getDataGeneration())) {
+                    obj.setData(data);
+                    return obj;
+                }
+            }
+            // A concurrent overwrite (or delete) landed mid-read; retry against the new state.
+        }
+        throw new IllegalStateException(
+                "getObject retry limit exceeded for " + bucketName + "/" + key
+                        + " - the object is either under sustained concurrent overwrite or the "
+                        + "metadata/data resolution paths disagree about where this key lives");
     }
 
     public S3Object headObject(String bucketName, String key) {
@@ -1093,12 +1159,11 @@ public class S3Service implements Resettable, ResourceProvider {
             });
             return toDelete;
         } else {
+            S3Object existing = objectStore.get(objectKey(bucketName, key)).orElse(null);
             // Check lock on the non-versioned object before delete
-            objectStore.get(objectKey(bucketName, key)).ifPresent(obj -> {
-                if (!obj.isDeleteMarker()) {
-                    checkLockProtection(obj, bypassGovernance);
-                }
-            });
+            if (existing != null && !existing.isDeleteMarker()) {
+                checkLockProtection(existing, bypassGovernance);
+            }
             // Non-versioned delete
             objectStore.delete(objectKey(bucketName, key));
             deleteFile(bucketName, key);
@@ -1640,6 +1705,8 @@ public class S3Service implements Resettable, ResourceProvider {
             String indexKey = prefix.isEmpty() ? index : prefix + "/" + index;
             try {
                 authorizeGetObject(bucket, indexKey, null, authorization);
+                // Metadata only: the controller fetches the body atomically itself when the
+                // request actually needs one (GET), so HEAD website requests never load it.
                 return new WebsiteResolution.ServeObject(indexKey, headObject(bucket, indexKey, null));
             } catch (AwsException e) {
                 if (!isWebsiteErrorDocumentTrigger(e)) {
@@ -1859,9 +1926,19 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchKey",
                         "The specified key does not exist.", 404));
 
-        // COMPLIANCE mode: retainUntil cannot be shortened
-        if ("COMPLIANCE".equals(obj.getObjectLockMode())
+        boolean activeComplianceRetention = "COMPLIANCE".equals(obj.getObjectLockMode())
                 && obj.getRetainUntilDate() != null
+                && Instant.now().isBefore(obj.getRetainUntilDate());
+
+        // Active COMPLIANCE mode cannot be changed or removed, even when the
+        // retention date is unchanged or extended.
+        if (activeComplianceRetention && !"COMPLIANCE".equals(mode)) {
+            throw new AwsException("AccessDenied",
+                    "COMPLIANCE retention mode cannot be changed", 403);
+        }
+
+        // Active COMPLIANCE mode: retainUntil cannot be shortened.
+        if (activeComplianceRetention
                 && retainUntil != null
                 && retainUntil.isBefore(obj.getRetainUntilDate())) {
             throw new AwsException("AccessDenied",
@@ -2787,6 +2864,13 @@ public class S3Service implements Resettable, ResourceProvider {
             case "authenticated-read" -> objectAclXml(
                     ownerFullControlGrant(),
                     groupGrant(AUTHENTICATED_USERS_GROUP_URI, "READ"));
+            // Standard canned ACL used by S3 server-access-logging (and Terraform's
+            // aws_s3_bucket_acl / access-logging modules) to grant the S3 log-delivery service
+            // group permission to write log objects into this bucket and read their own ACL.
+            case "log-delivery-write" -> objectAclXml(
+                    ownerFullControlGrant(),
+                    groupGrant(LOG_DELIVERY_GROUP_URI, "WRITE"),
+                    groupGrant(LOG_DELIVERY_GROUP_URI, "READ_ACP"));
             default -> throw new AwsException("InvalidArgument",
                     "Unsupported x-amz-acl value: " + cannedAcl, 400);
         };
@@ -3235,6 +3319,7 @@ public class S3Service implements Resettable, ResourceProvider {
         copy.setRetainUntilDate(source.getRetainUntilDate());
         copy.setLegalHoldStatus(source.getLegalHoldStatus());
         copy.setAcl(source.getAcl());
+        copy.setDataGeneration(source.getDataGeneration());
         return copy;
     }
 

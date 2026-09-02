@@ -43,6 +43,8 @@ class HttpApiRequestAuthorizerTest {
     private static String identitySourceAuthorizerId;
     private static String echoV1AuthorizerId;
     private static String echoV2AuthorizerId;
+    private static String nestedContextAuthorizerId;
+    private static String contextlessAuthorizerId;
 
     private static final String ALLOW_FN = "httpv2-auth-allow-fn";
     private static final String DENY_FN = "httpv2-auth-deny-fn";
@@ -51,6 +53,8 @@ class HttpApiRequestAuthorizerTest {
     private static final String SIMPLE_DENY_FN = "httpv2-auth-simple-deny-fn";
     private static final String ECHO_FN = "httpv2-auth-echo-fn";
     private static final String BACKEND_FN = "httpv2-auth-backend-fn";
+    private static final String NESTED_CTX_FN = "httpv2-auth-nested-ctx-fn";
+    private static final String CONTEXTLESS_FN = "httpv2-auth-contextless-fn";
 
     // ──────────────────────────── Setup ────────────────────────────
 
@@ -82,10 +86,16 @@ class HttpApiRequestAuthorizerTest {
     @Order(2)
     void setupLambdaFunctions() throws Exception {
         // Backend Lambda
+        // Echoes requestContext.authorizer back. JSON.stringify drops the key entirely when the
+        // event carries none, which is what the contextless case asserts.
         createNodeLambda(BACKEND_FN, """
                 exports.handler = async (event) => ({
                     statusCode: 200,
-                    body: JSON.stringify({ message: "Hello from backend", path: event.rawPath })
+                    body: JSON.stringify({
+                        message: "Hello from backend",
+                        path: event.rawPath,
+                        authorizer: event.requestContext ? event.requestContext.authorizer : undefined
+                    })
                 });
                 """);
 
@@ -132,6 +142,27 @@ class HttpApiRequestAuthorizerTest {
                 });
                 """);
 
+        // Simple-response authorizer whose context nests objects — an HTTP API delivers the
+        // context as JSON, so the nesting has to survive.
+        createNodeLambda(NESTED_CTX_FN, """
+                exports.handler = async (event) => ({
+                    isAuthorized: true,
+                    context: {
+                        jwt: { claims: { sub: "user-abc", scope: "condo/read" } },
+                        tenantId: "CONDO_1",
+                        licenseTier: "PRO",
+                        requestCount: 3,
+                        active: true,
+                        groups: ["admin", "auditor"]
+                    }
+                });
+                """);
+
+        // Simple-response authorizer that allows without returning any context
+        createNodeLambda(CONTEXTLESS_FN, """
+                exports.handler = async (event) => ({ isAuthorized: true });
+                """);
+
         // Echo authorizer that returns the event payload in context
         createNodeLambda(ECHO_FN, """
                 exports.handler = async (event) => ({
@@ -148,7 +179,8 @@ class HttpApiRequestAuthorizerTest {
     @Test
     @Order(3)
     void prewarmLambdaFunctions() {
-        for (String fn : new String[]{BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN, SIMPLE_DENY_FN, ECHO_FN}) {
+        for (String fn : new String[]{BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN,
+                SIMPLE_DENY_FN, ECHO_FN, NESTED_CTX_FN, CONTEXTLESS_FN}) {
             given().contentType(ContentType.JSON).body("{}")
                     .when().post("/2015-03-31/functions/" + fn + "/invocations")
                     .then().statusCode(200);
@@ -242,6 +274,26 @@ class HttpApiRequestAuthorizerTest {
                 .then().statusCode(201)
                 .extract().path("authorizerId");
 
+        // Nested-context authorizer (format 2.0 with enableSimpleResponses)
+        nestedContextAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"nested-ctx-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"2.0","enableSimpleResponses":true,"authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(NESTED_CTX_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Contextless simple-allow authorizer (format 2.0 with enableSimpleResponses)
+        contextlessAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"contextless-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"2.0","enableSimpleResponses":true,"authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(CONTEXTLESS_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
         // Echo authorizer (format 1.0)
         echoV1AuthorizerId = given()
                 .contentType(ContentType.JSON)
@@ -279,6 +331,24 @@ class HttpApiRequestAuthorizerTest {
         given()
                 .when().get("/execute-api/" + httpApiId + "/test/hello")
                 .then().statusCode(200);
+    }
+
+    /**
+     * The context an IAM-policy authorizer returns alongside its policy document reaches the
+     * backend under requestContext.authorizer.lambda.
+     */
+    @Test
+    @Order(15)
+    void iamPolicyContextReachesBackend() throws Exception {
+        // Route still carries allowAuthorizerId from the previous test.
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode lambda = MAPPER.readTree(body).path("authorizer").path("lambda");
+        assertEquals("user123", lambda.path("userId").asText());
+        assertEquals("admin", lambda.path("role").asText());
     }
 
     // ──────────────────────────── Test: Deny with IAM policy (format 1.0) ────────────────────────────
@@ -333,6 +403,78 @@ class HttpApiRequestAuthorizerTest {
         given()
                 .when().get("/execute-api/" + httpApiId + "/test/hello")
                 .then().statusCode(200);
+    }
+
+    @Test
+    @Order(45)
+    void simpleResponseContextReachesBackend() throws Exception {
+        // Route still carries simpleAllowAuthorizerId from the previous test.
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode lambda = MAPPER.readTree(body).path("authorizer").path("lambda");
+        assertEquals("simple-user", lambda.path("userId").asText());
+        assertEquals("premium", lambda.path("plan").asText());
+        assertTrue(MAPPER.readTree(body).path("authorizer").path("jwt").isMissingNode(),
+                "A Lambda authorizer must not render the JWT-authorizer node");
+    }
+
+    /**
+     * An HTTP API delivers the authorizer context as JSON, so nested objects and non-string
+     * scalars survive to the backend, unlike a REST API's flattened string map.
+     */
+    @Test
+    @Order(46)
+    void nestedContextSurvivesToBackend() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(nestedContextAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode lambda = MAPPER.readTree(body).path("authorizer").path("lambda");
+        assertEquals("user-abc", lambda.path("jwt").path("claims").path("sub").asText(),
+                "Nested objects must not be flattened or stringified");
+        assertEquals("condo/read", lambda.path("jwt").path("claims").path("scope").asText());
+        assertEquals("CONDO_1", lambda.path("tenantId").asText());
+        assertEquals("PRO", lambda.path("licenseTier").asText());
+        assertTrue(lambda.path("requestCount").isNumber(), "A number must stay a number");
+        assertEquals(3, lambda.path("requestCount").asInt());
+        assertTrue(lambda.path("active").isBoolean(), "A boolean must stay a boolean");
+        assertTrue(lambda.path("groups").isArray(), "An array must stay an array");
+        assertEquals("auditor", lambda.path("groups").get(1).asText());
+    }
+
+    /** An authorizer that allows without returning a context leaves the authorizer node absent. */
+    @Test
+    @Order(47)
+    void contextlessAllowLeavesAuthorizerNodeAbsent() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(contextlessAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode response = MAPPER.readTree(body);
+        assertEquals("Hello from backend", response.path("message").asText());
+        assertTrue(response.path("authorizer").isMissingNode(),
+                "No context returned means no authorizer node on the proxy event");
     }
 
     // ──────────────────────────── Test: Simple response Deny (format 2.0) ────────────────────────────
@@ -431,10 +573,8 @@ class HttpApiRequestAuthorizerTest {
                 .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
                 .then().statusCode(200);
 
-        // The echo authorizer allows the request and embeds the received event in its context.
-        // The backend Lambda receives the proxy event which does NOT include authorizer context
-        // in the v2 proxy event format. So we verify the authorizer was invoked (200 response)
-        // and then invoke the echo function directly with a realistic event to verify format.
+        // The echo authorizer embeds the event it received in its context, so assert that shape
+        // by invoking the echo function directly rather than unwrapping it through two hops.
         String response = given()
                 .header("X-Custom-Header", "test-value")
                 .queryParam("foo", "bar")
@@ -571,7 +711,8 @@ class HttpApiRequestAuthorizerTest {
     void cleanup() {
         if (routeId != null) given().when().delete("/v2/apis/" + httpApiId + "/routes/" + routeId);
         if (httpApiId != null) given().when().delete("/v2/apis/" + httpApiId);
-        for (String fn : new String[]{BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN, SIMPLE_DENY_FN, ECHO_FN}) {
+        for (String fn : new String[]{BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN,
+                SIMPLE_DENY_FN, ECHO_FN, NESTED_CTX_FN, CONTEXTLESS_FN}) {
             deleteFunction(fn);
         }
     }

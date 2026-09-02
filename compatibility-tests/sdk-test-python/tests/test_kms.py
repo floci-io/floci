@@ -1,6 +1,10 @@
 """KMS integration tests."""
 
+import hashlib
+
 import pytest
+from botocore.exceptions import ClientError
+from cryptography.hazmat.primitives import serialization
 
 
 class TestKMSKey:
@@ -232,6 +236,97 @@ class TestKMSSigning:
                 SigningAlgorithm="RSASSA_PSS_SHA_256",
             )
             assert verify_response["SignatureValid"]
+        finally:
+            kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
+
+
+    def test_ed25519_sign_and_verify(self, kms_client):
+        """Test Ed25519 signing, checked against an outside library and real KMS rules."""
+        key_id = kms_client.create_key(
+            Description="pytest-ed25519-key",
+            KeyUsage="SIGN_VERIFY",
+            KeySpec="ECC_NIST_EDWARDS25519",
+        )["KeyMetadata"]["KeyId"]
+        message = b"message to sign"
+        digest = hashlib.sha512(message).digest()
+
+        try:
+            # Real KMS returns a 44 byte SubjectPublicKeyInfo holding a 32 byte Ed25519
+            # point. A NIST P-521 key, which this key spec used to produce, is far larger.
+            public_key = serialization.load_der_public_key(
+                kms_client.get_public_key(KeyId=key_id)["PublicKey"]
+            )
+            assert type(public_key).__name__ == "Ed25519PublicKey"
+
+            # ED25519_SHA_512 is pure Ed25519 over the message, so an outside library
+            # verifies it directly.
+            signature = kms_client.sign(
+                KeyId=key_id,
+                Message=message,
+                MessageType="RAW",
+                SigningAlgorithm="ED25519_SHA_512",
+            )["Signature"]
+            assert len(signature) == 64
+            public_key.verify(signature, message)
+            assert kms_client.verify(
+                KeyId=key_id,
+                Message=message,
+                MessageType="RAW",
+                Signature=signature,
+                SigningAlgorithm="ED25519_SHA_512",
+            )["SignatureValid"]
+
+            # ED25519_PH_SHA_512 requires DIGEST and pre-hashes the bytes it is given,
+            # so it is a different signature over the same input.
+            prehash_signature = kms_client.sign(
+                KeyId=key_id,
+                Message=digest,
+                MessageType="DIGEST",
+                SigningAlgorithm="ED25519_PH_SHA_512",
+            )["Signature"]
+            assert len(prehash_signature) == 64
+            assert prehash_signature != signature
+            assert kms_client.verify(
+                KeyId=key_id,
+                Message=digest,
+                MessageType="DIGEST",
+                Signature=prehash_signature,
+                SigningAlgorithm="ED25519_PH_SHA_512",
+            )["SignatureValid"]
+
+            # Each algorithm takes one message type, the way real KMS enforces it.
+            for algorithm, message_type in [
+                ("ED25519_SHA_512", "DIGEST"),
+                ("ED25519_PH_SHA_512", "RAW"),
+            ]:
+                with pytest.raises(ClientError) as excinfo:
+                    kms_client.sign(
+                        KeyId=key_id,
+                        Message=digest if message_type == "DIGEST" else message,
+                        MessageType=message_type,
+                        SigningAlgorithm=algorithm,
+                    )
+                assert excinfo.value.response["Error"]["Code"] == "ValidationException"
+
+            # A DIGEST for the pre-hash algorithm has to be one SHA-512 digest. Real KMS
+            # checks the length on Sign and on Verify.
+            with pytest.raises(ClientError) as excinfo:
+                kms_client.sign(
+                    KeyId=key_id,
+                    Message=b"not a sha-512 digest",
+                    MessageType="DIGEST",
+                    SigningAlgorithm="ED25519_PH_SHA_512",
+                )
+            assert "Digest is invalid length" in excinfo.value.response["Error"]["Message"]
+            with pytest.raises(ClientError) as excinfo:
+                kms_client.verify(
+                    KeyId=key_id,
+                    Message=b"not a sha-512 digest",
+                    MessageType="DIGEST",
+                    Signature=prehash_signature,
+                    SigningAlgorithm="ED25519_PH_SHA_512",
+                )
+            assert "Digest is invalid length" in excinfo.value.response["Error"]["Message"]
         finally:
             kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
 

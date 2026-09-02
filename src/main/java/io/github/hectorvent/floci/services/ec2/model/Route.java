@@ -14,6 +14,7 @@ public class Route {
     private String gatewayId;
     private String natGatewayId;
     private String egressOnlyInternetGatewayId;
+    private String vpcPeeringConnectionId;
     private String state = "active";
     private String origin;
 
@@ -65,6 +66,9 @@ public class Route {
 
     public String getEgressOnlyInternetGatewayId() { return egressOnlyInternetGatewayId; }
     public void setEgressOnlyInternetGatewayId(String egressOnlyInternetGatewayId) { this.egressOnlyInternetGatewayId = egressOnlyInternetGatewayId; }
+
+    public String getVpcPeeringConnectionId() { return vpcPeeringConnectionId; }
+    public void setVpcPeeringConnectionId(String vpcPeeringConnectionId) { this.vpcPeeringConnectionId = vpcPeeringConnectionId; }
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }

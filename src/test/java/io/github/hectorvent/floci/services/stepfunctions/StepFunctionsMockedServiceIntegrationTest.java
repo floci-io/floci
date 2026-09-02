@@ -35,6 +35,7 @@ class StepFunctionsMockedServiceIntegrationTest {
     private static String mockSmArn;
     private static String ddbSmArn;
     private static String expressSmArn;
+    private static String skipSmArn;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -110,6 +111,29 @@ class StepFunctionsMockedServiceIntegrationTest {
                   }
                 }
                 """.formatted(UNSUPPORTED_RESOURCE));
+
+        skipSmArn = createStateMachine("sfn-mock-skip-test", null, """
+                {
+                  "StartAt": "Decide",
+                  "States": {
+                    "Decide": {
+                      "Type": "Choice",
+                      "Choices": [{"Variable": "$.go", "StringEquals": "skip", "Next": "Skip"}],
+                      "Default": "Run"
+                    },
+                    "Skip": {
+                      "Type": "Task",
+                      "Resource": "%s",
+                      "End": true
+                    },
+                    "Run": {
+                      "Type": "Task",
+                      "Resource": "%s",
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(UNSUPPORTED_RESOURCE, UNSUPPORTED_RESOURCE));
 
         given()
                 .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -259,6 +283,32 @@ class StepFunctionsMockedServiceIntegrationTest {
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("States.TaskFailed", describe.jsonPath().getString("error"));
         assertTrue(describe.jsonPath().getString("cause").contains("Unsupported resource"));
+    }
+
+    @Test
+    @Order(10)
+    void emptyMockedResponseIsIgnoredWhenItsStateIsNotEntered() throws Exception {
+        // Verified against Step Functions Local 2.0.0. A mocked response with no attempt entries
+        // does not stop the execution from starting when its state is never entered.
+        var execArn = startExecution(skipSmArn + "#EmptyUnusedResponse", "{\"go\": \"run\"}");
+
+        var describe = waitForTerminalState(execArn);
+        assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
+
+        var output = mapper.readTree(describe.jsonPath().getString("output"));
+        assertEquals(200, output.path("StatusCode").asInt());
+    }
+
+    @Test
+    @Order(11)
+    void emptyMockedResponseFailsTheExecutionWhenItsStateIsEntered() {
+        // Verified against Step Functions Local 2.0.0. Entering the state fails the execution
+        // with States.Runtime rather than rejecting StartExecution.
+        var execArn = startExecution(skipSmArn + "#EmptyUnusedResponse", "{\"go\": \"skip\"}");
+
+        var describe = waitForTerminalState(execArn);
+        assertEquals("FAILED", describe.jsonPath().getString("status"));
+        assertEquals("States.Runtime", describe.jsonPath().getString("error"));
     }
 
     private static String createStateMachine(String name, String type, String definition) {

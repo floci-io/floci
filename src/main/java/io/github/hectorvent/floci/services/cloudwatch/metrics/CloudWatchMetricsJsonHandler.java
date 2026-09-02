@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -27,11 +29,15 @@ public class CloudWatchMetricsJsonHandler {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsJsonHandler.class);
     private final CloudWatchMetricsService metricsService;
+    private final CloudWatchDashboardsService dashboardsService;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public CloudWatchMetricsJsonHandler(CloudWatchMetricsService metricsService, ObjectMapper objectMapper) {
+    public CloudWatchMetricsJsonHandler(CloudWatchMetricsService metricsService,
+                                        CloudWatchDashboardsService dashboardsService,
+                                        ObjectMapper objectMapper) {
         this.metricsService = metricsService;
+        this.dashboardsService = dashboardsService;
         this.objectMapper = objectMapper;
     }
 
@@ -49,6 +55,10 @@ public class CloudWatchMetricsJsonHandler {
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "GetMetricData" -> handleGetMetricData(request, region);
+            case "PutDashboard" -> handlePutDashboard(request, region);
+            case "GetDashboard" -> handleGetDashboard(request, region);
+            case "ListDashboards" -> handleListDashboards(request, region);
+            case "DeleteDashboards" -> handleDeleteDashboards(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported by CloudWatch JSON."))
                     .build();
@@ -233,7 +243,9 @@ public class CloudWatchMetricsJsonHandler {
         String arn = request.has("ResourceARN") ? request.path("ResourceARN").asText() : request.path("ResourceArn").asText();
         if (arn.isEmpty()) arn = request.path("resourceArn").asText();
 
-        Map<String, String> tags = metricsService.listTagsForResource(arn, region);
+        Map<String, String> tags = CloudWatchDashboardsService.isDashboardArn(arn)
+                ? dashboardsService.listTagsForResource(arn, region)
+                : metricsService.listTagsForResource(arn, region);
         ArrayNode tagsArray = objectMapper.createArrayNode();
         tags.forEach((k, v) -> tagsArray.addObject().put("Key", k).put("Value", v));
         return Response.ok(objectMapper.createObjectNode().set("Tags", tagsArray)).build();
@@ -248,7 +260,11 @@ public class CloudWatchMetricsJsonHandler {
         if (tagsNode.isArray()) {
             tagsNode.forEach(t -> tags.put(t.path("Key").asText(), t.path("Value").asText()));
         }
-        metricsService.tagResource(arn, tags, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.tagResource(arn, tags, region);
+        } else {
+            metricsService.tagResource(arn, tags, region);
+        }
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -261,7 +277,11 @@ public class CloudWatchMetricsJsonHandler {
         if (keysNode.isArray()) {
             keysNode.forEach(k -> keys.add(k.asText()));
         }
-        metricsService.untagResource(arn, keys, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.untagResource(arn, keys, region);
+        } else {
+            metricsService.untagResource(arn, keys, region);
+        }
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -320,6 +340,65 @@ public class CloudWatchMetricsJsonHandler {
             }
         }
         return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Dashboards ────────────────────────────
+
+    private Response handlePutDashboard(JsonNode request, String region) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        JsonNode tagsNode = request.path("Tags");
+        if (tagsNode.isArray()) {
+            tagsNode.forEach(t -> tags.put(t.path("Key").asText(), t.path("Value").asText()));
+        }
+        dashboardsService.putDashboard(
+                request.path("DashboardName").asText(null),
+                request.path("DashboardBody").asText(null),
+                tags,
+                region);
+        // DashboardValidationMessages is optional on the response shape, but AWS always
+        // sends the list. It stays empty here: the body is stored opaquely, so nothing
+        // inspects it and no validation warning can be produced.
+        ObjectNode response = objectMapper.createObjectNode();
+        response.putArray("DashboardValidationMessages");
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetDashboard(JsonNode request, String region) {
+        Dashboard dashboard = dashboardsService.getDashboard(
+                request.path("DashboardName").asText(null), region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("DashboardArn", dashboard.getDashboardArn());
+        response.put("DashboardName", dashboard.getDashboardName());
+        response.put("DashboardBody", dashboard.getDashboardBody());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListDashboards(JsonNode request, String region) {
+        String prefix = request.has("DashboardNamePrefix")
+                ? request.path("DashboardNamePrefix").asText() : null;
+        List<Dashboard> dashboards = dashboardsService.listDashboards(prefix, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode entries = response.putArray("DashboardEntries");
+        for (Dashboard d : dashboards) {
+            ObjectNode node = entries.addObject();
+            node.put("DashboardName", d.getDashboardName());
+            node.put("DashboardArn", d.getDashboardArn());
+            node.put("LastModified", d.getLastModified());
+            node.put("Size", d.getSize());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteDashboards(JsonNode request, String region) {
+        List<String> names = new ArrayList<>();
+        JsonNode namesNode = request.path("DashboardNames");
+        if (namesNode.isArray()) {
+            namesNode.forEach(n -> names.add(n.asText()));
+        }
+        dashboardsService.deleteDashboards(names, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private List<MetricDatum> parseMetricDataJson(JsonNode node) {

@@ -370,8 +370,8 @@ public class ElastiCacheQueryHandler {
                   .elem("ReplicationGroupId", g.getReplicationGroupId())
                   .elem("AutoMinorVersionUpgrade", true)
                   .elem("AuthTokenEnabled", authTokenEnabled)
-                  .elem("TransitEncryptionEnabled", authTokenEnabled)
-                  .elem("AtRestEncryptionEnabled", false);
+                  .elem("TransitEncryptionEnabled", transitEncryptionEnabled(g))
+                  .elem("AtRestEncryptionEnabled", g.isAtRestEncryptionEnabled());
         if (g.getEngine() != null) {
             xml.elem("Engine", g.getEngine());
         }
@@ -745,6 +745,18 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         return xml.end("CacheCluster").build();
     }
 
+    /**
+     * TransitEncryptionEnabled is not AuthTokenEnabled. An auth token forces encryption in transit,
+     * so a PASSWORD group is always encrypted — but the reverse does not hold: a group created with
+     * {@code TransitEncryptionEnabled=true} and no token is encrypted in transit too, and this
+     * handler records exactly that request as {@link AuthMode#IAM}. Reporting the auth-token flag
+     * for both answers false for such a group, which is permanent drift for Terraform's
+     * aws_elasticache_replication_group: it reads transit_encryption_enabled back on every plan.
+     */
+    private static boolean transitEncryptionEnabled(ReplicationGroup g) {
+        return g.getAuthMode() != AuthMode.NO_AUTH;
+    }
+
     private String replicationGroupXml(ReplicationGroup g) {
         Endpoint ep = g.getConfigurationEndpoint();
         boolean authTokenEnabled = g.getAuthMode() == AuthMode.PASSWORD;
@@ -755,7 +767,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("Description", g.getDescription())
                   .elem("Status", g.getStatus().wireName())
                   .elem("AuthTokenEnabled", authTokenEnabled)
-                  .elem("TransitEncryptionEnabled", authTokenEnabled)
+                  .elem("TransitEncryptionEnabled", transitEncryptionEnabled(g))
                   .elem("AtRestEncryptionEnabled", g.isAtRestEncryptionEnabled())
                   .elem("ClusterEnabled", g.isClusterEnabled())
                   .elem("ClusterMode", g.isClusterEnabled() ? "enabled" : "disabled")

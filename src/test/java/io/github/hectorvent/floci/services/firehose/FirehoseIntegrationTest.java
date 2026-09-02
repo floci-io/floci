@@ -19,6 +19,9 @@ class FirehoseIntegrationTest {
     private static final String KINESIS_SOURCE_STREAM_NAME = "kinesis-source-delivery-stream";
     private static final String KINESIS_STREAM_ARN = "arn:aws:kinesis:us-east-1:000000000000:stream/events";
     private static final String SOURCE_ROLE_ARN = "arn:aws:iam::000000000000:role/firehose-role";
+    private static final String EU_WEST_1_AUTH = "AWS4-HMAC-SHA256 "
+            + "Credential=test/20260829/eu-west-1/firehose/aws4_request, "
+            + "SignedHeaders=host;x-amz-date, Signature=test";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -509,5 +512,34 @@ class FirehoseIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(17)
+    void deliveryStreamArnUsesRequestRegion() {
+        String streamName = "regional-delivery-stream";
+        String expectedArn = "arn:aws:firehose:eu-west-1:000000000000:deliverystream/" + streamName;
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EU_WEST_1_AUTH)
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + streamName + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamARN", equalTo(expectedArn));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", EU_WEST_1_AUTH)
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + streamName + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamARN", equalTo(expectedArn));
     }
 }

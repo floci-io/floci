@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-java@v5.6.0
+      - uses: actions/setup-java@v6.0.0
         with:
           java-version: '25'
           distribution: 'temurin'
@@ -86,8 +86,20 @@ jobs:
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
 
+      # Save from main only, and from shard 1 only. Actions caches are ref-scoped:
+      # a pull_request run's write lands in refs/pull/N/merge where no other PR can
+      # read it, so every open PR was storing a ~201 MB byte-identical duplicate of
+      # the copy main already publishes under this exact key — 1.61 GB across 8 PRs
+      # when measured, against a 10 GB repo budget. PRs restore main's copy instead
+      # (verified: four sampled PR runs all restored maven-Linux-a80d20aaec, the key
+      # main holds), and main gets ~15 qualifying pushes a day so it stays fresh.
+      #
+      # Trade-off: a PR that edits pom.xml misses this exact key, falls back to the
+      # restore-keys prefix for the bulk, and re-downloads its delta on each re-run
+      # rather than caching it. pom.xml changed 21 times in 30 days, so that is a
+      # small minority of PRs paying a small delta.
       - uses: actions/cache/save@v6.1.0
-        if: always() && matrix.shard == 1
+        if: always() && matrix.shard == 1 && github.event_name == 'push'
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}

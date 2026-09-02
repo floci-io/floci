@@ -13,8 +13,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 
 /**
- * A JSONata expression that reads the top-level context is refused when the state machine is
- * created, as real AWS refuses it. Every message and location asserted here was measured with
+ * A JSONata expression that reads the top-level context, or that does not parse at all, is refused
+ * when the state machine is created, as real AWS refuses it. Every message and location asserted
+ * here was measured with
  * {@code aws stepfunctions validate-state-machine-definition --region us-east-1} on the same
  * definition, and the CreateStateMachine wire shape with
  * {@code aws stepfunctions create-state-machine}.
@@ -82,6 +83,18 @@ class StepFunctionsTopLevelReferenceIntegrationTest {
                 .body("message", equalTo("Invalid State Machine Definition: "
                         + "'UNSUPPORTED_JSONATA_EXPRESSION: Reference to 'phone' at the top level "
                         + "is not supported. at /States/E/Output/v'"));
+    }
+
+    @Test
+    @DisplayName("CreateStateMachine refuses a syntax error with AWS's InvalidDefinition message")
+    void createStateMachineRefusesASyntaxError() {
+        create("invalid-jsonata-expression-" + System.nanoTime(),
+                passWithOutput("{\"v\":\"{% phone[1,2) %}\"}"))
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidDefinition"))
+                .body("message", equalTo("Invalid State Machine Definition: "
+                        + "'INVALID_JSONATA_EXPRESSION: Expected \"]\", got \",\" "
+                        + "at /States/E/Output/v'"));
     }
 
     @Test
@@ -304,8 +317,14 @@ class StepFunctionsTopLevelReferenceIntegrationTest {
     }
 
     @Test
-    @DisplayName("a syntax error is left to the execution, as it is today")
-    void syntaxErrorsAreOutOfScope() {
-        expectAccepted(passWithOutput("{\"v\":\"{% phone[1,2) %}\"}"));
+    @DisplayName("a syntax error is refused at definition time")
+    void syntaxErrorsAreRefusedAtDefinitionTime() {
+        validate(passWithOutput("{\"v\":\"{% phone[1,2) %}\"}")).then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("INVALID_JSONATA_EXPRESSION"))
+                .body("diagnostics[0].message", equalTo("Expected \"]\", got \",\""))
+                .body("diagnostics[0].location", equalTo("/States/E/Output/v"));
     }
 }

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
@@ -386,7 +387,7 @@ class AutoScalingReconcilerTest {
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         SsmCommandService ssmCommandService = mock(SsmCommandService.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(
-                asgService, ec2Service, elbV2Service, ssmCommandService);
+                asgService, ec2Service, elbV2Service, null, ssmCommandService);
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setRegion("us-east-1");
         asg.setAutoScalingGroupName("app-asg");
@@ -407,6 +408,29 @@ class AutoScalingReconcilerTest {
 
         assertEquals(0, asg.getInstances().size());
         verify(ssmCommandService).failActiveInvocationsForInstances("us-east-1", Set.of("i-dead"), "Undeliverable");
+    }
+
+    @Test
+    void reconcileDeregistersStaleInstanceFromClassicLoadBalancerBeforePruning() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        ElbClassicService elbClassicService = mock(ElbClassicService.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(
+                asgService, ec2Service, elbV2Service, elbClassicService, null);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.setLoadBalancerNames(List.of("classic-lb"));
+        asg.getInstances().add(instance("i-dead", "InService"));
+        when(ec2Service.isInstanceContainerRunning("i-dead")).thenReturn(false);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(elbClassicService).deregisterInstances(
+                eq(asg.getRegion()), eq("classic-lb"), eq(List.of("i-dead")));
     }
 
     @Test

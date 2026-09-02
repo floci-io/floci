@@ -128,6 +128,40 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void omitsRecordsForStatementsThatProduceNoResultSet() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        for (String sql : new String[] {
+                "create table data_api_omit(id bigint primary key)",
+                "insert into data_api_items(id, title) values ('omit', 'Omit')",
+                "update data_api_items set title = 'Renamed' where id = 'omit'",
+                "delete from data_api_items where id = 'omit'",
+                "update data_api_items set title = 'Nobody' where id = 'no-such-row'"}) {
+            ObjectNode response = harness.service.executeStatement(harness.request(sql), REGION);
+
+            assertFalse(response.has("records"), sql);
+            assertFalse(response.has("columnMetadata"), sql);
+            assertTrue(response.has("generatedFields"), sql);
+            assertTrue(response.has("numberOfRecordsUpdated"), sql);
+        }
+    }
+
+    @Test
+    void reportsEmptyRecordsForQueriesThatMatchNoRows() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode response = harness.service.executeStatement(
+                harness.request("select title from data_api_items where id = 'no-such-row'"), REGION);
+
+        ArrayNode records = (ArrayNode) response.get("records");
+        assertTrue(records.isEmpty());
+        assertEquals(0L, response.get("numberOfRecordsUpdated").asLong());
+        assertFalse(response.has("generatedFields"));
+    }
+
+    @Test
     void batchExecuteStatementRunsEveryParameterSet() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();

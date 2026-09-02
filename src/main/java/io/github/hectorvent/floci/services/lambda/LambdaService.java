@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -56,6 +57,14 @@ import java.util.regex.Pattern;
 public class LambdaService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(LambdaService.class);
+
+    /**
+     * Qualifier constraint the live service enforces, taken from its own ValidationException
+     * rather than the API reference, which publishes a laxer pattern. Notably it is ASCII-only,
+     * so a non-ASCII digit is rejected here rather than being read as a version number.
+     */
+    private static final String QUALIFIER_PATTERN = "\\$(LATEST(\\.PUBLISHED)?)|[a-zA-Z0-9-_$]+";
+    private static final Pattern QUALIFIER = Pattern.compile(QUALIFIER_PATTERN);
     private static final Pattern EFS_ACCESS_POINT_ARN = Pattern.compile(
             "^arn:aws[a-zA-Z-]*:elasticfilesystem:(?:eusc-)?[a-z]{2}"
                     + "(?:(?:-gov)|(?:-iso(?:b)?))?-[a-z]+-\\d:"
@@ -112,6 +121,8 @@ public class LambdaService implements ResourceProvider {
     private final StorageFactory storageFactory;
     private final LambdaLayerService layerService;
     private final Ec2Service ec2Service;
+    /** Null in the constructors tests use, exactly as the other optional collaborators above are. */
+    private final CustomResourceLiveness customResourceLiveness;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     /**
@@ -182,6 +193,7 @@ public class LambdaService implements ResourceProvider {
         this.storageFactory = storageFactory;
         this.layerService = null;
         this.ec2Service = null;
+        this.customResourceLiveness = null;
     }
 
     @Inject
@@ -202,7 +214,9 @@ public class LambdaService implements ResourceProvider {
                           DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
                           StorageFactory storageFactory,
                           LambdaLayerService layerService,
-                          Ec2Service ec2Service) {
+                          Ec2Service ec2Service,
+                          CustomResourceLiveness customResourceLiveness) {
+        this.customResourceLiveness = customResourceLiveness;
         this.functionStore = functionStore;
         this.executorService = executorService;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -484,6 +498,9 @@ public class LambdaService implements ResourceProvider {
 
         functionStore.save(region, fn);
         LOG.infov("Created Lambda function: {0} in region {1}", functionName, region);
+        if (Boolean.TRUE.equals(request.get("Publish"))) {
+            return publishVersion(region, functionName, null);
+        }
         return fn;
     }
 
@@ -570,6 +587,9 @@ public class LambdaService implements ResourceProvider {
 
         functionStore.save(region, fn);
         LOG.infov("Updated code for function: {0}", functionName);
+        if (Boolean.TRUE.equals(request.get("Publish"))) {
+            return publishVersion(region, functionName, null);
+        }
         return fn;
     }
 
@@ -744,7 +764,74 @@ public class LambdaService implements ResourceProvider {
         return fn;
     }
 
+    /**
+     * DeleteFunction without a Qualifier: removes the function and every version of it.
+     */
     public void deleteFunction(String region, String functionName) {
+        deleteFunction(region, functionName, null);
+    }
+
+    /**
+     * DeleteFunction. A Qualifier names a single published version to remove, leaving the
+     * function and its other versions in place; without one the whole function goes.
+     */
+    public void deleteFunction(String region, String functionName, String qualifier) {
+        if (qualifier != null && !qualifier.isEmpty()) {
+            deleteFunctionVersion(region, functionName, qualifier);
+            return;
+        }
+        deleteWholeFunction(region, functionName);
+    }
+
+    /**
+     * Removes one published version. Error behaviour follows the live service: deleting
+     * {@code $LATEST} or naming an alias is rejected, a version an alias points at is a
+     * conflict, and a version that does not exist is a silent success rather than a 404.
+     */
+    private void deleteFunctionVersion(String region, String functionName, String qualifier) {
+        if (!QUALIFIER.matcher(qualifier).matches()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + qualifier + "' at 'qualifier' failed"
+                            + " to satisfy constraint: Member must satisfy regular expression"
+                            + " pattern: " + QUALIFIER_PATTERN, 400);
+        }
+        LambdaFunction fn = getFunction(region, functionName);
+        if ("$LATEST".equals(qualifier)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "$LATEST version cannot be deleted without deleting the function.", 400);
+        }
+        if (!qualifier.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            // A non-numeric qualifier names an alias, which the live service refuses to
+            // resolve here rather than deleting the version behind it.
+            throw new AwsException("InvalidParameterValueException",
+                    "Deletion of aliases is not currently supported.", 400);
+        }
+        String name = fn.getFunctionName();
+        List<String> referencing = aliasStore == null ? List.of()
+                : aliasStore.list(region, name).stream()
+                        .filter(alias -> qualifier.equals(alias.getFunctionVersion()))
+                        .map(LambdaAlias::getName)
+                        .toList();
+        if (!referencing.isEmpty()) {
+            throw new AwsException("ResourceConflictException",
+                    "Unable to delete version because the following aliases reference it: "
+                            + referencing, 409);
+        }
+        Optional<LambdaFunction> version = functionStore.get(region, name, qualifier);
+        if (version.isEmpty()) {
+            return;
+        }
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            warmPool.drainEnvironment(version.get());
+            functionStore.deleteVersion(region, name, qualifier);
+            // The snapshot shares $LATEST's code directory, so this only reclaims once no
+            // remaining version references it.
+            reclaimLegacyCodeDirectoryIfUnused(name);
+        }
+        LOG.infov("Deleted version {0} of Lambda function: {1}", qualifier, name);
+    }
+
+    private void deleteWholeFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
@@ -816,6 +903,7 @@ public class LambdaService implements ResourceProvider {
         } else {
             fn = resolveInvokeTarget(region, name, qualifier);
         }
+        reportCustomResourceLiveness(payload);
         InvokeResult result = executorService.invoke(fn, payload, type);
         result.setExecutedVersion(fn.getVersion());
         return result;
@@ -830,6 +918,21 @@ public class LambdaService implements ResourceProvider {
         InvokeResult result = executorService.invoke(fn, payload, type);
         result.setExecutedVersion(fn.getVersion());
         return result;
+    }
+
+    /**
+     * Reports that a pending custom resource is still making progress, if this payload belongs to
+     * one. A CDK provider-framework waiter re-invokes {@code framework.isComplete} on a cadence and
+     * echoes the original event -- including its ResponseURL -- into every poll, so a poll landing
+     * here is proof of liveness for that resource's callback token. Resetting the idle budget on it
+     * keeps a long-but-progressing resource (12 org accounts at one per poll) from being cut off
+     * mid-success, without CloudFormation needing to know how much work is left.
+     */
+    private void reportCustomResourceLiveness(byte[] payload) {
+        if (customResourceLiveness == null) {
+            return;
+        }
+        CustomResourceLiveness.tokenIn(payload).ifPresent(customResourceLiveness::touch);
     }
 
     private LambdaFunction resolveInvokeTarget(String region, String name, String qualifier) {

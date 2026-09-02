@@ -106,6 +106,147 @@ setup() {
     assert_output --partial "floci-compat"
 }
 
+@test "OpenTofu: ECR repository created" {
+    run aws_cmd ecr describe-repositories --repository-names floci-compat-app
+    assert_success
+    assert_output --partial "floci-compat-app"
+}
+
+@test "OpenTofu: ECS cluster created" {
+    run aws_cmd ecs describe-clusters --clusters floci-compat-cluster
+    assert_success
+    assert_output --partial "floci-compat-cluster"
+    assert_output --partial "ACTIVE"
+}
+
+@test "OpenTofu: KMS key created" {
+    run aws_cmd kms list-keys
+    assert_success
+    [ "$(aws_cmd kms list-keys --query 'length(Keys)' --output text)" -gt 0 ]
+}
+
+@test "OpenTofu: Kinesis stream created" {
+    run aws_cmd kinesis describe-stream-summary --stream-name floci-compat-events
+    assert_success
+    assert_output --partial "ACTIVE"
+}
+
+@test "OpenTofu: CloudWatch log group created" {
+    run aws_cmd logs describe-log-groups --log-group-name-prefix /floci/compat/app
+    assert_success
+    assert_output --partial "/floci/compat/app"
+}
+
+@test "OpenTofu: EventBridge event bus created" {
+    run aws_cmd events describe-event-bus --name floci-compat-bus
+    assert_success
+    assert_output --partial "floci-compat-bus"
+}
+
+@test "OpenTofu: Step Functions state machine created" {
+    run aws_cmd stepfunctions list-state-machines
+    assert_success
+    assert_output --partial "floci-compat-state-machine"
+}
+
+@test "OpenTofu: CloudFormation stack created" {
+    run aws_cmd cloudformation describe-stacks --stack-name floci-compat-stack
+    assert_success
+    assert_output --partial "floci-compat-stack"
+}
+
+@test "OpenTofu: EKS cluster created" {
+    run aws_cmd eks describe-cluster --name floci-compat-eks
+    assert_success
+    assert_output --partial "floci-compat-eks"
+    assert_output --partial "ACTIVE"
+}
+
+@test "OpenTofu: API Gateway v2 HTTP API created" {
+    run aws_cmd apigatewayv2 get-apis
+    assert_success
+    assert_output --partial "floci-compat-http-api"
+}
+
+@test "OpenTofu: AppConfig application created" {
+    run aws_cmd appconfig list-applications
+    assert_success
+    assert_output --partial "floci-compat-appconfig"
+}
+
+@test "OpenTofu: Backup vault created" {
+    run aws_cmd backup describe-backup-vault --backup-vault-name floci-compat-vault
+    assert_success
+    assert_output --partial "floci-compat-vault"
+}
+
+@test "OpenTofu: Cloud Map namespace created" {
+    run aws_cmd servicediscovery list-namespaces
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "OpenTofu: CodeDeploy application created" {
+    run aws_cmd deploy get-application --application-name floci-compat-codedeploy
+    assert_success
+    assert_output --partial "floci-compat-codedeploy"
+}
+
+@test "OpenTofu: ACM certificate created" {
+    run aws_cmd acm list-certificates
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "OpenTofu: SES identity created" {
+    run aws_cmd ses get-identity-verification-attributes \
+        --identities terraform@floci-compat.internal
+    assert_success
+    assert_output --partial "terraform@floci-compat.internal"
+}
+
+@test "OpenTofu: EventBridge schedule created" {
+    run aws_cmd scheduler get-schedule --name floci-compat-schedule
+    assert_success
+    assert_output --partial "floci-compat-schedule"
+}
+
+@test "OpenTofu: WAFv2 web ACL created" {
+    run aws_cmd wafv2 list-web-acls --scope REGIONAL
+    assert_success
+    assert_output --partial "floci-compat-waf"
+}
+
+@test "OpenTofu: Cost and Usage Report created" {
+    run aws_cmd cur describe-report-definitions
+    assert_success
+    assert_output --partial "floci-compat-report"
+}
+
+@test "OpenTofu: AppSync GraphQL API created" {
+    run aws_cmd appsync list-graphql-apis
+    assert_success
+    assert_output --partial "floci-compat-graphql"
+}
+
+@test "OpenTofu: ElastiCache replication group created" {
+    run aws_cmd elasticache describe-replication-groups --replication-group-id floci-compat-cache
+    assert_success
+    assert_output --partial "floci-compat-cache"
+}
+
+@test "OpenTofu: Firehose delivery stream created" {
+    run aws_cmd firehose list-delivery-streams
+    assert_success
+    assert_output --partial "floci-compat-firehose-basic"
+}
+
+@test "OpenTofu: EventBridge pipe created" {
+    run aws_cmd pipes list-pipes
+    assert_success
+    assert_output --partial "floci-compat-pipe"
+}
+
 @test "OpenTofu: VPC created with custom DNS settings" {
     run aws_cmd ec2 describe-vpcs \
         --filters "Name=tag:Name,Values=floci-compat-vpc"

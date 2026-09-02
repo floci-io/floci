@@ -161,6 +161,31 @@ Pass `ApplicationConfiguration.ApplicationSnapshotConfiguration.SnapshotsEnabled
 `UpdateApplication`) to disable snapshots for an application — real AWS defaults this to `true`.
 `CreateApplicationSnapshot` rejects the request with `InvalidRequestException` while disabled.
 
+### CloudWatch Logs format
+
+The JobManager and TaskManager are started with a `log4j-console.properties` that makes every log
+line a single JSON object, matching the shape real Managed Service for Apache Flink writes to
+CloudWatch Logs: `applicationARN`, `applicationVersionId`, `locationInformation`, `logger`,
+`message`, `messageSchemaVersion`, `messageType`, `threadName`, `throwableInformation`. This applies
+to Flink's own framework logs as well as anything a deployed JAR logs through SLF4J/Log4j2 — a JAR
+whose own tests assert on this exact schema (or that simply expects its logs to reach CloudWatch
+rather than being swallowed by a competing logging framework it bundles) sees the same thing here as
+on real MSF. The config is written into the container before the JVM starts (config placed at
+creation time, before `StartApplication`'s container start), overwriting the stock image's default,
+non-JSON config entirely. `throwableInformation` is always present (an empty string when the log
+event has no exception), unlike real AWS which omits the key entirely in that case. Not re-applied
+on `UpdateApplication` — `applicationVersionId` in already-emitted log lines does not advance across
+an in-place code update, since the JobManager/TaskManager JVMs (and therefore log4j2) are not
+restarted for that, matching how real MSF also keeps the same processes running across an
+`UpdateApplication`.
+
+`applicationARN` and `applicationVersionId` are baked into the generated config as literal text, so
+`CreateApplication` validates `ApplicationName` against AWS's own constraints (`[a-zA-Z0-9_.-]+`,
+1-128 characters) rather than only requiring it non-blank — matching real AWS, and also keeping a
+name containing `%`, `"`, `\`, or `$` out of the log4j2 pattern in the first place. `StartApplication`
+re-checks the same pattern, so an application persisted by an older Floci build (before this
+validation existed) fails loudly there rather than getting a corrupted `applicationARN` in its logs.
+
 ### Flink Dashboard access
 
 `CreateApplicationPresignedUrl` (with `UrlType: FLINK_DASHBOARD_URL`) returns a URL to the running

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -31,8 +32,10 @@ class CloudWatchMetricsTagsTest {
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000")
         );
-        queryHandler = new CloudWatchMetricsQueryHandler(service);
-        jsonHandler = new CloudWatchMetricsJsonHandler(service, objectMapper);
+        CloudWatchDashboardsService dashboardsService = new CloudWatchDashboardsService(
+                new InMemoryStorage<>(), new RegionResolver("us-east-1", "000000000000"));
+        queryHandler = new CloudWatchMetricsQueryHandler(service, dashboardsService);
+        jsonHandler = new CloudWatchMetricsJsonHandler(service, dashboardsService, objectMapper);
     }
 
     @Test

@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * pure logic and live here rather than in the integration test. Error
  * messages mirror the real AWS SESv2 wire responses.
  */
-class SesServiceEventDestinationTest {
+class SesConfigurationSetEventDestinationTest {
 
     private static EventDestination withSns(List<String> matchingEventTypes) {
         EventDestination ed = new EventDestination();
@@ -34,20 +34,20 @@ class SesServiceEventDestinationTest {
 
     @Test
     void validName_passes() {
-        assertDoesNotThrow(() -> SesService.validateEventDestinationName("my-dest_1"));
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestinationName("my-dest_1"));
     }
 
     @Test
     void blankName_throwsInvalidParameterValue() {
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestinationName("   "));
+                () -> SesConfigurationSetService.validateEventDestinationName("   "));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
     }
 
     @Test
     void invalidNameCharacters_throws() {
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestinationName("bad name!"));
+                () -> SesConfigurationSetService.validateEventDestinationName("bad name!"));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("Invalid event destination name <bad name!>: only alphanumeric ASCII characters, "
                 + "'_', and '-' are allowed.", ex.getMessage());
@@ -56,20 +56,20 @@ class SesServiceEventDestinationTest {
     @Test
     void nameTooLong_throws() {
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestinationName("a".repeat(65)));
+                () -> SesConfigurationSetService.validateEventDestinationName("a".repeat(65)));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("Event destination name cannot exceed 64 characters.", ex.getMessage());
     }
 
     @Test
     void validDestination_passes() {
-        assertDoesNotThrow(() -> SesService.validateEventDestination(withSns(List.of("SEND", "BOUNCE"))));
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(withSns(List.of("SEND", "BOUNCE"))));
     }
 
     @Test
     void emptyMatchingEventTypes_throws() {
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(withSns(List.of())));
+                () -> SesConfigurationSetService.validateEventDestination(withSns(List.of())));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("At least one event type must be specified.", ex.getMessage());
     }
@@ -77,7 +77,7 @@ class SesServiceEventDestinationTest {
     @Test
     void invalidEventType_throws() {
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(withSns(List.of("SEND", "NOPE"))));
+                () -> SesConfigurationSetService.validateEventDestination(withSns(List.of("SEND", "NOPE"))));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("Invalid event type: NOPE. Valid values are [SEND, REJECT, BOUNCE, COMPLAINT, "
                 + "DELIVERY, OPEN, CLICK, RENDERING_FAILURE, DELIVERY_DELAY, SUBSCRIPTION].", ex.getMessage());
@@ -88,7 +88,7 @@ class SesServiceEventDestinationTest {
         EventDestination ed = new EventDestination();
         ed.setMatchingEventTypes(List.of("SEND"));
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("Event destination is not provided.", ex.getMessage());
     }
@@ -98,7 +98,7 @@ class SesServiceEventDestinationTest {
         EventDestination ed = withSns(List.of("SEND"));
         ed.setCloudWatchDestination(cloudWatch());
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("Please provide only one destination with each request. Either a Firehose Destination "
                 + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.",
@@ -111,7 +111,7 @@ class SesServiceEventDestinationTest {
         ed.setMatchingEventTypes(List.of("SEND"));
         ed.setCloudWatchDestination(new CloudWatchDestination());
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("CloudWatch metrics dimension configuration list cannot be empty.", ex.getMessage());
     }
@@ -121,7 +121,7 @@ class SesServiceEventDestinationTest {
         EventDestination ed = new EventDestination();
         ed.setMatchingEventTypes(List.of("SEND"));
         ed.setCloudWatchDestination(cloudWatch());
-        assertDoesNotThrow(() -> SesService.validateEventDestination(ed));
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(ed));
     }
 
     @Test
@@ -130,7 +130,7 @@ class SesServiceEventDestinationTest {
         ed.setMatchingEventTypes(List.of("SEND"));
         ed.setPinpointDestination(new PinpointDestination());
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("Invalid Pinpoint application ARN provided: null.", ex.getMessage());
     }
@@ -142,7 +142,7 @@ class SesServiceEventDestinationTest {
         PinpointDestination pp = new PinpointDestination();
         pp.setApplicationArn("arn:aws:mobiletargeting:us-east-1:000000000000:apps/abc");
         ed.setPinpointDestination(pp);
-        assertDoesNotThrow(() -> SesService.validateEventDestination(ed));
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(ed));
     }
 
     @Test
@@ -153,7 +153,7 @@ class SesServiceEventDestinationTest {
         sns.setTopicArn("");
         ed.setSnsDestination(sns);
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("SnsDestination requires a non-blank TopicArn.", ex.getMessage());
     }
@@ -164,7 +164,7 @@ class SesServiceEventDestinationTest {
         ed.setMatchingEventTypes(List.of("SEND"));
         ed.setSnsDestination(new SnsDestination()); // TopicArn left null
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("SnsDestination requires a non-blank TopicArn.", ex.getMessage());
     }
@@ -178,7 +178,7 @@ class SesServiceEventDestinationTest {
         // DeliveryStreamArn left null
         ed.setKinesisFirehoseDestination(fh);
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("KinesisFirehoseDestination requires both IamRoleArn and DeliveryStreamArn.",
                 ex.getMessage());
@@ -192,7 +192,7 @@ class SesServiceEventDestinationTest {
         fh.setDeliveryStreamArn("arn:aws:firehose:us-east-1:000000000000:deliverystream/ses");
         // IamRoleArn left null
         ed.setKinesisFirehoseDestination(fh);
-        assertThrows(AwsException.class, () -> SesService.validateEventDestination(ed));
+        assertThrows(AwsException.class, () -> SesConfigurationSetService.validateEventDestination(ed));
     }
 
     @Test
@@ -203,7 +203,7 @@ class SesServiceEventDestinationTest {
         fh.setIamRoleArn("arn:aws:iam::000000000000:role/ses-firehose");
         fh.setDeliveryStreamArn("arn:aws:firehose:us-east-1:000000000000:deliverystream/ses");
         ed.setKinesisFirehoseDestination(fh);
-        assertDoesNotThrow(() -> SesService.validateEventDestination(ed));
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(ed));
     }
 
     @Test
@@ -218,7 +218,7 @@ class SesServiceEventDestinationTest {
         cw.setDimensionConfigurations(List.of(dim));
         ed.setCloudWatchDestination(cw);
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.validateEventDestination(ed));
+                () -> SesConfigurationSetService.validateEventDestination(ed));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         // Member index 1-based for callers, included in the error message.
         assertEquals("CloudWatchDestination dimension configurations require "
@@ -237,7 +237,7 @@ class SesServiceEventDestinationTest {
         dim.setDefaultDimensionValue("default");
         cw.setDimensionConfigurations(List.of(dim));
         ed.setCloudWatchDestination(cw);
-        assertThrows(AwsException.class, () -> SesService.validateEventDestination(ed));
+        assertThrows(AwsException.class, () -> SesConfigurationSetService.validateEventDestination(ed));
     }
 
     @Test
@@ -251,7 +251,7 @@ class SesServiceEventDestinationTest {
         // DefaultDimensionValue left null
         cw.setDimensionConfigurations(List.of(dim));
         ed.setCloudWatchDestination(cw);
-        assertThrows(AwsException.class, () -> SesService.validateEventDestination(ed));
+        assertThrows(AwsException.class, () -> SesConfigurationSetService.validateEventDestination(ed));
     }
 
     private static CloudWatchDestination cloudWatch() {

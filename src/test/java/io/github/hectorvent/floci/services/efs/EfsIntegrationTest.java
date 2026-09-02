@@ -46,6 +46,7 @@ class EfsIntegrationTest {
             .body("FileSystemId", startsWith("fs-"))
             .body("Encrypted", equalTo(true))
             .body("NumberOfMountTargets", equalTo(0))
+            .body("FileSystemProtection.ReplicationOverwriteProtection", equalTo("ENABLED"))
             .body("Tags[0].Value", equalTo("MyFS"))
             .extract().jsonPath().getString("FileSystemId");
     }
@@ -200,6 +201,63 @@ class EfsIntegrationTest {
 
     @Test
     @Order(10)
+    void describeReportsProtectionEnabledByDefault() {
+        given()
+            .queryParam("FileSystemId", fileSystemId)
+        .when()
+            .get("/2015-02-01/file-systems")
+        .then()
+            .statusCode(200)
+            .body("FileSystems[0].FileSystemProtection.ReplicationOverwriteProtection",
+                    equalTo("ENABLED"));
+    }
+
+    @Test
+    @Order(11)
+    void updateFileSystemProtection() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ReplicationOverwriteProtection": "DISABLED"
+                }
+                """)
+        .when()
+            .put("/2015-02-01/file-systems/" + fileSystemId + "/protection")
+        .then()
+            .statusCode(200)
+            .body("ReplicationOverwriteProtection", equalTo("DISABLED"));
+
+        // The change has to survive the round trip, not just echo back: the terraform
+        // provider reads protection back through DescribeFileSystems.
+        given()
+            .queryParam("FileSystemId", fileSystemId)
+        .when()
+            .get("/2015-02-01/file-systems")
+        .then()
+            .statusCode(200)
+            .body("FileSystems[0].FileSystemProtection.ReplicationOverwriteProtection",
+                    equalTo("DISABLED"));
+    }
+
+    @Test
+    @Order(12)
+    void updateFileSystemProtectionOnMissingFileSystemIs404() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ReplicationOverwriteProtection": "DISABLED"
+                }
+                """)
+        .when()
+            .put("/2015-02-01/file-systems/fs-does-not-exist/protection")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(13)
     void deleteResources() {
         given()
             .contentType("application/json")

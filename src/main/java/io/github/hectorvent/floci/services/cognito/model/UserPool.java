@@ -49,6 +49,9 @@ public class UserPool {
     private String clientIdOverride = null;
     private String clientSecretOverride = null;
 
+    /** Empty until SetLogDeliveryConfiguration sets it; GetLogDeliveryConfiguration always returns it. */
+    private List<Map<String, Object>> logConfigurations = new ArrayList<>();
+
     public UserPool() {
         long now = System.currentTimeMillis() / 1000L;
         this.creationDate = now;
@@ -159,4 +162,9 @@ public class UserPool {
 
     public String getClientSecretOverride() { return clientSecretOverride; }
     public void setClientSecretOverride(String clientSecretOverride) { this.clientSecretOverride = clientSecretOverride; }
+
+    public List<Map<String, Object>> getLogConfigurations() { return logConfigurations; }
+    public void setLogConfigurations(List<Map<String, Object>> logConfigurations) {
+        this.logConfigurations = logConfigurations;
+    }
 }

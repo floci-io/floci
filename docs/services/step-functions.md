@@ -41,6 +41,45 @@
 definition, role, logging, tracing, encryption, and tags without replacing the state machine;
 changes to `StateMachineName` or `StateMachineType` use replacement semantics.
 
+## Execution history events
+
+`GetExecutionHistory` emits an event family around a Task state's `TaskStateEntered` and
+`TaskStateExited` pair. Which family depends on the resource type.
+
+- A service integration ARN (`arn:aws:states:::...`) emits `TaskScheduled`, `TaskStarted`,
+  and then `TaskSucceeded` or `TaskFailed`. `taskScheduledEventDetails` carries
+  `resourceType`, `resource`, `region`, and `parameters`. `parameters` is the resolved
+  `Parameters` or `Arguments` payload, serialized as a JSON string. `timeoutInSeconds` and
+  `heartbeatInSeconds` appear only when the state sets `TimeoutSeconds` or
+  `HeartbeatSeconds` as a literal number.
+- A direct Lambda function ARN emits `LambdaFunctionScheduled`, `LambdaFunctionStarted`,
+  and then `LambdaFunctionSucceeded` or `LambdaFunctionFailed`. `LambdaFunctionScheduled`
+  carries `resource` and `input`. `resource` holds the full function ARN. `LambdaFunctionStarted`
+  carries no details at all. This matches AWS.
+- An activity ARN emits the equivalent `Activity*` family.
+
+A `Retry` re-entry emits its own Scheduled, Started, and Failed triple for each attempt. A
+mocked Task (`SFN_MOCK_CONFIG`) emits the same events as a real one, because Step Functions
+Local does the same.
+
+Every event's `previousEventId` points to the id of the event right before it. The one
+exception is the first state's `*StateEntered` event. Its `previousEventId` is `0`. That
+matches `ExecutionStarted`, which is always `id: 1, previousEventId: 0`.
+
+`inputDetails` appears on `ExecutionStarted`, on `stateEnteredEventDetails`, and on
+`LambdaFunctionScheduled`/`ActivityScheduled`. `outputDetails` appears on
+`stateExitedEventDetails`, on `executionSucceededEventDetails`, and on
+`taskSucceededEventDetails`/`lambdaFunctionSucceededEventDetails`. Both are always
+`{"truncated": false}`. Floci never truncates a payload, so the value never changes.
+When the request sets `includeExecutionData` to false, the details objects stay but lose
+`input`, `inputDetails`, `output`, and `outputDetails`. Every other field stays, including
+`taskScheduledEventDetails.parameters`. This matches AWS.
+
+A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
+scheduling time, not when a worker actually picks up the task. Events inside a `Parallel` or
+`Map` branch are not recorded in the parent execution's history. `TaskSubmitted`, which real
+AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet.
+
 ## Map concurrency
 
 Map states honor `MaxConcurrency` and, for JSONPath state machines, `MaxConcurrencyPath`.
@@ -62,10 +101,55 @@ and each retrier keeps its own attempt counter. `Retry` is evaluated before `Cat
 `$$.State.RetryCount` increments per attempt. Attempt counts, defaults, and backoff
 timing were verified against real AWS Step Functions.
 
+A state with no `Retry` array runs exactly once. This is what makes CDK-generated provider-framework
+workflows converge: the `framework-isComplete-task` throws on every not-yet-complete poll and relies on
+`Retry` to poll again until the custom resource reports done — see
+[CloudFormation custom resources](cloudformation.md#custom-resources-and-the-cdk-provider-framework).
+
 `JitterStrategy` supports `NONE` (the default) and `FULL`. `FULL` draws the delay
 uniformly between zero and the computed delay, as on AWS. One deviation. The delay
 between attempts is capped at 30 seconds, the same cap Floci applies to `Wait` states,
 so emulated runs stay fast.
+
+## Timeouts
+
+ASL carries two `TimeoutSeconds` fields and Floci enforces both, in the two terminal shapes
+AWS uses. The state machine's own field bounds every state; a `Task`'s own field only bounds
+one that waits for a task token — an activity, or a `.waitForTaskToken` integration. A Lambda
+or other SDK task that returns directly is not bound by it.
+
+The state machine's own `TimeoutSeconds` is the whole execution's budget. It is checked before
+every state and inside a `Wait`, so a `Wait` longer than what is left is cut rather than slept
+out. The execution ends `TIMED_OUT` with `stopDate` set and no `error` and no `cause` at all;
+`States.Timeout` is named only in the single `ExecutionTimedOut` event, whose `previousEventId`
+is `0`. The state that was cut gets no `*StateExited` event. A `Parallel` or `Map` branch runs
+on its own thread and is not cut mid-state: the budget is enforced again as soon as the branch
+returns.
+
+A `Task` that waits for a task token — an activity, or a `.waitForTaskToken` integration — has
+two independent bounds. `TimeoutSeconds` is the whole wait; `HeartbeatSeconds` is the longest gap
+allowed between two `SendTaskHeartbeat` calls, and every heartbeat pushes that gap forward, so a
+worker that reports as often as the definition asks runs until `TimeoutSeconds` runs out. Either
+clock ends the state the same way: an `ActivityTimedOut` event — `TaskTimedOut` for a
+`.waitForTaskToken` integration — carrying `States.Timeout` and no cause, then an execution that
+reads `FAILED` with that same error. A `Catch` on a heartbeat expiry matches under
+`States.HeartbeatTimeout` and under `States.Timeout` alike. Neither timeout carries a cause:
+`DescribeExecution` and the `ExecutionFailed` event both leave the key out, where every other
+failure reports one. A `Task` that declares no `TimeoutSeconds` waits 300 seconds, where AWS
+waits a year.
+
+One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
+it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
+when the task is scheduled.
+
+## Intrinsic arguments
+
+A `$.` reference passed to a `States.*` intrinsic must find something. An argument that matches
+nothing fails the execution with `States.Runtime`, as on AWS.
+
+One deviation. Indexing something that is not an array makes AWS leak its JSONPath library and
+write `Filter: [0] can only be applied to arrays. Current context is: 1`. Floci writes its own
+`The JsonPath argument for the field '$.other[0]' could not be found in the input ...` there.
 
 ## JSONata nulls
 
@@ -114,7 +198,7 @@ top of the JSONata language, alongside every function JSONata itself provides.
 
 | Function | Returns |
 | --- | --- |
-| `$parse(jsonString)` | the deserialized value; the replacement for `$eval`, which AWS disables |
+| `$parse(jsonString)` | the deserialized value; the replacement for `$eval`, which AWS disables and so does Floci, answering `T1006` to a call |
 | `$partition(array, chunkSize)` | `array` split into chunks of `chunkSize`, the last one holding the remainder |
 | `$range(start, end, step)` | the values from `start` to `end`, inclusive when `step` lands on `end` |
 | `$hash(str, algorithm)` | the hex digest of `str`; `algorithm` is `MD5`, `SHA-1`, `SHA-256`, `SHA-384` or `SHA-512`, case-sensitive |
@@ -135,16 +219,47 @@ JSONata's own `$string` follows AWS's number notation: a whole number is written
 `1e21` and in exponent notation from there, on both signs, so `$string(1e20)` is
 `100000000000000000000` and `$string(1e21)` is `1e+21`.
 
-Evaluation is bounded, as it is on AWS: one expression may run for five seconds and nest 500
-levels deep, and past either the state fails with `States.QueryEvaluationError`. Both bounds sit
-well above what AWS itself accepts, so an expression that evaluates there evaluates here. AWS
-refuses a non-tail-recursive function past a nesting depth near 100, and the largest sequence it
-accepts evaluates here in about a tenth of a second.
+The execution input reaching `$states.input` follows the same number model as `$parse`: an integer
+stays exact while it fits in a `long` and switches to a `double` past that boundary, matching AWS.
 
-One deviation. AWS also bounds the *memory* an expression may use, refusing
-`[1..900000] ~> $count()` with `Expression evaluation memory limit exceeded` while accepting the
-same expression at 800,000 elements. Floci bounds time and depth but not memory, and its ranges
-are lazy, so that expression answers immediately at any size.
+JSONata's own `$formatNumber` checks its picture string against the fourteen rules of XPath F&O
+4.7.3, as AWS does, so `$formatNumber(1, "x")` fails with `D3086` rather than answering `x1`: a
+picture with no digit in it describes no number.
+
+Evaluation is bounded on three axes, as it is on AWS, and past any of them the state fails with
+`States.QueryEvaluationError`.
+
+- **Depth**: one expression may nest 100 levels, which is AWS's own ceiling: AWS accepts `1+1+…+1`
+  at 100 terms, 99 parentheses, 99 brackets, 99 `~>` stages, and a non-tail-recursive `$f(31)`,
+  which nests `3n+5`, and refuses one level more of each. The refusal names the depth reached, as
+  in `Stack overflow error: … Depth=101 max=100`.
+- **Memory**: one value an expression builds may hold 6,990,256 bytes, counting a number as eight
+  bytes and a character as one. That is AWS's own bound: AWS accepts `[1..873782]` and refuses one
+  element more, and it accepts a string doubled 22 times, 2^22 characters, refusing the 23rd. The
+  refusal is AWS's own
+  `Expression evaluation memory limit exceeded`, which is what `[1..900000] ~> $count()` and
+  `$sum([1..900000])` now answer. `$range` holds a tighter bound of its own, checked before it
+  allocates rather than on the array it would have built: AWS accepts `$range(1, 360145, 1)`, all
+  360,145 elements, and refuses one element more with the same refusal. A lazy literal range such
+  as `[1..873782]` is exempt from both bounds on AWS, and stays exempt here.
+- **Time**: five seconds, which is the library's own default and roughly fifty times the slowest
+  evaluation of a payload AWS itself accepts. A recursive expression with no base case is a tail
+  call, so it loops rather than nesting and only the clock ends it.
+
+JSON has no literal for a non-finite number, so AWS writes each one as the string JavaScript names
+it by, wherever it lands: `1/0` is `"Infinity"`, `1e308 * 10` is `"Infinity"`, `0/0` is `"NaN"` and
+`$parseInteger("abc", "0")` is `"NaN"`, and nested, `[1/0]` is `["Infinity"]` and `{"k": 1/0}` is
+`{"k": "Infinity"}`.
+
+One deviation, on the arithmetic half of that. A non-finite number a **function** answers is a value
+like any other here, so `$parseInteger("abc", "0")` is `"NaN"` on its own, inside an array and
+inside an object, as on AWS. One the **arithmetic** produces is not: the JSONata library refuses to
+carry it and raises instead, so Floci sees the value only in that refusal, after it has unwound
+whatever was being built around it. `1/0`, `-1/0` and `1e308 * 10` are answered because the
+expression's own result is what was refused; `[1/0]`, `{"k": 1/0}` and `$string(1/0)` fail the state
+with `States.QueryEvaluationError` where AWS answers a string, and `0/0` fails the field that holds
+it, because NaN is dropped as not-a-number without even a refusal to read it from. A state that
+fails is one a `Catch` fires on, which is the half of the divergence worth keeping.
 
 ## Nested workflows
 
@@ -228,10 +343,17 @@ in a predicate, in a sort term or in an object grouping stays legal and
 `$states.input.items[value > 3]` is accepted. A lambda body keeps the context of the expression
 that defines it, so `$map($states.input.a, function($x){ b })` does name `b` at the top level.
 
-Two neighbouring rules stay with the execution rather than the definition. A syntax error such as
-`{% a[1,2) %}` is accepted here and fails the execution, where AWS reports
-`INVALID_JSONATA_EXPRESSION` when the state machine is created; and `$$`, which AWS refuses under
-its own message, is accepted here.
+A JSONata expression that fails to parse, such as `{% a[1,2) %}`, is refused the same way, with
+`INVALID_JSONATA_EXPRESSION` and the parser's own message at the field's location. `$$`, the
+reference to the top-level context, is refused under `UNSUPPORTED_JSONATA_EXPRESSION` with the
+message `Reference to '$$' is not supported.`; so is `$states.errorOutput` outside the one place it
+resolves, a catcher's own `Output` or `Assign`.
+
+A definition is refused outright, with no state machine created, for a graph that never reaches a
+terminal state (`MISSING_END_STATE`), for a `StartAt`, `Next`, `Default` or `Catch[].Next` naming a
+state absent from its container or a state nothing transitions to (`MISSING_TRANSITION_TARGET`),
+and for a field the state type does not carry: `TimeoutSeconds` only on `Task`, and `Catch`/`Retry`
+only on `Task`, `Parallel` and `Map`.
 
 ## Mocked service integrations
 
@@ -284,6 +406,11 @@ invalid mock configuration (unparseable file, bad attempt key, missing `MockedRe
 entry, `Return` and `Throw` together, `Throw` without `Error`) as a structured 400 error
 at `StartExecution`. Step Functions Local instead returns a plain HTTP 500 for most of
 these and starts the execution only to fail it with `States.Runtime` for the last two.
+
+A mocked response with no attempt entries (`{}`) is not rejected. As in Step Functions
+Local, the execution starts and fails with `States.Runtime` only if the state that names
+it is entered. This keeps a generated mock file usable when the collection it was built
+from is empty and the state is never reached.
 
 ## Configuration
 

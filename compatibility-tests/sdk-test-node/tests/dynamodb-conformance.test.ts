@@ -707,14 +707,32 @@ describe('DynamoDB — Phase 10: Legacy API', () => {
   it('QueryFilter (legacy) filters query results', async () => {
     const resp = await ddb.send(new QueryCommand({
       TableName: table,
-      KeyConditionExpression: 'pk = :pk',
-      ExpressionAttributeValues: { ':pk': s('p1') },
+      KeyConditions: {
+        pk: { ComparisonOperator: 'EQ', AttributeValueList: [s('p1')] },
+      },
       QueryFilter: {
         name: { ComparisonOperator: 'EQ', AttributeValueList: [s('Item-0')] },
       },
     }));
     expect(resp.Count).toBe(1);
     expect(resp.Items![0].name.S).toBe('Item-0');
+  });
+
+  it('QueryFilter and KeyConditionExpression are mutually exclusive', async () => {
+    const err = await ddb.send(new QueryCommand({
+      TableName: table,
+      KeyConditionExpression: 'pk = :pk',
+      ExpressionAttributeValues: { ':pk': s('p1') },
+      QueryFilter: {
+        name: { ComparisonOperator: 'EQ', AttributeValueList: [s('Item-0')] },
+      },
+    })).catch(e => e);
+
+    expect(err.name).toBe('ValidationException');
+    expect(err.message).toBe(
+      'Can not use both expression and non-expression parameters in the same request: '
+      + 'Non-expression parameters: {QueryFilter} Expression parameters: {KeyConditionExpression}',
+    );
   });
 
   it('ScanFilter (legacy) filters scan results', async () => {
