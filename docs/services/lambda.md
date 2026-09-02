@@ -313,10 +313,12 @@ environment as a Kubernetes pod instead of a Docker container. This is designed
 for CI/CD clusters where privileged containers and `docker.sock` access are not
 allowed. Floci talks to the cluster through the standard Kubernetes API: when
 running inside the cluster it uses its ServiceAccount, and when running outside
-it uses your local kubeconfig. Only an inline static bearer `token` or a
-client-certificate/client-key credential with a PKCS#8 private key is
-supported; `tokenFile`, exec, and auth-provider credential plugins
-(`aws eks get-token`, gcloud, etc.) are not, and fail with a named error.
+it uses your local kubeconfig. An inline static bearer `token`, a
+client-certificate/client-key credential with a PKCS#8 private key, or the
+`aws eks get-token --cluster-name <name> [--region <region>]` exec plugin
+(what `aws eks update-kubeconfig` generates) is supported. `--role-arn`,
+`tokenFile`, any other exec command, and auth-provider credential plugins
+(gcloud, etc.) are not, and fail with a named error.
 
 How an invocation works:
 
