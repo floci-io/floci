@@ -385,6 +385,7 @@ and `DescribeTransitGateways` include it.
 | CreateTransitGatewayVpcAttachment | Attaches a VPC to a transit gateway through one subnet per availability zone. |
 | DescribeTransitGatewayVpcAttachments | Lists or returns VPC attachments with their subnets and options. |
 | DescribeTransitGatewayAttachments | Returns the same attachments in the resource-agnostic shape, including the route table association. |
+| DescribeTransitGatewayConnects | Always returns an empty list, since Connect attachments cannot be created yet; requested ids are still validated. |
 | ModifyTransitGatewayVpcAttachment | Adds or removes attachment subnets and updates its options. |
 | DeleteTransitGatewayVpcAttachment | Deletes a VPC attachment. |
 

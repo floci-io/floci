@@ -110,6 +110,7 @@ public class Ec2QueryHandler {
                         handleDescribeTransitGatewayVpcAttachments(params, region);
                 case "DescribeTransitGatewayAttachments" ->
                         handleDescribeTransitGatewayAttachments(params, region);
+                case "DescribeTransitGatewayConnects" -> handleDescribeTransitGatewayConnects(params, region);
                 case "ModifyTransitGatewayVpcAttachment" ->
                         handleModifyTransitGatewayVpcAttachment(params, region);
                 case "DeleteTransitGatewayVpcAttachment" ->
@@ -2178,6 +2179,18 @@ public class Ec2QueryHandler {
             xml.start("item").raw(item.build()).end("item");
         }
         xml.end("transitGatewayAttachments").end("DescribeTransitGatewayAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /** floci does not yet support creating Connect attachments, so this is always an empty list. */
+    private Response handleDescribeTransitGatewayConnects(MultivaluedMap<String, String> p, String region) {
+        service.describeTransitGatewayConnects(region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayConnectsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayConnectSet")
+                .end("transitGatewayConnectSet")
+                .end("DescribeTransitGatewayConnectsResponse");
         return xmlResponse(xml.build());
     }
 

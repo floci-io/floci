@@ -1610,6 +1610,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * floci does not yet support creating Connect attachments, so this always answers with an
+     * empty list, the same thing a real account with none would get back. Requested ids still
+     * validate the same way {@link #describeTransitGatewayVpcAttachments} validates VPC attachment
+     * ids, since Connect attachments share the same {@code tgw-attach-} id namespace.
+     */
+    public List<TransitGatewayVpcAttachment> describeTransitGatewayConnects(
+            String region, List<String> attachmentIds, Map<String, List<String>> filters) {
+        attachmentIds.forEach(Ec2Service::requireWellFormedAttachmentId);
+        if (!attachmentIds.isEmpty()) {
+            throw new AwsException("InvalidTransitGatewayConnectID.NotFound",
+                    "Transit Gateway Connect " + attachmentIds.get(0) + " was deleted or does not exist.", 400);
+        }
+        return List.of();
+    }
+
     public TransitGatewayVpcAttachment modifyTransitGatewayVpcAttachment(
             String region, String attachmentId, List<String> addSubnetIds, List<String> removeSubnetIds,
             TransitGatewayVpcAttachmentOptions changes) {
