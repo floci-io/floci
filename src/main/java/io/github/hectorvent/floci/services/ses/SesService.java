@@ -2456,9 +2456,9 @@ public class SesService {
      * <p>The returned value is one of {@code "BOUNCE"} / {@code "COMPLAINT"}, allowing
      * callers (publishSendEvents) to map the recipient to a synthetic Bounce / Complaint
      * event without consulting the store again. Both the per-address suppression entries
-     * and the account-level / per-CS {@code suppressedReasons} go through
-     * {@link SesSuppressionService}'s reason validation / {@link SesConfigurationSetService}'s,
-     * which enforce exact case-sensitive equality with the two canonical values, so
+     * and the account-level / per-CS {@code suppressedReasons} go through reason validation
+     * (in {@link SesSuppressionService} and {@link SesConfigurationSetService} respectively),
+     * which enforces exact case-sensitive equality with the two canonical values, so
      * {@code entry.getReason()} is guaranteed to be canonical and downstream
      * {@code .equals("BOUNCE")} / {@code .equals("COMPLAINT")} checks are safe.
      */
