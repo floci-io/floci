@@ -2239,7 +2239,7 @@ public class ApiGatewayService {
 
             // "x-amazon-apigateway-any-method" is AWS's vendor extension for a pseudo-operation that
             // matches every HTTP verb (ANY). It is not a real OpenAPI operation keyword, so the swagger
-            // parser never surfaces it via pathItem.readOperationsMap() above — it only ends up in the
+            // parser never surfaces it via pathItem.readOperationsMap() above. It only ends up in the
             // PathItem's raw extensions map, as an untyped Map rather than a typed Operation. Convert it
             // and process it the same way as a normal operation so imported ANY methods are created.
             if (pathItem.getExtensions() != null) {
