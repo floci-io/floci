@@ -109,6 +109,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private Map<String, List<Attribute>> attributes = new ConcurrentHashMap<>();
     // name → value (account-level settings)
     private Map<String, String> accountSettings = new ConcurrentHashMap<>();
+    // deploymentIds for which SERVICE_DEPLOYMENT_IN_PROGRESS has already been emitted this process.
+    private final Set<String> inProgressEmitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -857,6 +859,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);
         persistCluster(region, cluster);
         recordServiceDeployment(svc, taskDefinition, region);
+        if (eventPublisher != null) {
+            eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
+                    "ECS deployment " + svc.getDeploymentId() + " started.", region);
+        }
         LOG.infov("Created ECS service: {0} in cluster {1}", serviceName, cluster.getClusterName());
         return svc;
     }
@@ -914,6 +920,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
             svc.setDeploymentId(newDeploymentId());
             svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, svc.getTaskDefinition(), region);
+            if (eventPublisher != null) {
+                eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
+                        "ECS deployment " + svc.getDeploymentId() + " started.", region);
+            }
         }
         services.put(key, svc);
         return svc;
@@ -1850,6 +1860,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         long current = running - staleTasks.size();
 
         svc.setRunningCount((int) running);
+
+        if (eventPublisher != null) {
+            String deploymentId = currentDeploymentId;
+            boolean converged = current >= svc.getDesiredCount();
+            if (converged) {
+                if (!deploymentId.equals(svc.getLastCompletedDeploymentId())) {
+                    svc.setLastCompletedDeploymentId(deploymentId);
+                    services.put(key, svc);
+                    eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_COMPLETED",
+                            "ECS deployment " + deploymentId + " completed.", region);
+                }
+            } else if (inProgressEmitted.add(deploymentId)) {
+                eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_IN_PROGRESS",
+                        "ECS deployment " + deploymentId + " in progress.", region);
+            }
+        }
 
         if (current < svc.getDesiredCount()) {
             int toStart = svc.getDesiredCount() - (int) current;

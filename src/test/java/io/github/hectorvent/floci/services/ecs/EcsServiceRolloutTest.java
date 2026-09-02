@@ -25,7 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -179,6 +181,28 @@ class EcsServiceRolloutTest {
         String taskArn = runningTasks(service).getFirst().getTaskArn();
         service.stopTask("evt-cluster", taskArn, "test", REGION);
         verify(publisher).emitTaskLadder(any(), eq(TaskStatus.RUNNING), eq(TaskStatus.STOPPED), eq(REGION));
+    }
+
+    @Test
+    void deploymentEmitsStartedThenCompleted() {
+        EcsEventPublisher publisher = mock(EcsEventPublisher.class);
+        EcsService service = newMockModeService(publisher);
+        service.createCluster("dep-cluster", REGION);
+        registerTaskDef(service, "dep-fam", "app:1");
+
+        service.createService("dep-cluster", "dep-svc", "dep-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_STARTED"), any(), eq(REGION));
+
+        service.reconcileServices(); // task starts, still converging or converged same tick
+        service.reconcileServices(); // converged
+        verify(publisher, atLeastOnce())
+                .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
+
+        // COMPLETED is not re-emitted on further steady-state ticks.
+        service.reconcileServices();
+        verify(publisher, times(1))
+                .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
     }
 
     private static List<EcsTask> runningTasks(EcsService service) {
