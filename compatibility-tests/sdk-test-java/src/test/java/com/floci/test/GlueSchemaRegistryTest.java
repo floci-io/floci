@@ -148,6 +148,24 @@ class GlueSchemaRegistryTest {
                     + "  string email = 2;\n"
                     + "}\n";
 
+    private static final String PROTOBUF_SCHEMA_RESPACED =
+            "syntax   =   \"proto3\";\n"
+                    + "\n"
+                    + "package   com.floci;\n"
+                    + "\n"
+                    + "message Customer {\n"
+                    + "\n"
+                    + "  int64 id=1;\n"
+                    + "    string   email   =   2;\n"
+                    + "}\n";
+
+    private static final String PROTOBUF_SCHEMA_INVALID =
+            "syntax = \"proto3\";\n"
+                    + "package com.floci;\n"
+                    + "message Customer {\n"
+                    + "  int64 id = ;\n"
+                    + "}\n";
+
     private static final String JSON_COMPAT_BASE_CLOSED =
             "{\"$schema\":\"http://json-schema.org/draft-07/schema#\","
                     + "\"type\":\"object\","
@@ -367,6 +385,70 @@ class GlueSchemaRegistryTest {
                         .dataFormat(DataFormat.PROTOBUF)
                         .schemaDefinition(PROTOBUF_SCHEMA)
                         .build()).valid()).isTrue();
+            } finally {
+                glue.deleteRegistry(DeleteRegistryRequest.builder()
+                        .registryId(RegistryId.builder().registryName(registryName).build())
+                        .build());
+            }
+        }
+    }
+
+    /**
+     * Ensure the parser still links and runs after excluding KotlinPoet and ICU4j. Canonicalization is
+     * asserted by re-registering a whitespace-only variant. It resolves to the version already stored
+     * only when Wire reformatted both definitions, which the raw-definition fallback in the service
+     * would not do.
+     */
+    @Test
+    void sdkClientValidatesAndCanonicalizesProtobufSchemas() {
+        var registryName = TestFixtures.uniqueName("java-gsr-protobuf-validation");
+        var schemaName = TestFixtures.uniqueName("protobuf-validated");
+
+        try (var glue = TestFixtures.glueClient()) {
+            glue.createRegistry(CreateRegistryRequest.builder()
+                    .registryName(registryName)
+                    .build());
+            try {
+                var invalid = glue.checkSchemaVersionValidity(CheckSchemaVersionValidityRequest.builder()
+                        .dataFormat(DataFormat.PROTOBUF)
+                        .schemaDefinition(PROTOBUF_SCHEMA_INVALID)
+                        .build());
+                assertThat(invalid.valid()).isFalse();
+                assertThat(invalid.error()).isNotBlank();
+
+                assertThatThrownBy(() -> glue.createSchema(CreateSchemaRequest.builder()
+                        .registryId(RegistryId.builder().registryName(registryName).build())
+                        .schemaName(TestFixtures.uniqueName("protobuf-invalid"))
+                        .dataFormat(DataFormat.PROTOBUF)
+                        .compatibility(Compatibility.NONE)
+                        .schemaDefinition(PROTOBUF_SCHEMA_INVALID)
+                        .build()))
+                        .isInstanceOf(InvalidInputException.class);
+
+                var created = glue.createSchema(CreateSchemaRequest.builder()
+                        .registryId(RegistryId.builder().registryName(registryName).build())
+                        .schemaName(schemaName)
+                        .dataFormat(DataFormat.PROTOBUF)
+                        .compatibility(Compatibility.BACKWARD)
+                        .schemaDefinition(PROTOBUF_SCHEMA)
+                        .build());
+
+                var reregistered = glue.registerSchemaVersion(RegisterSchemaVersionRequest.builder()
+                        .schemaId(SchemaId.builder()
+                                .registryName(registryName)
+                                .schemaName(schemaName)
+                                .build())
+                        .schemaDefinition(PROTOBUF_SCHEMA_RESPACED)
+                        .build());
+                assertThat(reregistered.schemaVersionId()).isEqualTo(created.schemaVersionId());
+                assertThat(reregistered.versionNumber()).isEqualTo(1L);
+
+                assertThat(glue.getSchema(GetSchemaRequest.builder()
+                        .schemaId(SchemaId.builder()
+                                .registryName(registryName)
+                                .schemaName(schemaName)
+                                .build())
+                        .build()).latestSchemaVersion()).isEqualTo(1L);
             } finally {
                 glue.deleteRegistry(DeleteRegistryRequest.builder()
                         .registryId(RegistryId.builder().registryName(registryName).build())
