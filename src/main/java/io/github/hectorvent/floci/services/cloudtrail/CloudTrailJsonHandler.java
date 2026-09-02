@@ -210,7 +210,12 @@ public class CloudTrailJsonHandler {
             ObjectNode entry = resourceTagList.addObject();
             entry.put("ResourceId", resourceId);
             ArrayNode tagsList = entry.putArray("TagsList");
-            tags.forEach((k, v) -> tagsList.addObject().put("Key", k).put("Value", v));
+            tags.forEach((k, v) -> {
+                ObjectNode tag = tagsList.addObject().put("Key", k);
+                if (v != null) {
+                    tag.put("Value", v);
+                }
+            });
         }
         return Response.ok(resp).build();
     }

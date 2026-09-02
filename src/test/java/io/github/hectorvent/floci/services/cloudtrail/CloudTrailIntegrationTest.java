@@ -16,6 +16,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -350,6 +351,34 @@ class CloudTrailIntegrationTest {
             .then().statusCode(200)
                 .body("ResourceTagList[0].TagsList", hasSize(1))
                 .body("ResourceTagList[0].TagsList[0].Key", equalTo("team"));
+    }
+
+    @Test
+    void listTagsOmitsValueForTagWithNoValue() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "novalue-" + suffix;
+        String destBucket = "novalue-logs-" + suffix;
+
+        createBucket(destBucket);
+        String trailArn = invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, destBucket))
+            .then().statusCode(200)
+            .extract().path("TrailARN");
+
+        invokeCloudTrail("AddTags", String.format("""
+                {"ResourceId":"%s","TagsList":[{"Key":"novalue"}]}
+                """, trailArn))
+            .then().statusCode(200);
+
+        // AWS omits absent optionals: a valueless tag must come back as
+        // {"Key":"novalue"} with no "Value" member at all, not "Value":null.
+        invokeCloudTrail("ListTags", String.format("""
+                {"ResourceIdList":["%s"]}
+                """, trailArn))
+            .then().statusCode(200)
+                .body(containsString("{\"Key\":\"novalue\"}"))
+                .body(not(containsString("\"Value\":null")));
     }
 
     @Test
