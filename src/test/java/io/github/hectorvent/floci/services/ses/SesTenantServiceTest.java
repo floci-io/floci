@@ -151,7 +151,7 @@ class SesTenantServiceTest {
     @Test
     void tenantForTagArn_resolvesByIdAlone_notFoundMessagesMatchAws() {
         Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
-        // The name segment is never matched — only the id resolves.
+        // The name segment is never matched; only the id resolves.
         assertEquals("acme",
                 service.tenantForTagArn("wrong-name/" + tenant.tenantId(), REGION).tenantName());
         // The missing space before "with" is AWS's own wording.
@@ -173,7 +173,7 @@ class SesTenantServiceTest {
         assertEquals("env", tags.get(0).key());
 
         // A stale TenantId (delete/recreate happened since the caller's lookup) must not resurrect
-        // the old record — the mutation re-resolves by id under the lock and 404s.
+        // the old record: the mutation re-resolves by id under the lock and 404s.
         service.deleteTenant("acme", REGION);
         service.createTenant("acme", List.of(), ACCOUNT, REGION);
         AwsException e = assertThrows(AwsException.class, () -> service.mutateTags(
@@ -187,7 +187,7 @@ class SesTenantServiceTest {
     void mutateTags_shieldsTheStoredRecordFromCallbackMutation() {
         Tenant tenant = service.createTenant("acme",
                 new ArrayList<>(List.of(new Tag("team", "floci"))), ACCOUNT, REGION);
-        // The callback gets an immutable copy — an in-place mutation fails fast instead of
+        // The callback gets an immutable copy: an in-place mutation fails fast instead of
         // silently aliasing the stored record's list.
         assertThrows(UnsupportedOperationException.class, () -> service.mutateTags(
                 "acme/" + tenant.tenantId(), REGION, tags -> {

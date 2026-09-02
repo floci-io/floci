@@ -88,7 +88,7 @@ class SesTenantTagV2IntegrationTest {
                 .body("Tags", hasSize(1))
                 .body("Tags[0].Key", equalTo("team"));
 
-        // A valid name with a wrong id is a 404 — with AWS's own missing space in the message.
+        // A valid name with a wrong id is a 404, with AWS's own missing space in the message.
         v2().when().get("/v2/email/tags?ResourceArn="
                         + ARN_PREFIX + "tenant/" + TENANT + "/tn-000000000000000000000000000000")
                 .then().statusCode(404)

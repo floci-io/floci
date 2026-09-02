@@ -178,7 +178,7 @@ public class SesTenantService {
 
     /**
      * Resolves a tenant by its TenantId, for the ARN-dispatched tag operations: AWS resolves a
-     * tenant tag ARN by the id segment alone — the name segment is not matched (probe-confirmed).
+     * tenant tag ARN by the id segment alone; the name segment is not matched (probe-confirmed).
      */
     public Optional<Tenant> findByTenantId(String tenantId, String region) {
         String prefix = tenantKeyPrefix(region);
@@ -191,7 +191,7 @@ public class SesTenantService {
      * The name/id decomposition of a tenant tag ARN's resource remainder ({@code <name>/<tenantId>}
      * after the generic dispatch split off the {@code tenant/} type segment). AWS parses a remainder
      * without a slash as a null name with the whole segment as the id, and resolves by the id alone
-     * (probe-confirmed) — tenant-domain knowledge, so it lives here, not in the tag dispatch.
+     * (probe-confirmed): tenant-domain knowledge, so it lives here, not in the tag dispatch.
      */
     record TenantTagArn(String name, String tenantId) {
         static TenantTagArn parse(String resourceRemainder) {
@@ -228,7 +228,7 @@ public class SesTenantService {
         }
     }
 
-    /** The tag-dispatch not-found error — the missing space before "with" is AWS's own. */
+    /** The tag-dispatch not-found error: the missing space before "with" is AWS's own. */
     private static AwsException tagArnTenantNotFound(TenantTagArn arn) {
         return new AwsException("NotFoundException",
                 "No Tenant present with name: " + arn.name() + "with tenantId: " + arn.tenantId(), 404);
