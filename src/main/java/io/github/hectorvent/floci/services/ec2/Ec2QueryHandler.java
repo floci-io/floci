@@ -761,23 +761,43 @@ public class Ec2QueryHandler {
         checkDryRun(p);
 
         List<FleetLaunchResult> results = new ArrayList<>(targetCapacity);
-        for (int i = 0; i < targetCapacity; i++) {
-            FleetLaunch launch = launches.get(i % launches.size());
-            Reservation reservation = service.runInstances(
-                    region,
-                    launch.imageId(),
-                    launch.instanceType(),
-                    1,
-                    1,
-                    launch.keyName(),
-                    launch.securityGroupIds(),
-                    launch.subnetId(),
-                    p.getFirst("ClientToken"),
-                    launch.instanceTags(),
-                    launch.userData(),
-                    launch.iamInstanceProfileArn());
-            Instance instance = reservation.getInstances().get(0);
-            results.add(new FleetLaunchResult(instance, launch));
+        List<String> launchedInstanceIds = new ArrayList<>(targetCapacity);
+        try {
+            for (int i = 0; i < targetCapacity; i++) {
+                FleetLaunch launch = launches.get(i % launches.size());
+                Reservation reservation = service.runInstances(
+                        region,
+                        launch.imageId(),
+                        launch.instanceType(),
+                        1,
+                        1,
+                        launch.keyName(),
+                        launch.securityGroupIds(),
+                        launch.subnetId(),
+                        p.getFirst("ClientToken"),
+                        launch.instanceTags(),
+                        launch.userData(),
+                        launch.iamInstanceProfileArn(),
+                        null,
+                        null,
+                        0,
+                        launch.availabilityZone());
+                Instance instance = reservation.getInstances().get(0);
+                launchedInstanceIds.add(instance.getInstanceId());
+                results.add(new FleetLaunchResult(instance, launch));
+            }
+        } catch (RuntimeException e) {
+            if (!launchedInstanceIds.isEmpty()) {
+                LOG.warnv("CreateFleet failed after launching instances {0}; rolling them back: {1}",
+                        launchedInstanceIds, e.getMessage());
+                try {
+                    service.terminateInstances(region, launchedInstanceIds);
+                } catch (RuntimeException cleanupFailure) {
+                    LOG.warnv("CreateFleet rollback failed for instances {0}: {1}",
+                            launchedInstanceIds, cleanupFailure.getMessage());
+                }
+            }
+            throw e;
         }
 
         XmlBuilder xml = new XmlBuilder()

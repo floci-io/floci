@@ -7,6 +7,8 @@ import software.amazon.awssdk.services.ec2.model.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -14,6 +16,7 @@ import static org.assertj.core.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class Ec2Tests {
 
+    private static final Logger LOG = Logger.getLogger(Ec2Tests.class.getName());
     private static Ec2Client ec2;
     private static String vpcId;
     private static String subnetId;
@@ -39,7 +42,9 @@ class Ec2Tests {
                 if (fleetInstanceId != null) {
                     ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(fleetInstanceId).build());
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to terminate CreateFleet test instance " + fleetInstanceId, e);
+            }
             try {
                 if (instanceId != null) {
                     ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(instanceId).build());

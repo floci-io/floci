@@ -60,6 +60,42 @@ class Ec2CreateFleetIntegrationTest {
 
     @Test
     @Order(2)
+    void createFleetRollsBackEarlierLaunchesWhenLaterLaunchFails() {
+        given()
+                .formParam("Action", "CreateFleet")
+                .formParam("Type", "instant")
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", launchTemplateId)
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", "ami-rollback-test")
+                .formParam("LaunchTemplateConfig.1.Overrides.2.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateConfig.1.Overrides.2.ImageId", "ami-rollback-test")
+                .formParam("LaunchTemplateConfig.1.Overrides.2.SubnetId", "subnet-does-not-exist")
+                .formParam("TargetCapacitySpecification.TotalTargetCapacity", "2")
+                .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body(containsString("InvalidSubnetID.NotFound"));
+
+        given()
+                .formParam("Action", "DescribeInstances")
+                .formParam("Filter.1.Name", "image-id")
+                .formParam("Filter.1.Value.1", "ami-rollback-test")
+                .formParam("Filter.2.Name", "instance-state-name")
+                .formParam("Filter.2.Value.1", "running")
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(3)
     void createFleetLaunchesInstanceAndReturnsFleetShape() {
         if (launchTemplateId == null) {
             launchTemplateId = createLaunchTemplate();
@@ -72,6 +108,7 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.AvailabilityZone", "us-east-1b")
                 .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
                 .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
                 .header("Authorization", AUTH_HEADER)
@@ -82,6 +119,7 @@ class Ec2CreateFleetIntegrationTest {
                 .body("CreateFleetResponse.fleetId", startsWith("fleet-"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item", startsWith("i-"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.instanceType", equalTo("t3.micro"))
+                .body("CreateFleetResponse.fleetInstanceSet.item.availabilityZone", equalTo("us-east-1b"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.lifecycle", equalTo("on-demand"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.launchTemplateSpecification.launchTemplateId",
                         equalTo(launchTemplateId))

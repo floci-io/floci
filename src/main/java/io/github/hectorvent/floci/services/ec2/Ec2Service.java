@@ -2225,6 +2225,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn,
                                     Boolean associatePublicIp, String networkInterfaceId, int networkInterfaceDeviceIndex) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, associatePublicIp, networkInterfaceId,
+                networkInterfaceDeviceIndex, null);
+    }
+
+    /**
+     * Launches instances with an optional placement availability zone. When no subnet is
+     * supplied, the zone selects the default subnet for that zone, matching EC2's placement
+     * semantics instead of silently falling back to the first subnet in the region.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -2246,6 +2264,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         Subnet subnet = null;
         if (subnetId != null && !subnetId.isEmpty()) {
             subnet = requireSubnet(region, subnetId);
+        } else if (availabilityZone != null && !availabilityZone.isBlank()) {
+            subnet = resolveSubnetForAvailabilityZone(region, availabilityZone);
         } else {
             // Pick first default subnet
             subnet = subnets.scan(k -> true).stream()
@@ -2255,7 +2275,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
 
         String vpcId = subnet != null ? subnet.getVpcId() : resolveDefaultVpcId(region);
-        String az = subnet != null ? subnet.getAvailabilityZone() : region + "a";
+        String az = subnet != null ? subnet.getAvailabilityZone()
+                : availabilityZone != null && !availabilityZone.isBlank() ? availabilityZone : region + "a";
         String finalSubnetId = subnet != null ? subnet.getSubnetId() : null;
 
         // Resolve security groups
@@ -2534,6 +2555,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
 
         return subnet;
+    }
+
+    /**
+     * Resolves a subnet for an EC2 placement availability zone. Prefer the seeded default subnet
+     * when several local subnets share the zone, but allow user-created subnets to make custom
+     * VPC fixtures useful for CreateFleet as well.
+     */
+    public Subnet resolveSubnetForAvailabilityZone(String region, String availabilityZone) {
+        ensureDefaultResources(region);
+        return subnets.scan(k -> true).stream()
+                .filter(subnet -> region.equals(subnet.getRegion()))
+                .filter(subnet -> availabilityZone.equals(subnet.getAvailabilityZone()))
+                .sorted(Comparator.comparing(Subnet::isDefaultForAz).reversed()
+                        .thenComparing(Subnet::getSubnetId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidAvailabilityZone.NotFound",
+                        "The availability zone '" + availabilityZone + "' has no subnet in this region.", 400));
     }
 
     private String assignPrivateIp(String region, String subnetId) {
