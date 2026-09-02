@@ -211,6 +211,10 @@ class RedshiftSqlInterceptorTest {
         String rewrittenTagged = RedshiftSqlInterceptor.rewrite(sqlTagged);
         assertEquals(sqlTagged, rewrittenTagged, "Tagged dollar-quoted string must not be altered");
 
+        String sqlCustomTag = "CREATE TABLE t (code text DEFAULT $custom_tag$a; CREATE TABLE fake (id int DISTKEY)$custom_tag$);";
+        String rewrittenCustomTag = RedshiftSqlInterceptor.rewrite(sqlCustomTag);
+        assertEquals(sqlCustomTag, rewrittenCustomTag, "Custom-tagged dollar-quoted string must not be altered");
+
         String sqlWithDistkey = "CREATE TABLE t (code text DEFAULT $$a; CREATE TABLE fake (id int DISTKEY)$$, id int DISTKEY);";
         String rewrittenWithDistkey = RedshiftSqlInterceptor.rewrite(sqlWithDistkey);
         assertEquals("CREATE TABLE t (code text DEFAULT $$a; CREATE TABLE fake (id int DISTKEY)$$, id int);", rewrittenWithDistkey);

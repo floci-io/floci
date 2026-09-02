@@ -45,9 +45,9 @@ public final class RedshiftSqlInterceptor {
             "(?is)^\\s*(?:(?:--[^\\n]*\\n)|(?:/\\*.*?\\*/)|\\s)*(?:CREATE|ALTER)\\s+(?:(?:GLOBAL|LOCAL)\\s+)?"
                     + "(?:(?:TEMP|TEMPORARY|UNLOGGED)\\s+)?TABLE\\b");
 
-    /** Single-quoted string literal, untagged dollar quote ($$...$$), and tagged dollar quote ($tag$...$tag$). */
+    /** Single-quoted string literal (doubled '' is escaped quote) and PostgreSQL dollar-quoted string literal ($tag$...$tag$). */
     private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile(
-            "'(?:[^']|'')*'|(?s)\\$\\$.*?\\$\\$|(?s)\\$([A-Za-z_][A-Za-z0-9_]*)\\$.*?\\$\\1\\$");
+            "'(?:[^']|'')*'|(?s)\\$([^$\\s]*)\\$.*?\\$\\1\\$");
 
     private static final Pattern DISTSTYLE_PATTERN = Pattern.compile("(?i)\\bDISTSTYLE\\s+(ALL|EVEN|KEY|AUTO)\\b");
     private static final Pattern DISTKEY_PAREN_PATTERN = Pattern.compile("(?i)\\bDISTKEY\\s*\\([^)]*\\)");
