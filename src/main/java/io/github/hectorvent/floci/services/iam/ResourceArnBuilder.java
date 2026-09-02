@@ -246,24 +246,8 @@ public class ResourceArnBuilder {
         return List.of("*");
     }
 
-    private static final java.util.regex.Pattern PARTIQL_TABLE_PATTERN =
-            java.util.regex.Pattern.compile("(?i)\\b(?:FROM|INTO|UPDATE)\\s+(?:\"([^\"]+)\"|'([^']+)'|([a-zA-Z0-9_.-]+))");
-
     private static String extractDynamoDbTableFromPartiQL(String statement) {
-        if (statement == null || statement.isBlank()) {
-            return null;
-        }
-        var matcher = PARTIQL_TABLE_PATTERN.matcher(statement);
-        if (matcher.find()) {
-            if (matcher.group(1) != null) {
-                return matcher.group(1);
-            }
-            if (matcher.group(2) != null) {
-                return matcher.group(2);
-            }
-            return matcher.group(3);
-        }
-        return null;
+        return io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.extractTable(statement);
     }
 
     private String toDynamoDbTableArn(String tableName, String region, String accountId) {
@@ -359,6 +343,7 @@ public class ResourceArnBuilder {
         try {
             body = in.readAllBytes();
         } catch (IOException e) {
+            ctx.setEntityStream(new ByteArrayInputStream(new byte[0]));
             return null;
         }
         ctx.setEntityStream(new ByteArrayInputStream(body));

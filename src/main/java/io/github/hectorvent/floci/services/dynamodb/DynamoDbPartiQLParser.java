@@ -5,7 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.*;
 
-class DynamoDbPartiQLParser {
+public class DynamoDbPartiQLParser {
 
     enum TType {
         SELECT, FROM, WHERE, INSERT, INTO, VALUE,
@@ -20,11 +20,42 @@ class DynamoDbPartiQLParser {
 
     // --- AST node types ---
 
-    sealed interface Stmt permits Stmt.Select, Stmt.Insert, Stmt.Update, Stmt.Delete {
+    public sealed interface Stmt permits Stmt.Select, Stmt.Insert, Stmt.Update, Stmt.Delete {
+        String table();
         record Select(String table, List<String> columns, List<Cond> where) implements Stmt {}
         record Insert(String table, Map<String, PVal> item)                 implements Stmt {}
         record Update(String table, List<Assign> sets, List<String> removes, List<Cond> where) implements Stmt {}
         record Delete(String table, List<Cond> where)                       implements Stmt {}
+    }
+
+    /**
+     * Extracts the target table name from a PartiQL statement using the parser tokenizer,
+     * ensuring quoted attribute names containing SQL keywords are not mistakenly treated as table names.
+     */
+    public static String extractTable(String statement) {
+        if (statement == null || statement.isBlank()) {
+            return null;
+        }
+        try {
+            return parse(statement, List.of()).table();
+        } catch (Exception e) {
+            try {
+                List<Token> tokens = tokenize(statement.trim());
+                for (int i = 0; i < tokens.size(); i++) {
+                    Token t = tokens.get(i);
+                    if (t.type() == TType.FROM || t.type() == TType.INTO || t.type() == TType.UPDATE) {
+                        if (i + 1 < tokens.size()) {
+                            Token next = tokens.get(i + 1);
+                            if (next.type() == TType.IDENT || next.type() == TType.STRING) {
+                                return next.value();
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
+        }
     }
 
     sealed interface PVal permits PVal.Str, PVal.Num, PVal.Bool, PVal.Null {
