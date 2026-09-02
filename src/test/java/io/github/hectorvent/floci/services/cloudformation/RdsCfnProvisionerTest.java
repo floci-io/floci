@@ -1262,4 +1262,26 @@ class RdsCfnProvisionerTest {
                 "AWS::RDS::DBProxyTargetGroup", targetGroupArn, "us-east-1"));
         verify(rdsService).clearDbProxyTargetGroupByArn(targetGroupArn, "us-east-1");
     }
+
+    @Test
+    void provisionsDbProxyFromCrossStackSplitSubnetImport() {
+        importResolver = name -> "VpcSubnets".equals(name) ? "subnet-a,subnet-b" : null;
+        DbProxy proxy = mock(DbProxy.class);
+        when(proxy.getDbProxyName()).thenReturn("my-proxy");
+        when(proxy.getDbProxyArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db-proxy:my-proxy");
+        when(rdsService.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any())).thenReturn(proxy);
+
+        provision("Proxy", "AWS::RDS::DBProxy", """
+                {"DBProxyName":"my-proxy","EngineFamily":"POSTGRESQL",
+                 "RoleArn":"arn:aws:iam::000000000000:role/proxy",
+                 "Auth":[{"AuthScheme":"SECRETS","SecretArn":"arn:aws:secretsmanager:us-east-1:000000000000:secret:db"}],
+                 "VpcSubnetIds":{"Fn::Split":[",",{"Fn::ImportValue":"VpcSubnets"}]}}
+                """);
+
+        ArgumentCaptor<List<String>> subnets = ArgumentCaptor.forClass(List.class);
+        verify(rdsService).createDbProxy(eq("my-proxy"), eq("POSTGRESQL"), anyBoolean(), anyBoolean(),
+                any(), any(), subnets.capture(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+        assertEquals(List.of("subnet-a", "subnet-b"), subnets.getValue());
+    }
 }
