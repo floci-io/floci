@@ -56,7 +56,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.interfaces.EdECPrivateKey;
 import java.security.spec.ECGenParameterSpec;
+import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.*;
@@ -962,7 +964,7 @@ public class KmsService implements ResourceProvider {
             if (isSecgP256k1(kmsKey.getKeySpec())) {
                 return signSecgP256k1(privateKey, message, jcaAlgo);
             }
-            Signature sig = Signature.getInstance(jcaAlgo);
+            var sig = signatureFor(jcaAlgo);
             sig.initSign(privateKey);
             sig.update(message);
             return sig.sign();
@@ -1003,7 +1005,7 @@ public class KmsService implements ResourceProvider {
             if (isSecgP256k1(kmsKey.getKeySpec())) {
                 return verifySecgP256k1(publicKey, message, signature, jcaAlgo);
             }
-            Signature sig = Signature.getInstance(jcaAlgo);
+            var sig = signatureFor(jcaAlgo);
             sig.initVerify(publicKey);
             sig.update(message);
             return sig.verify(signature);
@@ -1263,6 +1265,33 @@ public class KmsService implements ResourceProvider {
 
     private static byte[] ed25519Point(PublicKey publicKey) {
         return SubjectPublicKeyInfo.getInstance(publicKey.getEncoded()).getPublicKeyData().getBytes();
+    }
+
+    /**
+     * Builds the {@link Signature} for a KMS signing algorithm.
+     *
+     * <p>BouncyCastle names PSS signatures {@code SHAnnnwithRSA/PSS}, and only its provider
+     * answers to that name. The JDK exposes one {@code RSASSA-PSS} Signature whose digest,
+     * mask generation function and salt length come from a parameter spec instead. AWS KMS
+     * RSASSA_PSS_SHA_nnn uses MGF1 over the same digest with a salt as long as that digest,
+     * which is what BouncyCastle's alias defaults to, so a signature made either way verifies
+     * against the other. Every other name Floci asks for is a standard JCA name.
+     */
+    private static Signature signatureFor(String jcaAlgorithm) throws GeneralSecurityException {
+        if (!jcaAlgorithm.endsWith("withRSA/PSS")) {
+            return Signature.getInstance(jcaAlgorithm);
+        }
+        var digest = "SHA-" + jcaAlgorithm.substring("SHA".length(), jcaAlgorithm.indexOf("with"));
+        var maskGeneration = switch (digest) {
+            case "SHA-256" -> MGF1ParameterSpec.SHA256;
+            case "SHA-384" -> MGF1ParameterSpec.SHA384;
+            case "SHA-512" -> MGF1ParameterSpec.SHA512;
+            default -> throw new NoSuchAlgorithmException("Unsupported PSS digest: " + digest);
+        };
+        var saltLength = MessageDigest.getInstance(digest).getDigestLength();
+        var signature = Signature.getInstance("RSASSA-PSS");
+        signature.setParameter(new PSSParameterSpec(digest, "MGF1", maskGeneration, saltLength, 1));
+        return signature;
     }
 
     private static boolean isPKCS1v1_5(KmsKeySpec.Algorithm spec) {

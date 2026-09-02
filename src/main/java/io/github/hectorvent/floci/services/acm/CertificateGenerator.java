@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import jakarta.enterprise.context.ApplicationScoped;
-import org.bouncycastle.asn1.nist.NISTObjectIdentifiers;
+import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.pkcs.EncryptedPrivateKeyInfo;
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.BasicConstraints;
 import org.bouncycastle.asn1.x509.Extension;
 import org.bouncycastle.asn1.x509.GeneralName;
@@ -13,7 +15,6 @@ import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
@@ -21,12 +22,12 @@ import org.bouncycastle.openssl.jcajce.JcePEMEncryptorBuilder;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfo;
-import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfoBuilder;
-import org.bouncycastle.pkcs.jcajce.JcaPKCS8EncryptedPrivateKeyInfoBuilder;
-import org.bouncycastle.pkcs.jcajce.JcePKCSPBEOutputEncryptorBuilder;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.jboss.logging.Logger;
 
+import javax.crypto.Cipher;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigInteger;
@@ -52,6 +53,7 @@ public class CertificateGenerator {
     private static final Logger LOG = Logger.getLogger(CertificateGenerator.class);
     private static final String ISSUER_DN = "CN=Amazon,OU=Server CA 1B,O=Amazon,C=US";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+    private static final String PBE_ALGORITHM = "PBEWithHmacSHA256AndAES_256";
 
     /**
      * Pattern matching IPv4 addresses (e.g. 192.168.1.100) and IPv6 addresses
@@ -166,12 +168,10 @@ public class CertificateGenerator {
             // a cosmetic Amazon DN (mimicking ACM); for generateSelfSignedCertificate() issuer ==
             // subject, so the cert is a valid self-signed trust anchor.
             ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm)
-                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                 .build(keyPair.getPrivate());
 
             X509CertificateHolder certHolder = certBuilder.build(signer);
             X509Certificate cert = new JcaX509CertificateConverter()
-                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                 .getCertificate(certHolder);
 
             String certPem = toPem(cert);
@@ -197,10 +197,10 @@ public class CertificateGenerator {
     private KeyPair generateKeyPair(KeyAlgorithm keyAlgorithm) throws Exception {
         KeyPairGenerator keyGen;
         if ("EC".equals(keyAlgorithm.getAlgorithm())) {
-            keyGen = KeyPairGenerator.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
+            keyGen = KeyPairGenerator.getInstance("EC");
             keyGen.initialize(new ECGenParameterSpec(keyAlgorithm.getCurveName()), SECURE_RANDOM);
         } else {
-            keyGen = KeyPairGenerator.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME);
+            keyGen = KeyPairGenerator.getInstance("RSA");
             keyGen.initialize(keyAlgorithm.getKeySize(), SECURE_RANDOM);
         }
         return keyGen.generateKeyPair();
@@ -260,16 +260,21 @@ public class CertificateGenerator {
         try {
             PrivateKey privateKey = parsePrivateKey(privateKeyPem);
 
-            // Use AES-256-CBC instead of deprecated Triple-DES
-            JcePKCSPBEOutputEncryptorBuilder encryptorBuilder = new JcePKCSPBEOutputEncryptorBuilder(
-                NISTObjectIdentifiers.id_aes256_CBC
-            );
-            encryptorBuilder.setProvider(BouncyCastleProvider.PROVIDER_NAME);
+            // PBES2 with AES-256-CBC, run through the JDK so no JCE provider has to be
+            // registered. The JDK derives the key with PBKDF2 over HMAC-SHA256 and 4096
+            // iterations, where BouncyCastle defaulted to HMAC-SHA1 and 1024. The ASN.1
+            // below only wraps the result, so it needs no provider either.
+            var secretKey = SecretKeyFactory.getInstance(PBE_ALGORITHM)
+                .generateSecret(new PBEKeySpec(passphrase.toCharArray()));
+            var cipher = Cipher.getInstance(PBE_ALGORITHM);
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+            var ciphertext = cipher.doFinal(privateKey.getEncoded());
 
-            PKCS8EncryptedPrivateKeyInfoBuilder pkcs8Builder = new JcaPKCS8EncryptedPrivateKeyInfoBuilder(privateKey);
-            PKCS8EncryptedPrivateKeyInfo encryptedInfo = pkcs8Builder.build(
-                encryptorBuilder.build(passphrase.toCharArray())
-            );
+            var scheme = new AlgorithmIdentifier(
+                PKCSObjectIdentifiers.id_PBES2,
+                ASN1Primitive.fromByteArray(cipher.getParameters().getEncoded()));
+            var encryptedInfo =
+                new PKCS8EncryptedPrivateKeyInfo(new EncryptedPrivateKeyInfo(scheme, ciphertext));
 
             StringWriter sw = new StringWriter();
             try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
@@ -288,7 +293,6 @@ public class CertificateGenerator {
             Object obj = parser.readObject();
             if (obj instanceof X509CertificateHolder holder) {
                 return new JcaX509CertificateConverter()
-                    .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                     .getCertificate(holder);
             }
             throw new IllegalArgumentException("Invalid certificate PEM format");
@@ -301,8 +305,7 @@ public class CertificateGenerator {
     public PrivateKey parsePrivateKey(String keyPem) {
         try (PEMParser parser = new PEMParser(new StringReader(keyPem))) {
             Object obj = parser.readObject();
-            JcaPEMKeyConverter converter = new JcaPEMKeyConverter()
-                .setProvider(BouncyCastleProvider.PROVIDER_NAME);
+            JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
 
             if (obj instanceof org.bouncycastle.openssl.PEMKeyPair pemKeyPair) {
                 return converter.getKeyPair(pemKeyPair).getPrivate();
