@@ -2245,10 +2245,17 @@ public class ApiGatewayService {
             if (pathItem.getExtensions() != null) {
                 Object anyMethodExt = pathItem.getExtensions().get("x-amazon-apigateway-any-method");
                 if (anyMethodExt != null) {
-                    Operation anyOperation = io.swagger.v3.core.util.Json.mapper()
-                            .convertValue(anyMethodExt, Operation.class);
-                    applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
-                            schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    try {
+                        Operation anyOperation = io.swagger.v3.core.util.Json.mapper()
+                                .convertValue(anyMethodExt, Operation.class);
+                        applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
+                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    } catch (IllegalArgumentException e) {
+                        throw new AwsException("BadRequestException",
+                                "Invalid x-amazon-apigateway-any-method definition for path " + path + ": "
+                                        + e.getMessage(),
+                                400);
+                    }
                 }
             }
         }
@@ -2339,9 +2346,20 @@ public class ApiGatewayService {
 
         // Extract x-amazon-apigateway-integration extension
         Map<String, Object> integrationExt = null;
-        if (operation.getExtensions() != null) {
-            integrationExt = (Map<String, Object>) operation.getExtensions()
-                    .get("x-amazon-apigateway-integration");
+        Object rawIntegrationExt = operation.getExtensions() == null
+                ? null
+                : operation.getExtensions().get("x-amazon-apigateway-integration");
+        if (rawIntegrationExt != null) {
+            if (rawIntegrationExt instanceof Map<?, ?> map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> typed = (Map<String, Object>) map;
+                integrationExt = typed;
+            } else {
+                throw new AwsException("BadRequestException",
+                        "Invalid x-amazon-apigateway-integration definition for method " + httpMethod
+                                + ": expected an object",
+                        400);
+            }
         }
 
         if (integrationExt != null) {

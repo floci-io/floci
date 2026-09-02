@@ -166,4 +166,75 @@ class ApiGatewayOpenApiAnyMethodImportTest {
     void cleanup() {
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
     }
+
+    @Test
+    @Order(6)
+    void import_withMalformedAnyMethodExtension_returnsCleanBadRequest() {
+        // "x-amazon-apigateway-any-method" set to a plain string instead of an operation object.
+        // Json.mapper().convertValue(..., Operation.class) can't coerce this and must not be allowed
+        // to escape as an uncaught IllegalArgumentException (which would surface as a raw 500).
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {
+                    "title": "MalformedAnyMethodAPI",
+                    "version": "1.0"
+                  },
+                  "paths": {
+                    "/broken": {
+                      "x-amazon-apigateway-any-method": "not-an-operation-object"
+                    }
+                  }
+                }
+                """;
+
+        given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(7)
+    void import_withMalformedIntegrationExtension_returnsCleanBadRequest() {
+        // "x-amazon-apigateway-integration" set to an array instead of an integration object. The
+        // cast to Map<String, Object> must be guarded so this can't escape as an uncaught
+        // ClassCastException (which would surface as a raw 500).
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {
+                    "title": "MalformedIntegrationAPI",
+                    "version": "1.0"
+                  },
+                  "paths": {
+                    "/broken": {
+                      "get": {
+                        "responses": {
+                          "200": {
+                            "description": "200 response"
+                          }
+                        },
+                        "x-amazon-apigateway-integration": ["not", "an", "object"]
+                      }
+                    }
+                  }
+                }
+                """;
+
+        given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
 }
