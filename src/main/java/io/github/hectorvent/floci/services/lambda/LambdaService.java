@@ -44,6 +44,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -1278,6 +1279,29 @@ public class LambdaService implements ResourceProvider {
      * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
      * serialize on the instance monitor for the storage round-trip.
      */
+    /**
+     * The already-published version cut from {@code $LATEST}'s current revision, if there is one.
+     *
+     * <p>Versions published before {@code sourceRevisionId} was recorded carry null and never
+     * match, so existing state simply keeps the previous behaviour rather than deduplicating
+     * against a revision nobody wrote down.
+     */
+    private LambdaFunction latestPublishedFrom(String region, LambdaFunction fn, String description) {
+        String current = fn.getRevisionId();
+        if (current == null) {
+            return null;
+        }
+        // Description is supplied at publish time rather than carried on $LATEST, so a publish that
+        // names a new one is a real publish even when nothing else moved. LambdaVersionIntegrationTest
+        // asserts exactly that: two publishes differing only in Description produce versions 1 and 2.
+        String effective = description != null ? description : fn.getDescription();
+        return functionStore.listVersions(region, fn.getFunctionName()).stream()
+                .filter(v -> current.equals(v.getSourceRevisionId()))
+                .filter(v -> Objects.equals(effective, v.getDescription()))
+                .findFirst()
+                .orElse(null);
+    }
+
     private int nextVersionNumber(String counterKey, String legacyCounterKey) {
         synchronized (versionCounterLocks.computeIfAbsent(counterKey, k -> new Object())) {
             Integer current = versionCounters.get(counterKey);
@@ -1311,14 +1335,46 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaFunction publishVersion(String region, String functionName, String description) {
+        return publishVersion(region, functionName, description, null);
+    }
+
+    /**
+     * Publishes a version of {@code $LATEST}.
+     *
+     * <p>Two AWS behaviours this used to skip (issue #2822). {@code CodeSha256} is a precondition:
+     * "only publish a version if the hash value matches the value that's specified", so a caller
+     * that raced someone else's deploy is told rather than publishing code it did not intend.
+     * And an unchanged publish does not create a version: "AWS Lambda doesn't publish a version if
+     * the function's configuration and code haven't changed since the last version". Without that,
+     * repeated publishes accumulate identical versions.
+     *
+     * <p>"Unchanged" is decided by {@code $LATEST}'s {@code revisionId}, which is regenerated on
+     * every code and configuration update, so a version records the revision it was cut from and a
+     * later publish that finds it unmoved returns the existing version instead of a new one.
+     */
+    public LambdaFunction publishVersion(String region, String functionName, String description,
+                                         String expectedCodeSha256) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
+
+        if (expectedCodeSha256 != null && !expectedCodeSha256.isBlank()
+                && !expectedCodeSha256.equals(fn.getCodeSha256())) {
+            throw new AwsException("InvalidParameterValueException",
+                    "CodeSHA256 (" + expectedCodeSha256 + ") is different from current CodeSHA256 in $LATEST",
+                    400);
+        }
         // Shares the per-function lock deleteFunction and extractZipCodeBytes take around their
         // own codeLocalPath-affecting work: without it, a version could be published in the
         // narrow window between reclaimLegacyCodeDirectoryIfUnused's check and its actual
         // delete, persisting a snapshot.codeLocalPath (below) that names a directory about to
         // be removed as unreferenced.
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            LambdaFunction unchanged = latestPublishedFrom(region, fn, description);
+            if (unchanged != null) {
+                LOG.debugv("PublishVersion for {0} found nothing changed since version {1}; "
+                        + "returning it rather than creating a duplicate", functionName, unchanged.getVersion());
+                return unchanged;
+            }
             int version = nextVersionNumber(versionCounterKey(region, fn),
                     legacyVersionCounterKey(region, functionName));
             LambdaFunction snapshot = new LambdaFunction();
@@ -1348,6 +1404,7 @@ public class LambdaService implements ResourceProvider {
             snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
             snapshot.setLastModified(System.currentTimeMillis());
             snapshot.setRevisionId(UUID.randomUUID().toString());
+            snapshot.setSourceRevisionId(fn.getRevisionId());
 
             // Everything that determines what actually runs. Without these the snapshot describes a
             // function with no code: a version-qualified invoke resolves to it, launches a container
