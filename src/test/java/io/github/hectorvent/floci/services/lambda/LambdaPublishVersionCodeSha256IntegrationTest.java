@@ -116,4 +116,20 @@ class LambdaPublishVersionCodeSha256IntegrationTest {
         given().when().get("/2015-03-31/functions/" + fn + "/versions")
             .then().statusCode(200).body("Versions.size()", equalTo(1));
     }
+
+    @Test
+    void aNullJsonBodyIsRejectedRatherThanPublished() throws Exception {
+        // "null" is valid JSON and parses cleanly to a null map, so it never reaches the parse
+        // failure path. Without a guard the field reads would throw a NullPointerException, and a
+        // guard placed inside the try would be caught and reported as a parse failure it is not.
+        String fn = "pv-nullbody-" + Long.toString(System.nanoTime(), 36);
+        createFunction(fn);
+
+        given().contentType("application/json").body("null")
+        .when().post("/2015-03-31/functions/" + fn + "/versions")
+        .then().statusCode(400);
+
+        given().when().get("/2015-03-31/functions/" + fn + "/versions")
+            .then().statusCode(200).body("Versions.size()", equalTo(1));
+    }
 }

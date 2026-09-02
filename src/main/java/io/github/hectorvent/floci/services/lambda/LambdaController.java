@@ -406,6 +406,13 @@ public class LambdaController {
                 throw new AwsException("InvalidParameterValueException",
                         "Could not parse request body: " + e.getMessage(), 400);
             }
+            if (req == null) {
+                // A literal "null" body parses cleanly to a null map, so it never reaches the catch
+                // above. Checked here rather than inside the try, where this exception would be
+                // caught by that same catch and rewrapped as a parse failure it is not.
+                throw new AwsException("InvalidParameterValueException",
+                        "Request body must be a JSON object", 400);
+            }
             description = stringField(req, "Description");
             codeSha256 = stringField(req, "CodeSha256");
         }
