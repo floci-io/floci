@@ -5060,6 +5060,21 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbSubnetGroupErrorNamesMissingSubnetIds() {
+        String subnetA = "subnet-default-a";
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                rdsService.createDbSubnetGroup("grp", "desc",
+                        List.of(subnetA, "subnet-missing"), "us-east-1"));
+
+        assertEquals("InvalidSubnet", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("subnet-missing"),
+                "message should name the missing id, was: " + ex.getMessage());
+        assertFalse(ex.getMessage().contains(subnetA),
+                "message should not list the id that does exist, was: " + ex.getMessage());
+    }
+
+    @Test
     void createDbInstanceKeepsTheEngineNameTheRequestGave() {
         rdsService.createDbCluster("aurora", "aurora-postgresql", null, "admin", "secret99password",
                 null, false, null);
