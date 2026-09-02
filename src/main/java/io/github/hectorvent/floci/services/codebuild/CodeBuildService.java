@@ -448,7 +448,12 @@ public class CodeBuildService {
         } else {
             build.setSource(projectSource);
         }
-        build.setSecondarySources(secondarySourcesOverride != null && !secondarySourcesOverride.isEmpty()
+        // A null override means "not provided" (fall back to the project); an empty list is a
+        // real override in its own right -- both on the wire (an explicit `[]` in a StartBuild
+        // request) and internally (retryBuild passing the original build's already-resolved,
+        // possibly-empty secondarySources, which must not silently pick up sources the project
+        // gained after the original build ran).
+        build.setSecondarySources(secondarySourcesOverride != null
                 ? secondarySourcesOverride : project.getSecondarySources());
         build.setArtifacts(artifactsOverride != null ? artifactsOverride : project.getArtifacts());
         build.setTimeoutInMinutes(timeoutOverride != null ? timeoutOverride : project.getTimeoutInMinutes());
