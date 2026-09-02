@@ -27,7 +27,7 @@ class RedshiftProxyManagerTest {
 
     private RedshiftProxyManager newManager() {
         return new RedshiftProxyManager(
-                mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class));
+                mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), null);
     }
 
     private static void start(RedshiftProxyManager manager, String key, int proxyPort) {

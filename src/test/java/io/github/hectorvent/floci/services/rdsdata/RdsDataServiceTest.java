@@ -33,6 +33,14 @@ import static org.mockito.Mockito.when;
 
 class RdsDataServiceTest {
 
+    static {
+        try {
+            Class.forName("org.h2.Driver");
+        } catch (ClassNotFoundException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
     private static final String RESOURCE_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:test";
     private static final String FALLBACK_RESOURCE_ARN = "arn:aws:rds:us-west-2:111111111111:cluster:test";
     private static final String OTHER_RESOURCE_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:other";

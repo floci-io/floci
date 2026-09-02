@@ -81,11 +81,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        PostgresProtocolHandler.handleAuth(
+                        Socket activeClient = PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
+                        if (activeClient != null) {
+                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -135,11 +138,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        PostgresProtocolHandler.handleAuth(
+                        Socket activeClient = PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
+                        if (activeClient != null) {
+                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -189,11 +195,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        PostgresProtocolHandler.handleAuth(
+                        Socket activeClient = PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
+                        if (activeClient != null) {
+                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -252,11 +261,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        PostgresProtocolHandler.handleAuth(
+                        Socket activeClient = PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), tlsCertificates,
                                 (user, pass) -> true);
+                        if (activeClient != null) {
+                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -302,11 +314,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        PostgresProtocolHandler.handleAuth(
+                        Socket activeClient = PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), tlsCertificates,
                                 (user, pass) -> true);
+                        if (activeClient != null) {
+                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        }
                     } catch (IOException ignored) {
                         // Client aborts the handshake below — the handler observing that is expected.
                     }
@@ -348,11 +363,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        PostgresProtocolHandler.handleAuth(
+                        Socket activeClient = PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
+                        if (activeClient != null) {
+                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }

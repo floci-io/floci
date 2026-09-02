@@ -135,10 +135,38 @@ cluster = redshift.create_cluster(
 print(cluster["Cluster"]["Endpoint"])
 ```
 
+## SQL Interceptor & S3 COPY/UNLOAD
+
+Floci's Redshift auth proxy intercepts frontend queries on the PostgreSQL wire protocol (Simple Query `'Q'` protocol) to emulate common Redshift-specific SQL syntax:
+
+### Supported Features
+
+- **DDL Compatibility:**
+  - Redshift-specific DDL keywords are automatically stripped before forwarding to PostgreSQL: `DISTSTYLE ALL|EVEN|KEY|AUTO`, `DISTKEY (<col>)`, `COMPOUND|INTERLEAVED SORTKEY (<cols>)`, and column encodings `ENCODE <codec>` (only the real Redshift encodings — `raw`, `az64`, `bytedict`, `delta`, `delta32k`, `lzo`, `mostly8/16/32`, `runlength`, `text255`, `text32k`, `zstd`, `auto`).
+  - The rewrite only runs when the query's first keyword is `CREATE TABLE` / `ALTER TABLE`; a `SELECT`, `INSERT`, etc. is forwarded byte-for-byte even if it mentions these keywords. String literals are masked before rewriting, so a keyword inside a quoted value (including in a later statement of a multi-statement query) is preserved.
+- **S3 COPY Emulation:**
+  - `COPY <table> FROM 's3://<bucket>/<prefix>'` is intercepted and streamed from Floci's S3 service directly into PostgreSQL via `COPY ... FROM STDIN WITH (FORMAT csv...)`.
+  - Supports exact object keys or prefix directories (streams all matching objects).
+  - Supports `CSV`, `DELIMITER`, `HEADER` / `IGNOREHEADER <n>`, `GZIP` decompression, and `NULL AS '<string>'`.
+- **S3 UNLOAD Emulation:**
+  - `UNLOAD ('<select query>') TO 's3://<bucket>/<prefix>'` executes the query against PostgreSQL using `COPY (...) TO STDOUT WITH (FORMAT csv...)` and writes the output directly to Floci's S3 service as `<prefix>000`.
+  - Supports `CSV`, `DELIMITER`, `HEADER`, `GZIP` compression, `ADDQUOTES`, `NULL AS '<string>'`, and `MANIFEST` generation (writes `<prefix>manifest` JSON metadata).
+
+### Limitations
+
+- Emulation is supported on the **Simple Query protocol** (`'Q'`) only. Extended Query protocol statements (`Parse`/`Bind`/`Execute`) pass through untouched — including anything a JDBC `PreparedStatement` sends, and, with the pgjdbc default `preferQueryMode=extended`, plain `Statement` calls too. To exercise the interceptor from JDBC, connect with `preferQueryMode=simple`.
+- Only `CSV` and `GZIP` formats are currently supported for S3 COPY/UNLOAD (Parquet, ORC, JSON, and columnar formats are not yet supported).
+- The DDL rewrite is textual (regex). It masks single-quoted string literals first, so `DEFAULT`/`CHECK` string values are safe. It is **not** comment-aware and does not recognise dollar-quoting (`$$ … $$`) or escape strings (`E'…'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe — the statement then reaches PostgreSQL, which returns its own syntax error — but avoid apostrophes-in-comments and dollar-quoted bodies in `CREATE TABLE`.
+- `UNLOAD` buffers the whole result set in memory before writing to S3 (single `<prefix>000` object, no multi-file split): compression happens on the fly, a warning is logged past 64 MiB, and the operation is **aborted with an error** past 128 MiB (uncompressed) to protect the shared emulator process. At most 4 UNLOADs may buffer at once — further ones are rejected until a slot frees. Streaming/multipart UNLOAD is not implemented.
+- `IGNOREHEADER <n>` with `n > 1` still skips only the first line (maps to PostgreSQL `HEADER`).
+- **S3 authorization**: a Postgres session carries no AWS principal, so COPY/UNLOAD authorize against S3 as an *unsigned* request (every key that will be read or written, including the manifest). With `s3.enforceAuth` off (the default) this is unrestricted, like every other operation in that mode; with it on, only buckets whose policy / public-access configuration permits anonymous access are reachable. `IAM_ROLE` / `CREDENTIALS` clauses are parsed and ignored.
+- The interceptor rebuilds the query it sends to PostgreSQL from the parsed parts. `COPY` is only intercepted when the target and column list are plain / quoted identifiers, and `UNLOAD` only when the subquery starts with `SELECT` / `WITH`, keeps its parentheses balanced, and contains no `;`, SQL comment, or dollar-quote outside a string literal. Anything else is forwarded verbatim (PostgreSQL then rejects the Redshift-only syntax). This blocks a crafted subquery from closing the wrapping `COPY (…)` and appending e.g. `TO PROGRAM`.
+- A single wire-protocol message larger than 64 MiB is refused before its body is read, so a client cannot pin the shared heap with an oversized declared length.
+
 ## Out of Scope
 
-- Real Redshift SQL semantics — the data plane is stock PostgreSQL, so Redshift-only SQL (distribution/sort keys, `COPY`/`UNLOAD` from S3, `SUPER`/`SPECTRUM`) is not emulated.
-- Multi-node clusters — `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
+- Real Redshift distributed execution — every cluster is a single PostgreSQL container; `NodeType` and `NumberOfNodes` are metadata only.
+- Redshift-specific data types and advanced features like `SUPER`, `SPECTRUM`, or columnar storage internals.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
