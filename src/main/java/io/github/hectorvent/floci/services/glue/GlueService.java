@@ -1286,22 +1286,28 @@ public class GlueService {
             String resource = parts[5];
             if (resource.startsWith("job/")) {
                 getJob(resource.substring(4));
+                return;
             } else if (resource.startsWith("crawler/")) {
                 getCrawler(resource.substring(8));
+                return;
             } else if (resource.startsWith("database/")) {
                 getDatabase(resource.substring(9));
+                return;
             } else if (resource.startsWith("table/")) {
                 String[] tableParts = resource.substring(6).split("/");
                 if (tableParts.length >= 2) {
                     getTable(tableParts[0], tableParts[1]);
+                    return;
                 }
             } else if (resource.startsWith("userDefinedFunction/")) {
                 String[] funcParts = resource.substring(20).split("/");
                 if (funcParts.length >= 2) {
                     getUserDefinedFunction(funcParts[0], funcParts[1]);
+                    return;
                 }
             }
         }
+        throw new AwsException("EntityNotFoundException", "Resource " + arn + " not found or not supported.", 400);
     }
 
     public record Page<T>(List<T> items, String nextToken) {}
