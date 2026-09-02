@@ -52,6 +52,23 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
+    public void updateResource(String region, String resourceArn, String roleArn, String expectedResourceOwnerAccount,
+                               Boolean hybridAccessEnabled, Boolean withFederation) {
+        ResourceInfo info = resourcesStorage.get(region + ":" + resourceArn).orElseThrow();
+        info.setRoleArn(roleArn);
+        if (expectedResourceOwnerAccount != null) {
+            info.setExpectedResourceOwnerAccount(expectedResourceOwnerAccount);
+        }
+        if (hybridAccessEnabled != null) {
+            info.setHybridAccessEnabled(hybridAccessEnabled);
+        }
+        if (withFederation != null) {
+            info.setWithFederation(withFederation);
+        }
+        resourcesStorage.put(region + ":" + resourceArn, info);
+    }
+
+    @Override
     public void deregisterResource(String region, String resourceArn) {
         resourcesStorage.delete(region + ":" + resourceArn);
     }

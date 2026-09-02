@@ -80,6 +80,47 @@ class LakeFormationServiceTest {
     }
 
     @Test
+    void testUpdateResource() {
+        UpdateResourceRequest req = new UpdateResourceRequest();
+        req.setResourceArn("arn:aws:s3:::my-bucket");
+        req.setRoleArn("arn:aws:iam::123:role/UpdatedRole");
+        req.setHybridAccessEnabled(true);
+
+        when(storage.describeResource("us-east-1", "arn:aws:s3:::my-bucket")).thenReturn(Optional.of(new ResourceInfo()));
+
+        UpdateResourceResponse res = service.updateResource("us-east-1", req);
+
+        assertNotNull(res);
+        verify(storage).updateResource(
+                "us-east-1", "arn:aws:s3:::my-bucket", "arn:aws:iam::123:role/UpdatedRole", null, true, null);
+    }
+
+    @Test
+    void testUpdateResourceNotFound() {
+        UpdateResourceRequest req = new UpdateResourceRequest();
+        req.setResourceArn("arn:aws:s3:::my-bucket");
+        req.setRoleArn("arn:aws:iam::123:role/UpdatedRole");
+        when(storage.describeResource(anyString(), anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", req));
+
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        verify(storage, never()).updateResource(anyString(), anyString(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void testUpdateResourceRejectsInvalidRequiredArn() {
+        UpdateResourceRequest req = new UpdateResourceRequest();
+        req.setResourceArn("not-an-arn");
+        req.setRoleArn("not-an-arn");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", req));
+
+        assertEquals("InvalidInputException", ex.getErrorCode());
+        verifyNoInteractions(storage);
+    }
+
+    @Test
     void testDescribeResource() {
         DescribeResourceRequest req = new DescribeResourceRequest();
         req.setResourceArn("arn:aws:s3:::my-bucket");

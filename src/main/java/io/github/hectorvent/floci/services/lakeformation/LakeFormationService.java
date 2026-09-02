@@ -55,6 +55,28 @@ public class LakeFormationService {
         return new RegisterResourceResponse();
     }
 
+    public UpdateResourceResponse updateResource(String region, UpdateResourceRequest request) {
+        if (request.getResourceArn() == null || !request.getResourceArn().startsWith("arn:")) {
+            throw new AwsException("InvalidInputException", "ResourceArn must be a valid ARN", 400);
+        }
+        if (request.getRoleArn() == null || !request.getRoleArn().matches("arn:aws:iam::\\d+:role/.+")) {
+            throw new AwsException("InvalidInputException", "RoleArn must be a valid IAM role ARN", 400);
+        }
+        if (storage.describeResource(region, request.getResourceArn()).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Resource not found", 400);
+        }
+
+        storage.updateResource(
+                region,
+                request.getResourceArn(),
+                request.getRoleArn(),
+                request.getExpectedResourceOwnerAccount(),
+                request.getHybridAccessEnabled(),
+                request.getWithFederation()
+        );
+        return new UpdateResourceResponse();
+    }
+
     public DeregisterResourceResponse deregisterResource(String region, DeregisterResourceRequest request) {
         if (request.getResourceArn() == null) {
             throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
