@@ -58,12 +58,14 @@ class RdsCfnProvisionerTest {
     private SecretsManagerService secretsManagerService;
     private SsmService ssmService;
     private CloudFormationResourceProvisioner provisioner;
+    private Function<String, String> importResolver;
 
     @BeforeEach
     void setUp() {
         rdsService = mock(RdsService.class);
         secretsManagerService = mock(SecretsManagerService.class);
         ssmService = mock(SsmService.class);
+        importResolver = name -> null;
         provisioner = CfnProvisionerFixture.builder()
                 .ssm(ssmService)
                 .secretsManager(secretsManagerService)
@@ -75,7 +77,7 @@ class RdsCfnProvisionerTest {
     private CloudFormationTemplateEngine engine() {
         return new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
                 "stack/id", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), mapper,
-                (Function<String, String>) name -> null);
+                importResolver);
     }
 
     private JsonNode props(String json) {
@@ -834,6 +836,71 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbSubnetGroup("my-subnet-group", "Managed by CloudFormation",
                 List.of("subnet-a"), "us-west-2");
+    }
+
+    /**
+     * Repro for issue #2937: a CDK cross-stack VPC exposes its subnet ids as one comma-joined
+     * export, so the consuming stack passes {@code SubnetIds} as a list-valued intrinsic
+     * ({@code Fn::Split} over {@code Fn::ImportValue}) rather than a literal JSON array. The
+     * provisioner must still forward the two real subnet ids.
+     */
+    @Test
+    void provisionsDbSubnetGroupFromCrossStackSplitImport() {
+        importResolver = name -> "VpcPrivateSubnetIds".equals(name) ? "subnet-a,subnet-b" : null;
+        DbSubnetGroup group = mock(DbSubnetGroup.class);
+        when(group.getDbSubnetGroupName()).thenReturn("my-subnet-group");
+        when(rdsService.createDbSubnetGroup(any(), any(), anyList(), any())).thenReturn(group);
+
+        provision("Sg", "AWS::RDS::DBSubnetGroup", """
+                {"DBSubnetGroupName":"my-subnet-group",
+                 "SubnetIds":{"Fn::Split":[",",{"Fn::ImportValue":"VpcPrivateSubnetIds"}]}}
+                """);
+
+        verify(rdsService).createDbSubnetGroup("my-subnet-group", "Managed by CloudFormation",
+                List.of("subnet-a", "subnet-b"), "us-east-1");
+    }
+
+    /**
+     * Repro for issue #2937: when {@code SubnetIds} is a literal array whose {@code Fn::Select}
+     * index runs past the imported list, the element resolves to "" and must be dropped rather
+     * than forwarded as a phantom id that {@code describeSubnets} then reports as non-existent.
+     */
+    @Test
+    void provisionsDbSubnetGroupDropsBlankResolvedSubnetIds() {
+        importResolver = name -> "VpcPrivateSubnetIds".equals(name) ? "subnet-a,subnet-b" : null;
+        DbSubnetGroup group = mock(DbSubnetGroup.class);
+        when(group.getDbSubnetGroupName()).thenReturn("my-subnet-group");
+        when(rdsService.createDbSubnetGroup(any(), any(), anyList(), any())).thenReturn(group);
+
+        provision("Sg", "AWS::RDS::DBSubnetGroup", """
+                {"DBSubnetGroupName":"my-subnet-group","SubnetIds":[
+                   {"Fn::Select":[0,{"Fn::Split":[",",{"Fn::ImportValue":"VpcPrivateSubnetIds"}]}]},
+                   {"Fn::Select":[5,{"Fn::Split":[",",{"Fn::ImportValue":"VpcPrivateSubnetIds"}]}]}]}
+                """);
+
+        verify(rdsService).createDbSubnetGroup("my-subnet-group", "Managed by CloudFormation",
+                List.of("subnet-a"), "us-east-1");
+    }
+
+    /**
+     * Repro for issue #2937: an array element that is itself a list-valued intrinsic
+     * ({@code Fn::Split}) collapses to one comma-joined string under scalar resolution, which
+     * {@code describeSubnets} then cannot match — surfacing as "subnets do not exist".
+     */
+    @Test
+    void provisionsDbSubnetGroupExpandsSplitElementInsideArray() {
+        importResolver = name -> "VpcPrivateSubnetIds".equals(name) ? "subnet-a,subnet-b" : null;
+        DbSubnetGroup group = mock(DbSubnetGroup.class);
+        when(group.getDbSubnetGroupName()).thenReturn("my-subnet-group");
+        when(rdsService.createDbSubnetGroup(any(), any(), anyList(), any())).thenReturn(group);
+
+        provision("Sg", "AWS::RDS::DBSubnetGroup", """
+                {"DBSubnetGroupName":"my-subnet-group","SubnetIds":[
+                   {"Fn::Split":[",",{"Fn::ImportValue":"VpcPrivateSubnetIds"}]}]}
+                """);
+
+        verify(rdsService).createDbSubnetGroup("my-subnet-group", "Managed by CloudFormation",
+                List.of("subnet-a", "subnet-b"), "us-east-1");
     }
 
     @Test
