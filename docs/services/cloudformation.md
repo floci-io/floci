@@ -48,7 +48,7 @@ Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`.
 the backing service and sets a real physical ID plus the `Ref` / `Fn::GetAtt` attributes used by
 cross-resource references.
 
-> Adding a type? See [Adding a CloudFormation Resource Type](../../CONTRIBUTING.md#adding-a-cloudformation-resource-type).
+> Adding a type? See [Adding a CloudFormation Resource Type](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#adding-a-cloudformation-resource-type).
 > Types live in per-service provisioners under `services/cloudformation/provisioners/`. This table
 > is generated from the provisioner inventory by `make docs-sync`; edit that, not the table.
 

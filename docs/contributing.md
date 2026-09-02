@@ -90,9 +90,10 @@ Quick summary:
 
 1. Create `src/main/java/.../services/<service>/` with a Controller, Service, and `model/` package
 2. Pick the right protocol (see the protocol table in `AGENTS.md`)
-3. Register the service in `ServiceRegistry`
-4. Add config in `EmulatorConfig.java` and `application.yml`
-5. Add `*IntegrationTest.java` tests
+3. Register a `ServiceDescriptor` in `ResolvedServiceCatalog` (`ServiceRegistry` only reads the catalog)
+4. Add config in `EmulatorConfig.java` and in both the main and test `application.yml`
+5. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
+6. Add the docs page, its `mkdocs.yml` nav entry, a Service Matrix row and a README row (`make docs-check` gates the matrix)
 
 ## Pull Request Checklist
 
