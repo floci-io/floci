@@ -3540,6 +3540,214 @@ given()
         deleteTable("NullKeyTable");
     }
 
+    // Reproduces #2893 — unused ExpressionAttributeNames/Values must be rejected on
+    // PutItem, DeleteItem, Scan and Query, matching AWS ValidationException behaviour.
+    @Test
+    void unusedExpressionAttributesAreRejected() {
+        String tableName = "UnusedExprAttrTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // PutItem: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // PutItem: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // DeleteItem: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_exists(pk)",
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // DeleteItem: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_exists(pk)",
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Scan: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "#d = :d",
+                    "ExpressionAttributeNames": {"#d": "data", "#st": "status"},
+                    "ExpressionAttributeValues": {":d": {"S": "v"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // Scan: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "#d = :d",
+                    "ExpressionAttributeNames": {"#d": "data"},
+                    "ExpressionAttributeValues": {":d": {"S": "v"}, ":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Query: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {":pk": {"S": "a"}, ":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Query: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeNames": {"#st": "status"},
+                    "ExpressionAttributeValues": {":pk": {"S": "a"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // Only the unused entries are reported: #used is referenced, #a and #b are not.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_not_exists(#used)",
+                    "ExpressionAttributeNames": {"#used": "pk", "#a": "x", "#b": "y"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#a, #b}"));
+
+        // Control: fully-referenced expression attributes are still accepted.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "data": {"S": "v"}},
+                    "ConditionExpression": "attribute_not_exists(#p)",
+                    "ExpressionAttributeNames": {"#p": "pk"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        deleteTable(tableName);
+    }
+
     private void deleteTable(String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")

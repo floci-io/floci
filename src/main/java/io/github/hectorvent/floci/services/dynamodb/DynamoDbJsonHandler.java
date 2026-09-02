@@ -335,6 +335,10 @@ public class DynamoDbJsonHandler {
 
         ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
+        // Reject ExpressionAttributeNames/Values entries not referenced by ConditionExpression (AWS parity, #2893)
+        checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
+        checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
+
         validateItemSets(item);
 
         JsonNode oldItem = null;
@@ -440,6 +444,10 @@ public class DynamoDbJsonHandler {
         }
 
         ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
+        // Reject ExpressionAttributeNames/Values entries not referenced by ConditionExpression (AWS parity, #2893)
+        checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
+        checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
 
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
         String condOpDel = request.has("ConditionalOperator")
@@ -890,6 +898,8 @@ public class DynamoDbJsonHandler {
             // Check unused EAN across all expressions (KCE + FE + PE)
             Set<String> hashTokens = extractHashTokens(keyConditionExpr, filterExpr, projectionExpression);
             checkUnusedEan(exprAttrNames, hashTokens);
+            // Reject ExpressionAttributeValues entries not referenced by KCE/FE (AWS parity, #2893)
+            checkUnusedEav(exprAttrValues, extractColonTokens(keyConditionExpr, filterExpr));
         }
 
         if (exclusiveStartKey != null) {
@@ -998,6 +1008,10 @@ public class DynamoDbJsonHandler {
 
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpressionScan);
+
+        // Reject ExpressionAttributeNames/Values entries not referenced by any expression (AWS parity, #2893)
+        checkUnusedEan(exprAttrNames, extractHashTokens(filterExpr, projectionExpressionScan));
+        checkUnusedEav(exprAttrValues, extractColonTokens(filterExpr));
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
