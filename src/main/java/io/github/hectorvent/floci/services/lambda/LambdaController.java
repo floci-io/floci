@@ -393,14 +393,16 @@ public class LambdaController {
                                    String body) {
         String region = regionResolver.resolveRegion(headers);
         String description = null;
+        String codeSha256 = null;
         if (body != null && !body.isBlank()) {
             try {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> req = objectMapper.readValue(body, Map.class);
                 description = (String) req.get("Description");
+                codeSha256 = (String) req.get("CodeSha256");
             } catch (Exception ignored) {}
         }
-        LambdaFunction version = lambdaService.publishVersion(region, functionName, description);
+        LambdaFunction version = lambdaService.publishVersion(region, functionName, description, codeSha256);
         return Response.status(201).entity(buildFunctionConfiguration(version)).build();
     }
 

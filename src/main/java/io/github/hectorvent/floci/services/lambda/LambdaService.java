@@ -1311,6 +1311,18 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaFunction publishVersion(String region, String functionName, String description) {
+        return publishVersion(region, functionName, description, null);
+    }
+
+    /**
+     * Publishes a version of {@code $LATEST}.
+     *
+     * <p>{@code CodeSha256} is a precondition: "only publish a version if the hash value matches the
+     * value that's specified". It was never parsed out of the request, so a caller that raced
+     * someone else's deploy published code it had not authorised, silently (issue #2822).
+     */
+    public LambdaFunction publishVersion(String region, String functionName, String description,
+                                         String expectedCodeSha256) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
         // Shares the per-function lock deleteFunction and extractZipCodeBytes take around their
@@ -1319,6 +1331,16 @@ public class LambdaService implements ResourceProvider {
         // delete, persisting a snapshot.codeLocalPath (below) that names a directory about to
         // be removed as unreferenced.
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            // Inside the lock UpdateFunctionCode takes, so the hash cannot be checked against one
+            // version of $LATEST and the snapshot then taken from another. Checking it outside
+            // would let an overlapping deploy publish code the caller never authorised.
+            if (expectedCodeSha256 != null && !expectedCodeSha256.isBlank()
+                    && !expectedCodeSha256.equals(fn.getCodeSha256())) {
+                throw new AwsException("InvalidParameterValueException",
+                        "CodeSHA256 (" + expectedCodeSha256 + ") is different from current CodeSHA256 in $LATEST",
+                        400);
+            }
+
             int version = nextVersionNumber(versionCounterKey(region, fn),
                     legacyVersionCounterKey(region, functionName));
             LambdaFunction snapshot = new LambdaFunction();
