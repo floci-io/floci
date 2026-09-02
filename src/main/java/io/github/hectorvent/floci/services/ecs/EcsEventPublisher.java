@@ -56,14 +56,14 @@ public class EcsEventPublisher {
     /** Emits the synthesized phase sequence for a start (to RUNNING) or a stop (to STOPPED). */
     public void emitTaskLadder(EcsTask task, TaskStatus from, TaskStatus to, String region) {
         List<TaskStatus> ladder = to == TaskStatus.STOPPED ? STOP_LADDER : START_LADDER;
-        String realStatus = task.getLastStatus();
-        try {
-            for (TaskStatus phase : ladder) {
-                task.setLastStatus(phase.name());
-                emitTaskStateChange(task, region);
-            }
-        } finally {
-            task.setLastStatus(realStatus);
+        // Synthesize the ladder on a snapshot, not the shared task instance: that instance lives
+        // in EcsService's live task map and stays visible to a concurrent DescribeTasks/ListTasks
+        // call for the whole synthesis, which would otherwise observe a lastStatus this task never
+        // actually occupies.
+        EcsTask snapshot = new EcsTask(task);
+        for (TaskStatus phase : ladder) {
+            snapshot.setLastStatus(phase.name());
+            emitTaskStateChange(snapshot, region);
         }
     }
 

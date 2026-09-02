@@ -1657,7 +1657,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 try {
                     region = AwsArnUtils.parse(task.getTaskArn()).region();
                 } catch (Exception e) {
-                    LOG.debugv(e, "Could not parse region from task ARN {0}, falling back to default region", task.getTaskArn());
+                    LOG.warnv(e, "Could not parse region from task ARN {0}, falling back to default region", task.getTaskArn());
                 }
             }
             if (region == null || region.isBlank()) {
