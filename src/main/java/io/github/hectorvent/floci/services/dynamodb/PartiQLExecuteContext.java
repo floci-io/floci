@@ -4,6 +4,7 @@ class PartiQLExecuteContext {
 
     private Integer limit;
     private String nextToken;
+    private boolean consistentRead;
 
     private PartiQLExecuteContext() {
     }
@@ -20,6 +21,15 @@ class PartiQLExecuteContext {
     PartiQLExecuteContext nextToken(String nextToken) {
         this.nextToken = nextToken;
         return this;
+    }
+
+    PartiQLExecuteContext consistentRead(boolean consistentRead) {
+        this.consistentRead = consistentRead;
+        return this;
+    }
+
+    boolean consistentRead() {
+        return consistentRead;
     }
 
     Integer limit() {
