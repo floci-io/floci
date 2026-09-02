@@ -45,6 +45,27 @@ quarkus:
         - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
+      # snappy-java registers 27 JNI libraries, one per platform. Only the one
+      # for the running platform loads, so 23 are dropped. Linux x86_64 and
+      # aarch64 cover the published images, Mac covers a local native build.
+      excludes:
+        - org/xerial/snappy/native/AIX/**
+        - org/xerial/snappy/native/FreeBSD/**
+        - org/xerial/snappy/native/SunOS/**
+        - org/xerial/snappy/native/Windows/**
+        - org/xerial/snappy/native/Linux/android-aarch64/**
+        - org/xerial/snappy/native/Linux/android-arm/**
+        - org/xerial/snappy/native/Linux/arm/**
+        - org/xerial/snappy/native/Linux/armv6/**
+        - org/xerial/snappy/native/Linux/armv7/**
+        - org/xerial/snappy/native/Linux/loongarch64/**
+        - org/xerial/snappy/native/Linux/ppc/**
+        - org/xerial/snappy/native/Linux/ppc64/**
+        - org/xerial/snappy/native/Linux/ppc64le/**
+        - org/xerial/snappy/native/Linux/riscv64/**
+        - org/xerial/snappy/native/Linux/s390x/**
+        - org/xerial/snappy/native/Linux/x86/**
+        - org/xerial/snappy/native/Linux/x86_64-musl/**
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
