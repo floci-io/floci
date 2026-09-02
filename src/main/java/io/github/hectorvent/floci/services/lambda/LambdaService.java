@@ -1334,8 +1334,12 @@ public class LambdaService implements ResourceProvider {
             // Inside the lock UpdateFunctionCode takes, so the hash cannot be checked against one
             // version of $LATEST and the snapshot then taken from another. Checking it outside
             // would let an overlapping deploy publish code the caller never authorised.
-            if (expectedCodeSha256 != null && !expectedCodeSha256.isBlank()
-                    && !expectedCodeSha256.equals(fn.getCodeSha256())) {
+            // No isBlank() exclusion here. A present but empty value was previously treated as
+            // absent, so it skipped the comparison entirely and published without checking
+            // anything, which is the failure this precondition exists to prevent. It is simply
+            // compared like any other value and fails as a mismatch, which avoids inventing an
+            // error shape for the empty case that has not been measured against the live service.
+            if (expectedCodeSha256 != null && !expectedCodeSha256.equals(fn.getCodeSha256())) {
                 throw new AwsException("InvalidParameterValueException",
                         "CodeSHA256 (" + expectedCodeSha256 + ") is different from current CodeSHA256 in $LATEST",
                         400);

@@ -132,4 +132,22 @@ class LambdaPublishVersionCodeSha256IntegrationTest {
         given().when().get("/2015-03-31/functions/" + fn + "/versions")
             .then().statusCode(200).body("Versions.size()", equalTo(1));
     }
+
+    @Test
+    void aBlankCodeSha256IsRejectedRatherThanTreatedAsOmitted() throws Exception {
+        // An explicit empty string is a present value, not an absent one. It was excluded from the
+        // comparison by an isBlank() check and so published without checking anything. It is now
+        // compared like any other value and fails as a mismatch, rather than getting an error shape
+        // invented for the empty case that has not been measured against the live service.
+        String fn = "pv-blank-" + Long.toString(System.nanoTime(), 36);
+        createFunction(fn);
+
+        given().contentType("application/json").body("{\"CodeSha256\": \"\"}")
+        .when().post("/2015-03-31/functions/" + fn + "/versions")
+        .then().statusCode(400)
+            .body("message", containsString("different from current CodeSHA256"));
+
+        given().when().get("/2015-03-31/functions/" + fn + "/versions")
+            .then().statusCode(200).body("Versions.size()", equalTo(1));
+    }
 }
