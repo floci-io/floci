@@ -87,4 +87,33 @@ class LambdaPublishVersionCodeSha256IntegrationTest {
         .when().post("/2015-03-31/functions/" + fn + "/versions")
         .then().statusCode(201).body("Version", equalTo("1"));
     }
+
+    @Test
+    void aMalformedBodyIsRejectedRatherThanPublished() throws Exception {
+        // The parse failure used to be swallowed, so a body whose CodeSha256 could not be read was
+        // treated as one that never sent it: the precondition was skipped and a version published.
+        String fn = "pv-badbody-" + Long.toString(System.nanoTime(), 36);
+        createFunction(fn);
+
+        given().contentType("application/json").body("{\"CodeSha256\": ")
+        .when().post("/2015-03-31/functions/" + fn + "/versions")
+        .then().statusCode(400);
+
+        given().when().get("/2015-03-31/functions/" + fn + "/versions")
+            .then().statusCode(200).body("Versions.size()", equalTo(1));
+    }
+
+    @Test
+    void aNonStringCodeSha256IsRejectedRatherThanIgnored() throws Exception {
+        // A cast failure was swallowed the same way, so a hash sent as a number checked nothing.
+        String fn = "pv-badtype-" + Long.toString(System.nanoTime(), 36);
+        createFunction(fn);
+
+        given().contentType("application/json").body("{\"CodeSha256\": 12345}")
+        .when().post("/2015-03-31/functions/" + fn + "/versions")
+        .then().statusCode(400);
+
+        given().when().get("/2015-03-31/functions/" + fn + "/versions")
+            .then().statusCode(200).body("Versions.size()", equalTo(1));
+    }
 }

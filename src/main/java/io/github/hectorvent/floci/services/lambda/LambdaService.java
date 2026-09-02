@@ -1996,12 +1996,24 @@ public class LambdaService implements ResourceProvider {
         Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
-            fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
-            fn.setCodeSizeBytes(zipBytes.length);
+            // Publish the new code identity under the same per-function lock publishVersion holds.
+            // PublishVersion's CodeSha256 precondition is a check-then-act: it compares the hash and
+            // then snapshots the code. Mutating these fields without the lock lets an overlapping
+            // deploy move $LATEST between those two steps, so a version would carry code whose hash
+            // the caller never authorised even though the check passed. Extraction to disk stays
+            // outside the lock; only the fields that decide what a snapshot copies are inside it.
+            String newSha256 = null;
             try {
                 byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(zipBytes);
-                fn.setCodeSha256(Base64.getEncoder().encodeToString(digest));
+                newSha256 = Base64.getEncoder().encodeToString(digest);
             } catch (java.security.NoSuchAlgorithmException ignored) {}
+            synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+                fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
+                fn.setCodeSizeBytes(zipBytes.length);
+                if (newSha256 != null) {
+                    fn.setCodeSha256(newSha256);
+                }
+            }
 
             // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
             if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {
