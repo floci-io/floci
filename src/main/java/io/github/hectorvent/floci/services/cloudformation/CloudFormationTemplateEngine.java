@@ -293,6 +293,41 @@ public class CloudFormationTemplateEngine {
         return out;
     }
 
+    /**
+     * Resolves a node to a flat list of strings, expanding list-valued intrinsics
+     * ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}) whether the node itself
+     * is one or they appear as elements of a literal array, and dropping blank entries.
+     *
+     * <p>Provisioners read list properties (SubnetIds, VPCZoneIdentifier, …) with this so a
+     * cross-stack {@code Fn::Split} over {@code Fn::ImportValue} — the shape CDK emits when a
+     * VPC exports its subnet ids as one comma-joined value — resolves to the real ids instead
+     * of a single comma-joined string or an empty list (issue #2937).
+     */
+    public List<String> resolveStringList(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return out;
+        }
+        if (node.isArray()) {
+            for (JsonNode element : node) {
+                if (isListValuedIntrinsic(element)) {
+                    out.addAll(resolveList(element));
+                } else {
+                    out.add(resolve(element));
+                }
+            }
+        } else {
+            out.addAll(resolveList(node));
+        }
+        out.removeIf(value -> value == null || value.isBlank());
+        return out;
+    }
+
+    private boolean isListValuedIntrinsic(JsonNode node) {
+        return node != null && node.isObject()
+                && (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr"));
+    }
+
     private List<String> resolveSplit(JsonNode split) {
         if (!split.isArray() || split.size() < 2) {
             return List.of();

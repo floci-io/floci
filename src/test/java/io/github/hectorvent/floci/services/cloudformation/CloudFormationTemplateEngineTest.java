@@ -88,4 +88,46 @@ class CloudFormationTemplateEngineTest {
         assertNull(engine().resolveJsonAttribute(json("null")));
         assertNull(engine().resolveJsonAttribute(mapper.createArrayNode().path("nope")));
     }
+
+    @Test
+    void resolveStringListSplitsListValuedIntrinsicNode() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                e.resolveStringList(json("{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]}")));
+    }
+
+    @Test
+    void resolveStringListFlattensListValuedArrayElements() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                e.resolveStringList(json(
+                        "[{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]}]")));
+    }
+
+    @Test
+    void resolveStringListKeepsLiteralArrayOfScalars() {
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                engine().resolveStringList(json("[\"subnet-a\",\"subnet-b\"]")));
+    }
+
+    @Test
+    void resolveStringListDropsBlankEntries() {
+        assertEquals(java.util.List.of("subnet-a"),
+                engine().resolveStringList(json("[\"subnet-a\",\"\",\"  \"]")));
+    }
+
+    @Test
+    void resolveStringListReturnsEmptyForNullOrMissing() {
+        assertEquals(java.util.List.of(), engine().resolveStringList(json("null")));
+        assertEquals(java.util.List.of(),
+                engine().resolveStringList(mapper.createArrayNode().path("nope")));
+    }
 }
