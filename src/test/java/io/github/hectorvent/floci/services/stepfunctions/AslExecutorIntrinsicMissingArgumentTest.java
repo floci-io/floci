@@ -89,7 +89,7 @@ class AslExecutorIntrinsicMissingArgumentTest {
     /**
      * A reference path in the format template position is left as written rather than resolved, so
      * it never reaches the argument check. Real AWS and Step Functions Local resolve it and fail
-     * here. That is a separate gap from issue #2870 and is left for its own change.
+     * here. That is a separate gap from issue #2870 and is tracked by issue #2927.
      */
     @Test
     void aReferencePathAsTheFormatTemplateIsStillTakenLiterally() throws Exception {
