@@ -9,7 +9,15 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.ExecCreateCmd;
+import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.InspectExecCmd;
+import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.Frame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -45,6 +53,7 @@ class EcrRegistryManagerTest {
     private CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private EmulatorConfig.DockerConfig docker;
     private EmulatorConfig.EcrServiceConfig ecr;
+    private EmulatorConfig.StorageConfig storage;
     private ContainerBuilder.Builder builder;
     private EcrRegistryManager manager;
 
@@ -68,7 +77,7 @@ class EcrRegistryManagerTest {
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
         docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
-        EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+        storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
         when(config.services().ecr()).thenReturn(ecr);
         when(config.docker()).thenReturn(docker);
@@ -76,6 +85,7 @@ class EcrRegistryManagerTest {
         when(docker.resourceNamespace()).thenReturn(Optional.empty());
         // Empty host-persistent-path selects named-volume mode (no host bind-mount logic).
         when(storage.hostPersistentPath()).thenReturn("");
+        when(storage.mode()).thenReturn("persistent");
         when(ecr.registryContainerName()).thenReturn(REGISTRY_NAME);
         when(ecr.registryImage()).thenReturn("registry:2");
         when(ecr.registryBasePort()).thenReturn(BASE_PORT);
@@ -199,5 +209,76 @@ class EcrRegistryManagerTest {
     @Test
     void rewriteImageUri_nullImage_returnsNull() {
         assertNull(manager.rewriteImageUri(null));
+    }
+
+    @Test
+    void pruneStorageRemovesTheRegistryAndVolumeWhenConfigured() {
+        when(storage.pruneVolumesOnDelete()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+
+        manager.pruneStorage();
+
+        verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
+        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+    }
+
+    @Test
+    void pruneStorageRetainsTheRegistryWhenVolumePruningIsDisabled() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+
+        manager.pruneStorage();
+
+        verify(lifecycleManager, Mockito.never()).stopAndRemove(anyString(), Mockito.isNull());
+        verify(lifecycleManager, Mockito.never()).removeVolume(anyString());
+    }
+
+    @Test
+    void shutdownRemovesTheRegistryVolumeWhenItIsNotRetained() {
+        when(storage.pruneVolumesOnDelete()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+
+        manager.shutdown();
+
+        verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
+        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+    }
+
+    @Test
+    void deleteRepositoryStorageBoundsCleanupAndPreservesNestedRepositories() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        ExecCreateCmd execCreate = Mockito.mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse exec = Mockito.mock(ExecCreateCmdResponse.class);
+        when(exec.getId()).thenReturn("exec-id");
+        when(execCreate.exec()).thenReturn(exec);
+        when(dockerClient.execCreateCmd("container-id")).thenReturn(execCreate);
+        ExecStartCmd execStart = Mockito.mock(ExecStartCmd.class);
+        when(execStart.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback<Frame> callback = invocation.getArgument(0);
+            callback.onComplete();
+            return callback;
+        });
+        when(dockerClient.execStartCmd("exec-id")).thenReturn(execStart);
+        InspectExecCmd inspect = Mockito.mock(InspectExecCmd.class);
+        InspectExecResponse result = Mockito.mock(InspectExecResponse.class);
+        when(result.getExitCodeLong()).thenReturn(0L);
+        when(inspect.exec()).thenReturn(result);
+        when(dockerClient.inspectExecCmd("exec-id")).thenReturn(inspect);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+        manager.deleteRepositoryStorage("000000000000", "us-east-1", "team/app");
+
+        verify(execCreate).withCmd("timeout", "-k", "1", "10", "rm", "-rf",
+                "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_layers",
+                "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_manifests",
+                "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_uploads");
     }
 }
