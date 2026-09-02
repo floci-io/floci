@@ -59,6 +59,7 @@ class RdsCfnProvisionerTest {
     private SsmService ssmService;
     private CloudFormationResourceProvisioner provisioner;
     private Function<String, String> importResolver;
+    private Map<String, Boolean> conditions;
 
     @BeforeEach
     void setUp() {
@@ -66,6 +67,7 @@ class RdsCfnProvisionerTest {
         secretsManagerService = mock(SecretsManagerService.class);
         ssmService = mock(SsmService.class);
         importResolver = name -> null;
+        conditions = Map.of();
         provisioner = CfnProvisionerFixture.builder()
                 .ssm(ssmService)
                 .secretsManager(secretsManagerService)
@@ -76,7 +78,7 @@ class RdsCfnProvisionerTest {
 
     private CloudFormationTemplateEngine engine() {
         return new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
-                "stack/id", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), mapper,
+                "stack/id", Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
                 importResolver);
     }
 
@@ -897,6 +899,23 @@ class RdsCfnProvisionerTest {
         provision("Sg", "AWS::RDS::DBSubnetGroup", """
                 {"DBSubnetGroupName":"my-subnet-group","SubnetIds":[
                    {"Fn::Split":[",",{"Fn::ImportValue":"VpcPrivateSubnetIds"}]}]}
+                """);
+
+        verify(rdsService).createDbSubnetGroup("my-subnet-group", "Managed by CloudFormation",
+                List.of("subnet-a", "subnet-b"), "us-east-1");
+    }
+
+    @Test
+    void provisionsDbSubnetGroupExpandsFnIfInsideArray() {
+        importResolver = name -> "VpcPrivateSubnetIds".equals(name) ? "subnet-a,subnet-b" : null;
+        conditions = Map.of("UseVpcSubnets", true);
+        DbSubnetGroup group = mock(DbSubnetGroup.class);
+        when(group.getDbSubnetGroupName()).thenReturn("my-subnet-group");
+        when(rdsService.createDbSubnetGroup(any(), any(), anyList(), any())).thenReturn(group);
+
+        provision("Sg", "AWS::RDS::DBSubnetGroup", """
+                {"DBSubnetGroupName":"my-subnet-group","SubnetIds":[
+                   {"Fn::If":["UseVpcSubnets",{"Fn::Split":[",",{"Fn::ImportValue":"VpcPrivateSubnetIds"}]},"subnet-default"]}]}
                 """);
 
         verify(rdsService).createDbSubnetGroup("my-subnet-group", "Managed by CloudFormation",

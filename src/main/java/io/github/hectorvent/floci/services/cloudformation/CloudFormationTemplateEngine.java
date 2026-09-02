@@ -285,6 +285,14 @@ public class CloudFormationTemplateEngine {
             if (node.has("Fn::Split")) {
                 return resolveSplit(node.get("Fn::Split"));
             }
+            if (node.has("Fn::If")) {
+                JsonNode ifNode = node.get("Fn::If");
+                if (ifNode.isArray() && ifNode.size() >= 3) {
+                    String conditionName = ifNode.get(0).asText();
+                    boolean condValue = conditions.getOrDefault(conditionName, false);
+                    return resolveList(condValue ? ifNode.get(1) : ifNode.get(2));
+                }
+            }
         }
         String scalar = resolve(node);
         if (!scalar.isEmpty()) {
@@ -295,8 +303,9 @@ public class CloudFormationTemplateEngine {
 
     /**
      * Resolves a node to a flat list of strings, expanding list-valued intrinsics
-     * ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}) whether the node itself
-     * is one or they appear as elements of a literal array, and dropping blank entries.
+     * ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}, or an {@code Fn::If} evaluating
+     * to one) whether the node itself is one or they appear as elements of a literal array,
+     * and dropping blank entries.
      *
      * <p>Provisioners read list properties (SubnetIds, VPCZoneIdentifier, …) with this so a
      * cross-stack {@code Fn::Split} over {@code Fn::ImportValue} — the shape CDK emits when a
@@ -324,8 +333,26 @@ public class CloudFormationTemplateEngine {
     }
 
     private boolean isListValuedIntrinsic(JsonNode node) {
-        return node != null && node.isObject()
-                && (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr"));
+        if (node == null) {
+            return false;
+        }
+        if (node.isArray()) {
+            return true;
+        }
+        if (node.isObject()) {
+            if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
+                return true;
+            }
+            if (node.has("Fn::If")) {
+                JsonNode ifNode = node.get("Fn::If");
+                if (ifNode.isArray() && ifNode.size() >= 3) {
+                    String conditionName = ifNode.get(0).asText();
+                    boolean condValue = conditions.getOrDefault(conditionName, false);
+                    return isListValuedIntrinsic(condValue ? ifNode.get(1) : ifNode.get(2));
+                }
+            }
+        }
+        return false;
     }
 
     private List<String> resolveSplit(JsonNode split) {

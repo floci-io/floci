@@ -130,4 +130,42 @@ class CloudFormationTemplateEngineTest {
         assertEquals(java.util.List.of(),
                 engine().resolveStringList(mapper.createArrayNode().path("nope")));
     }
+
+    @Test
+    void resolveStringListExpandsFnIfWithListValuedBranch() {
+        CloudFormationTemplateEngine eTrue = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", true), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                eTrue.resolveStringList(json("{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}")));
+
+        CloudFormationTemplateEngine eFalse = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", false), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-default"),
+                eFalse.resolveStringList(json("{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}")));
+    }
+
+    @Test
+    void resolveStringListFlattensFnIfInsideArrayElements() {
+        CloudFormationTemplateEngine eTrue = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", true), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                eTrue.resolveStringList(json("[{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}]")));
+
+        CloudFormationTemplateEngine eFalse = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", false), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-default"),
+                eFalse.resolveStringList(json("[{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}]")));
+    }
 }
