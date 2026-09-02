@@ -27,8 +27,9 @@ import java.util.regex.Pattern;
  *       encoding (or {@code AUTO}), so a column literally named {@code encode} of
  *       an ordinary type survives.</li>
  * </ul>
- * String-literal masking is <em>not</em> comment-aware and does not recognise
- * dollar-quoting ({@code $$ ... $$}) or escape strings ({@code E'...'}); an
+ * String-literal masking recognizes both single-quoted literals and
+ * dollar-quoted literals ({@code $$ ... $$}, {@code $tag$ ... $tag$}). It is
+ * <em>not</em> comment-aware and does not recognise escape strings ({@code E'...'}); an
  * apostrophe inside a {@code --} or block comment can therefore make the rewrite
  * skip a real clause. Every such case fails safe: the unrewritten statement
  * reaches PostgreSQL, which returns its own syntax error. The residual ambiguity
@@ -44,8 +45,9 @@ public final class RedshiftSqlInterceptor {
             "(?is)^\\s*(?:(?:--[^\\n]*\\n)|(?:/\\*.*?\\*/)|\\s)*(?:CREATE|ALTER)\\s+(?:(?:GLOBAL|LOCAL)\\s+)?"
                     + "(?:(?:TEMP|TEMPORARY|UNLOGGED)\\s+)?TABLE\\b");
 
-    /** Single-quoted string literal, PostgreSQL-style (doubled {@code ''} is an escaped quote). */
-    private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile("'(?:[^']|'')*'");
+    /** Single-quoted string literal, untagged dollar quote ($$...$$), and tagged dollar quote ($tag$...$tag$). */
+    private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile(
+            "'(?:[^']|'')*'|(?s)\\$\\$.*?\\$\\$|(?s)\\$([A-Za-z_][A-Za-z0-9_]*)\\$.*?\\$\\1\\$");
 
     private static final Pattern DISTSTYLE_PATTERN = Pattern.compile("(?i)\\bDISTSTYLE\\s+(ALL|EVEN|KEY|AUTO)\\b");
     private static final Pattern DISTKEY_PAREN_PATTERN = Pattern.compile("(?i)\\bDISTKEY\\s*\\([^)]*\\)");

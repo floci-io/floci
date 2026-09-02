@@ -202,6 +202,21 @@ class RedshiftSqlInterceptorTest {
     }
 
     @Test
+    void shouldPreserveDollarQuotedStringsWithDdlKeywordsAndSemicolons() {
+        String sql = "CREATE TABLE t (code text DEFAULT $$a; CREATE TABLE fake (id int DISTKEY)$$);";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertEquals(sql, rewritten, "Dollar-quoted string literal containing DDL text must not be altered");
+
+        String sqlTagged = "CREATE TABLE t (code text DEFAULT $tag$a; CREATE TABLE fake (id int DISTKEY)$tag$);";
+        String rewrittenTagged = RedshiftSqlInterceptor.rewrite(sqlTagged);
+        assertEquals(sqlTagged, rewrittenTagged, "Tagged dollar-quoted string must not be altered");
+
+        String sqlWithDistkey = "CREATE TABLE t (code text DEFAULT $$a; CREATE TABLE fake (id int DISTKEY)$$, id int DISTKEY);";
+        String rewrittenWithDistkey = RedshiftSqlInterceptor.rewrite(sqlWithDistkey);
+        assertEquals("CREATE TABLE t (code text DEFAULT $$a; CREATE TABLE fake (id int DISTKEY)$$, id int);", rewrittenWithDistkey);
+    }
+
+    @Test
     void shouldHandleComprehensiveComplexDdl() {
         String complexSql = """
                 CREATE TABLE public.orders (
