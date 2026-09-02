@@ -885,25 +885,22 @@ public class DynamoDbJsonHandler {
                 projectionExpression, attributesToGet, exprAttrNames);
         rejectConsistentReadOnGsi(request, queryAccessPath);
 
-        // Validate EAN/EAV usage when any expression parameter is present. FilterExpression
-        // may be combined with legacy KeyConditions, so this must not be gated on
-        // KeyConditionExpression alone (#2893).
-        if (keyConditionExpr != null || filterExpr != null || projectionExpression != null) {
-            // Check undefined #tokens in FilterExpression
-            if (filterExpr != null) {
-                for (String token : extractHashTokens(filterExpr)) {
-                    if (exprAttrNames == null || !exprAttrNames.has(token)) {
-                        throw new AwsException("ValidationException",
-                                "Invalid FilterExpression: An expression attribute name used in the document path is not defined; attribute name: " + token, 400);
-                    }
+        // Check undefined #tokens in FilterExpression
+        if (filterExpr != null) {
+            for (String token : extractHashTokens(filterExpr)) {
+                if (exprAttrNames == null || !exprAttrNames.has(token)) {
+                    throw new AwsException("ValidationException",
+                            "Invalid FilterExpression: An expression attribute name used in the document path is not defined; attribute name: " + token, 400);
                 }
             }
-            // Check unused EAN across all expressions (KCE + FE + PE)
-            Set<String> hashTokens = extractHashTokens(keyConditionExpr, filterExpr, projectionExpression);
-            checkUnusedEan(exprAttrNames, hashTokens);
-            // Reject ExpressionAttributeValues entries not referenced by KCE/FE (AWS parity, #2893)
-            checkUnusedEav(exprAttrValues, extractColonTokens(keyConditionExpr, filterExpr));
         }
+        // Reject ExpressionAttributeNames/Values entries not referenced by any expression
+        // (AWS parity, #2893). Unconditional: a legacy KeyConditions request that still
+        // carries EAN/EAV must be rejected, and either map can only be referenced from
+        // KeyConditionExpression, FilterExpression or (names only) ProjectionExpression.
+        Set<String> hashTokens = extractHashTokens(keyConditionExpr, filterExpr, projectionExpression);
+        checkUnusedEan(exprAttrNames, hashTokens);
+        checkUnusedEav(exprAttrValues, extractColonTokens(keyConditionExpr, filterExpr));
 
         if (exclusiveStartKey != null) {
             validateExclusiveStartKey(exclusiveStartKey, queryTable, queryAccessPath, false);

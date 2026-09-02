@@ -3734,6 +3734,26 @@ given()
             .body("message", equalTo("Value provided in ExpressionAttributeValues "
                     + "unused in expressions: keys: {:unused}"));
 
+        // Query: legacy KeyConditions with no expression parameter at all, stray EAV.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditions": {
+                        "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}
+                    },
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
         // Only the unused entries are reported: #used is referenced, #a and #b are not.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
