@@ -96,6 +96,31 @@ Known differences from AWS:
 - `updatedAt` equals `createdAt`. AWS advances it as a rollout progresses; Floci has no
   intermediate rollout state to report.
 
+#### ECS EventBridge events
+
+Floci publishes AWS-shaped lifecycle events to the **default** EventBridge bus
+(`source: aws.ecs`). Rules matching `aws.ecs` fire from ECS activity, in both docker
+and mock mode.
+
+| `detail-type` | When | Key `detail` fields |
+|---|---|---|
+| `ECS Task State Change` | a task starts or stops | `lastStatus`, `desiredStatus`, `taskDefinitionArn`, `group`, `startedBy`, `stoppedReason`, `containers[].exitCode` |
+| `ECS Deployment State Change` | a service deployment starts, is in progress, or reaches steady state | `eventType` (always `INFO`), `eventName`, `deploymentId` |
+
+`eventName` is one of `SERVICE_DEPLOYMENT_STARTED`, `SERVICE_DEPLOYMENT_IN_PROGRESS`,
+`SERVICE_DEPLOYMENT_COMPLETED`.
+
+Known differences from AWS:
+
+- The task phase ladder is **synthesized**. Floci's task model only occupies
+  `PENDING`, `RUNNING` and `STOPPED`, but a start emits
+  `PROVISIONING -> PENDING -> ACTIVATING -> RUNNING` and a stop emits
+  `DEACTIVATING -> STOPPING -> DEPROVISIONING -> STOPPED`, one `ECS Task State Change`
+  per phase, so rules that filter on `detail.lastStatus` behave as on AWS.
+- `SERVICE_DEPLOYMENT_FAILED` and the deployment circuit breaker are not emitted.
+- `SubmitTaskStateChange` / `SubmitContainerStateChange` remain ACK-only; Floci drives
+  the task lifecycle itself rather than via agent submissions.
+
 #### Unknown services
 
 A service reference that does not resolve is returned in `failures` with
