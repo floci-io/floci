@@ -884,8 +884,11 @@ public class DynamoDbJsonHandler {
         DynamoDbAccessPathValidator.validateSelection(queryTable, queryAccessPath, select,
                 projectionExpression, attributesToGet, exprAttrNames);
         rejectConsistentReadOnGsi(request, queryAccessPath);
-        // Validate EAN/EAV usage when using expression format
-        if (keyConditionExpr != null) {
+
+        // Validate EAN/EAV usage when any expression parameter is present. FilterExpression
+        // may be combined with legacy KeyConditions, so this must not be gated on
+        // KeyConditionExpression alone (#2893).
+        if (keyConditionExpr != null || filterExpr != null || projectionExpression != null) {
             // Check undefined #tokens in FilterExpression
             if (filterExpr != null) {
                 for (String token : extractHashTokens(filterExpr)) {

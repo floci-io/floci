@@ -3540,8 +3540,8 @@ given()
         deleteTable("NullKeyTable");
     }
 
-    // Reproduces #2893 — unused ExpressionAttributeNames/Values must be rejected on
-    // PutItem, DeleteItem, Scan and Query, matching AWS ValidationException behaviour.
+    // Reproduces #2893: unused ExpressionAttributeNames/Values must be rejected on
+    // PutItem, DeleteItem, Scan and Query, matching AWS ValidationException behavior.
     @Test
     void unusedExpressionAttributesAreRejected() {
         String tableName = "UnusedExprAttrTable";
@@ -3710,6 +3710,29 @@ given()
             .body("__type", containsString("ValidationException"))
             .body("message", equalTo("Value provided in ExpressionAttributeNames "
                     + "unused in expressions: keys: {#st}"));
+
+        // Query: legacy KeyConditions combined with FilterExpression, unused EAV entry.
+        // keyConditionExpr is null here, so the check must not be gated on it.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditions": {
+                        "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}
+                    },
+                    "FilterExpression": "#d = :d",
+                    "ExpressionAttributeNames": {"#d": "data"},
+                    "ExpressionAttributeValues": {":d": {"S": "v"}, ":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
 
         // Only the unused entries are reported: #used is referenced, #a and #b are not.
         given()
