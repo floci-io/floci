@@ -160,6 +160,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. |
+| CreateFleet | Creates an instant local fleet from launch-template configurations and on-demand or spot overrides. DryRun returns the AWS-compatible `DryRunOperation` error without launching instances. |
 | DescribeInstances | Lists or returns stored EC2 instances. |
 | TerminateInstances | Terminates instances and updates their stored lifecycle state. |
 | StartInstances | Starts stopped instances and their local runtime when applicable. |

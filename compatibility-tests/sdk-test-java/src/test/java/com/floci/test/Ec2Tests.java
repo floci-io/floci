@@ -24,6 +24,7 @@ class Ec2Tests {
     private static String rtbAssocId;
     private static String allocationId;
     private static String instanceId;
+    private static String fleetInstanceId;
 
     @BeforeAll
     static void setup() {
@@ -34,6 +35,11 @@ class Ec2Tests {
     @AfterAll
     static void cleanup() {
         if (ec2 != null) {
+            try {
+                if (fleetInstanceId != null) {
+                    ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(fleetInstanceId).build());
+                }
+            } catch (Exception ignored) {}
             try {
                 if (instanceId != null) {
                     ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(instanceId).build());
@@ -204,6 +210,58 @@ class Ec2Tests {
         assertThat(resp.instanceTypes()).hasSize(1);
         assertThat(resp.instanceTypes().get(0).processorInfo().supportedArchitecturesAsStrings())
                 .containsExactly("arm64");
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("CreateFleet - dry-run and instant on-demand launch")
+    void createFleetDryRunAndLaunch() {
+        String launchTemplateId = ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
+                .launchTemplateName("sdk-create-fleet")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .build())
+                .build()).launchTemplate().launchTemplateId();
+
+        FleetLaunchTemplateConfigRequest config = FleetLaunchTemplateConfigRequest.builder()
+                .launchTemplateSpecification(FleetLaunchTemplateSpecificationRequest.builder()
+                        .launchTemplateId(launchTemplateId)
+                        .version("1")
+                        .build())
+                .overrides(FleetLaunchTemplateOverridesRequest.builder()
+                        .instanceType(InstanceType.T3_MICRO)
+                        .imageId("ami-0abcdef1234567890")
+                        .build())
+                .build();
+        CreateFleetRequest request = CreateFleetRequest.builder()
+                .type(FleetType.INSTANT)
+                .launchTemplateConfigs(config)
+                .targetCapacitySpecification(TargetCapacitySpecificationRequest.builder()
+                        .totalTargetCapacity(1)
+                        .defaultTargetCapacityType(DefaultTargetCapacityType.ON_DEMAND)
+                        .build())
+                .build();
+
+        try {
+            assertThatThrownBy(() -> ec2.createFleet(request.toBuilder().dryRun(true).build()))
+                    .isInstanceOf(Ec2Exception.class)
+                    .satisfies(error -> assertThat(((Ec2Exception) error).awsErrorDetails().errorCode())
+                            .isEqualTo("DryRunOperation"));
+
+            CreateFleetResponse response = ec2.createFleet(request);
+            assertThat(response.fleetId()).startsWith("fleet-");
+            assertThat(response.instances()).hasSize(1);
+            assertThat(response.instances().get(0).instanceIds()).hasSize(1);
+            fleetInstanceId = response.instances().get(0).instanceIds().get(0);
+            assertThat(response.instances().get(0).instanceType()).isEqualTo(InstanceType.T3_MICRO);
+            assertThat(response.instances().get(0).lifecycle()).isEqualTo(InstanceLifecycle.ON_DEMAND);
+        }
+        finally {
+            ec2.deleteLaunchTemplate(DeleteLaunchTemplateRequest.builder()
+                    .launchTemplateId(launchTemplateId)
+                    .build());
+        }
     }
 
     @Test
