@@ -151,10 +151,6 @@ One deviation. Indexing something that is not an array makes AWS leak its JSONPa
 write `Filter: [0] can only be applied to arrays. Current context is: 1`. Floci writes its own
 `The JsonPath argument for the field '$.other[0]' could not be found in the input ...` there.
 
-One gap. A reference path in the format template position of `States.Format` is taken literally
-rather than resolved, and nothing reports it. `States.Format($.tmpl, 1)` yields the string
-`$.tmpl`.
-
 ## JSONata nulls
 
 An expression that evaluates to JSON `null` produces a value, not a missing one. It keeps its key
