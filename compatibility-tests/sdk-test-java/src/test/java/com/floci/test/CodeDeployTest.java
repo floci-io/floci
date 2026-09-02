@@ -300,6 +300,14 @@ class CodeDeployTest {
         v1 = pv1.version();
         assertThat(v1).isNotBlank();
 
+        // A second version needs a real change behind it. AWS does not publish a version when the
+        // code and configuration have not moved since the last one, so two publishes in a row
+        // return the same version. A blue/green deployment shifts between two different builds
+        // anyway, so deploy one here rather than publishing the same bytes twice.
+        lambda.updateFunctionCode(r -> r
+                .functionName(DEPLOY_FUNCTION)
+                .zipFile(SdkBytes.fromByteArray(LambdaUtils.handlerZip())));
+
         PublishVersionResponse pv2 = lambda.publishVersion(r -> r.functionName(DEPLOY_FUNCTION));
         v2 = pv2.version();
         assertThat(v2).isNotBlank().isNotEqualTo(v1);

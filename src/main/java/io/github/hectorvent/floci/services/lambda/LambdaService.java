@@ -44,6 +44,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -1350,6 +1351,46 @@ public class LambdaService implements ResourceProvider {
      * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
      * serialize on the instance monitor for the storage round-trip.
      */
+    /**
+     * The already-published version cut from {@code $LATEST}'s current revision, if there is one.
+     *
+     * <p>Versions published before {@code sourceRevisionId} was recorded carry null and never match,
+     * so existing state keeps its previous behaviour rather than deduplicating against a revision
+     * nobody wrote down.
+     */
+    private LambdaFunction latestPublishedFrom(String region, LambdaFunction fn, String description) {
+        String current = fn.getRevisionId();
+        if (current == null) {
+            return null;
+        }
+        // A hot-reload function's code lives in a bind-mounted directory that changes without any
+        // API call, so revisionId cannot witness it. Deduplicating would hand back a version whose
+        // identity no longer describes what will actually run, so these always publish.
+        if (fn.getHotReloadHostPath() != null) {
+            return null;
+        }
+        // Description is supplied at publish time rather than carried on $LATEST, so a publish that
+        // names a new one is a real publish even when nothing else moved. LambdaVersionIntegrationTest
+        // asserts exactly that: two publishes differing only in Description produce versions 1 and 2.
+        String effective = description != null ? description : fn.getDescription();
+        // Only the most recent version counts. AWS compares against the last version, so a
+        // description going A then B then A must publish again rather than matching the older A:
+        // scanning every version would return version 1 and leave the caller with a version whose
+        // place in the history is wrong.
+        return newestVersion(region, fn.getFunctionName())
+                .filter(v -> current.equals(v.getSourceRevisionId()))
+                .filter(v -> Objects.equals(effective, v.getDescription()))
+                .orElse(null);
+    }
+
+    /** The highest-numbered published version of a function, if any. */
+    private java.util.Optional<LambdaFunction> newestVersion(String region, String functionName) {
+        return functionStore.listVersions(region, functionName).stream()
+                .filter(v -> v.getVersion() != null && !"$LATEST".equals(v.getVersion()))
+                .filter(v -> v.getVersion().chars().allMatch(Character::isDigit))
+                .max(java.util.Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
+    }
+
     private int nextVersionNumber(String counterKey, String legacyCounterKey) {
         synchronized (versionCounterLocks.computeIfAbsent(counterKey, k -> new Object())) {
             Integer current = versionCounters.get(counterKey);
@@ -1389,6 +1430,13 @@ public class LambdaService implements ResourceProvider {
     /**
      * Publishes a version of {@code $LATEST}.
      *
+     * <p>An unchanged publish does not create a version: "AWS Lambda doesn't publish a version if
+     * the function's configuration and code haven't changed since the last version". Publishing was
+     * unconditional, so repeated publishes accumulated identical versions. "Unchanged" is decided by
+     * {@code $LATEST}'s {@code revisionId}, which is regenerated on every code and configuration
+     * update, so a version records the revision it was cut from and a later publish that finds it
+     * unmoved returns that version.
+     *
      * <p>{@code CodeSha256} is a precondition: "only publish a version if the hash value matches the
      * value that's specified". It was never parsed out of the request, so a caller that raced
      * someone else's deploy published code it had not authorised, silently (issue #2822).
@@ -1417,6 +1465,12 @@ public class LambdaService implements ResourceProvider {
                         400);
             }
 
+            LambdaFunction unchanged = latestPublishedFrom(region, fn, description);
+            if (unchanged != null) {
+                LOG.debugv("PublishVersion for {0} found nothing changed since version {1}; "
+                        + "returning it rather than creating a duplicate", functionName, unchanged.getVersion());
+                return unchanged;
+            }
             int version = nextVersionNumber(versionCounterKey(region, fn),
                     legacyVersionCounterKey(region, functionName));
             LambdaFunction snapshot = new LambdaFunction();
@@ -1446,6 +1500,7 @@ public class LambdaService implements ResourceProvider {
             snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
             snapshot.setLastModified(System.currentTimeMillis());
             snapshot.setRevisionId(UUID.randomUUID().toString());
+            snapshot.setSourceRevisionId(fn.getRevisionId());
 
             // Everything that determines what actually runs. Without these the snapshot describes a
             // function with no code: a version-qualified invoke resolves to it, launches a container
