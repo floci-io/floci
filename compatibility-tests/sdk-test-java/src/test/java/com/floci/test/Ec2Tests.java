@@ -195,6 +195,23 @@ class Ec2Tests {
 
     @Test
     @Order(7)
+    @DisplayName("DescribeInstanceTypes - network compatibility metadata")
+    void describeInstanceTypeNetworkCompatibilityMetadata() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.M5_LARGE, InstanceType.fromValue("t4g.medium"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(2);
+        assertThat(resp.instanceTypes()).allSatisfy(instanceType -> {
+            assertThat(instanceType.networkInfo()).isNotNull();
+            assertThat(instanceType.networkInfo().encryptionInTransitSupported()).isNotNull();
+        });
+        assertThat(resp.instanceTypes()).allMatch(instanceType ->
+                !instanceType.networkInfo().encryptionInTransitSupported());
+    }
+
+    @Test
+    @Order(7)
     @DisplayName("DescribeInstanceTypes - processor architectures")
     void describeInstanceTypeProcessorArchitectures() {
         DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()

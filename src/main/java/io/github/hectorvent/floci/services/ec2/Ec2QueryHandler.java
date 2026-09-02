@@ -3370,7 +3370,13 @@ public class Ec2QueryHandler {
             for (String arch : (List<String>) t.get("supportedArchitectures")) {
                 xml.elem("item", arch);
             }
-            xml.end("supportedArchitectures").end("processorInfo").end("item");
+            xml.end("supportedArchitectures").end("processorInfo");
+            Map<String, Object> networkInfo = (Map<String, Object>) t.get("networkInfo");
+            xml.start("networkInfo")
+                    .elem("encryptionInTransitSupported",
+                            String.valueOf(networkInfo.get("encryptionInTransitSupported")))
+                    .end("networkInfo")
+                    .end("item");
         }
         xml.end("instanceTypeSet").end("DescribeInstanceTypesResponse");
         return xmlResponse(xml.build());

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -52,6 +53,15 @@ class Ec2InstanceTypeCatalogTest {
     @Test
     void unknownInstanceTypeIsAbsent() {
         assertFalse(instanceTypeCatalog.find("m8gd.xlarge").isPresent());
+    }
+
+    @Test
+    void catalogEntriesIncludeNetworkCompatibilityMetadata() {
+        instanceTypeCatalog.instanceTypes().forEach(instanceType ->
+                assertNotNull(instanceType.encryptionInTransitSupported, instanceType.instanceType));
+
+        assertFalse(instanceTypeCatalog.find("m5.large").orElseThrow().encryptionInTransitSupported);
+        assertFalse(instanceTypeCatalog.find("t4g.medium").orElseThrow().encryptionInTransitSupported);
     }
 
     private void assertLargeGravitonType(String name) {
