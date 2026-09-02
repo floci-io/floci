@@ -476,6 +476,50 @@ public class LambdaService implements ResourceProvider {
     }
 
     /**
+     * Reads a function, honouring a {@code Qualifier} that selects a published version or an alias.
+     *
+     * <p>The read paths used to ignore the qualifier entirely and answer with {@code $LATEST} for
+     * everything, including versions that were never published (issue #2821). That defeats the
+     * point of publishing: a caller pinning version 1 silently got whatever {@code $LATEST} held at
+     * the time of the call, and a typo or a stale alias read back as a live function instead of
+     * failing. Resolution is delegated to the same target resolver the invoke path uses, so a
+     * qualifier means the same thing whether you read it or run it.
+     *
+     * <p>A qualifier may also be carried on the name itself, as {@code fn:1} or a qualified ARN. An
+     * explicit {@code Qualifier} and one embedded in the name must agree; AWS rejects the
+     * combination when they do not.
+     */
+    public LambdaFunction getFunction(String region, String functionName, String qualifier) {
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
+        enforceRegion(region, ref);
+        String effective = resolveQualifier(ref.qualifier(), qualifier);
+        if (effective == null) {
+            return getFunction(region, functionName);
+        }
+        if (functionName.startsWith("arn:")) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
+            return resolveInvokeTargetForAccount(arn.accountId(), region, ref.name(), effective);
+        }
+        return resolveInvokeTarget(region, ref.name(), effective);
+    }
+
+    /**
+     * Reconciles a qualifier carried on the function name with an explicit {@code Qualifier}
+     * parameter. Either alone wins; both must agree.
+     */
+    private static String resolveQualifier(String onName, String explicit) {
+        if (explicit == null || explicit.isBlank()) {
+            return onName;
+        }
+        if (onName != null && !onName.equals(explicit)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Cannot provide both a qualified function name and a Qualifier: "
+                            + onName + " and " + explicit, 400);
+        }
+        return explicit;
+    }
+
+    /**
      * Resolves a {@code FunctionName} path parameter (bare name, partial ARN,
      * or full ARN, with optional {@code :qualifier}) to its canonical short
      * name, enforcing a region match when the input is a full ARN.

@@ -88,9 +88,10 @@ public class LambdaController {
     @Path("/functions/{functionName}")
     public Response getFunction(@Context HttpHeaders headers,
                                 @Context UriInfo uriInfo,
-                                @PathParam("functionName") String functionName) {
+                                @PathParam("functionName") String functionName,
+                                @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaFunction fn = lambdaService.getFunction(region, functionName);
+        LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
 
         ObjectNode root = objectMapper.createObjectNode();
         root.set("Configuration", objectMapper.valueToTree(buildFunctionConfiguration(fn)));
@@ -145,9 +146,10 @@ public class LambdaController {
     @GET
     @Path("/functions/{functionName}/configuration")
     public Response getFunctionConfiguration(@Context HttpHeaders headers,
-                                              @PathParam("functionName") String functionName) {
+                                              @PathParam("functionName") String functionName,
+                                              @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaFunction fn = lambdaService.getFunction(region, functionName);
+        LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
         return Response.ok(buildFunctionConfiguration(fn)).build();
     }
 
