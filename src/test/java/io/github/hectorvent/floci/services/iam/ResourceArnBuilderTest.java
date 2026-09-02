@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -117,10 +118,30 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void dynamoDbBuildsArnsFromMultiTableBatchRequest() {
+        setJsonBody("{\"RequestItems\":{\"TableA\":{\"Keys\":[]},\"TableB\":{\"Keys\":[]}}}");
+        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of(
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
+        ), arns);
+    }
+
+    @Test
     void dynamoDbBuildsArnFromSingleTableTransactRequest() {
         setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"MyTable\"}},{\"Delete\":{\"TableName\":\"MyTable\"}}]}");
         String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/MyTable", arn);
+    }
+
+    @Test
+    void dynamoDbBuildsArnsFromMultiTableTransactRequest() {
+        setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"TableA\"}},{\"Delete\":{\"TableName\":\"TableB\"}},{\"Get\":{\"TableName\":\"TableA\"}}]}");
+        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of(
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
+        ), arns);
     }
 
     @Test

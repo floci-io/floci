@@ -10,6 +10,10 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -34,18 +38,27 @@ public class ResourceArnBuilder {
 
     public String build(String credentialScope, ContainerRequestContext ctx,
                         String region, String accountId) {
+        List<String> list = buildResources(credentialScope, ctx, region, accountId);
+        return list.isEmpty() ? "*" : list.getFirst();
+    }
+
+    public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
+                                       String region, String accountId) {
+        if (credentialScope == null) {
+            return List.of("*");
+        }
         String path = ctx.getUriInfo().getPath();
         return switch (credentialScope) {
-            case "s3"             -> buildS3Arn(path);
-            case "lambda"         -> buildLambdaArn(path, region, accountId);
-            case "sqs"            -> buildSqsArn(ctx, region, accountId);
-            case "sns"            -> buildSnsArn(ctx, region, accountId);
-            case "dynamodb"       -> buildDynamoDbArn(ctx, region, accountId);
-            case "kinesis"        -> buildKinesisArn(ctx, region, accountId);
-            case "secretsmanager" -> buildSecretsManagerArn(ctx, region, accountId);
-            case "ssm"            -> buildSsmArn(ctx, region, accountId);
-            case "kms"            -> buildKmsArn(path, region, accountId);
-            default               -> "*";
+            case "s3"             -> List.of(buildS3Arn(path));
+            case "lambda"         -> List.of(buildLambdaArn(path, region, accountId));
+            case "sqs"            -> List.of(buildSqsArn(ctx, region, accountId));
+            case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
+            case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
+            case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
+            case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
+            case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
+            case "kms"            -> List.of(buildKmsArn(path, region, accountId));
+            default               -> List.of("*");
         };
     }
 
@@ -117,57 +130,59 @@ public class ResourceArnBuilder {
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
     private String buildDynamoDbArn(ContainerRequestContext ctx, String region, String accountId) {
+        List<String> arns = buildDynamoDbArns(ctx, region, accountId);
+        return arns.isEmpty() ? "*" : arns.getFirst();
+    }
+
+    private List<String> buildDynamoDbArns(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
             if (json.hasNonNull("TableName")) {
                 String tableName = json.get("TableName").asText().trim();
                 if (!tableName.isEmpty()) {
-                    if (tableName.startsWith("arn:aws:dynamodb:")) {
-                        return tableName;
-                    }
-                    return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
+                    return List.of(toDynamoDbTableArn(tableName, region, accountId));
                 }
             }
             if (json.hasNonNull("ResourceArn")) {
                 String resourceArn = json.get("ResourceArn").asText().trim();
                 if (!resourceArn.isEmpty()) {
-                    return resourceArn;
+                    return List.of(resourceArn);
                 }
             }
             if (json.hasNonNull("TableArn")) {
                 String tableArn = json.get("TableArn").asText().trim();
                 if (!tableArn.isEmpty()) {
-                    return tableArn;
+                    return List.of(tableArn);
                 }
             }
             if (json.hasNonNull("StreamArn")) {
                 String streamArn = json.get("StreamArn").asText().trim();
                 if (!streamArn.isEmpty()) {
-                    return streamArn;
+                    return List.of(streamArn);
                 }
             }
             if (json.hasNonNull("ExportArn")) {
                 String exportArn = json.get("ExportArn").asText().trim();
                 if (!exportArn.isEmpty()) {
-                    return exportArn;
+                    return List.of(exportArn);
                 }
             }
             if (json.hasNonNull("RequestItems") && json.get("RequestItems").isObject()) {
+                Set<String> arns = new LinkedHashSet<>();
                 var fieldNames = json.get("RequestItems").fieldNames();
-                if (fieldNames.hasNext()) {
-                    String firstTable = fieldNames.next();
-                    if (!fieldNames.hasNext() && !firstTable.isEmpty()) {
-                        if (firstTable.startsWith("arn:aws:dynamodb:")) {
-                            return firstTable;
-                        }
-                        return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + firstTable).toString();
+                while (fieldNames.hasNext()) {
+                    String table = fieldNames.next().trim();
+                    if (!table.isEmpty()) {
+                        arns.add(toDynamoDbTableArn(table, region, accountId));
                     }
+                }
+                if (!arns.isEmpty()) {
+                    return new ArrayList<>(arns);
                 }
             }
             if (json.hasNonNull("TransactItems") && json.get("TransactItems").isArray()) {
+                Set<String> arns = new LinkedHashSet<>();
                 JsonNode items = json.get("TransactItems");
-                String commonTable = null;
-                boolean allSame = true;
                 for (JsonNode item : items) {
                     String t = null;
                     if (item.hasNonNull("Put") && item.get("Put").hasNonNull("TableName")) {
@@ -181,24 +196,26 @@ public class ResourceArnBuilder {
                     } else if (item.hasNonNull("Get") && item.get("Get").hasNonNull("TableName")) {
                         t = item.get("Get").get("TableName").asText();
                     }
-                    if (t != null && !t.isEmpty()) {
-                        if (commonTable == null) {
-                            commonTable = t;
-                        } else if (!commonTable.equals(t)) {
-                            allSame = false;
-                            break;
+                    if (t != null) {
+                        t = t.trim();
+                        if (!t.isEmpty()) {
+                            arns.add(toDynamoDbTableArn(t, region, accountId));
                         }
                     }
                 }
-                if (allSame && commonTable != null && !commonTable.isEmpty()) {
-                    if (commonTable.startsWith("arn:aws:dynamodb:")) {
-                        return commonTable;
-                    }
-                    return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + commonTable).toString();
+                if (!arns.isEmpty()) {
+                    return new ArrayList<>(arns);
                 }
             }
         }
-        return "*";
+        return List.of("*");
+    }
+
+    private String toDynamoDbTableArn(String tableName, String region, String accountId) {
+        if (tableName.startsWith("arn:aws:dynamodb:")) {
+            return tableName;
+        }
+        return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
     }
 
     // ── Kinesis ──────────────────────────────────────────────────────────────────
