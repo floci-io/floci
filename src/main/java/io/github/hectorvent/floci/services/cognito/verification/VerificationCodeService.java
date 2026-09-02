@@ -145,6 +145,18 @@ public final class VerificationCodeService {
         store.delete(VerificationCode.storageKey(userPoolId, username, purpose));
     }
 
+    /**
+     * Removes every code issued for a pool, for DeleteUserPool. Keys are collected before
+     * deleting so the backing key set is not modified while it is being iterated.
+     */
+    public void invalidateForPool(String userPoolId) {
+        String prefix = userPoolId + ":";
+        store.keys().stream()
+            .filter(k -> k.startsWith(prefix))
+            .toList()
+            .forEach(store::delete);
+    }
+
     private byte[] randomBytes(int n) {
         byte[] b = new byte[n];
         random.nextBytes(b);
