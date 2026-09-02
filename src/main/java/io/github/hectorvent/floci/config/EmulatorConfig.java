@@ -1861,6 +1861,16 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean ephemeral();
 
+        /**
+         * When true, Docker Lambda containers use the platform declared by the function's
+         * Architectures value. Disabled by default because foreign-platform containers require
+         * host support such as binfmt_misc or QEMU.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES
+         */
+        @WithDefault("false")
+        boolean honourArchitectures();
+
         @WithDefault("300")
         int containerIdleTimeoutSeconds();
 

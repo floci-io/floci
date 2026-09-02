@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectImageCmd;
+import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.command.PullImageCmd;
 import com.github.dockerjava.api.command.PullImageResultCallback;
 import com.github.dockerjava.api.exception.DockerClientException;
@@ -21,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -45,6 +47,7 @@ class ImageCacheServiceTest {
         newService(dockerClient).ensureImageExists(IMAGE);
 
         verify(pullImage).exec(any(PullImageResultCallback.class));
+        verify(pullImage, never()).withPlatform(nullable(String.class));
         verify(callback).awaitCompletion(5, TimeUnit.MINUTES);
     }
 
@@ -61,6 +64,74 @@ class ImageCacheServiceTest {
 
         assertSame(failure, thrown);
         verify(dockerClient, never()).pullImageCmd(IMAGE);
+    }
+
+    @Test
+    void pullsRequestedPlatformWhenLocalImageArchitectureDoesNotMatch() throws Exception {
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectImageCmd inspectImage = mock(InspectImageCmd.class);
+        PullImageCmd pullImage = mock(PullImageCmd.class);
+        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
+        when(inspectImage.exec()).thenReturn(
+                new InspectImageResponse().withOs("linux").withArch("amd64"),
+                new InspectImageResponse().withId("sha256:arm64").withOs("linux").withArch("arm64"));
+        when(dockerClient.pullImageCmd(IMAGE)).thenReturn(pullImage);
+        when(pullImage.withAuthConfig(any())).thenReturn(pullImage);
+        when(pullImage.withPlatform("linux/arm64")).thenReturn(pullImage);
+        when(pullImage.exec(any(PullImageResultCallback.class))).thenReturn(callback);
+
+        String resolvedImage = newService(dockerClient)
+                .ensureImageExists(IMAGE, "linux/arm64");
+
+        assertEquals("sha256:arm64", resolvedImage);
+        verify(pullImage).withPlatform("linux/arm64");
+        verify(callback).awaitCompletion(5, TimeUnit.MINUTES);
+    }
+
+    @Test
+    void skipsPullWhenLocalImageMatchesRequestedPlatform() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectImageCmd inspectImage = mock(InspectImageCmd.class);
+        when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
+        when(inspectImage.exec()).thenReturn(new InspectImageResponse()
+                .withId("sha256:arm64")
+                .withOs("linux")
+                .withArch("arm64"));
+
+        String resolvedImage = newService(dockerClient)
+                .ensureImageExists(IMAGE, "linux/arm64");
+
+        assertEquals("sha256:arm64", resolvedImage);
+        verify(dockerClient, never()).pullImageCmd(IMAGE);
+    }
+
+    @Test
+    void keepsDifferentPlatformsAsSeparateCacheRequests() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectImageCmd inspectImage = mock(InspectImageCmd.class);
+        PullImageCmd pullImage = mock(PullImageCmd.class);
+        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
+        when(inspectImage.exec()).thenReturn(
+                new InspectImageResponse().withOs("linux").withArch("amd64"),
+                new InspectImageResponse().withId("sha256:arm64").withOs("linux").withArch("arm64"),
+                new InspectImageResponse().withOs("linux").withArch("arm64"),
+                new InspectImageResponse().withId("sha256:amd64").withOs("linux").withArch("amd64"));
+        when(dockerClient.pullImageCmd(IMAGE)).thenReturn(pullImage);
+        when(pullImage.withAuthConfig(any())).thenReturn(pullImage);
+        when(pullImage.withPlatform("linux/arm64")).thenReturn(pullImage);
+        when(pullImage.withPlatform("linux/amd64")).thenReturn(pullImage);
+        when(pullImage.exec(any(PullImageResultCallback.class))).thenReturn(callback);
+
+        ImageCacheService service = newService(dockerClient);
+        String armImage = service.ensureImageExists(IMAGE, "linux/arm64");
+        String amdImage = service.ensureImageExists(IMAGE, "linux/amd64");
+
+        assertEquals("sha256:arm64", armImage);
+        assertEquals("sha256:amd64", amdImage);
+        verify(pullImage).withPlatform("linux/arm64");
+        verify(pullImage).withPlatform("linux/amd64");
     }
 
     @Test

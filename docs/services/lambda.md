@@ -211,10 +211,19 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
 ## Configuration
 
+!!! warning "Lambda container architecture"
+    Floci uses the Docker host architecture by default. Set
+    `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES=true` to run each function with
+    its declared `arm64` or `x86_64` architecture. The Docker host must support
+    the selected architecture. Foreign architectures require Docker Desktop or
+    host emulation such as `binfmt_misc` with QEMU. Floci does not fall back to
+    the host architecture when this setting is enabled.
+
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove containers after each invocation |
+| `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES` | `false` | Select each function's declared architecture for Docker image pulls and containers |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API range |

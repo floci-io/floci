@@ -77,6 +77,7 @@ class ContainerLifecycleManagerLabelsTest {
         assertEquals(
                 Map.of("floci", "true", "floci_emulator", "floci-aws"),
                 capturedLabels(createCmd));
+        verify(imageCacheService).ensureImageExists("busybox:stable");
     }
 
     @Test
@@ -101,6 +102,19 @@ class ContainerLifecycleManagerLabelsTest {
         assertEquals(
                 Map.of("floci", "true", "floci_emulator", "custom-value"),
                 capturedLabels(createCmd));
+    }
+
+    @Test
+    void createUsesRequestedDockerPlatform() {
+        when(imageCacheService.ensureImageExists("busybox:stable", "linux/arm64"))
+                .thenReturn("sha256:arm64");
+        CreateContainerCmd createCmd = stubCreateContainer("sha256:arm64");
+
+        manager().create(new ContainerSpec("busybox:stable"), "linux/arm64");
+
+        verify(imageCacheService).ensureImageExists("busybox:stable", "linux/arm64");
+        verify(dockerClient).createContainerCmd("sha256:arm64");
+        verify(createCmd).withPlatform("linux/arm64");
     }
 
     @Test
@@ -169,8 +183,12 @@ class ContainerLifecycleManagerLabelsTest {
     }
 
     private CreateContainerCmd stubCreateContainer() {
+        return stubCreateContainer("busybox:stable");
+    }
+
+    private CreateContainerCmd stubCreateContainer(String image) {
         CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
-        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        when(dockerClient.createContainerCmd(image)).thenReturn(createCmd);
         CreateContainerResponse response = mock(CreateContainerResponse.class);
         when(response.getId()).thenReturn("container-id");
         when(createCmd.exec()).thenReturn(response);

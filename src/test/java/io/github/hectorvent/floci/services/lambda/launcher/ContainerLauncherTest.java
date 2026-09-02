@@ -146,6 +146,7 @@ class ContainerLauncherTest {
         // lenient: the failure-path test (populate fails before any container is created) never
         // reaches these, but every success-path test does — they must not trip strict-stubs.
         lenient().when(lifecycleManager.create(any())).thenReturn("container-123");
+        lenient().when(lifecycleManager.create(any(), anyString())).thenReturn("container-123");
         ContainerLifecycleManager.ContainerInfo info =
                 new ContainerLifecycleManager.ContainerInfo("container-123", Map.of());
         lenient().when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
@@ -204,6 +205,13 @@ class ContainerLauncherTest {
                 .orElseGet(() -> specs.get(specs.size() - 1));
     }
 
+    private String captureRealContainerPlatform() {
+        ArgumentCaptor<String> platformCaptor = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager, atLeastOnce()).create(any(ContainerSpec.class), platformCaptor.capture());
+        List<String> platforms = platformCaptor.getAllValues();
+        return platforms.get(platforms.size() - 1);
+    }
+
     /** Returns the read-only {@code /var/task} volume mount on the spec, or null if absent. */
     private static Mount varTaskVolumeMount(ContainerSpec spec) {
         if (spec.mounts() == null) {
@@ -213,6 +221,88 @@ class ContainerLauncherTest {
                 .filter(m -> m.getType() == MountType.VOLUME && "/var/task".equals(m.getTarget()))
                 .findFirst()
                 .orElse(null);
+    }
+
+    @Test
+    void launchFunction_usesArm64DockerPlatformWhenArchitectureHonouringIsEnabled() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("arm64-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("arm64-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(List.of("arm64"));
+
+        launcher.launch(fn);
+
+        assertEquals("linux/arm64", captureRealContainerPlatform());
+    }
+
+    @Test
+    void launchFunction_usesAmd64DockerPlatformForX86Architecture() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("x86-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("x86-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(List.of("x86_64"));
+
+        launcher.launch(fn);
+
+        assertEquals("linux/amd64", captureRealContainerPlatform());
+    }
+
+    @Test
+    void launchFunction_keepsDaemonDefaultPlatformWhenArchitectureHonouringIsDisabled() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("native-platform-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("native-platform-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(List.of("arm64"));
+
+        launcher.launch(fn);
+
+        captureRealContainerSpec();
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
+    }
+
+    @Test
+    void launchFunction_usesArm64DockerPlatformForCodeVolumeHelper() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("large-arm64-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]);
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("large-arm64-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setCodeSha256("large-arm64-code-sha");
+        fn.setArchitectures(List.of("arm64"));
+
+        long originalThreshold = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(fn);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalThreshold;
+        }
+
+        ArgumentCaptor<String> platformCaptor = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager, times(2)).create(any(ContainerSpec.class), platformCaptor.capture());
+        assertTrue(platformCaptor.getAllValues().stream()
+                .allMatch("linux/arm64"::equals));
     }
 
     @Test
