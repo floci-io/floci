@@ -12,6 +12,8 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.IntFunction;
 
 /** Runs Map iterations with a bounded in-flight window while preserving input order. */
@@ -20,8 +22,15 @@ final class MapIterationScheduler {
     private MapIterationScheduler() {
     }
 
+    /**
+     * @param deadlineNanos a {@link System#nanoTime()} reading the iterations must all finish
+     *                      before, or {@link Long#MAX_VALUE} for no deadline. Reaching it throws
+     *                      {@link TimeoutException}, leaving the caller to say what the expiry
+     *                      means for the state it belongs to.
+     */
     static <T> List<T> execute(int itemCount, int maxConcurrency,
-                               IntFunction<Callable<T>> taskFactory) throws Exception {
+                               IntFunction<Callable<T>> taskFactory, long deadlineNanos)
+            throws Exception {
         if (itemCount < 0) {
             throw new IllegalArgumentException("itemCount must not be negative");
         }
@@ -31,12 +40,8 @@ final class MapIterationScheduler {
         if (itemCount == 0) {
             return List.of();
         }
-        if (itemCount == 1 || maxConcurrency == 1) {
-            List<T> results = new ArrayList<>(itemCount);
-            for (int i = 0; i < itemCount; i++) {
-                results.add(taskFactory.apply(i).call());
-            }
-            return results;
+        if (System.nanoTime() >= deadlineNanos) {
+            throw new TimeoutException();
         }
 
         int inFlightLimit = Math.min(itemCount, maxConcurrency);
@@ -53,7 +58,12 @@ final class MapIterationScheduler {
                 inFlight.add(submit(completions, taskFactory, nextIndex++));
             }
             while (completed < itemCount) {
-                Future<IndexedResult<T>> future = completions.take();
+                Future<IndexedResult<T>> future =
+                        completions.poll(deadlineNanos - System.nanoTime(), TimeUnit.NANOSECONDS);
+                if (future == null) {
+                    cancel(inFlight);
+                    throw new TimeoutException();
+                }
                 inFlight.remove(future);
                 IndexedResult<T> result = future.get();
                 results.set(result.index(), result.value());

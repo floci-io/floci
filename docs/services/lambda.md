@@ -166,9 +166,32 @@ services:
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
-**Layers:** `PublishLayerVersion`, `GetLayerVersion`, `ListLayerVersions`, `ListLayers`, and
-`DeleteLayerVersion` are implemented, with real local storage under
-`{lambda.codePath}/layers/{name}/{version}`. `CreateFunction`/`UpdateFunctionConfiguration`
+**Versions:** `CreateFunction` and `UpdateFunctionCode` honour `Publish`, publishing a version
+and reporting it in the response's `Version`. The two differ in the ARN they return, matching the
+live service: `CreateFunction` keeps the unqualified `FunctionArn` while `UpdateFunctionCode`
+returns the qualified one (`...:function:name:2`), as `PublishVersion` does. Without `Publish`
+both answer for `$LATEST` and create nothing. `UpdateFunctionConfiguration` has no `Publish`
+parameter in the AWS API and none here.
+
+`DeleteFunction` honours `Qualifier` — it removes that published version only, leaving `$LATEST`,
+the other versions and the function's aliases in place; without a qualifier the whole function
+goes. Matching the live service, deleting `$LATEST` by qualifier and naming an alias are both
+rejected with `InvalidParameterValueException`, a version an alias points at is a
+`ResourceConflictException`, and a version that does not exist is a silent success rather than
+a 404.
+
+**Layers:** `PublishLayerVersion`, `GetLayerVersion`, `GetLayerVersionByArn`, `ListLayerVersions`,
+`ListLayers`, and `DeleteLayerVersion` are implemented, with real local storage under
+`{lambda.codePath}/layers/{name}/{version}`. `ListLayers` and `ListLayerVersions` honour
+`CompatibleRuntime`, `CompatibleArchitecture`, `MaxItems` (1-50, defaulting to 50) and `Marker`,
+and always emit `NextMarker`, null on the last page. Under a filter, `LatestMatchingVersion` is
+the newest version that matches rather than the newest overall, and a layer with no matching
+version is omitted; a version published without `CompatibleArchitectures` matches neither
+architecture. `Marker` is opaque and signed with a key generated at startup, so a fabricated,
+edited or previous-run token is rejected with `InvalidParameterValueException` rather than
+applied as a cursor. One divergence: a parameter sent with an empty value
+(`?CompatibleRuntime=`) is treated as absent rather than rejected, because RESTEasy binds an
+empty query value as null. `CreateFunction`/`UpdateFunctionConfiguration`
 validate each `Layers` ARN eagerly against that storage, matching real AWS - an unresolvable ARN
 is rejected with `InvalidParameterValueException`, not silently accepted. Only resolves layers
 published into this same local Floci instance; a real AWS-owned layer ARN (e.g. the AWS AppConfig
@@ -180,7 +203,7 @@ a name you control and reference that ARN instead.
 
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
-- Layer permissions and cross-account ARN lookup (`GetLayerVersionByArn`, `AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
+- Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - Dead-letter, async invoke config, and event invoke config operations
 - `InvokeWithResponseStream`
@@ -207,6 +230,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
+| `FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY` | `max(2, cpus/2)` | Maximum concurrent first-time code-volume populates. See the note below |
 | `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | *(unset)* | Extra pod labels as comma-separated `key=value` entries |
@@ -225,6 +249,25 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
     ```bash
     docker volume prune --filter label=floci=true
     ```
+
+!!! note "Concurrent cold starts of large functions"
+    A function whose unpacked code is at least 32 MB has that code streamed once into a
+    read-only Docker volume, so later cold starts mount it instead of copying. Those
+    first-time *populates* are capped — a burst of them overwhelms the Docker daemon — and
+    the default cap is `max(2, cpus/2)`, derived from the CPU count the JVM sees.
+
+    Because the JVM honours the container's cgroup CPU quota, running Floci with a small CPU
+    allocation collapses the cap to 2, and a burst of cold starts across *distinct* large
+    functions completes in waves of two rather than in parallel. Six such functions invoked
+    at once take roughly three times the wall-clock of one. Raise the cap to decouple it from
+    the CPU allocation:
+
+    ```bash
+    FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY=8
+    ```
+
+    Only first-time populates are gated. Warm containers, already-populated volumes, and
+    functions under 32 MB are never serialised by this.
 
 ### Runtime API host override
 

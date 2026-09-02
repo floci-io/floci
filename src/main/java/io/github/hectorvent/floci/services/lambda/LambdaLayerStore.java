@@ -59,6 +59,20 @@ public class LambdaLayerStore {
     }
 
     /**
+     * Returns every version of every layer in a region, ordered by layer name then version
+     * ascending. ListLayers needs all versions, not just the latest of each: under a
+     * CompatibleRuntime or CompatibleArchitecture filter, LatestMatchingVersion is the newest
+     * version that matches, which may not be the newest version overall.
+     */
+    public List<LambdaLayerVersion> listAllVersions(String region) {
+        String prefix = "layer::" + region + "::";
+        return backend.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(java.util.Comparator.comparing(LambdaLayerVersion::getLayerName)
+                        .thenComparingLong(LambdaLayerVersion::getVersion))
+                .toList();
+    }
+
+    /**
      * Returns all distinct layers in a region (latest version of each).
      */
     public List<LambdaLayerVersion> listLayers(String region) {

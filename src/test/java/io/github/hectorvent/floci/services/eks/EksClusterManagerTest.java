@@ -12,8 +12,13 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.InspectVolumeCmd;
+import com.github.dockerjava.api.model.Container;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -205,6 +210,293 @@ class EksClusterManagerTest {
                 "io.floci.resource-id", "my-cluster",
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1"));
+    }
+
+    /** Re-latching persisted clusters after a Floci/Docker restart (#2609), without a Docker daemon. */
+    @Nested
+    class RestoreCluster {
+
+        private EmulatorConfig config;
+        private EmulatorConfig.StorageConfig storage;
+        private ContainerLifecycleManager lifecycleManager;
+        private PortAllocator portAllocator;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            EmulatorConfig.EksServiceConfig eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+            when(config.services()).thenReturn(services);
+            when(config.storage()).thenReturn(storage);
+            when(services.eks()).thenReturn(eks);
+            when(eks.defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+            when(eks.apiServerBasePort()).thenReturn(6440);
+            when(eks.apiServerMaxPort()).thenReturn(6499);
+            when(eks.dockerNetwork()).thenReturn(Optional.empty());
+            when(eks.endpointMode()).thenReturn("host");
+            when(eks.disableCni()).thenReturn(false);
+            when(eks.iamAuthWebhook()).thenReturn(false);
+            when(eks.ecrRegistryMirror()).thenReturn(false);
+
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+            ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            portAllocator = Mockito.mock(PortAllocator.class);
+
+            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), portAllocator,
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    config, Mockito.mock(RegionResolver.class));
+        }
+
+        // Container's getters are final, so survivors are built from JSON instead of mocked.
+        private Container survivingContainer(String id) {
+            return containerFromJson("{\"Id\":\"" + id + "\"}");
+        }
+
+        private Container survivingContainerOwnedBy(String id, String accountId) {
+            return containerFromJson("{\"Id\":\"" + id + "\","
+                    + "\"Labels\":{\"io.floci.account\":\"" + accountId + "\"}}");
+        }
+
+        private Container containerFromJson(String json) {
+            try {
+                return new ObjectMapper().readValue(json, Container.class);
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        private Cluster cluster() {
+            Cluster cluster = new Cluster();
+            cluster.setName("demo");
+            return cluster;
+        }
+
+        private void stubFreshStart(String containerId, int allocatedPort) {
+            when(lifecycleManager.create(any())).thenReturn(containerId);
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenReturn(new ContainerInfo(containerId, Map.of()));
+            when(portAllocator.allocate(6440, 6499)).thenReturn(allocatedPort);
+        }
+
+        @Test
+        void adoptsASurvivingContainerAndKeepsItsPublishedPort() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            // adopt() starts a stopped container — the Docker-reboot case from #2609.
+            when(lifecycleManager.adopt("cid-1", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-1", cluster.getContainerId());
+            assertEquals(6512, cluster.getHostPort());
+            assertEquals("https://localhost:6512", cluster.getEndpoint());
+            assertEquals("https://localhost:6512", cluster.getInternalEndpoint());
+            // The port Docker already holds must not be handed out to another cluster.
+            verify(portAllocator).markReserved(6512);
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void recreatesTheContainerWhenNoneSurvives() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals(6440, cluster.getHostPort());
+            verify(lifecycleManager).create(any());
+            verify(lifecycleManager, never()).adopt(anyString(), any());
+        }
+
+        @Test
+        void recreatesWhenTheSurvivingContainerPublishesNoPort() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of()));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(portAllocator, never()).markReserved(6440);
+        }
+
+        @Test
+        void recreatesWhenAdoptionFails() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt(anyString(), any())).thenThrow(new RuntimeException("broken"));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            // startCluster removes the broken survivor before reusing its name.
+            verify(lifecycleManager).removeIfExists("floci-eks-demo");
+        }
+
+        @Test
+        void stopClusterRetainsTheDataVolumeInPersistentStorageMode() {
+            when(storage.mode()).thenReturn("hybrid");
+            when(storage.pruneVolumesOnDelete()).thenReturn(false);
+
+            Cluster cluster = cluster();
+            cluster.setContainerId("cid-1");
+            manager.stopCluster(cluster);
+
+            verify(lifecycleManager).stopAndRemove("cid-1", null);
+            // The volume must survive so restoreCluster can bring the workloads back.
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
+        void stopClusterRemovesTheDataVolumeInMemoryStorageMode() {
+            when(storage.mode()).thenReturn("memory");
+
+            Cluster cluster = cluster();
+            cluster.setContainerId("cid-1");
+            manager.stopCluster(cluster);
+
+            verify(lifecycleManager).stopAndRemove("cid-1", null);
+            verify(lifecycleManager).removeVolume("floci-eks-demo");
+        }
+
+        @Test
+        void nonDefaultAccountClustersGetAccountQualifiedDockerNames() {
+            // Cluster names are unique only per account: an unqualified name would cross-bind two
+            // accounts' same-named clusters to one container and data volume.
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            when(lifecycleManager.findByName("floci-eks-999999999999.demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-9")));
+            when(lifecycleManager.adopt("cid-9", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-9", Map.of(), Map.of(6443, 6520)));
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("999999999999");
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-9", cluster.getContainerId());
+            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+        }
+
+        @Test
+        void defaultAccountClustersKeepTheHistoricalUnqualifiedName() {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("000000000000");
+
+            assertEquals("floci-eks-demo", manager.clusterResourceName(cluster));
+        }
+
+        @Test
+        void legacyNamedContainerIsKeptWhenItsAccountLabelMatchesTheOwner() {
+            // A non-default-account cluster created before account-qualified naming left its
+            // container (and mounted data volume) under floci-eks-<name>. Restoration must keep
+            // that name — recreating under the qualified name would orphan the workloads.
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainerOwnedBy("cid-legacy", "999999999999")));
+            when(lifecycleManager.adopt("cid-legacy", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-legacy", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("999999999999");
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-legacy", cluster.getContainerId());
+            assertEquals("floci-eks-demo", cluster.getDockerName());
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void legacyNamedContainerOfAnotherAccountIsNeverClaimed() {
+            // The legacy container belongs to whoever's label it carries. A different account's
+            // restored cluster must start fresh under its qualified name, leaving the survivor
+            // (and its data) untouched.
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainerOwnedBy("cid-other", "111111111111")));
+            when(lifecycleManager.findByName("floci-eks-999999999999.demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("999999999999");
+            manager.restoreCluster(cluster);
+
+            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(lifecycleManager, never()).adopt(anyString(), any());
+            verify(lifecycleManager, never()).removeIfExists("floci-eks-demo");
+        }
+
+        @Test
+        void legacyNamedContainerWithoutAnOwnerLabelIsNeverClaimed() {
+            // No label means no verifiable owner — adopting on a guess could hand another
+            // account's workloads over. The cluster starts fresh under its qualified name and
+            // the unclaimed survivor is only reported.
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-unlabeled")));
+            when(lifecycleManager.findByName("floci-eks-999999999999.demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("999999999999");
+            manager.restoreCluster(cluster);
+
+            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+            verify(lifecycleManager, never()).adopt(anyString(), any());
+            verify(lifecycleManager, never()).removeIfExists("floci-eks-demo");
+        }
+
+        @Test
+        void legacyVolumeWithoutItsContainerIsNeverClaimed() {
+            // A surviving volume carries no ownership label at all, so it cannot be verified for
+            // any account — the cluster starts fresh under its qualified name and the volume is
+            // reported for manual migration instead of being silently mounted or orphaned.
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            InspectVolumeCmd inspectVolumeCmd = Mockito.mock(InspectVolumeCmd.class);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.inspectVolumeCmd("floci-eks-demo")).thenReturn(inspectVolumeCmd);
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("999999999999");
+            manager.restoreCluster(cluster);
+
+            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(inspectVolumeCmd).exec();
+        }
+
+        @Test
+        void startClusterAssignsTheAccountQualifiedDockerName() {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("999999999999");
+            manager.startCluster(cluster);
+
+            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+            verify(lifecycleManager).removeIfExists("floci-eks-999999999999.demo");
+        }
     }
 
     /** Mirror-injection guard behavior, without a Docker daemon. */

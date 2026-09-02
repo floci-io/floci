@@ -58,9 +58,14 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError",
                     "Updating RoleName requires resource replacement, which is not supported.", 400);
         }
-        String assumeDoc = props != null && props.has("AssumeRolePolicyDocument")
-                ? props.get("AssumeRolePolicyDocument").toString()
-                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String assumeDoc = props == null
+                ? null
+                : ctx.engine().resolveJsonAttribute(props.path("AssumeRolePolicyDocument"));
+
+        if (assumeDoc == null) {
+            assumeDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        }
+
         String path = ctx.resolveOptional(props, "Path");
         if (path == null) {
             path = "/";

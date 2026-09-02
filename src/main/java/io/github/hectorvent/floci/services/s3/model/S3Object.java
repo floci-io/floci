@@ -43,6 +43,14 @@ public class S3Object {
     private String legalHoldStatus;      // "ON" | "OFF" | null
     private String acl;
 
+    // Internal-only per-write stamp (not an S3 versionId, and set even when bucket versioning is
+    // off - see S3Service#getLatestObject). A fresh value is assigned every time this key is
+    // overwritten; comparing two reads of it is how a GET detects whether a concurrent overwrite
+    // landed in the middle of reading this object's metadata and body, without holding a lock
+    // for that read's full duration.
+    @JsonIgnore
+    private String dataGeneration;
+
     public S3Object() {
         this.metadata = new HashMap<>();
         this.storageClass = "STANDARD";
@@ -142,6 +150,9 @@ public class S3Object {
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
+
+    public String getDataGeneration() { return dataGeneration; }
+    public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }
 
     private static String computeETag(byte[] data) {
         try {

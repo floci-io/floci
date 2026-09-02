@@ -277,7 +277,7 @@ public class ElbV2Service implements ResourceProvider {
 
     public Map<String, String> describeLoadBalancerAttributes(String region, String arn) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
-        return new LinkedHashMap<>(lb.getAttributes());
+        return ElbV2DefaultAttributes.merge(ElbV2DefaultAttributes.forLoadBalancer(lb), lb.getAttributes());
     }
 
     public void modifyLoadBalancerAttributes(String region, String arn, Map<String, String> newAttrs) {
@@ -446,7 +446,7 @@ public class ElbV2Service implements ResourceProvider {
 
     public Map<String, String> describeTargetGroupAttributes(String region, String arn) {
         TargetGroup tg = requireTargetGroup(region, arn);
-        return new LinkedHashMap<>(tg.getAttributes());
+        return ElbV2DefaultAttributes.merge(ElbV2DefaultAttributes.forTargetGroup(tg), tg.getAttributes());
     }
 
     public void modifyTargetGroupAttributes(String region, String arn, Map<String, String> newAttrs) {

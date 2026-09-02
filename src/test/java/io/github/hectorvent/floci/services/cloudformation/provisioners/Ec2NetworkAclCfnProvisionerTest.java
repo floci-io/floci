@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -135,6 +137,26 @@ class Ec2NetworkAclCfnProvisionerTest {
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 100, "-1", null, false,
                 null, null, null, true);
         assertEquals("acl-abc|100|ingress", r.getPhysicalId());
+    }
+
+    /**
+     * Id is the type's primaryIdentifier and its only schema readOnlyProperty. It went unset for a
+     * long time because the sibling NetworkAcl arm sets one too, and the coverage scan read the
+     * class as a whole, so the gap never reached getatt-attribute-gaps.tsv.
+     */
+    @Test
+    void aclEntrySetsTheIdAttributeItsSchemaDeclares() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 150)
+                .put("Egress", true);
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("acl-abc|150|egress", r.getPhysicalId());
+        assertEquals("acl-abc|150|egress", r.getAttributes().get("Id"));
+        assertEquals(Set.of("Id"), r.getAttributes().keySet());
     }
 
     @Test

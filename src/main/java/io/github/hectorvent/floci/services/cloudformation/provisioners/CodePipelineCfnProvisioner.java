@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -194,6 +195,8 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
             delete("AWS::CodePipeline::Pipeline", previousPhysicalId, ctx.region());
         }
         r.setPhysicalId(name);
+        r.getAttributes().put("Arn",
+                AwsArnUtils.Arn.of("codepipeline", ctx.region(), ctx.accountId(), name).toString());
         r.getAttributes().put("Version",
                 String.valueOf(response.path("pipeline").path("version").asInt(1)));
     }

@@ -10,6 +10,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -349,6 +350,50 @@ class JsonataEvaluatorTest {
         assertTrue(ex.cause.contains("T0410"));
     }
 
+    /**
+     * The AWS bound on how many elements a single {@code $range} call may produce, measured
+     * directly (us-east-1, test-state, 2026-08-30): AWS accepts {@code $range(1, 360145, 1)},
+     * returning all 360,145 elements.
+     */
+    @Test
+    void rangeAtTheAwsElementBoundBuildsTheFullArray() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        JsonNode result = evaluator.evaluate("{% $count($range(1, 360145, 1)) %}", statesVar);
+        assertEquals(360145, result.asInt());
+    }
+
+    /**
+     * One element past the bound, AWS fails the state with {@code States.QueryEvaluationError}
+     * and this cause byte for byte (us-east-1, test-state, 2026-08-30).
+     */
+    @Test
+    void rangeOneElementPastTheAwsElementBoundFailsWithTheMemoryRefusal() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% $range(1, 360146, 1) %}", "Output/v", statesVar, null));
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertEquals("The JSONata expression '$range(1, 360146, 1)' specified for the field 'Output/v' threw "
+                + "an error during evaluation: Expression evaluation memory limit exceeded: Check for excessive "
+                + "memory usage", failure.cause);
+    }
+
+    /**
+     * Far past the bound, the refusal has to come from the pre-allocation cap in {@code range()}
+     * rather than from the memory bound on the built value: an unbounded call would spend
+     * gigabytes building the array before that check ever runs.
+     */
+    @Test
+    @Timeout(60)
+    void rangeFarPastTheBoundFailsWithoutAllocating() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% $range(1, 1000000000, 1) %}", "Output/v", statesVar, null));
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertEquals("The JSONata expression '$range(1, 1000000000, 1)' specified for the field 'Output/v' threw "
+                + "an error during evaluation: Expression evaluation memory limit exceeded: Check for excessive "
+                + "memory usage", failure.cause);
+    }
+
     @Test
     void hash_computesKnownDigestsForEachAlgorithm() {
         JsonNode statesVar = objectMapper.createObjectNode();
@@ -519,6 +564,33 @@ class JsonataEvaluatorTest {
         assertEquals("1.5", evaluator.evaluate("{% $parse('1.5') %}", statesVar).toString());
     }
 
+    /**
+     * The execution input reaching {@code $states.input} follows the same number model as
+     * {@code $parse} (see {@link #parse_dropsATrailingZeroOnAnIntegerValuedNumber}): both route
+     * through {@code toJsonataValue}/{@code toJsonataNumber}. Measured against real AWS
+     * (us-east-1, test-state, 2026-08-30): a Pass state with
+     * {@code Output: {"v": "{% $states.input.amount %}"}} and input {@code {"amount": 1.0}}
+     * answers {@code {"v": 1}}.
+     */
+    @Test
+    void statesInputDropsATrailingZeroOnAnIntegerValuedNumber() throws Exception {
+        JsonNode statesVar = objectMapper.readTree("{\"input\": {\"amount\": 1.0}}");
+        assertEquals("1", evaluator.evaluate("{% $states.input.amount %}", statesVar).toString());
+    }
+
+    /**
+     * Same model, the other side of the long boundary (see
+     * {@link #parse_keepsAnIntegerExactWhileItFitsInALong}). Measured against real AWS
+     * (us-east-1, test-state, 2026-08-30): input {@code {"amount": 9223372036854775808}} answers
+     * {@code {"v": 9.223372036854776E18}}.
+     */
+    @Test
+    void statesInputSwitchesToADoublePastTheLongBoundary() throws Exception {
+        JsonNode statesVar = objectMapper.readTree("{\"input\": {\"amount\": 9223372036854775808}}");
+        assertEquals("9.223372036854776E18",
+                evaluator.evaluate("{% $states.input.amount %}", statesVar).toString());
+    }
+
     @Test
     void parse_rejectsJsonAwsRejects() {
         JsonNode statesVar = objectMapper.createObjectNode();
@@ -582,9 +654,9 @@ class JsonataEvaluatorTest {
      * without a depth bound it ends in a StackOverflowError, which is an Error and so escapes the
      * evaluator's catch. The shipped bound is what turns it into a state failure.
      *
-     * <p>The cause is AWS's own string for this failure, followed by the {@code Depth=N max=M}
-     * suffix that names the bound that was hit. AWS writes one space after the full stop where
-     * the library writes two.
+     * <p>The cause is the library's own string for this failure, with its trailing {@code Depth=N
+     * max=M} suffix stripped: AWS never emits it. The library writes two spaces after the full
+     * stop where AWS writes one; that divergence is left as is.
      */
     @Test
     @Timeout(30)
@@ -597,18 +669,13 @@ class JsonataEvaluatorTest {
 
         assertEquals("States.QueryEvaluationError", ex.error);
         assertEquals("Stack overflow error: Check for non-terminating recursive"
-                + " function.  Consider rewriting as tail-recursive. Depth=501 max=500", ex.cause);
+                + " function.  Consider rewriting as tail-recursive", ex.cause);
     }
 
     /**
      * The boundary from below: the risk of a bound is that it fails a working state machine, so
-     * these must all still evaluate. Measured with {@code aws stepfunctions test-state}, AWS
-     * returns 30 for the first and 800000 for the second, which makes them the ceiling of what
-     * AWS itself accepts on each axis: it refuses the recursion at n=40 (nesting depth 125) and
-     * the sequence at 900,000 elements.
-     *
-     * <p>The last two AWS refuses on its memory limit and Floci evaluates, which is where the
-     * bounds are deliberately looser than AWS rather than tighter.
+     * these must all still evaluate. AWS accepts every one of them and refuses the next value on
+     * each axis: the recursion at n=32, the sequence at 873,783 elements.
      */
     @Test
     @Timeout(60)
@@ -617,11 +684,249 @@ class JsonataEvaluatorTest {
         String recursionHead = "{% ($f := function($x){ $x <= 0 ? 0 : 1 + $f($x-1) }; $f(";
 
         assertEquals(30, evaluator.evaluate(recursionHead + "30)) %}", statesVar).asInt());
+        assertEquals(31, evaluator.evaluate(recursionHead + "31)) %}", statesVar).asInt());
         assertEquals(800000, evaluator.evaluate("{% [1..800000] ~> $count() %}", statesVar).asInt());
-
-        assertEquals(160, evaluator.evaluate(recursionHead + "160)) %}", statesVar).asInt());
         assertEquals(40000200000L,
                 evaluator.evaluate("{% $sum($map([1..200000], function($v){$v * 2})) %}", statesVar).asLong());
+    }
+
+    /**
+     * The four nesting shapes of issue #2737, at the last {@code n} AWS accepts and at the first
+     * it refuses. An addition chain nests one level per term, so AWS accepts 100 terms;
+     * parentheses, brackets and the chain operator nest one level more than their count, so AWS
+     * accepts 99 of each. Both put AWS's ceiling at
+     * nesting depth 100, which is what {@link JsonataEvaluator#MAX_EVALUATION_DEPTH} holds.
+     */
+    @Test
+    @Timeout(30)
+    void everyNestingShapeFailsAtTheDepthAwsFailsAt() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertEquals(100, evaluator.evaluate("{% 1" + "+1".repeat(99) + " %}", statesVar).asInt());
+        assertEquals(1, evaluator.evaluate("{% " + "(".repeat(99) + "1" + ")".repeat(99) + " %}", statesVar).asInt());
+        assertTrue(evaluator.evaluate("{% " + "[".repeat(99) + "1" + "]".repeat(99) + " %}",
+                statesVar).isArray());
+        assertEquals("1", evaluator.evaluate("{% 1" + "~>$string".repeat(99) + " %}", statesVar).asText());
+
+        for (String tooDeep : new String[]{
+                "1" + "+1".repeat(100),
+                "(".repeat(100) + "1" + ")".repeat(100),
+                "[".repeat(100) + "1" + "]".repeat(100),
+                "1" + "~>$string".repeat(100)}) {
+            AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                    () -> evaluator.evaluate("{% " + tooDeep + " %}", statesVar),
+                    "expected the depth bound to refuse " + tooDeep.substring(0, 20) + "...");
+            assertEquals("States.QueryEvaluationError", ex.error);
+            assertTrue(ex.cause.endsWith("Consider rewriting as tail-recursive"), ex.cause);
+        }
+    }
+
+    /**
+     * The non-tail-recursive shape of issue #2737, which nests three levels per call: AWS accepts
+     * {@code $f(31)} and refuses {@code $f(32)}, and the depth bound reproduces both.
+     */
+    @Test
+    @Timeout(30)
+    void nonTailRecursionFailsAtTheCallDepthAwsFailsAt() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        String recursionHead = "{% ($f := function($x){ $x <= 0 ? 0 : 1 + $f($x-1) }; $f(";
+
+        assertEquals(31, evaluator.evaluate(recursionHead + "31)) %}", statesVar).asInt());
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate(recursionHead + "32)) %}", statesVar));
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertTrue(ex.cause.endsWith("Consider rewriting as tail-recursive"), ex.cause);
+    }
+
+    /**
+     * The memory bound of issue #2737 on the sequence AWS draws it on: AWS accepts
+     * {@code [1..873782]} and refuses one element more, and counting a number as eight bytes puts
+     * those two on either side of {@link JsonataEvaluator#MAX_EXPRESSION_BYTES} here as well.
+     */
+    @Test
+    @Timeout(60)
+    void theLargestSequenceAwsAcceptsEvaluatesAndTheNextOneFailsOnTheMemoryBound() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertEquals(873782, evaluator.evaluate("{% [1..873782] ~> $count() %}", statesVar).asInt());
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate("{% [1..873783] ~> $count() %}", statesVar));
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertEquals("Expression evaluation memory limit exceeded: Check for excessive memory usage", ex.cause);
+    }
+
+    /**
+     * The same memory bound on a string: a string that doubles 22 times evaluates on AWS and one
+     * that doubles 23 times does not. A character counts as one byte, which leaves 2^22 characters
+     * inside the bound and 2^23 outside it, as on AWS.
+     */
+    @Test
+    @Timeout(60)
+    void aStringDoublingStopsAtTheSameBoundAwsStopsAt() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        String doublingHead = "{% ($f := function($s, $n){ $n = 0 ? $s : $f($s & $s, $n - 1) };"
+                + " $length($f('x', ";
+
+        assertEquals(4194304, evaluator.evaluate(doublingHead + "22))) %}", statesVar).asInt());
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate(doublingHead + "23))) %}", statesVar));
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertEquals("Expression evaluation memory limit exceeded: Check for excessive memory usage", ex.cause);
+    }
+
+    /**
+     * The two expressions of issue #2737 that AWS refuses on its memory limit. They fail the state
+     * here too, so a Catch fires on them rather than the state succeeding with a value.
+     */
+    @Test
+    @Timeout(60)
+    void theSequencesAwsRefusesOnItsMemoryLimitFailTheStateHere() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        for (String expression : new String[]{"[1..900000] ~> $count()", "$sum([1..900000])"}) {
+            AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                    () -> evaluator.evaluate("{% " + expression + " %}", statesVar),
+                    "expected the memory bound to refuse " + expression);
+            assertEquals("States.QueryEvaluationError", ex.error);
+            assertEquals("Expression evaluation memory limit exceeded: Check for excessive memory usage", ex.cause);
+        }
+    }
+
+    /**
+     * AWS disables $eval and answers T1006 for a call to it. The library ships $eval, so the name
+     * is left unbound here and a call to it answers the same code; $parse is the replacement AWS
+     * documents.
+     */
+    @Test
+    void evalIsNotBoundBecauseAwsDisablesIt() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate("{% $eval('1+1') %}", statesVar));
+
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertEquals("T1006: Attempted to invoke a non-function", ex.cause);
+    }
+
+    /**
+     * JSON has no literal for a non-finite number, so AWS writes each one as the string JavaScript
+     * names it by. The library refuses to carry the value at all and raises D1001 instead, and the
+     * value that refusal carries is what these answer.
+     */
+    @Test
+    void aNonFiniteNumberIsTheStringAwsWritesForIt() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertEquals("Infinity", evaluator.evaluate("{% 1/0 %}", statesVar).asText());
+        assertEquals("Infinity", evaluator.evaluate("{% 1e308 * 10 %}", statesVar).asText());
+        assertEquals("-Infinity", evaluator.evaluate("{% -1/0 %}", statesVar).asText());
+    }
+
+    /**
+     * The shapes AWS answers a string for and Floci does not. A non-finite number the library's own
+     * arithmetic produces reaches Floci only as the exception the library raises instead of carrying
+     * the value, and by then the exception has unwound whatever value was being built around it, so
+     * only an expression whose own result is non-finite can be answered. AWS answers
+     * {@code ["Infinity"]} for the first, {@code {"k":"Infinity"}} for the second and
+     * {@code "NaN"} for {@code 0/0}.
+     *
+     * <p>Failing the state is the half of the divergence a Catch fires on, which is why the value is
+     * not answered at the top of an expression that was building something else with it.
+     */
+    @Test
+    void aNonFiniteNumberTheArithmeticBuildsInsideAValueFailsTheStateInstead() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        for (String expression : new String[]{"[1/0]", "{'k': 1/0}", "[1/0, 2]", "$string(1/0)"}) {
+            AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                    () -> evaluator.evaluate("{% " + expression + " %}", statesVar),
+                    "expected " + expression + " to fail the state");
+            assertEquals("States.QueryEvaluationError", ex.error);
+            assertEquals("D1001: Number out of range: \"Infinity\"", ex.cause);
+        }
+
+        // NaN raises nothing at all: the library reads it as not a number and drops it, so the
+        // expression returns nothing and the field it was written in is what fails.
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% 0/0 %}", "Output/r", statesVar, null));
+        assertEquals("The JSONata expression '0/0' specified for the field 'Output/r' "
+                + "returned nothing (undefined).", ex.cause);
+    }
+
+    /**
+     * $parseInteger answers NaN for a value its picture cannot read, where the library answers
+     * nothing and an ASL field that evaluates to nothing fails the state.
+     */
+    @Test
+    void parseIntegerAnswersNaNForAValueThePictureCannotRead() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertEquals("NaN", evaluator.evaluateField("{% $parseInteger('abc', '0') %}",
+                "Output/r", statesVar, null).asText());
+        // A non-finite number a function answers is carried like any other value, so it reaches the
+        // output as AWS writes it wherever it lands, which is what arithmetic cannot do.
+        assertEquals("[\"NaN\"]",
+                evaluator.evaluate("{% [$parseInteger('abc', '0')] %}", statesVar).toString());
+        assertEquals("{\"k\":\"NaN\"}",
+                evaluator.evaluate("{% {'k': $parseInteger('abc', '0')} %}", statesVar).toString());
+        // A value the picture does read stays the integer it was, not a double.
+        assertEquals("123", evaluator.evaluate("{% $parseInteger('123', '0') %}", statesVar).toString());
+    }
+
+    /**
+     * A picture string with no digit in it describes no number, and AWS fails the state on it
+     * where the library formats through DecimalFormat and answers "x1".
+     */
+    @Test
+    void formatNumberRefusesAPictureThatDescribesNoNumber() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate("{% $formatNumber(1, 'x') %}", statesVar));
+
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertEquals("D3086: The sub-picture must not contain a passive character that is preceded"
+                + " by an active character and that is followed by another active character", ex.cause);
+    }
+
+    @Test
+    void formatNumberNamesTheRuleThePictureBreaks() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        Map<String, String> expectedCodes = Map.ofEntries(
+                Map.entry("0.0;0.0;0.0", "D3080"), Map.entry("0.0.0", "D3081"),
+                Map.entry("0%%", "D3082"), Map.entry("0‰‰", "D3083"),
+                Map.entry("0%‰", "D3084"), Map.entry("0,.0", "D3087"),
+                Map.entry("0,", "D3088"), Map.entry("0,,0", "D3089"),
+                Map.entry("0#", "D3090"), Map.entry("##0.0#0", "D3091"),
+                Map.entry("0e0%", "D3092"), Map.entry("#0e", "D3093"));
+
+        expectedCodes.forEach((picture, code) -> {
+            AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                    () -> evaluator.evaluate("{% $formatNumber(1, '" + picture + "') %}", statesVar),
+                    "expected " + picture + " to fail");
+            assertTrue(ex.cause.startsWith(code + ":"), picture + " gave " + ex.cause);
+        });
+    }
+
+    @Test
+    void formatNumberStillFormatsThePicturesTheRulesAllow() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertEquals("1,234.57", evaluator.evaluate("{% $formatNumber(1234.5678, '#,##0.00') %}",
+                statesVar).asText());
+        assertEquals("12.3%", evaluator.evaluate("{% $formatNumber(0.123, '#0.0%') %}", statesVar).asText());
+        assertEquals("$1,234.57", evaluator.evaluate("{% $formatNumber(1234.5678, '$#,##0.00') %}",
+                statesVar).asText());
+        // A passive character before the first active one (a currency prefix, or the parenthesis
+        // AWS's own negative sub-picture opens with) shifted the exponent separator's index without
+        // shifting it back onto the active part, so any of these with an exponent was refused with a
+        // spurious D3093.
+        assertEquals("-$12e2", evaluator.evaluate("{% $formatNumber(-1200, '$#0e0') %}", statesVar).asText());
+        assertEquals("-12e2", evaluator.evaluate("{% $formatNumber(-1200, '#0e0;-#0e0') %}", statesVar).asText());
+        assertEquals("(12e2)", evaluator.evaluate("{% $formatNumber(-1200, '#0e0;(#0e0)') %}", statesVar).asText());
     }
 
     @Test
@@ -908,6 +1213,51 @@ class JsonataEvaluatorTest {
                 + expectedFieldPath + "' returned nothing (undefined).", failure.cause);
     }
 
+    /**
+     * #2738: {@code evaluate} caught {@code Exception}, not {@code Error}, so a
+     * {@code java.lang.Error} raised while parsing or evaluating an expression escaped straight
+     * past this method to {@code AslExecutor}'s last-resort {@code catch (Error e)}, failing the
+     * whole execution as {@code States.Runtime} before the state's own {@code Retry}/{@code Catch}
+     * ever ran. This pins the {@code StackOverflowError} arm of the catch, with an expression
+     * nested 200,000 parentheses deep that overflows the JVM call stack during parsing in a few
+     * milliseconds and never grows a string past a few hundred KB. The other arm,
+     * {@code OutOfMemoryError}, remains a guard with no cheap trigger through this library: the
+     * memory bound now trips first on every expression measured against it, including the one the
+     * issue reproduced with (see
+     * {@code StepFunctionsJsonataIntegrationTest.parallelBranchErrorIsCatchableByStatesAll}).
+     */
+    @Test
+    void aStackOverflowErrorDuringParsingBecomesAQueryEvaluationError() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        String deeplyNested = "(".repeat(200_000) + "1" + ")".repeat(200_000);
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate("{% " + deeplyNested + " %}", statesVar));
+
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertTrue(ex.cause.contains("StackOverflowError"), ex.cause);
+    }
+
+    /**
+     * The {@code StackOverflowError}/{@code OutOfMemoryError} arm used to throw a bare
+     * {@code FailStateException}, which {@link JsonataEvaluator#evaluateField} does not catch as a
+     * {@code QueryEvaluationFailure}, so the field's expression and AWS's sentence never reached the
+     * cause: a Catch on this failure saw the bare {@code java.lang.StackOverflowError} instead of
+     * the sentence every other evaluation failure carries.
+     */
+    @Test
+    void evaluateFieldWrapsAStackOverflowErrorWithTheSentenceAndAColonSeparator() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        String deeplyNested = "(".repeat(200_000) + "1" + ")".repeat(200_000);
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% " + deeplyNested + " %}", "Output/v", statesVar, null));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertTrue(failure.cause.contains("threw an error during evaluation: "), failure.cause);
+        assertTrue(failure.cause.contains("StackOverflowError"), failure.cause);
+    }
+
     @Test
     void evaluateFieldNamesTheFieldOfAPositionThatHoldsASingleExpression() throws Exception {
         JsonNode statesVar = objectMapper.readTree("{\"input\": {}}");
@@ -918,6 +1268,79 @@ class JsonataEvaluatorTest {
         assertEquals("States.QueryEvaluationError", failure.error);
         assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Seconds' "
                 + "returned nothing (undefined).", failure.cause);
+    }
+
+    @Test
+    void evaluateFieldWrapsAThrownJsonataErrorWithTheSentenceAndACodedSeparator() throws Exception {
+        // A coded JSONata failure carries AWS's sentence in front of the code, joined by ". ".
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% $sum(['a']) %}", "Output/v", statesVar, null));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertEquals("The JSONata expression '$sum(['a'])' specified for the field 'Output/v' threw an error "
+                + "during evaluation. T0412: Argument [\"a\"] must be an array of \"numbers\"", failure.cause);
+    }
+
+    @Test
+    void evaluateFieldWrapsABoundFailureWithTheSentenceAndAColonSeparator() throws Exception {
+        // A failure with no JSONata code and no template to render (see
+        // aNonJsonataFailureKeepsTheMessageItCameWith) carries AWS's sentence in front of the bare
+        // message it came with, joined by ": " where a coded one joins with ". ".
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% $toMillis('nope') %}", "Output/v", statesVar, null));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertTrue(failure.cause.startsWith("The JSONata expression '$toMillis('nope')' specified for the field "
+                + "'Output/v' threw an error during evaluation: "), failure.cause);
+        assertTrue(failure.cause.contains("nope"), failure.cause);
+    }
+
+    /**
+     * The memory bound's message carries no JSONata code slot, so it is a bare bound message like
+     * {@code $toMillis('nope')}'s and joins AWS's sentence with {@code ": "}, not the {@code ". "}
+     * a coded message joins with. Measured against real AWS (us-east-1, test-state): this is its
+     * cause byte for byte.
+     */
+    @Test
+    @Timeout(60)
+    void evaluateFieldWrapsTheMemoryBoundFailureWithTheSentenceAndAColonSeparator() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% [1..900000] ~> $count() %}", "Output/r", statesVar, null));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertEquals("The JSONata expression '[1..900000] ~> $count()' specified for the field 'Output/r' threw "
+                + "an error during evaluation: Expression evaluation memory limit exceeded: Check for excessive "
+                + "memory usage", failure.cause);
+    }
+
+    /**
+     * The depth bound's message is the same shape: no JSONata code slot, so {@code ": "} joins it
+     * to AWS's sentence too. AWS's own cause for this same 101-term chain, measured the same way,
+     * ends {@code "...evaluation: Stack overflow error: Check for non-terminating recursive
+     * function. Consider rewriting as tail-recursive"}; the library's own double space after
+     * "function." is the one divergence {@link JsonataEvaluator#withoutDepthBoundSuffix} leaves in
+     * place, so this checks the sentence and the join rather than the byte-exact tail.
+     */
+    @Test
+    @Timeout(30)
+    void evaluateFieldWrapsTheDepthBoundFailureWithTheSentenceAndAColonSeparator() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        String chain = "1" + "+1".repeat(100);
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% " + chain + " %}", "Output/r", statesVar, null));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertTrue(failure.cause.startsWith("The JSONata expression '" + chain + "' specified for the field "
+                + "'Output/r' threw an error during evaluation: Stack overflow error: Check for non-terminating"),
+                failure.cause);
+        assertTrue(failure.cause.endsWith("Consider rewriting as tail-recursive"), failure.cause);
     }
 
     @Test

@@ -493,6 +493,36 @@ class DynamoDbIntegrationTest {
 
     @Test
     @Order(10)
+    void queryWithQueryFilterAndKeyConditionExpressionFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {
+                        ":pk": {"S": "user-1"}
+                    },
+                    "QueryFilter": {
+                        "name": {
+                            "ComparisonOperator": "EQ",
+                            "AttributeValueList": [{"S": "Alice"}]
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {QueryFilter} Expression parameters: {KeyConditionExpression}"));
+    }
+
+    @Test
+    @Order(10)
     void queryWithBeginsWith() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.Query")

@@ -2,14 +2,14 @@
 
 Thank you for your interest in contributing! Floci is a community-driven project and all contributions are welcome.
 
-**Join us on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw)** — it is the fastest way to reach maintainers. Ask about AWS behaviour, sanity-check an approach before you build it, or get unstuck on a PR.
+**Join us on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw)**: it is the fastest way to reach maintainers. Ask about AWS behaviour, sanity-check an approach before you build it, or get unstuck on a PR.
 
 ## Ways to Contribute
 
-- **Bug reports** — open an issue with a minimal reproduction
-- **Feature requests** — open an issue describing the AWS behavior you need
-- **Pull requests** — bug fixes, new service implementations, or improvements
-- **Compatibility tests** — add cases to `./compatibility-tests/`
+- **Bug reports**: open an issue with a minimal reproduction
+- **Feature requests**: open an issue describing the AWS behavior you need
+- **Pull requests**: bug fixes, new service implementations, or improvements
+- **Compatibility tests**: add cases to `./compatibility-tests/`
 
 ## Getting Started
 
@@ -49,16 +49,16 @@ If you prefer to use your own Maven installation (3.9+), you can use `mvn` inste
 
 ## Branching Model
 
-Floci uses a **tag-driven release model**. Docker images are never published on PR merge — only when a maintainer pushes a version tag.
+Floci uses a **tag-driven release model**. Docker images are never published on PR merge, only when a maintainer pushes a version tag.
 
 | Branch | Purpose | Docker published? |
 |---|---|---|
-| `main` | Integration branch — all PRs merge here. Treated as unstable/nightly. | No (CI tests only) |
+| `main` | Integration branch: all PRs merge here. Treated as unstable/nightly. | No (CI tests only) |
 | `X.Y.Z` tag | Signals a production release. Triggers the full Docker publish pipeline. | Yes (`x.y.z`, `latest`, `x.y.z-jvm`, `latest-jvm`) |
 
 ## Commit Message Format
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/) — semantic-release reads these to generate the changelog and version bumps automatically.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/): semantic-release reads these to generate the changelog and version bumps automatically.
 
 > **The PR title is validated automatically by CI** and must follow this format, since it becomes the squash-merge commit message that semantic-release reads.
 
@@ -68,9 +68,9 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) �
 <type>[optional scope]: <description>
 ```
 
-- **type** — one of the values in the table below (lowercase)
-- **scope** — optional, in parentheses, identifies the service or area (e.g. `s3`, `dynamodb`, `core`)
-- **description** — short summary in the imperative mood, no trailing period
+- **type**: one of the values in the table below (lowercase)
+- **scope**: optional, in parentheses, identifies the service or area (e.g. `s3`, `dynamodb`, `core`)
+- **description**: short summary in the imperative mood, no trailing period
 - Append `!` before the colon to signal a breaking change: `feat(api)!:`
 
 | Type | When to use | Version bump |
@@ -80,13 +80,13 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) �
 | `perf` | Performance improvement | patch |
 | `revert` | Reverts a previous commit | patch |
 | `docs` | Documentation only | none |
-| `style` | Formatting, whitespace — no logic change | none |
+| `style` | Formatting, whitespace, no logic change | none |
 | `chore` | Build, CI, dependencies, housekeeping | none |
 | `refactor` | Code restructure without behavior change | none |
 | `test` | Adding or updating tests | none |
 | `build` | Build system or tooling changes | none |
 | `ci` | CI workflow changes | none |
-| `BREAKING CHANGE` | Footer or `!` suffix — incompatible change | major |
+| `BREAKING CHANGE` | Footer or `!` suffix, incompatible change | major |
 
 ### Valid examples ✅
 
@@ -120,7 +120,7 @@ wip: still working on this          # "wip" is not a recognised type
 
 Do not include `Co-Authored-By` trailers for AI tools in commit messages. Attribution should be limited to human contributors.
 
-CI enforces this: the **Commits omit AI attribution trailers** check fails a pull request whose commits carry a `Co-Authored-By` for an identity that is not a person — one whose GitHub address belongs to a bot account, or that uses a `noreply@` mailbox — along with the session and generator lines such tools add on their own. It never judges a co-author by name, so co-authoring a person is always fine; that trailer is how GitHub credits reviewers on a squash merge. `dependabot[bot]` is allowlisted. If the check fires, drop the offending lines with `git commit --amend` (or a rebase for several commits) and force-push.
+CI enforces this: the **Commits omit AI attribution trailers** check fails a pull request whose commits carry a `Co-Authored-By` for an identity that is not a person (one whose GitHub address belongs to a bot account, or that uses a `noreply@` mailbox), along with the session and generator lines such tools add on their own. It never judges a co-author by name, so co-authoring a person is always fine; that trailer is how GitHub credits reviewers on a squash merge. `dependabot[bot]` is allowlisted. If the check fires, drop the offending lines with `git commit --amend` (or a rebase for several commits) and force-push.
 
 ## Architecture
 
@@ -137,7 +137,7 @@ ln -s AGENTS.md COPILOT.md
 ## Adding a New AWS Service
 
 1. Create a package under `src/main/java/.../services/<service>/`
-2. Add a Controller (follow the correct protocol — Query, JSON 1.1, REST JSON, or REST XML)
+2. Add a Controller (follow the correct protocol: Query, JSON 1.1, REST JSON, or REST XML)
 3. Add a Service (`@ApplicationScoped`) and model POJOs
 4. Add config entries in `EmulatorConfig.java` and `application.yml`
 5. Register a `ServiceDescriptor` in `ResolvedServiceCatalog`
@@ -146,54 +146,83 @@ ln -s AGENTS.md COPILOT.md
 
 `ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` now resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers.
 
-Always implement the **real AWS wire protocol** — never invent custom endpoints. The AWS SDK must work against Floci without modification.
+Always implement the **real AWS wire protocol**. Never invent custom endpoints. The AWS SDK must work against Floci without modification.
 
 ## Adding a CloudFormation Resource Type
 
 CloudFormation resource types live in **per-service provisioner classes**, not in
-`CloudFormationResourceProvisioner`. That class is a legacy monolith being dismantled — please do
+`CloudFormationResourceProvisioner`. That class is a legacy monolith being dismantled, so please do
 not add cases to it. If the service you need already has a `*CfnProvisioner`, add your type there;
 otherwise create one.
 
 1. Create `services/cloudformation/provisioners/<Service>CfnProvisioner.java`, annotate it
-   `@ApplicationScoped`, and inject **only** the service it wraps. Registration is automatic —
+   `@ApplicationScoped`, and inject **only** the service it wraps. Registration is automatic:
    `CloudFormationResourceRegistry` discovers it via CDI. (Forgetting `@ApplicationScoped` compiles
    and unit-tests green, but the type is never wired.)
 2. Implement `resourceTypes()` returning every `AWS::*` type the class serves, and `provision(...)`.
    When you serve more than one type, switch on `resource.getResourceType()`.
 3. In `provision`, set **both**:
-   - `resource.setPhysicalId(...)` — this is what `Ref` resolves to
-   - `resource.getAttributes().put("Name", value)` for every `Fn::GetAtt` attribute — a *separate*
+   - `resource.setPhysicalId(...)`: this is what `Ref` resolves to
+   - `resource.getAttributes().put("Name", value)` for every `Fn::GetAtt` attribute, a *separate*
      map. Forgetting it does not fail: `Fn::GetAtt` silently resolves to the literal string
      `"LogicalId.Attr"`. Take the attribute names from the resource's registry schema under
      `local/aws/cfn-resource-schemas/us-east-1/` (`readOnlyProperties`).
 4. **`provision` is also the update path.** On `UpdateStack` it is called again with the previous
-   physical id and attributes already set on the resource. Check for an existing physical id and
-   update in place rather than creating unconditionally, which would otherwise throw
-   `AlreadyExists` or orphan the old resource.
+   physical id and attributes already set on the resource. Use `ctx.isUpdate()` and
+   `ctx.priorPhysicalId()` rather than reading the id back off the resource: `provision` assigns the
+   new id as it works, so a resource-derived check changes meaning mid-method. Update in place
+   rather than creating unconditionally, which would otherwise throw `AlreadyExists` or orphan the
+   old resource.
 5. Override `delete(...)` if the type has a backing delete. Deleting a resource that is already gone
-   should be tolerated.
-6. Add a focused unit test (mock only your service — see `SqsCfnProvisionerTest`) and an integration
-   test. Assert the **specific `Fn::GetAtt` attribute keys**, not just `CREATE_COMPLETE`: an
-   unmapped type is stubbed out as a successful no-op, so a status-only assertion passes even when
-   nothing was provisioned.
-7. Add the type to the table in `docs/services/cloudformation.md`.
+   should be tolerated: `CfnDeletes.safeDelete` does this, taking the specific error codes that
+   mean "already gone" (never a catch-all: a real failure such as `BucketNotEmpty` must propagate so
+   the stack reports `DELETE_FAILED`).
+   If the delete needs more than the physical id (a create-time attribute such as a rule's event
+   bus), override `delete(StackResource, String)` instead, which receives the whole resource.
+6. **Register the type in `src/test/resources/cloudformation/supported-resource-types.tsv`**
+   (`type<TAB>YourCfnProvisioner`). `CfnResourceInventoryTest` compares that file against the
+   CDI-resolved registry, so it fails if you forget, which is also what catches a missing
+   `@ApplicationScoped`.
+7. **Make your provisioner reachable from `CfnProvisionerFixture`** if it takes a single service.
+   That is three edits, not one: a `private <Svc>Service` field on `Builder`, a
+   `public Builder <svc>(<Svc>Service v)` setter for it, and a construction arm in
+   `inferredProvisioners()`. Tests name a service and the fixture wires the matching provisioner;
+   without all three, a test exercising your type silently falls through to the stub arm instead.
+   The setter is the step that gets missed: a field nothing can assign stays null, so its
+   construction arm never runs. `CfnProvisionerFixtureTest` fails if the provisioner cannot be
+   reached through the public builder.
+8. Add a focused unit test (mock only your service, see `SqsCfnProvisioner`'s test) and an
+   integration test. Assert the **specific `Fn::GetAtt` attribute keys**, not just
+   `CREATE_COMPLETE`: an unmapped type is stubbed out as a successful no-op, so a status-only
+   assertion passes even when nothing was provisioned.
+9. Run `make docs-sync` to regenerate the resource-type table in `docs/services/cloudformation.md`,
+   and commit the result. **Do not hand-edit that table**: it is generated from the inventory in
+   step 6. Presentation (service label, ordering, notes) lives in `tools/docs/cfn_resource_types.yaml`.
+10. If your type has a schema `readOnlyProperties` entry you cannot set, add a row to
+    `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with the reason.
+    `CfnSchemaCoverageTest` requires every unset attribute to be either fixed or recorded, so
+    "not emulated" stays distinguishable from "forgotten".
 
 `SqsCfnProvisioner` is the smallest reference implementation; `Ec2LaunchTemplateCfnProvisioner`
-shows update-in-place and replacement handling.
+shows update-in-place and replacement handling; `LogsCfnProvisioner` shows a full reconcile-vs-replace
+update path.
 
 ## Pull Request Guidelines
 
 1. Branch off `main`: `git checkout -b feature/my-feature`
 2. Open a PR targeting `main`.
-3. CI runs tests automatically — all checks must pass before merge.
-4. Keep PRs focused — one feature or fix per PR.
+3. CI runs tests automatically. All checks must pass before merge.
+4. Keep PRs focused: one feature or fix per PR.
 5. Reference any related issues in the PR description.
-6. Keep at most **5 open PRs** at a time. A bot leaves an advisory note and an `over-pr-limit` label on PRs opened beyond that — nothing gets closed or blocked, but please land or close your existing PRs before opening more.
+6. Keep at most **5 open PRs** at a time. A bot leaves an advisory note and an `over-pr-limit` label on PRs opened beyond that. Nothing gets closed or blocked, but please land or close your existing PRs before opening more.
 
 Docker images are never built on contributor PRs, so merging to `main` is always cheap.
 
 ## Release Process (maintainers)
+
+Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does
+not cut a release: the change rides the next train, and reaches the `nightly` image on the
+next nightly build.
 
 Releases are cut from `main` with the **Release Cut** workflow
 (Actions → Release Cut → Run workflow). semantic-release analyzes the
@@ -202,7 +231,7 @@ Conventional Commits since the last tag, bumps `pom.xml`, regenerates
 push triggers the Docker publish pipeline. Use the `dry-run` input to
 preview the next version and notes without releasing.
 
-`CHANGELOG.md` is generated — **do not edit it by hand**. Your Conventional
+`CHANGELOG.md` is generated. **Do not edit it by hand.** Your Conventional
 Commit message is the changelog entry. Genuine corrections to the file
 require the `changelog-edit` label on the PR.
 

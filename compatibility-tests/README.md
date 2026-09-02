@@ -44,6 +44,8 @@ just test-awscli
 | [`compat-opentofu`](compat-opentofu/)   | OpenTofu   | `./run.sh` |
 | [`compat-terraform`](compat-terraform/) | Terraform  | `./run.sh` |
 
+The Terraform suite uses the standard `hashicorp/aws` provider against Floci's local endpoint. It validates `init`, `validate`, `plan`, `apply`, resource reads, and `destroy` without creating resources in a real AWS account. See the [Terraform with Floci guide](../docs/getting-started/terraform.md) for a copy-paste setup.
+
 ## Prerequisites
 
 - **Floci running** on `http://localhost:4566` (or set `FLOCI_ENDPOINT`)
@@ -91,6 +93,21 @@ just test-typescript
 
 # AWS CLI (bats-core)
 just test-awscli
+```
+
+### IaC tools
+
+The Terraform, OpenTofu, and CDK suites aren't part of `just test-all` — run them individually by name:
+
+```bash
+# Terraform
+compat-terraform/run.sh
+
+# OpenTofu
+compat-opentofu/run.sh
+
+# AWS CDK
+compat-cdk/run.sh
 ```
 
 Bats-based suites keep their normal console output and also write JUnit XML reports:

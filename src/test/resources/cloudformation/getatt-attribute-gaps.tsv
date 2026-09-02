@@ -1,0 +1,21 @@
+AWS::CodeBuild::Project	Id	schema gives no description; AWS's Id may differ from the project name Floci uses
+AWS::CodePipeline::CustomActionType	Id	schema gives no description; the custom action has no separate id in Floci
+AWS::CodePipeline::Webhook	Id	schema gives no description; Floci keys webhooks by name
+AWS::EC2::VPC	CidrBlockAssociations	needs association ids Floci's VPC model does not track
+AWS::EC2::VPC	DefaultNetworkAcl	needs a default network ACL Floci does not create with the VPC
+AWS::EC2::VPC	Ipv6CidrBlocks	IPv6 CIDR association is not emulated
+AWS::EC2::VPCEndpoint	DnsEntries	endpoint DNS entries are not emulated
+AWS::EC2::VPCEndpoint	NetworkInterfaceIds	endpoint ENIs are not created
+AWS::EC2::VPCGatewayAttachment	AttachmentType	the exact literal AWS returns (internet vs vpn gateway) is not given by the schema
+AWS::Kinesis::Stream	WarmThroughputObject	warm throughput is not an emulated Kinesis feature
+AWS::Lambda::MicrovmImage	CreatedAt	microvm image lifecycle fields are not tracked
+AWS::Lambda::MicrovmImage	LatestFailedImageVersion	failure history is not tracked
+AWS::Lambda::MicrovmImage	State	microvm image state is not modelled
+AWS::Lambda::MicrovmImage	UpdatedAt	microvm image lifecycle fields are not tracked
+AWS::Lambda::NetworkConnector	State	network connector state is not modelled
+AWS::Lambda::Permission	Id	schema gives no description and AWS's value is unclear; the physical id is a composite functionName|statementId
+AWS::Pipes::Pipe	CreationTime	pipe lifecycle timestamps are not tracked
+AWS::Pipes::Pipe	CurrentState	pipe state transitions are not modelled
+AWS::Pipes::Pipe	LastModifiedTime	pipe lifecycle timestamps are not tracked
+AWS::Pipes::Pipe	StateReason	pipe state transitions are not modelled
+AWS::SQS::QueuePolicy	Id	schema gives no description; the policy has no backing entity to take an id from

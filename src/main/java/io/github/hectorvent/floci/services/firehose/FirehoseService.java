@@ -201,6 +201,13 @@ public class FirehoseService implements ResourceProvider {
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
                                        String deliveryStreamType, KinesisStreamSource source) {
+        return createDeliveryStream(regionResolver.getDefaultRegion(), name, s3Config, tags, deliveryStreamType,
+                source);
+    }
+
+    public String createDeliveryStream(String region, String name, S3Destination s3Config,
+                                       List<DeliveryStreamDescription.Tag> tags, String deliveryStreamType,
+                                       KinesisStreamSource source) {
         if (name == null || name.isEmpty() || name.length() > 64 || !name.matches("[a-zA-Z0-9_.-]+")) {
             throw new AwsException("InvalidArgumentException",
                     "Delivery stream name must be between 1 and 64 characters and contain only letters, numbers, underscores, hyphens, or periods.", 400);
@@ -212,7 +219,8 @@ public class FirehoseService implements ResourceProvider {
         }
 
         validateBufferingHints(s3Config);
-        String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
+        String arn = AwsArnUtils.Arn.of("firehose", region, regionResolver.getAccountId(),
+                "deliverystream/" + name).toString();
         // CreateDeliveryStream's KinesisStreamSourceConfiguration carries only the ARN and
         // role -- DeliveryStartTimestamp exists only on the Description shape, which AWS
         // fills in at creation. Stamping it here, at creation time, is what makes the first

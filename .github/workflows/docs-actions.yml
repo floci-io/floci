@@ -1,13 +1,16 @@
 name: Docs Action Tables
 
-# Keeps the generated "Supported Actions" tables in docs/services/*.md in sync with
-# handler source. Runs on handler changes (which can add/remove actions) and on doc or
-# tooling changes. Python-only, so it is fast and independent of the Java build job.
+# Keeps the generated tables in docs/services/*.md in sync with their sources: the
+# "Supported Actions" tables with handler source, and the CloudFormation "Supported Resource
+# Types" table with the provisioner inventory TSV. Runs on handler changes (which can add or
+# remove actions), inventory changes (which add or move resource types), and on doc or tooling
+# changes. Python-only, so it is fast and independent of the Java build job.
 
 on:
   pull_request:
     paths:
       - 'src/main/**'
+      - 'src/test/resources/cloudformation/**'
       - 'docs/services/**'
       - 'tools/docs/**'
       - 'Makefile'
@@ -17,6 +20,7 @@ on:
       - main
     paths:
       - 'src/main/**'
+      - 'src/test/resources/cloudformation/**'
       - 'docs/services/**'
       - 'tools/docs/**'
       - 'Makefile'

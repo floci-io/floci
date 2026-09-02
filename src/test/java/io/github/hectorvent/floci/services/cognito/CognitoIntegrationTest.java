@@ -343,6 +343,55 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void signUpEnforcesTheConfiguredPasswordPolicy() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "StrictPasswordPolicyPool",
+                  "Policies": {
+                    "PasswordPolicy": {
+                      "MinimumLength": 12,
+                      "RequireUppercase": true,
+                      "RequireLowercase": true,
+                      "RequireNumbers": true,
+                      "RequireSymbols": true,
+                      "PasswordHistorySize": 10
+                    }
+                  }
+                }
+                """);
+        String strictPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "strict-password-policy-client"
+                }
+                """.formatted(strictPoolId));
+        String strictClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "invalid-password-user",
+                  "Password": "Short1!"
+                }
+                """.formatted(strictClientId))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("InvalidPasswordException"));
+
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "valid-password-user",
+                  "Password": "ValidPassword1!"
+                }
+                """.formatted(strictClientId))
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
     @Order(7)
     void confirmSignUpRequiresValidConfirmationCode() throws Exception {
         given().delete("/_aws/ses").then().statusCode(200);

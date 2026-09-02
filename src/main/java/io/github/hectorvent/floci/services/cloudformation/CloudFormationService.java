@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,10 +63,12 @@ public class CloudFormationService implements ResourceProvider {
 
     private final CloudFormationResourceProvisioner provisioner;
     private final S3Service s3Service;
+    private final SsmService ssmService;
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final SamTransformProcessor samTransformProcessor;
+    private final AwsIncludeProcessor awsIncludeProcessor;
     private final Clock clock;
 
     // Persisted state so stacks survive a restart (criteria #10, #11). The in-memory maps above are
@@ -78,15 +81,17 @@ public class CloudFormationService implements ResourceProvider {
 
     @Inject
     public CloudFormationService(CloudFormationResourceProvisioner provisioner, S3Service s3Service,
-                                 ObjectMapper objectMapper, EmulatorConfig config,
+                                 SsmService ssmService, ObjectMapper objectMapper, EmulatorConfig config,
                                  RegionResolver regionResolver, Clock clock,
                                  StorageFactory storageFactory) {
         this.provisioner = provisioner;
         this.s3Service = s3Service;
+        this.ssmService = ssmService;
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
         this.samTransformProcessor = new SamTransformProcessor(objectMapper);
+        this.awsIncludeProcessor = new AwsIncludeProcessor(objectMapper, s3Service);
         this.clock = clock;
         this.storageAccount = config.defaultAccountId();
         this.stackBackend = storageFactory.create(
@@ -151,6 +156,16 @@ public class CloudFormationService implements ResourceProvider {
                 .toList();
     }
 
+    /**
+     * The stack's current parameter values, or an empty map if it does not exist (yet). Used to
+     * resolve {@code UsePreviousValue} on an update before the stack lookup that
+     * {@code createChangeSet}/{@code executeChangeSet} would otherwise perform.
+     */
+    public Map<String, String> currentParameters(String stackName, String region) {
+        Stack stack = resolveStack(stackName, region);
+        return stack != null ? stack.getParameters() : Map.of();
+    }
+
     // ── CreateChangeSet ───────────────────────────────────────────────────────
 
     public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
@@ -210,8 +225,20 @@ public class CloudFormationService implements ResourceProvider {
                                       boolean attachToReviewInProgressStack) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
 
+        // Real CloudFormation runs a declared macro (here, only AWS::Serverless-2016-10-31)
+        // before it ever evaluates the template's own resources or conditions. On real AWS,
+        // create-change-set against a template with an invalid SAM resource (for example a local,
+        // unpackaged DefinitionUri) does not fail the API call: it creates the change set and
+        // marks it FAILED, with the transform's own error in StatusReason. Match that here instead
+        // of throwing, so this failure is reported by the change set, not by a 400 on creation.
+        String samTransformFailureReason = samTransformFailureReason(stackName, resolvedTemplate);
+
         // Reject an unresolvable condition dependency graph up front, before any stack state is
         // created, so CreateStack/UpdateStack fail synchronously the way real CloudFormation does.
+        // Unconditional: validateConditionDependencies already returns immediately for any
+        // template declaring the SAM transform, whether or not that transform succeeded, so
+        // gating this call on samTransformFailureReason == null duplicates that check for no
+        // effect.
         validateConditionDependencies(resolvedTemplate, parameters, region, accountId);
 
         // A CREATE change set against a name that already has a stack of any status - including
@@ -277,8 +304,14 @@ public class CloudFormationService implements ResourceProvider {
             cs.setTemplateBody(resolvedTemplate);
             cs.setParameters(parameters);
             cs.setCapabilities(capabilities);
-            cs.setStatus("CREATE_COMPLETE");
-            cs.setExecutionStatus("AVAILABLE");
+            if (samTransformFailureReason != null) {
+                cs.setStatus("FAILED");
+                cs.setExecutionStatus("UNAVAILABLE");
+                cs.setStatusReason(samTransformFailureReason);
+            } else {
+                cs.setStatus("CREATE_COMPLETE");
+                cs.setExecutionStatus("AVAILABLE");
+            }
             target.getChangeSets().put(changeSetName, cs);
             created[0] = cs;
             return target;
@@ -286,6 +319,46 @@ public class CloudFormationService implements ResourceProvider {
 
         persistStack(stack);
         return created[0];
+    }
+
+    /**
+     * Returns the change set's {@code StatusReason} when {@code templateBody} declares the SAM
+     * transform and that transform fails, {@code null} when the transform is absent or succeeds.
+     * The wrapping sentence mirrors real CloudFormation's own framing, measured against real AWS,
+     * us-east-1: {@code "Transform AWS::Serverless-2016-10-31 failed with: Invalid Serverless
+     * Application Specification document. Number of errors found: 1. "} followed by the
+     * transform's own per-resource message. The count is always 1: {@code expandSamTemplate}
+     * throws on the first bad resource rather than accumulating them.
+     */
+    private String samTransformFailureReason(String stackName, String templateBody) {
+        JsonNode template;
+        try {
+            template = parseTemplate(templateBody);
+        } catch (Exception e) {
+            // Template parse failures are reported by validateConditionDependencies and by
+            // execution itself, with their own messages; not this transform-specific one.
+            return null;
+        }
+        if (!samTransformProcessor.hasSamTransform(template)) {
+            return null;
+        }
+        try {
+            samTransformProcessor.expandSamTemplate(template);
+            return null;
+        } catch (AwsException e) {
+            return "Transform AWS::Serverless-2016-10-31 failed with: Invalid Serverless "
+                    + "Application Specification document. Number of errors found: 1. "
+                    + e.getMessage();
+        } catch (Exception e) {
+            // Anything other than the transform's own validation error (a ClassCastException or
+            // NPE from inside expandSamTemplate) is a real bug, not a template-authoring mistake.
+            // Swallowing it here would report the change set CREATE_COMPLETE while the same
+            // exception resurfaces unlogged when the change set is later executed. Log it with the
+            // stack name and let it fail loud instead.
+            LOG.errorv("Stack {0} SAM transform preflight failed unexpectedly: {1}",
+                    stackName, e.getMessage());
+            throw e;
+        }
     }
 
     // ── DescribeChangeSet ─────────────────────────────────────────────────────
@@ -300,9 +373,192 @@ public class CloudFormationService implements ResourceProvider {
         return cs;
     }
 
+    /**
+     * Computes the per-resource changes a change set would apply, by diffing its template against
+     * the stack's currently deployed template. CREATE-type change sets (and stacks that have never
+     * executed a template) report every resource with a truthy {@code Condition} as an Add.
+     */
+    public List<ResourceChange> computeChangeSetChanges(ChangeSet cs, String region) {
+        if ("FAILED".equals(cs.getStatus())) {
+            // A SAM transform failure already recorded by createChangeSet (see
+            // samTransformFailureReason): the change set carries 0 changes, matching real
+            // CloudFormation's own CreateChangeSet response for the same failure.
+            return List.of();
+        }
+        Stack stack = getStackOrThrow(cs.getStackName(), region);
+        try {
+            JsonNode newTemplate = parseTemplate(cs.getTemplateBody());
+            // Merge Fn::Transform/AWS::Include snippets before SAM expansion, matching AWS order:
+            // an included fragment may itself carry SAM resources.
+            newTemplate = awsIncludeProcessor.mergeIncludes(newTemplate);
+            if (samTransformProcessor.hasSamTransform(newTemplate)) {
+                // The deployed stack's template is always the SAM-expanded form (see
+                // executeTemplate); comparing the change set's raw SAM source against it would
+                // report every SAM-generated resource as Add/Remove even on a no-op update.
+                newTemplate = samTransformProcessor.expandSamTemplate(newTemplate);
+            }
+            JsonNode newResources = newTemplate.path("Resources");
+            boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
+                    || stack.getTemplateBody() == null;
+            JsonNode oldResources = createType
+                    ? objectMapper.createObjectNode()
+                    : parseTemplate(stack.getTemplateBody()).path("Resources");
+
+            Map<String, String> oldParams = stack.getParameters() != null
+                    ? stack.getParameters() : Map.of();
+            // Prefer the SSM-resolved values captured by the last executeTemplate run; fall back to
+            // the raw parameters for stacks persisted before resolvedParameters existed.
+            Map<String, String> oldResolvedParams = stack.getResolvedParameters() != null
+                    && !stack.getResolvedParameters().isEmpty()
+                    ? stack.getResolvedParameters() : oldParams;
+            // A parameter omitted from the update falls back to the template's Default when
+            // ExecuteChangeSet actually runs it, so the preview must resolve the same defaults or
+            // it will under-report changes to resources that depend on that fallback value.
+            Map<String, String> newParams = resolveDefaultParameters(newTemplate,
+                    cs.getParameters() != null ? cs.getParameters() : Map.of());
+            // ExecuteChangeSet also resolves AWS::SSM::Parameter::Value<String> parameters against
+            // the live Parameter Store before applying resource changes, and the stored SSM value
+            // can drift between deploys even when the referencing parameter name is unchanged. Diff
+            // on the resolved values, like execution does, so the preview agrees with what actually
+            // gets applied. A preview must not fail harder than the operation it previews though: if
+            // the referenced SSM parameter is missing, fall back to the unresolved values here and
+            // let ExecuteChangeSet raise that ValidationError when it actually resolves them.
+            Map<String, String> ssmResolvedNewParams;
+            try {
+                ssmResolvedNewParams = resolveSsmParameters(newTemplate, newParams, region);
+            } catch (AwsException e) {
+                ssmResolvedNewParams = newParams;
+            }
+            final Map<String, String> newResolvedParams = ssmResolvedNewParams;
+            Set<String> changedParams = new HashSet<>();
+            newResolvedParams.forEach((k, v) -> {
+                if (!Objects.equals(v, oldResolvedParams.get(k))) {
+                    changedParams.add(k);
+                }
+            });
+            // A parameter that was deployed but is omitted from this update with no template
+            // Default is dropped entirely by resolveDefaultParameters (matching what
+            // ExecuteChangeSet does); flag its disappearance too, not just a value change.
+            oldResolvedParams.keySet().forEach(k -> {
+                if (!newResolvedParams.containsKey(k)) {
+                    changedParams.add(k);
+                }
+            });
+
+            // A resource whose Condition depends on a changed parameter can flip from excluded to
+            // included (or back) even when its own definition text is unchanged; ExecuteChangeSet
+            // applies that as an Add or Remove (see hasRemovedOrConditionFalseResources /
+            // deleteRemovedOrConditionFalseResources), so the preview must evaluate Conditions too
+            // rather than only scanning each resource's own Ref/Sub usage. A resource is "active" in
+            // the deployed stack precisely when it's present in stack.getResources() - the same
+            // ground truth execution uses - so no separate old-conditions evaluation is needed.
+            Map<String, Boolean> newConditions = resolveConditions(
+                    newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
+            Set<String> deployedIds = stack.getResources().keySet();
+
+            List<ResourceChange> changes = new ArrayList<>();
+            newResources.fields().forEachRemaining(e -> {
+                String logicalId = e.getKey();
+                JsonNode newDef = e.getValue();
+                String resourceType = newDef.path("Type").asText();
+                JsonNode oldDef = oldResources.get(logicalId);
+                String newConditionName = newDef.path("Condition").asText(null);
+                boolean newActive = newConditionName == null
+                        || newConditions.getOrDefault(newConditionName, false);
+                if (oldDef == null) {
+                    if (newActive) {
+                        changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
+                    }
+                    return;
+                }
+                boolean wasDeployed = deployedIds.contains(logicalId);
+                if (wasDeployed && !newActive) {
+                    // Condition flipped true -> false: the definition text is unchanged, but
+                    // ExecuteChangeSet deletes the resource (see deleteRemovedOrConditionFalseResources).
+                    changes.add(new ResourceChange("Remove", logicalId,
+                            resourcePhysicalId(stack, logicalId), oldDef.path("Type").asText(), null));
+                } else if (!wasDeployed && newActive) {
+                    // Condition flipped false -> true: never created before, ExecuteChangeSet creates
+                    // it now.
+                    changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
+                } else if (newActive
+                        && (!oldDef.equals(newDef) || referencesAnyParameter(newDef, changedParams))) {
+                    boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
+                    changes.add(new ResourceChange("Modify", logicalId,
+                            resourcePhysicalId(stack, logicalId), resourceType,
+                            typeChanged ? "True" : "False"));
+                }
+            });
+            oldResources.fields().forEachRemaining(e -> {
+                if (!newResources.has(e.getKey())) {
+                    changes.add(new ResourceChange("Remove", e.getKey(),
+                            resourcePhysicalId(stack, e.getKey()),
+                            e.getValue().path("Type").asText(), null));
+                }
+            });
+            return changes;
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ValidationError",
+                    "Unable to compute changes for change set " + cs.getChangeSetName()
+                            + ": " + e.getMessage(), 400);
+        }
+    }
+
+    /** True if a resource's definition references any of the given (changed) parameter names. */
+    private boolean referencesAnyParameter(JsonNode resourceDef, Set<String> parameterNames) {
+        if (parameterNames.isEmpty()) {
+            return false;
+        }
+        String json = resourceDef.toString();
+        for (String name : parameterNames) {
+            if (json.contains("\"Ref\":\"" + name + "\"") || json.contains("${" + name + "}")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
+                                 String resourceType, String replacement) {}
+
+    private String resourcePhysicalId(Stack stack, String logicalId) {
+        StackResource resource = stack.getResources().get(logicalId);
+        return resource != null ? resource.getPhysicalId() : null;
+    }
+
     // ── ExecuteChangeSet ──────────────────────────────────────────────────────
 
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region) {
+        return executeChangeSet(stackName, changeSetName, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Entry point for the {@code ExecuteChangeSet} operation itself, as opposed to the execute that
+     * {@code CreateStack}/{@code UpdateStack} run internally right after creating their own change
+     * set.
+     *
+     * <p>Real CloudFormation refuses to execute a change set that is not {@code AVAILABLE}, for
+     * example one a failed SAM transform already marked {@code FAILED}/{@code UNAVAILABLE}: it
+     * throws {@code InvalidChangeSetStatus}, naming the change set's ARN and its current status,
+     * and leaves the stack exactly where it was. Routing that check through a separate entry point
+     * keeps {@code CreateStack}/{@code UpdateStack} able to reach {@code CREATE_FAILED} (or its
+     * update equivalent) when their own change set failed - executing it unconditionally is how
+     * that failure surfaces on those paths, and floci must still expose it there.
+     */
+    public Future<?> executeChangeSetForRequest(String stackName, String changeSetName, String region) {
+        Stack stack = getStackOrThrow(stackName, region);
+        ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(changeSetName));
+        if (cs == null) {
+            throw new AwsException("ChangeSetNotFoundException",
+                    "ChangeSet [" + changeSetName + "] does not exist", 400);
+        }
+        if (!"AVAILABLE".equals(cs.getExecutionStatus())) {
+            throw new AwsException("InvalidChangeSetStatus",
+                    "ChangeSet [" + cs.getChangeSetId() + "] cannot be executed in its current "
+                            + "status of [" + cs.getStatus() + "]", 400);
+        }
         return executeChangeSet(stackName, changeSetName, region, regionResolver.getAccountId());
     }
 
@@ -313,6 +569,11 @@ public class CloudFormationService implements ResourceProvider {
      * the downstream service calls would otherwise fall back to the default account. The resources
      * are materialized under a synthetic request scope bound to {@code accountId} so a single-stack
      * deployment lands in the caller's account, and a StackSet instance lands in its target account.
+     *
+     * <p>Unlike {@link #executeChangeSetForRequest}, this does not refuse a non-{@code AVAILABLE}
+     * change set: {@code CreateStack}/{@code UpdateStack} call this directly right after creating
+     * their own change set, and must still reach {@code CREATE_FAILED} (or its update equivalent)
+     * when that change set failed, for example from a failed SAM transform.
      */
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region, String accountId) {
         Stack stack = getStackOrThrow(stackName, region);
@@ -418,9 +679,50 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── GetTemplate ───────────────────────────────────────────────────────────
 
-    public String getTemplate(String stackName, String region) {
+    private static final String STAGE_PROCESSED = "Processed";
+    private static final String STAGE_ORIGINAL = "Original";
+
+    // AWS's own enum order for the ValidationError message (measured against a real account).
+    private static final List<String> TEMPLATE_STAGE_ENUM = List.of(STAGE_PROCESSED, STAGE_ORIGINAL);
+    // AWS's own StagesAvailable order (Original first), which every GetTemplate call reports.
+    private static final List<String> TEMPLATE_STAGES_AVAILABLE = List.of(STAGE_ORIGINAL, STAGE_PROCESSED);
+
+    public String getTemplate(String stackName, String templateStage, String region) {
+        // AWS validates TemplateStage before it looks the stack up (measured against a real
+        // account: an invalid stage is rejected the same way whether or not the stack exists), so
+        // this must run before getStackOrThrow.
+        String stage = validateTemplateStage(templateStage);
         Stack stack = getStackOrThrow(stackName, region);
-        return stack.getTemplateBody() != null ? stack.getTemplateBody() : "{}";
+        // Processed is the SAM/AWS::Include-expanded form templateBody holds after executeTemplate.
+        // Original (also the default, matching real AWS) is the template exactly as the caller
+        // submitted it. originalTemplateBody is only absent for stacks persisted by a floci version
+        // predating this field, hence the fallback to templateBody; getTemplateSummary reads the
+        // same field for the same reason.
+        String body = STAGE_PROCESSED.equals(stage) ? stack.getTemplateBody() : stack.getOriginalTemplateBody();
+        if (body == null) {
+            body = stack.getTemplateBody();
+        }
+        return body != null ? body : "{}";
+    }
+
+    private String validateTemplateStage(String templateStage) {
+        // null means the caller omitted TemplateStage; "" means the caller sent it present and
+        // empty. AWS rejects the latter (measured against a real account) and only defaults the
+        // former, so this must not treat blank the same as absent.
+        if (templateStage == null) {
+            return STAGE_ORIGINAL;
+        }
+        if (!TEMPLATE_STAGE_ENUM.contains(templateStage)) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + templateStage + "' at 'templateStage' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: ["
+                            + String.join(", ", TEMPLATE_STAGE_ENUM) + "]", 400);
+        }
+        return templateStage;
+    }
+
+    public List<String> templateStagesAvailable() {
+        return TEMPLATE_STAGES_AVAILABLE;
     }
 
     // ── GetTemplateSummary ────────────────────────────────────────────────────
@@ -523,6 +825,12 @@ public class CloudFormationService implements ResourceProvider {
                     declaredTransforms.add(t.asText());
                 }
             });
+        }
+        // AWS reports AWS::Include in DeclaredTransforms for the embedded Fn::Transform form too,
+        // even with no top-level Transform section (measured against us-east-1).
+        if (!declaredTransforms.contains(AwsIncludeProcessor.AWS_INCLUDE)
+                && awsIncludeProcessor.containsAwsInclude(template)) {
+            declaredTransforms.add(AwsIncludeProcessor.AWS_INCLUDE);
         }
 
         List<String> iamResourceTypes = resourceTypes.stream()
@@ -629,6 +937,43 @@ public class CloudFormationService implements ResourceProvider {
         return resolved;
     }
 
+    /**
+     * Substitutes {@code AWS::SSM::Parameter::Value<String>}-typed parameter values — which carry
+     * an SSM parameter <em>name</em> — with the value stored in Parameter Store for the stack's
+     * account and region, as real CloudFormation does before template processing. Missing
+     * parameters fail the stack operation with the real AWS ValidationError. The related types
+     * {@code AWS::SSM::Parameter::Value<List<String>>} and {@code AWS::SSM::Parameter::Name} are
+     * not resolved and pass through verbatim.
+     */
+    private Map<String, String> resolveSsmParameters(JsonNode template, Map<String, String> params, String region) {
+        JsonNode paramDefs = template.path("Parameters");
+        if (!paramDefs.isObject()) {
+            return params;
+        }
+        Map<String, String> resolved = new HashMap<>(params);
+        List<String> missing = new ArrayList<>();
+        paramDefs.fields().forEachRemaining(e -> {
+            if (!"AWS::SSM::Parameter::Value<String>".equals(e.getValue().path("Type").asText())) {
+                return;
+            }
+            String parameterName = resolved.get(e.getKey());
+            if (parameterName == null || parameterName.isBlank()) {
+                return;
+            }
+            try {
+                resolved.put(e.getKey(), ssmService.getParameter(parameterName, region).getValue());
+            } catch (AwsException ex) {
+                missing.add(parameterName);
+            }
+        });
+        if (!missing.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Unable to fetch parameters [" + String.join(",", missing)
+                            + "] from parameter store for this account", 400);
+        }
+        return resolved;
+    }
+
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
                                  boolean isCreate, String region, String accountId) {
         StackUpdateSnapshot previousState = snapshotForUpdate(stack);
@@ -638,18 +983,36 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode template = parseTemplate(templateBody);
             stack.setOriginalTemplateBody(templateBody);
 
+            // Merge Fn::Transform/AWS::Include snippets before SAM expansion, matching AWS order:
+            // an included fragment may itself carry SAM resources. mergeIncludes returns the same
+            // reference, unchanged, when the template carries no AWS::Include, which is what lets
+            // the check below tell a real merge apart from a no-op one.
+            JsonNode beforeInclude = template;
+            template = awsIncludeProcessor.mergeIncludes(template);
+            boolean includeMerged = template != beforeInclude;
+
             // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
-            if (samTransformProcessor.hasSamTransform(template)) {
+            boolean hasSamTransform = samTransformProcessor.hasSamTransform(template);
+            if (hasSamTransform) {
                 LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
                 template = samTransformProcessor.expandSamTemplate(template);
-                // Store the expanded template so GetTemplate returns the transformed version
-                templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
             }
 
+            // Persist the merged/expanded tree, not the raw submitted body, whenever either
+            // processor actually changed it, so the change-set baseline diffs against it instead of
+            // against a stale Fn::Transform node. A template neither processor touched keeps its
+            // submitted body byte for byte.
+            if (includeMerged || hasSamTransform) {
+                templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
+            }
             stack.setTemplateBody(templateBody);
 
             // Merge default parameter values from the template with caller-supplied params
-            Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
+            Map<String, String> givenParams = resolveDefaultParameters(template, params);
+            stack.getParameters().clear();
+            stack.getParameters().putAll(givenParams);
+            Map<String, String> resolvedParams = resolveSsmParameters(template, givenParams, region);
+            stack.setResolvedParameters(new LinkedHashMap<>(resolvedParams));
 
             // Resolve conditions first
             Map<String, Boolean> conditions = resolveConditions(template, resolvedParams, stack, region, accountId);
@@ -1069,8 +1432,22 @@ public class CloudFormationService implements ResourceProvider {
 
         List<String> rollbackFailures = rollbackUpdatedResources(
                 stack, previousState.resources(), attemptedResourceIds, region);
+        // Parameters are independent of resource-rollback outcome - always restore them to the last
+        // successfully deployed values, even when resource rollback itself fails and the stack lands
+        // in UPDATE_ROLLBACK_FAILED, so DescribeStacks and later change-set previews don't keep
+        // serving the failed update's attempted values.
+        stack.getParameters().clear();
+        stack.getParameters().putAll(previousState.parameters());
+        stack.getResolvedParameters().clear();
+        stack.getResolvedParameters().putAll(previousState.resolvedParameters());
         if (rollbackFailures.isEmpty()) {
             stack.setTemplateBody(previousState.templateBody());
+            // GetTemplate reads originalTemplateBody for TemplateStage=Original and templateBody
+            // for TemplateStage=Processed: without restoring originalTemplateBody here too, a
+            // rolled-back update would keep serving the failed attempt's submitted body under
+            // Original even though every other piece of state (resources, parameters, outputs)
+            // was restored.
+            stack.setOriginalTemplateBody(previousState.originalTemplateBody());
         }
         try {
             restoreOutputAndExportState(stack, region, previousState);
@@ -1214,6 +1591,9 @@ public class CloudFormationService implements ResourceProvider {
     private StackUpdateSnapshot snapshotForUpdate(Stack stack) {
         return new StackUpdateSnapshot(
                 stack.getTemplateBody(),
+                stack.getOriginalTemplateBody(),
+                new LinkedHashMap<>(stack.getParameters()),
+                new LinkedHashMap<>(stack.getResolvedParameters()),
                 new LinkedHashMap<>(stack.getOutputs()),
                 new LinkedHashMap<>(stack.getExports()),
                 new LinkedHashMap<>(stack.getOutputExportNames()),
@@ -1244,6 +1624,9 @@ public class CloudFormationService implements ResourceProvider {
 
     private record StackUpdateSnapshot(
             String templateBody,
+            String originalTemplateBody,
+            Map<String, String> parameters,
+            Map<String, String> resolvedParameters,
             Map<String, String> outputs,
             Map<String, String> exports,
             Map<String, String> outputExportNames,
@@ -1499,6 +1882,10 @@ public class CloudFormationService implements ResourceProvider {
      * template synchronously ("Template format error: Unresolved resource dependencies [...]")
      * rather than silently skipping the dependent, so mirror that instead of dropping the resource.
      * Malformed or SAM templates are left for the execution path, which surfaces their own errors.
+     * A template carrying an unexpanded {@code Fn::Transform}/{@code AWS::Include} is left for the
+     * same reason: a {@code Conditions} section spliced in from a snippet is invisible here, since
+     * the merge has not run yet, and treating it as absent would fail a template whose dependency
+     * graph the execution path resolves correctly.
      */
     private void validateConditionDependencies(String templateBody, Map<String, String> params,
                                                String region, String accountId) {
@@ -1510,7 +1897,7 @@ public class CloudFormationService implements ResourceProvider {
                     e.getMessage());
             return;
         }
-        if (samTransformProcessor.hasSamTransform(template)) {
+        if (samTransformProcessor.hasSamTransform(template) || awsIncludeProcessor.containsAwsInclude(template)) {
             return;
         }
         JsonNode resources = template.path("Resources");

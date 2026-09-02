@@ -1,0 +1,12 @@
+# Fragment referenced by Fn::Transform / AWS::Include in AwsIncludeProcessorTest, mirroring the
+# shape of a measured DefinitionSubstitutions block. The folded block scalar below keeps its line
+# breaks under SnakeYAML, because its continuation lines are more indented than the first, and
+# AWS::Include's merge splices the parsed node unmodified: it does not fold the value. Folding, if
+# any, happens later, when the value is substituted into a definition and that definition is
+# reparsed as YAML - a separate concern from the merge this fragment exercises.
+expandItems: >-
+  {% (
+    $c := function($v) { $exists($v.S) ? $v.S : $exists($v.N) ? $number($v.N) : $v };
+    $map($states.result.Items, function($i) { $merge($map($keys($i), function($k) { {$k: $c($lookup($i, $k))} })) })
+  ) %}
+orderTableName: orders

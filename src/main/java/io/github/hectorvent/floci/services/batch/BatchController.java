@@ -50,10 +50,38 @@ public class BatchController {
     }
 
     @POST
+    @Path("/v1/updatecomputeenvironment")
+    public Response updateComputeEnvironment(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.updateComputeEnvironment(request)).build());
+    }
+
+    @POST
+    @Path("/v1/deletecomputeenvironment")
+    public Response deleteComputeEnvironment(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.deleteComputeEnvironment(request)).build());
+    }
+
+    @POST
     @Path("/v1/createjobqueue")
     public Response createJobQueue(@Context HttpHeaders headers, String body) {
         return handle(headers, body, (request, region) ->
                 Response.ok(service.createJobQueue(request, region)).build());
+    }
+
+    @POST
+    @Path("/v1/updatejobqueue")
+    public Response updateJobQueue(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.updateJobQueue(request)).build());
+    }
+
+    @POST
+    @Path("/v1/deletejobqueue")
+    public Response deleteJobQueue(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.deleteJobQueue(request)).build());
     }
 
     @POST

@@ -230,7 +230,7 @@ this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
 | Category | Operations |
 |---|---|
-| **APIs** | CreateApi, GetApi, GetApis, UpdateApi, DeleteApi, DeleteCorsConfiguration |
+| **APIs** | CreateApi, GetApi, GetApis, UpdateApi, DeleteApi, DeleteCorsConfiguration, ImportApi, ReimportApi |
 | **Routes** | CreateRoute, GetRoute, GetRoutes, UpdateRoute, DeleteRoute |
 | **Route Responses** | CreateRouteResponse, GetRouteResponse, GetRouteResponses, UpdateRouteResponse, DeleteRouteResponse |
 | **Integrations** | CreateIntegration, GetIntegration, GetIntegrations, UpdateIntegration, DeleteIntegration |
@@ -303,7 +303,7 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 
 ### Not Implemented
 
-- `ReimportApi`, `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
+- `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
 - `UpdateVpcLink` — the other four VPC Link operations are implemented; see the table above
 
 ### Examples

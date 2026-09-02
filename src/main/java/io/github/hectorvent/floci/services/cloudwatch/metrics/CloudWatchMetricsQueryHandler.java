@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cloudwatch.metrics;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -24,10 +26,13 @@ public class CloudWatchMetricsQueryHandler {
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsQueryHandler.class);
 
     private CloudWatchMetricsService metricsService;
+    private final CloudWatchDashboardsService dashboardsService;
 
     @Inject
-    public CloudWatchMetricsQueryHandler(CloudWatchMetricsService metricsService) {
+    public CloudWatchMetricsQueryHandler(CloudWatchMetricsService metricsService,
+                                         CloudWatchDashboardsService dashboardsService) {
         this.metricsService = metricsService;
+        this.dashboardsService = dashboardsService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -44,6 +49,10 @@ public class CloudWatchMetricsQueryHandler {
             case "ListTagsForResource" -> handleListTagsForResource(params, region);
             case "TagResource" -> handleTagResource(params, region);
             case "UntagResource" -> handleUntagResource(params, region);
+            case "PutDashboard" -> handlePutDashboard(params, region);
+            case "GetDashboard" -> handleGetDashboard(params, region);
+            case "ListDashboards" -> handleListDashboards(params, region);
+            case "DeleteDashboards" -> handleDeleteDashboards(params, region);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported by CloudWatch Query.", AwsNamespaces.CW, 400);
         };
@@ -254,7 +263,9 @@ public class CloudWatchMetricsQueryHandler {
 
     private Response handleListTagsForResource(MultivaluedMap<String, String> params, String region) {
         String arn = params.getFirst("ResourceARN");
-        Map<String, String> tags = metricsService.listTagsForResource(arn, region);
+        Map<String, String> tags = CloudWatchDashboardsService.isDashboardArn(arn)
+                ? dashboardsService.listTagsForResource(arn, region)
+                : metricsService.listTagsForResource(arn, region);
         XmlBuilder xml = new XmlBuilder().start("Tags");
         tags.forEach((k, v) -> xml.start("member").elem("Key", k).elem("Value", v).end("member"));
         xml.end("Tags");
@@ -269,7 +280,11 @@ public class CloudWatchMetricsQueryHandler {
             if (key == null) break;
             tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
         }
-        metricsService.tagResource(arn, tags, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.tagResource(arn, tags, region);
+        } else {
+            metricsService.tagResource(arn, tags, region);
+        }
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", null)).build();
     }
 
@@ -281,8 +296,73 @@ public class CloudWatchMetricsQueryHandler {
             if (key == null) break;
             keys.add(key);
         }
-        metricsService.untagResource(arn, keys, region);
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.untagResource(arn, keys, region);
+        } else {
+            metricsService.untagResource(arn, keys, region);
+        }
         return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", null)).build();
+    }
+
+    // ──────────────────────────── Dashboards ────────────────────────────
+
+    private Response handlePutDashboard(MultivaluedMap<String, String> params, String region) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("Tags.member." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
+        }
+        dashboardsService.putDashboard(params.getFirst("DashboardName"),
+                params.getFirst("DashboardBody"), tags, region);
+        // DashboardValidationMessages is optional on the response shape, but AWS always
+        // sends the list. It stays empty: the body is stored opaquely, so nothing here
+        // inspects it and no validation warning can be produced.
+        String xml = new XmlBuilder()
+                .start("DashboardValidationMessages").end("DashboardValidationMessages")
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("PutDashboard", null, xml)).build();
+    }
+
+    private Response handleGetDashboard(MultivaluedMap<String, String> params, String region) {
+        Dashboard dashboard = dashboardsService.getDashboard(params.getFirst("DashboardName"), region);
+        String xml = new XmlBuilder()
+                .elem("DashboardArn", dashboard.getDashboardArn())
+                .elem("DashboardName", dashboard.getDashboardName())
+                .elem("DashboardBody", dashboard.getDashboardBody())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetDashboard", null, xml)).build();
+    }
+
+    private Response handleListDashboards(MultivaluedMap<String, String> params, String region) {
+        List<Dashboard> dashboards =
+                dashboardsService.listDashboards(params.getFirst("DashboardNamePrefix"), region);
+
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+        var xml = new XmlBuilder().start("DashboardEntries");
+        for (Dashboard d : dashboards) {
+            xml.start("member")
+                    .elem("DashboardName", d.getDashboardName())
+                    .elem("DashboardArn", d.getDashboardArn())
+                    .elem("LastModified", fmt.format(Instant.ofEpochSecond(d.getLastModified())))
+                    .elem("Size", d.getSize())
+                    .end("member");
+        }
+        xml.end("DashboardEntries");
+        return Response.ok(AwsQueryResponse.envelope("ListDashboards", null, xml.build())).build();
+    }
+
+    private Response handleDeleteDashboards(MultivaluedMap<String, String> params, String region) {
+        List<String> names = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("DashboardNames.member." + i);
+            if (name == null) break;
+            names.add(name);
+        }
+        dashboardsService.deleteDashboards(names, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteDashboards", null)).build();
     }
 
     // ──────────────────────────── Parsing Helpers ────────────────────────────
@@ -353,7 +433,8 @@ public class CloudWatchMetricsQueryHandler {
         MetricAlarm a = new MetricAlarm();
         a.setAlarmName(params.getFirst("AlarmName"));
         a.setAlarmDescription(params.getFirst("AlarmDescription"));
-        a.setActionsEnabled(Boolean.parseBoolean(params.getFirst("ActionsEnabled")));
+        String actionsEnabled = params.getFirst("ActionsEnabled");
+        a.setActionsEnabled(actionsEnabled == null || Boolean.parseBoolean(actionsEnabled));
         a.setMetricName(params.getFirst("MetricName"));
         a.setNamespace(params.getFirst("Namespace"));
         a.setStatistic(params.getFirst("Statistic"));

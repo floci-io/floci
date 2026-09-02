@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.exception.DockerException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -84,5 +87,38 @@ class ContainerLifecycleManagerStartFailureTest {
         assertSame(info, manager.createAndStart(spec));
 
         verify(dockerClient, never()).removeContainerCmd(any(String.class));
+    }
+
+    @Test
+    void startCreatedTranslatesKeyringQuotaError() {
+        // github.com/floci-io/floci/issues/2243: crun/runc report the kernel session-keyring
+        // quota (kernel.keys.maxkeys) as "Disk quota exceeded", which sends operators looking at
+        // disk space instead of the actual cause under high concurrent container counts.
+        StartContainerCmd startCmd = mock(StartContainerCmd.class);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(startCmd);
+        when(startCmd.exec()).thenThrow(new DockerException(
+                "crun: join keyctl '12345': Disk quota exceeded: OCI runtime error", 500));
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> manager.startCreated("container-id", spec));
+
+        assertTrue(thrown.getMessage().contains("kernel.keys.maxkeys"),
+                "translated message should name the actual kernel-keyring cause: " + thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("sysctl"),
+                "translated message should include the fix: " + thrown.getMessage());
+    }
+
+    @Test
+    void startCreatedPropagatesUnrelatedDockerExceptionsUnchanged() {
+        StartContainerCmd startCmd = mock(StartContainerCmd.class);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(startCmd);
+        DockerException portConflict = new DockerException(
+                "Bind for 0.0.0.0:80 failed: port is already allocated", 500);
+        when(startCmd.exec()).thenThrow(portConflict);
+
+        DockerException thrown = assertThrows(DockerException.class,
+                () -> manager.startCreated("container-id", spec));
+
+        assertSame(portConflict, thrown, "unrelated Docker errors must propagate unchanged");
     }
 }

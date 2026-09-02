@@ -56,6 +56,14 @@ public class EfsController {
         return Response.status(202).entity(fs).build();
     }
 
+    @PUT
+    @Path("/file-systems/{FileSystemId}/protection")
+    public Response updateFileSystemProtection(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId, UpdateFileSystemProtectionRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        FileSystemProtectionDescription protection = efsService.updateFileSystemProtection(region, fileSystemId, request);
+        return Response.ok(protection).build();
+    }
+
     @DELETE
     @Path("/file-systems/{FileSystemId}")
     public Response deleteFileSystem(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId) {

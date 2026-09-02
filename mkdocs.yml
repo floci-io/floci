@@ -60,6 +60,7 @@ nav:
     - Quick Start: getting-started/quick-start.md
     - Installation: getting-started/installation.md
     - AWS CLI & SDK Setup: getting-started/aws-setup.md
+    - Terraform: getting-started/terraform.md
     - Migrate from LocalStack: getting-started/migrate-from-localstack.md
   - Configuration:
     - Environment Variables: configuration/environment-variables.md
@@ -116,6 +117,7 @@ nav:
     - CloudWatch: services/cloudwatch.md
     - CloudWatch RUM: services/rum.md
     - GuardDuty: services/guardduty.md
+    - Connect: services/connect.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
@@ -130,12 +132,14 @@ nav:
     - Bedrock Runtime: services/bedrock-runtime.md
     - Bedrock AgentCore: services/bedrock-agentcore.md
     - ELB v2: services/elb.md
+    - ELB Classic (v1): services/elb-classic.md
     - Auto Scaling: services/autoscaling.md
     - Application Auto Scaling: services/applicationautoscaling.md
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
+    - CodeGuru Reviewer: services/codegurureviewer.md
     - CodePipeline: services/codepipeline.md
     - Service Quotas: services/servicequotas.md
     - AWS RAM: services/ram.md

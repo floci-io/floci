@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
 import io.github.hectorvent.floci.services.docdb.model.DocDbInstance;
@@ -64,14 +63,12 @@ class SecretTargetAttachmentCfnProvisionerTest {
         docDbService = mock(DocDbService.class);
         when(secretsManagerService.claimTargetAttachment(any(), any(), any())).thenReturn(true);
         when(secretsManagerService.canManageTargetAttachment(any(), any(), any())).thenReturn(true);
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, null, null, null, null, secretsManagerService, null,
-                null, null, null, null, null, null,
-                mapper,
-                null, null, null, null, null, null, null,
-                rdsService, null, null, null, null, null, null,
-                docDbService, null,
-                new CloudFormationResourceRegistry(List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .secretsManager(secretsManagerService)
+                .objectMapper(mapper)
+                .rds(rdsService)
+                .docDb(docDbService)
+                .build();
     }
 
     @Test

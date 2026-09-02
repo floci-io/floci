@@ -156,6 +156,11 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("docdb"), Set.of(), Set.of()),
+                descriptor("redshift", "redshift", config.services().redshift().enabled(), true,
+                        "redshift", storageMode(config.storage().services().redshift().mode(), config.storage().mode()),
+                        5000L, AwsNamespaces.REDSHIFT, ServiceProtocol.QUERY,
+                        protocols(ServiceProtocol.QUERY),
+                        Set.of(), Set.of("redshift"), Set.of(), Set.of()),
                 
                 descriptor("events", "eventbridge", config.services().eventbridge().enabled(), true,
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
@@ -335,6 +340,14 @@ public class ResolvedServiceCatalog {
                         "elbv2", config.storage().mode(), 5000L, AwsNamespaces.ELB_V2, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("elasticloadbalancing"), Set.of(), Set.of()),
+                // Classic (v1) ELB shares the elasticloadbalancing endpoint and credential scope
+                // with ELBv2 above, so it claims neither here; AwsQueryController splits the two on
+                // the request's Version parameter. Listed so the service and its config knob are
+                // visible in status.
+                descriptor("elb", "elb", config.services().elb().enabled(), true,
+                        "elb", config.storage().mode(), 5000L, AwsNamespaces.ELB_CLASSIC, ServiceProtocol.QUERY,
+                        protocols(ServiceProtocol.QUERY),
+                        Set.of(), Set.of(), Set.of(), Set.of()),
                 descriptor("codebuild", "codebuild", config.services().codebuild().enabled(), true,
                         "codebuild", storageMode(config.storage().services().codebuild().mode(), config.storage().mode()),
                         config.storage().services().codebuild().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -450,6 +463,10 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Comprehend_20171127."), Set.of("comprehend"), Set.of(), Set.of()),
+                descriptor("rekognition", "rekognition", config.services().rekognition().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("RekognitionService."), Set.of("rekognition"), Set.of(), Set.of()),
                 descriptor("pricing", "pricing", config.services().pricing().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -459,6 +476,10 @@ public class ResolvedServiceCatalog {
                         config.storage().services().transcribe().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Transcribe."), Set.of("transcribe"), Set.of(), Set.of()),
+                descriptor("translate", "translate", config.services().translate().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSShineFrontendService_20170701."), Set.of("translate"), Set.of(), Set.of()),
                 descriptor("ce", "ce", config.services().ce().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -528,6 +549,11 @@ public class ResolvedServiceCatalog {
                         "route53resolver", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Route53Resolver."), Set.of("route53resolver"), Set.of(), Set.of()),
+                descriptor("connect", "connect", config.services().connect().enabled(), true,
+                        "connect", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("connect"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.connect.ConnectController.class)),
                 descriptor("network-firewall", "networkfirewall", config.services().networkfirewall().enabled(), true,
                         "networkfirewall", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -557,7 +583,13 @@ public class ResolvedServiceCatalog {
                         storageMode(config.storage().services().efs().mode(), config.storage().mode()),
                         config.storage().services().efs().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("elasticfilesystem"), Set.of(), Set.of(EfsController.class))
+                        Set.of(), Set.of("elasticfilesystem"), Set.of(), Set.of(EfsController.class)),
+                descriptor("codeguru-reviewer", "codegurureviewer",
+                        config.services().codegurureviewer().enabled(), true,
+                        "codegurureviewer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("codeguru-reviewer"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.codegurureviewer.CodeGuruReviewerController.class))
         ));
     }
 

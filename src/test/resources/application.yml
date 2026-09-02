@@ -19,6 +19,7 @@ floci:
   base-url: "http://localhost:4566"
   default-region: us-east-1
   default-account-id: "000000000000"
+  ai-mock-config-file: ${AI_MOCK_CONFIG:src/test/resources/fixtures/ai-mock-config.json}
   storage:
     mode: memory
     persistent-path: ./target/test-data
@@ -162,6 +163,12 @@ floci:
       proxy-base-port: 6400
       proxy-max-port: 6419
       default-image: "valkey/valkey:8"
+    redshift:
+      enabled: true
+      default-port: 5439
+      image-version: postgres:15-alpine
+      proxy-base-port: 7100
+      proxy-max-port: 7199
     rds:
       enabled: true
       mock: false
@@ -266,6 +273,9 @@ floci:
       mock: true
     pipes:
       enabled: true
+    elb:
+      enabled: true
+      mock: true
     elbv2:
       enabled: true
       mock: true
@@ -298,6 +308,10 @@ floci:
     textract:
       enabled: true
     comprehend:
+      enabled: true
+    rekognition:
+      enabled: true
+    translate:
       enabled: true
     pricing:
       enabled: true
@@ -359,6 +373,8 @@ floci:
       enabled: true
     route53resolver:
       enabled: true
+    connect:
+      enabled: true
     aps:
       enabled: true
     lakeformation:
@@ -380,4 +396,6 @@ floci:
     servicequotas:
       enabled: true
     ram:
+      enabled: true
+    codegurureviewer:
       enabled: true

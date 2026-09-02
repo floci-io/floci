@@ -42,15 +42,16 @@ class CustomResourceProvisionerTest {
     @BeforeEach
     void setUp() {
         lambdaService = mock(LambdaService.class);
-        store = new CustomResourceResponseStore();
+        store = new CustomResourceResponseStore(new ProviderFrameworkDetector(lambdaService));
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.baseUrl()).thenReturn("http://floci:4566");
 
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, lambdaService, null, null, null, null, null,
-                null, null, null, null, null, null, mapper, store, endpoint, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null,
-                new io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry(java.util.List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .lambda(lambdaService)
+                .objectMapper(mapper)
+                .customResourceResponseStore(store)
+                .reachableEndpoint(endpoint)
+                .build();
     }
 
     private CloudFormationTemplateEngine engine() {

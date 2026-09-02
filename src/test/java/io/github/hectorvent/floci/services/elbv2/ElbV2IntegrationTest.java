@@ -135,6 +135,8 @@ class ElbV2IntegrationTest {
     @Test
     @Order(6)
     void describeLoadBalancerAttributes() {
+        // AWS answers with the full attribute set, not just the keys somebody modified, so the
+        // modified key is asserted among them rather than as the only one.
         given()
                 .formParam("Action", "DescribeLoadBalancerAttributes")
                 .formParam("LoadBalancerArn", lbArn)
@@ -144,7 +146,9 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(200)
                 .body("DescribeLoadBalancerAttributesResponse.DescribeLoadBalancerAttributesResult.Attributes.member.Key",
-                        equalTo("deletion_protection.enabled"));
+                        hasItem("deletion_protection.enabled"))
+                .body("DescribeLoadBalancerAttributesResponse.DescribeLoadBalancerAttributesResult.Attributes.member.Key",
+                        hasItem("idle_timeout.timeout_seconds"));
     }
 
     @Test

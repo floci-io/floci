@@ -28,6 +28,7 @@ aliases:
   logs: cloudwatch                      # CloudWatch Logs facet, at cloudwatch.md
   monitoring: cloudwatch                # CloudWatch Metrics facet, at cloudwatch.md#metrics
   secretsmanager: secrets-manager
+  codeguru-reviewer: codegurureviewer   # SigV4 signing name is hyphenated; the doc slug is not
   servicecatalog: service-catalog
   cognito-idp: cognito                  # Cognito's SigV4 signing name
   states: step-functions                # Step Functions' SigV4 signing name

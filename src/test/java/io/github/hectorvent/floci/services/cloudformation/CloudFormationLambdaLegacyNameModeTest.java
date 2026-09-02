@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,14 +47,10 @@ class CloudFormationLambdaLegacyNameModeTest {
                 .thenAnswer(inv -> lambdaFunction(inv.getArgument(1)));
         when(lambdaService.updateFunctionCode(anyString(), anyString(), anyMap()))
                 .thenAnswer(inv -> lambdaFunction(inv.getArgument(1)));
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, lambdaService, null, null, null, null, null,
-                null, null, null, null, null, null,
-                mapper,
-                null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null,
-                null, null,
-                new CloudFormationResourceRegistry(List.of()), null);
+        provisioner = CfnProvisionerFixture.builder()
+                .lambda(lambdaService)
+                .objectMapper(mapper)
+                .build();
     }
 
     @Test

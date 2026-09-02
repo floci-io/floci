@@ -1397,4 +1397,129 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
     }
+
+    /**
+     * Ed25519 keys, checked against what real AWS KMS returns for the same calls.
+     *
+     * <p>ED25519_SHA_512 takes MessageType RAW and ED25519_PH_SHA_512 takes DIGEST. Real KMS
+     * rejects the other pairing, and rejects any other signing algorithm for the key spec. Note
+     * that ED25519_PH_SHA_512 pre-hashes the bytes it is given rather than signing them as a
+     * digest, so the two algorithms produce different signatures over the same input.
+     */
+    @Test
+    void ed25519KeyIsAnEd25519KeyAndSignsWithBothAlgorithms() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_NIST_EDWARDS25519\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.KeySpec", equalTo("ECC_NIST_EDWARDS25519"))
+                .body("KeyMetadata.SigningAlgorithms", equalTo(List.of("ED25519_SHA_512", "ED25519_PH_SHA_512")))
+                .extract().path("KeyMetadata.KeyId");
+
+        // Real AWS returns a 44 byte SubjectPublicKeyInfo carrying a 32 byte Ed25519 point.
+        // A NIST P-521 key, which this used to be, is far larger.
+        String publicKey = given()
+                .header("X-Amz-Target", "TrentService.GetPublicKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("PublicKey");
+        assertEquals(44, Base64.getDecoder().decode(publicKey).length);
+
+        // ED25519_PH_SHA_512 takes one SHA-512 digest, so the two algorithms are given
+        // different payloads here the way a caller would send them.
+        byte[] raw = "message".getBytes(StandardCharsets.UTF_8);
+        String message = Base64.getEncoder().encodeToString(raw);
+        String digest = Base64.getEncoder().encodeToString(sha512(raw));
+        for (String[] pair : List.of(new String[]{"ED25519_SHA_512", "RAW", message},
+                new String[]{"ED25519_PH_SHA_512", "DIGEST", digest})) {
+            String signature = given()
+                    .header("X-Amz-Target", "TrentService.Sign")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                            .formatted(keyId, pair[2], pair[1], pair[0]))
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("SigningAlgorithm", equalTo(pair[0]))
+                    .extract().path("Signature");
+            assertEquals(64, Base64.getDecoder().decode(signature).length);
+
+            given()
+                    .header("X-Amz-Target", "TrentService.Verify")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"%s\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                            .formatted(keyId, pair[2], pair[1], signature, pair[0]))
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("SignatureValid", equalTo(true));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "ED25519_SHA_512, DIGEST, ValidationException, Message type DIGEST is incompatible with algorithm ED25519_SHA_512.",
+            "ED25519_PH_SHA_512, RAW, ValidationException, Message type RAW is incompatible with algorithm ED25519_PH_SHA_512.",
+            "ECDSA_SHA_512, RAW, InvalidKeyUsageException, Algorithm ECDSA_SHA_512 is incompatible with key spec ECC_NIST_EDWARDS25519."
+    })
+    void ed25519RejectsTheCombinationsRealKmsRejects(String algorithm, String messageType, String error, String expectedMessage) {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_NIST_EDWARDS25519\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.Sign")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"MessageType\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                        .formatted(keyId, messageType, algorithm))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo(error))
+                .body("message", equalTo(expectedMessage));
+    }
+
+    /**
+     * Real KMS checks that a DIGEST for ED25519_PH_SHA_512 is exactly one SHA-512 digest, on
+     * Sign and on Verify alike, and answers a wrong length with a ValidationException.
+     */
+    @ParameterizedTest
+    @CsvSource({"TrentService.Sign", "TrentService.Verify"})
+    void ed25519PrehashRejectsADigestOfTheWrongLength(String target) {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_NIST_EDWARDS25519\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String tooShort = Base64.getEncoder().encodeToString("not a sha-512 digest".getBytes(StandardCharsets.UTF_8));
+        String signature = Base64.getEncoder().encodeToString(new byte[64]);
+        given()
+                .header("X-Amz-Target", target)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"DIGEST\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"ED25519_PH_SHA_512\"}"
+                        .formatted(keyId, tooShort, signature))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Digest is invalid length for algorithm ED25519_PH_SHA_512."));
+    }
+
+    private static byte[] sha512(byte[] value) {
+        try {
+            return java.security.MessageDigest.getInstance("SHA-512").digest(value);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 }

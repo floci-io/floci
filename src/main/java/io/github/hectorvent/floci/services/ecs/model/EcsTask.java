@@ -14,6 +14,13 @@ public class EcsTask {
     private String clusterArn;
     private String taskDefinitionArn;
     private String group;
+    /**
+     * ARN of the service that launched this task, assigned by the service reconciler at launch
+     * time. Internal to the emulator: it is never read from a {@code RunTask}/{@code StartTask}
+     * request and never serialized onto the wire, unlike {@link #group}, which is a free-form
+     * caller-supplied label and therefore cannot be trusted to establish ownership.
+     */
+    private String owningServiceArn;
     private LaunchType launchType;
     private String lastStatus;
     private String desiredStatus;
@@ -42,6 +49,9 @@ public class EcsTask {
 
     public String getGroup() { return group; }
     public void setGroup(String group) { this.group = group; }
+
+    public String getOwningServiceArn() { return owningServiceArn; }
+    public void setOwningServiceArn(String owningServiceArn) { this.owningServiceArn = owningServiceArn; }
 
     public LaunchType getLaunchType() { return launchType; }
     public void setLaunchType(LaunchType launchType) { this.launchType = launchType; }

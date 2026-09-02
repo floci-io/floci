@@ -13,6 +13,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AccountAwareStorageBackendTest {
 
     @Test
+    void accountIdReturnsDefaultOutsideRequestScope() {
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "111111111111");
+
+        assertEquals("111111111111", storage.accountId());
+    }
+
+    @Test
     void guardedLegacyLookupMigratesMatchingRawValue() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
         raw.put("resource", "owned");

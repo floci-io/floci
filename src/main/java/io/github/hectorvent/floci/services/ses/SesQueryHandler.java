@@ -770,6 +770,12 @@ public class SesQueryHandler {
                 .elem("CustomRedirectDomain", cs.getTrackingOptions().getCustomRedirectDomain())
                .end("TrackingOptions");
         }
+        if (attrs.contains("deliveryOptions") && cs.getDeliveryOptions() != null
+                && cs.getDeliveryOptions().getTlsPolicy() != null) {
+            xml.start("DeliveryOptions")
+                .elem("TlsPolicy", toV1TlsPolicy(cs.getDeliveryOptions().getTlsPolicy()))
+               .end("DeliveryOptions");
+        }
         return Response.ok(AwsQueryResponse.envelope("DescribeConfigurationSet",
                 AwsNamespaces.SES, xml.build())).build();
     }
@@ -949,6 +955,19 @@ public class SesQueryHandler {
         sesService.setConfigurationSetDeliveryOptions(configSet, options, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "PutConfigurationSetDeliveryOptions", AwsNamespaces.SES)).build();
+    }
+
+    /**
+     * V1 spells the TLS policy {@code Require}/{@code Optional}; Floci stores the V2 canonical
+     * {@code REQUIRE}/{@code OPTIONAL} that {@link #handlePutConfigurationSetDeliveryOptions}
+     * normalises to. Anything unrecognised is passed through unchanged rather than mangled.
+     */
+    private static String toV1TlsPolicy(String stored) {
+        return switch (stored) {
+            case "REQUIRE" -> "Require";
+            case "OPTIONAL" -> "Optional";
+            default -> stored;
+        };
     }
 
     private Response handleCreateReceiptRuleSet(MultivaluedMap<String, String> params, String region) {

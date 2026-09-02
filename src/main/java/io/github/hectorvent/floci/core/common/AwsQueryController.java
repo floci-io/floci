@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.autoscaling.AutoScalingQueryHandler;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.ec2.Ec2QueryHandler;
 import io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkQueryHandler;
+import io.github.hectorvent.floci.services.elb.ElbClassicQueryHandler;
 import io.github.hectorvent.floci.services.elbv2.ElbV2QueryHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsQueryHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.services.iam.IamQueryHandler;
 import io.github.hectorvent.floci.services.iam.StsQueryHandler;
 import io.github.hectorvent.floci.services.rds.RdsQueryHandler;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.redshift.RedshiftQueryHandler;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.ses.SesQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
@@ -194,8 +196,10 @@ public class AwsQueryController {
     private final CognitoJsonHandler cognitoJsonHandler;
     private final Ec2QueryHandler ec2QueryHandler;
     private final ElbV2QueryHandler elbV2QueryHandler;
+    private final ElbClassicQueryHandler elbClassicQueryHandler;
     private final AutoScalingQueryHandler autoScalingQueryHandler;
     private final ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler;
+    private final RedshiftQueryHandler redshiftQueryHandler;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
 
@@ -215,8 +219,10 @@ public class AwsQueryController {
                               CognitoJsonHandler cognitoJsonHandler,
                               Ec2QueryHandler ec2QueryHandler,
                               ElbV2QueryHandler elbV2QueryHandler,
+                              ElbClassicQueryHandler elbClassicQueryHandler,
                               AutoScalingQueryHandler autoScalingQueryHandler,
                               ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler,
+                              RedshiftQueryHandler redshiftQueryHandler,
                               ResolvedServiceCatalog catalog,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
@@ -236,8 +242,10 @@ public class AwsQueryController {
         this.cognitoJsonHandler = cognitoJsonHandler;
         this.ec2QueryHandler = ec2QueryHandler;
         this.elbV2QueryHandler = elbV2QueryHandler;
+        this.elbClassicQueryHandler = elbClassicQueryHandler;
         this.autoScalingQueryHandler = autoScalingQueryHandler;
         this.elasticBeanstalkQueryHandler = elasticBeanstalkQueryHandler;
+        this.redshiftQueryHandler = redshiftQueryHandler;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
     }
@@ -339,12 +347,57 @@ public class AwsQueryController {
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);
             case "cognito-idp" -> handleCognitoQuery(action, formParams, region);
             case "ec2" -> ec2QueryHandler.handle(action, formParams, region);
-            case "elasticloadbalancing" -> elbV2QueryHandler.handle(action, formParams, region);
+            case "elasticloadbalancing" -> isElbClassicRequest(action, formParams)
+                    ? elbClassicQueryHandler.handle(action, formParams, region)
+                    : elbV2QueryHandler.handle(action, formParams, region);
             case "autoscaling" -> autoScalingQueryHandler.handle(action, formParams, region);
             case "elasticbeanstalk" -> elasticBeanstalkQueryHandler.handle(action, formParams, region);
+            case "redshift" -> redshiftQueryHandler.handle(action, formParams);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
+    }
+
+    /** The API version a Classic (v1) Elastic Load Balancing request declares. */
+    private static final String ELB_CLASSIC_API_VERSION = "2012-06-01";
+
+    /** The API version an ELBv2 (ALB/NLB) request declares. */
+    private static final String ELB_V2_API_VERSION = "2015-12-01";
+
+    /**
+     * Whether an {@code elasticloadbalancing} request is for the Classic (2012-06-01) API.
+     *
+     * <p>Classic ELB and ELBv2 share an endpoint host <em>and</em> a credential scope, so the
+     * service name cannot separate them — the same in-case split the {@code rds} scope already
+     * needs for Neptune and DocumentDB. What separates them is the API version, which every
+     * Query-protocol request carries as the {@code Version} form parameter and which both service
+     * models declare. That is the discriminator used here, in preference to guessing from the
+     * shape of the parameters: a client that says {@code Version=2012-06-01} has told us which API
+     * it is speaking, and answering it from the other one is the defect this routing exists to fix.
+     *
+     * <p>The parameter shape is only a fallback, for a hand-rolled client that omitted
+     * {@code Version}. Then an action unique to one API decides, and for the action names both
+     * APIs define, the presence of a Classic-only parameter does: {@code LoadBalancerName} or
+     * {@code LoadBalancerNames} identify a load balancer by name, which is Classic's addressing
+     * model, whereas ELBv2 uses {@code LoadBalancerArn}, {@code Name} or {@code ResourceArns}.
+     * With neither present the request stays with ELBv2, which is the pre-existing behaviour.
+     */
+    private static boolean isElbClassicRequest(String action, MultivaluedMap<String, String> formParams) {
+        String version = formParams.getFirst("Version");
+        if (ELB_CLASSIC_API_VERSION.equals(version)) {
+            return true;
+        }
+        if (ELB_V2_API_VERSION.equals(version)) {
+            return false;
+        }
+        if (ElbClassicQueryHandler.CLASSIC_ONLY_ACTIONS.contains(action)) {
+            return true;
+        }
+        if (!ElbClassicQueryHandler.SHARED_ACTIONS.contains(action)) {
+            return false;
+        }
+        return formParams.getFirst("LoadBalancerName") != null
+                || formParams.getFirst("LoadBalancerNames.member.1") != null;
     }
 
     /**
@@ -445,7 +498,8 @@ public class AwsQueryController {
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(
             "PutMetricData", "ListMetrics", "GetMetricStatistics", "GetMetricData",
             "PutMetricAlarm", "DescribeAlarms", "DeleteAlarms", "SetAlarmState",
-            "ListTagsForResource", "TagResource", "UntagResource"
+            "ListTagsForResource", "TagResource", "UntagResource",
+            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards"
     );
 
     private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(
@@ -533,6 +587,16 @@ public class AwsQueryController {
             "AdminAddUserToGroup", "AdminRemoveUserFromGroup", "AdminListGroupsForUser"
     );
 
+    private static final Set<String> REDSHIFT_ACTIONS = Set.of(
+            "CreateCluster", "DescribeClusters", "DeleteCluster",
+            "CreateClusterSnapshot", "DescribeClusterSnapshots", "DeleteClusterSnapshot", "RestoreFromClusterSnapshot",
+            "ModifyCluster", "RebootCluster",
+            "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
+            "ModifyClusterParameterGroup",
+            "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
+            "CreateTags", "DeleteTags", "DescribeTags"
+    );
+
     private String resolveService(String authorization, String action) {
         ServiceDescriptor descriptor = SigV4CredentialScope.serviceName(authorization)
                 .flatMap(catalog::byCredentialScope)
@@ -574,7 +638,8 @@ public class AwsQueryController {
         if (EC2_ACTIONS.contains(action)) {
             return "ec2";
         }
-        if (ELB_V2_ACTIONS.contains(action)) {
+        if (ELB_V2_ACTIONS.contains(action)
+                || ElbClassicQueryHandler.CLASSIC_ONLY_ACTIONS.contains(action)) {
             return "elasticloadbalancing";
         }
         if (AUTOSCALING_ACTIONS.contains(action)) {
@@ -582,6 +647,9 @@ public class AwsQueryController {
         }
         if (ELASTIC_BEANSTALK_ACTIONS.contains(action)) {
             return "elasticbeanstalk";
+        }
+        if (REDSHIFT_ACTIONS.contains(action)) {
+            return "redshift";
         }
         // SQS actions are numerous and not enumerated — fall back to sqs only for
         // requests that arrived without an Authorization header (raw/test clients)

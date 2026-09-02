@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.startsWith;
@@ -238,5 +239,73 @@ class EcsDescribeServicesIntegrationTest {
         describe("dep-cluster-7", "dep-svc-7").then()
                 .body("services[0].status", equalTo("INACTIVE"))
                 .body("services[0].deployments", hasSize(0));
+    }
+
+    @Test
+    void describeServicesReportsAwsDefaultsForSchedulingDeploymentControllerAndAzRebalancing() {
+        // AWS always echoes these three; Terraform's aws_ecs_service reads all of them and
+        // schedulingStrategy is ForceNew, so a missing value replaced the service on every apply.
+        seedClusterAndTaskDef("dep-cluster-20", "dep-td-20");
+        call("CreateService", "{\"cluster\":\"dep-cluster-20\",\"serviceName\":\"dep-svc-20\","
+                + "\"taskDefinition\":\"dep-td-20\",\"desiredCount\":0}");
+
+        // CreateService defaults availabilityZoneRebalancing to ENABLED (API reference); only a
+        // service that never had a value reads as DISABLED.
+        describe("dep-cluster-20", "dep-svc-20").then()
+                .body("services[0].schedulingStrategy", equalTo("REPLICA"))
+                .body("services[0].deploymentController.type", equalTo("ECS"))
+                .body("services[0].availabilityZoneRebalancing", equalTo("ENABLED"));
+    }
+
+    @Test
+    void createServiceRejectsDaemonOnFargateAndNonEcsControllers() {
+        seedClusterAndTaskDef("dep-cluster-23", "dep-td-23");
+        given().contentType(CT).header("X-Amz-Target", TARGET + "CreateService")
+                .body("{\"cluster\":\"dep-cluster-23\",\"serviceName\":\"dep-svc-23\","
+                        + "\"taskDefinition\":\"dep-td-23\",\"schedulingStrategy\":\"DAEMON\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("DAEMON"));
+        given().contentType(CT).header("X-Amz-Target", TARGET + "CreateService")
+                .body("{\"cluster\":\"dep-cluster-23\",\"serviceName\":\"dep-svc-23b\","
+                        + "\"taskDefinition\":\"dep-td-23\",\"launchType\":\"EC2\","
+                        + "\"schedulingStrategy\":\"DAEMON\",\"deploymentController\":{\"type\":\"EXTERNAL\"}}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("InvalidParameterException"));
+    }
+
+    @Test
+    void createAndUpdateServiceEchoExplicitSchedulingDeploymentControllerAndAzRebalancing() {
+        seedClusterAndTaskDef("dep-cluster-21", "dep-td-21");
+        call("CreateService", "{\"cluster\":\"dep-cluster-21\",\"serviceName\":\"dep-svc-21\","
+                + "\"taskDefinition\":\"dep-td-21\",\"desiredCount\":0,\"launchType\":\"EC2\","
+                + "\"schedulingStrategy\":\"DAEMON\",\"deploymentController\":{\"type\":\"ECS\"},"
+                + "\"availabilityZoneRebalancing\":\"DISABLED\"}")
+                .then()
+                .body("service.schedulingStrategy", equalTo("DAEMON"))
+                .body("service.deploymentController.type", equalTo("ECS"))
+                .body("service.availabilityZoneRebalancing", equalTo("DISABLED"));
+
+        call("UpdateService", "{\"cluster\":\"dep-cluster-21\",\"service\":\"dep-svc-21\","
+                + "\"availabilityZoneRebalancing\":\"ENABLED\"}");
+
+        describe("dep-cluster-21", "dep-svc-21").then()
+                .body("services[0].schedulingStrategy", equalTo("DAEMON"))
+                .body("services[0].deploymentController.type", equalTo("ECS"))
+                .body("services[0].availabilityZoneRebalancing", equalTo("ENABLED"));
+    }
+
+    @Test
+    void createServiceRejectsUnknownSchedulingStrategy() {
+        seedClusterAndTaskDef("dep-cluster-22", "dep-td-22");
+        given().contentType(CT).header("X-Amz-Target", TARGET + "CreateService")
+                .body("{\"cluster\":\"dep-cluster-22\",\"serviceName\":\"dep-svc-22\","
+                        + "\"taskDefinition\":\"dep-td-22\",\"desiredCount\":0,"
+                        + "\"schedulingStrategy\":\"SOMETIMES\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("InvalidParameterException"));
     }
 }

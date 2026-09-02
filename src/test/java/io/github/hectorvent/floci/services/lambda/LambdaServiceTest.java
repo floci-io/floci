@@ -580,6 +580,28 @@ class LambdaServiceTest {
     }
 
     @Test
+    void updateFunctionCodeAppliesArchitectures() {
+        Map<String, Object> req = baseRequest("arch-fn");
+        req.put("Architectures", List.of("arm64"));
+        service.createFunction(REGION, req);
+
+        LambdaFunction updated = service.updateFunctionCode(REGION, "arch-fn",
+                Map.of("Architectures", List.of("x86_64")));
+        assertEquals(List.of("x86_64"), updated.getArchitectures());
+        assertEquals(List.of("x86_64"), service.getFunction(REGION, "arch-fn").getArchitectures());
+    }
+
+    @Test
+    void updateFunctionCodeWithoutArchitecturesKeepsExisting() {
+        Map<String, Object> req = baseRequest("arch-keep-fn");
+        req.put("Architectures", List.of("arm64"));
+        service.createFunction(REGION, req);
+
+        LambdaFunction updated = service.updateFunctionCode(REGION, "arch-keep-fn", Map.of());
+        assertEquals(List.of("arm64"), updated.getArchitectures());
+    }
+
+    @Test
     void rehydrateConcurrency_restoresReservedFromStore() {
         // Simulate a persisted state: functions already live in the store
         // with reserved values before the limiter is populated.

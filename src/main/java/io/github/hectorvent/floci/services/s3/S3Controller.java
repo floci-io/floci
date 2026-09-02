@@ -39,7 +39,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.io.StringReader;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -232,7 +231,7 @@ public class S3Controller {
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (isWebsiteRequest(httpHeaders, uriInfo)) {
-                Response websiteResponse = serveWebsiteObject(bucket, "", authorization);
+                Response websiteResponse = serveWebsiteObject(bucket, "", authorization, false);
                 if (websiteResponse != null) {
                     return headOnlyResponse(websiteResponse);
                 }
@@ -551,7 +550,7 @@ public class S3Controller {
             // /?code=...&state=... must return index.html, not a ListObjects response. (?list-type and
             // other sub-resource queries only reach the REST endpoint, never a website host.)
             if (isWebsiteRequest(httpHeaders, uriInfo)) {
-                Response website = serveWebsiteObject(bucket, "", authorization);
+                Response website = serveWebsiteObject(bucket, "", authorization, true);
                 if (website != null) {
                     return website;
                 }
@@ -787,7 +786,7 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (isWebsiteRequest(httpHeaders, uriInfo)) {
-                Response website = serveWebsiteObject(bucket, key, authorization);
+                Response website = serveWebsiteObject(bucket, key, authorization, true);
                 if (website != null) {
                     return website;
                 }
@@ -831,15 +830,19 @@ public class S3Controller {
                         mergedAttributes, maxParts, partNumberMarker);
             }
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
+            // Fetch metadata and body as one atomic snapshot: resolving the body lazily at
+            // entity-write time (openObjectStream) races concurrent overwrites and can pair one
+            // version's Content-Length/checksum headers with another version's bytes.
+            S3Object obj = s3Service.getObject(bucket, key, versionId);
             if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
-                // Fetch metadata only to evaluate preconditions, avoiding loading the full object unnecessarily.
-                S3Object metadata = s3Service.headObject(bucket, key, versionId);
-                Response preconditionResponse = checkPreconditions(metadata, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
+                // Evaluate preconditions against the same snapshot that is served: a separate
+                // metadata fetch could approve one version (e.g. If-Match for a CAS read) while a
+                // concurrent overwrite swaps in another before the body is resolved.
+                Response preconditionResponse = checkPreconditions(obj, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
                 if (preconditionResponse != null) {
                     return preconditionResponse;
                 }
             }
-            S3Object obj = s3Service.headObject(bucket, key, versionId);
             S3Service.validateSseCustomerAccess(
                     obj,
                     httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -855,11 +858,11 @@ public class S3Controller {
 
             boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides, includeChecksum);
+                return handleRangeRequest(obj, rangeHeader, overrides, includeChecksum);
             }
 
             emitCloudTrailEvent("GetObject", bucket, key, 0L, obj.getSize(), null, null);
-            return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
+            return fullObjectResponse(obj, overrides, includeChecksum);
         } catch (AwsException e) {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             if (S3Service.isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders, uriInfo)) {
@@ -872,16 +875,18 @@ public class S3Controller {
         }
     }
 
-    private Response fullObjectResponse(String bucket, String key, String versionId,
-                                        S3Object obj, ResponseHeaderOverrides overrides,
+    private Response fullObjectResponse(S3Object obj, ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
-        StreamingOutput stream = output -> {
-            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
-                input.transferTo(output);
-            }
-        };
-        var resp = Response.ok(stream)
-                .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
+        byte[] data = objectDataSnapshot(obj);
+        StreamingOutput stream = output -> output.write(data);
+        return objectResponseHeaders(Response.ok(stream), obj, overrides, includeChecksum).build();
+    }
+
+    /** Applies the standard GetObject response headers derived from {@code obj} to {@code resp}. */
+    private Response.ResponseBuilder objectResponseHeaders(Response.ResponseBuilder resp, S3Object obj,
+                                                           ResponseHeaderOverrides overrides,
+                                                           boolean includeChecksum) {
+        resp.header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                 .header("Content-Length", obj.getSize())
                 .header("ETag", obj.getETag())
                 .header("Last-Modified", RFC_822.format(obj.getLastModified()))
@@ -890,11 +895,10 @@ public class S3Controller {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
         appendObjectHeaders(resp, obj, overrides, includeChecksum);
-        return resp.build();
+        return resp;
     }
 
-    private Response handleRangeRequest(String bucket, String key, String versionId,
-                                        S3Object obj, String rangeHeader,
+    private Response handleRangeRequest(S3Object obj, String rangeHeader,
                                         ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
         long totalSize = obj.getSize();
@@ -928,18 +932,15 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
+                return fullObjectResponse(obj, overrides, includeChecksum);
             }
             return invalidRangeResponse(totalSize);
         }
 
         long length = end - start + 1;
-        StreamingOutput stream = output -> {
-            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
-                input.skipNBytes(start);
-                transferLimited(input, output, length);
-            }
-        };
+        byte[] data = objectDataSnapshot(obj);
+        // start/length fit in int: they are bounded by the snapshot's length (a byte[]).
+        StreamingOutput stream = output -> output.write(data, (int) start, (int) length);
         var resp = Response.status(206)
                 .entity(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
@@ -956,18 +957,24 @@ public class S3Controller {
         return resp.build();
     }
 
-    private static void transferLimited(InputStream input, java.io.OutputStream output, long bytes)
-            throws java.io.IOException {
-        byte[] buffer = new byte[8192];
-        long remaining = bytes;
-        while (remaining > 0) {
-            int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
-            if (count < 0) {
-                throw new java.io.EOFException("Object stream ended before the requested range was fully written.");
-            }
-            output.write(buffer, 0, count);
-            remaining -= count;
+    /**
+     * Returns the body bytes captured together with {@code obj}'s metadata by
+     * {@link S3Service#getObject}. Serving the response from this snapshot (instead of re-reading
+     * the store at entity-write time) guarantees the body always matches the already-committed
+     * Content-Length/ETag/checksum headers, even when a concurrent PutObject overwrites the key.
+     */
+    private static byte[] objectDataSnapshot(S3Object obj) {
+        byte[] data = obj.getData();
+        if (data == null) {
+            throw new IllegalStateException("S3 object data snapshot is missing for "
+                    + obj.getBucketName() + "/" + obj.getKey());
         }
+        if (data.length != obj.getSize()) {
+            throw new IllegalStateException("S3 object data snapshot for " + obj.getBucketName()
+                    + "/" + obj.getKey() + " has " + data.length + " bytes but metadata declares "
+                    + obj.getSize() + "; serving it would corrupt the response framing");
+        }
+        return data;
     }
 
     private Response invalidRangeResponse(long totalSize) {
@@ -1010,7 +1017,7 @@ public class S3Controller {
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (isWebsiteRequest(httpHeaders, uriInfo)) {
-                Response websiteResponse = serveWebsiteObject(bucket, key, authorization);
+                Response websiteResponse = serveWebsiteObject(bucket, key, authorization, false);
                 if (websiteResponse != null) {
                     return headOnlyResponse(websiteResponse);
                 }
@@ -2355,13 +2362,14 @@ public class S3Controller {
      * (a no-op unless S3 auth enforcement is enabled), matching the object-serving path.
      */
     private Response serveWebsiteObject(String bucket, String key,
-                                        S3Service.RequestAuthorization authorization) {
+                                        S3Service.RequestAuthorization authorization,
+                                        boolean includeBody) {
         // The routing layer strips a trailing slash from the object key, so the "directory" intent
         // has to be recovered from the raw request path before handing off to the service.
         String rawPath = currentVertxRequest.getCurrent().request().path();
         return renderWebsiteResolution(bucket,
                 s3Service.resolveWebsiteRequest(bucket, key, rawPath.endsWith("/"), authorization),
-                rawPath);
+                rawPath, includeBody);
     }
 
     private Response serveWebsiteErrorResponse(String bucket,
@@ -2369,7 +2377,7 @@ public class S3Controller {
                                                AwsException cause) {
         try {
             return renderWebsiteResolution(bucket,
-                    s3Service.resolveWebsiteError(bucket, authorization, cause.getHttpStatus()), null);
+                    s3Service.resolveWebsiteError(bucket, authorization, cause.getHttpStatus()), null, true);
         } catch (AwsException websiteException) {
             return xmlErrorResponse(websiteException);
         }
@@ -2378,16 +2386,22 @@ public class S3Controller {
     /**
      * Render a {@link S3Service.WebsiteResolution} as HTTP. {@code rawPath} is only needed for the
      * directory redirect; pass {@code null} where that outcome cannot occur. Returns {@code null}
-     * for {@code NotAWebsite}, meaning "fall through to the normal object path".
+     * for {@code NotAWebsite}, meaning "fall through to the normal object path". With
+     * {@code includeBody} false (HEAD requests) the served object's bytes are never loaded; the
+     * headers come from the resolution's metadata snapshot.
      */
     private Response renderWebsiteResolution(String bucket, S3Service.WebsiteResolution resolution,
-                                             String rawPath) {
+                                             String rawPath, boolean includeBody) {
+        var noOverrides = new ResponseHeaderOverrides(null, null, null, null, null, null);
         return switch (resolution) {
             // A website endpoint serves the index document with no response-header overrides and no
             // checksum headers (no viewer sends response-* or x-amz-checksum-mode to a website endpoint).
+            // For GET, the body is re-fetched as one atomic metadata+data snapshot so a concurrent
+            // overwrite of the index document cannot tear the response.
             case S3Service.WebsiteResolution.ServeObject(String key, S3Object object) ->
-                    fullObjectResponse(bucket, key, null, object,
-                            new ResponseHeaderOverrides(null, null, null, null, null, null), false);
+                    includeBody
+                            ? fullObjectResponse(s3Service.getObject(bucket, key), noOverrides, false)
+                            : objectResponseHeaders(Response.ok(), object, noOverrides, false).build();
             // The query string is deliberately dropped: real S3 answers
             // GET /photos?code=abc&state=xyz with a bare "Location: /photos/" (verified against a
             // live website endpoint in us-east-1, same for HEAD and for nested prefixes).

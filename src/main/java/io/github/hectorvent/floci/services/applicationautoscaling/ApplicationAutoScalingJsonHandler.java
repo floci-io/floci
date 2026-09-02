@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.Alarm;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.PredefinedMetricSpecification;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalableTarget;
+import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalingPolicy;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.StepAdjustment;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.StepScalingConfiguration;
@@ -54,6 +55,7 @@ public class ApplicationAutoScalingJsonHandler {
             case "PutScalingPolicy" -> handlePutScalingPolicy(request, region);
             case "DescribeScalingPolicies" -> handleDescribeScalingPolicies(request, region);
             case "DeleteScalingPolicy" -> handleDeleteScalingPolicy(request, region);
+            case "DescribeScalingActivities" -> handleDescribeScalingActivities(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
@@ -147,6 +149,19 @@ public class ApplicationAutoScalingJsonHandler {
                 text(request, "ScalableDimension"),
                 region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeScalingActivities(JsonNode request, String region) {
+        List<ScalingActivity> found = service.describeScalingActivities(
+                text(request, "ServiceNamespace"),
+                text(request, "ResourceId"),
+                text(request, "ScalableDimension"),
+                region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("ScalingActivities");
+        found.forEach(a -> array.add(scalingActivityJson(a)));
+        return Response.ok(response).build();
     }
 
     // ---------------------------------------------------------------- tagging
@@ -274,6 +289,23 @@ public class ApplicationAutoScalingJsonHandler {
                     stepNode.put("ScalingAdjustment", step.getScalingAdjustment());
                 }
             }
+        }
+        return node;
+    }
+
+    private ObjectNode scalingActivityJson(ScalingActivity a) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("ActivityId", a.getActivityId());
+        node.put("ServiceNamespace", a.getServiceNamespace());
+        node.put("ResourceId", a.getResourceId());
+        node.put("ScalableDimension", a.getScalableDimension());
+        node.put("Description", a.getDescription());
+        node.put("Cause", a.getCause());
+        node.put("StartTime", a.getStartTime());
+        node.put("EndTime", a.getEndTime());
+        node.put("StatusCode", a.getStatusCode());
+        if (a.getStatusMessage() != null) {
+            node.put("StatusMessage", a.getStatusMessage());
         }
         return node;
     }

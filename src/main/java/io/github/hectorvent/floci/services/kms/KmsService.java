@@ -30,10 +30,13 @@ import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.DigestInfo;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.crypto.params.ECDomainParameters;
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.bouncycastle.crypto.params.ECPrivateKeyParameters;
 import org.bouncycastle.crypto.params.ECPublicKeyParameters;
 import org.bouncycastle.crypto.params.ParametersWithRandom;
 import org.bouncycastle.crypto.signers.ECDSASigner;
+import org.bouncycastle.crypto.signers.Ed25519phSigner;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPrivateKey;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPublicKey;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyFactorySpi;
@@ -51,6 +54,7 @@ import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
+import java.security.interfaces.EdECPrivateKey;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
@@ -192,6 +196,11 @@ public class KmsService implements ResourceProvider {
                     int size = Integer.parseInt(spec.name().substring(4));
                     generator.initialize(size);
                     KeyPair pair = generator.generateKeyPair();
+                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
+                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
+                }
+                case ED25519 -> {
+                    var pair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
                     key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
                     key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
                 }
@@ -773,6 +782,7 @@ public class KmsService implements ResourceProvider {
     // Legacy v1 (kms:<keyId>:<base64>) still accepted on Decrypt for persistent-store back-compat.
     private static final String BLOB_PREFIX_V2 = "kms:v2:";
     private static final String BLOB_PREFIX_V1 = "kms:";
+    private static final int SHA_512_DIGEST_BYTES = 64;
     private static final int NONCE_BYTES = 8;
     private static final int MIN_MAC_MESSAGE_BYTES = 1;
     private static final int MAX_MAC_MESSAGE_BYTES = 4096;
@@ -928,8 +938,16 @@ public class KmsService implements ResourceProvider {
             throw new AwsException("UnsupportedOperationException", "Unsupported key spec for signing.", 400);
         }
 
+        var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
+        if (ed25519) {
+            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
+        }
+
         try {
             PrivateKey privateKey = loadPrivateKey(kmsKey.getPrivateKeyEncoded(), kmsKey.getKeySpec());
+            if (ed25519) {
+                return signEd25519(privateKey, message, algorithm);
+            }
             String jcaAlgo = switch (messageType) {
                 // If message is already a digest, we need a "NONEwith..." algorithm
                 case DIGEST -> "NONEwith" + (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "ECDSA");
@@ -963,8 +981,16 @@ public class KmsService implements ResourceProvider {
             return false;
         }
 
+        var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
+        if (ed25519) {
+            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
+        }
+
         try {
             PublicKey publicKey = loadPublicKey(kmsKey.getPublicKeyEncoded(), kmsKey.getKeySpec());
+            if (ed25519) {
+                return verifyEd25519(publicKey, message, signature, algorithm);
+            }
             String jcaAlgo = KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName();
 
             if (DIGEST.equals(messageType)) {
@@ -1162,6 +1188,83 @@ public class KmsService implements ResourceProvider {
         return KmsKeySpec.ECC_SECG_P256K1 == spec;
     }
 
+    /**
+     * Validates what an Ed25519 key accepts, matching the errors real KMS returns.
+     *
+     * <p>ED25519_SHA_512 only takes {@code MessageType=RAW} and ED25519_PH_SHA_512 only takes
+     * {@code MessageType=DIGEST}, whose value has to be exactly one SHA-512 digest. Real KMS
+     * rejects the other pairing and a wrong digest length with a ValidationException, and rejects
+     * any other signing algorithm with an InvalidKeyUsageException. Sign and Verify both enforce
+     * all three.
+     */
+    private static void validateEd25519Request(KmsKeySpec spec, String algorithm, KmsMessageType messageType,
+                                               byte[] message) {
+        var algo = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
+        if (algo != KmsKeySpec.Algorithm.ED25519_SHA_512 && algo != KmsKeySpec.Algorithm.ED25519_PH_SHA_512) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "Algorithm " + algorithm + " is incompatible with key spec " + spec.name() + ".", 400);
+        }
+        var required = algo == KmsKeySpec.Algorithm.ED25519_SHA_512 ? KmsMessageType.RAW : KmsMessageType.DIGEST;
+        if (messageType != required) {
+            throw new AwsException("ValidationException",
+                    "Message type " + messageType + " is incompatible with algorithm " + algorithm + ".", 400);
+        }
+        if (algo == KmsKeySpec.Algorithm.ED25519_PH_SHA_512 && message.length != SHA_512_DIGEST_BYTES) {
+            throw new AwsException("ValidationException",
+                    "Digest is invalid length for algorithm " + algorithm + ".", 400);
+        }
+    }
+
+    /**
+     * Signs with an Ed25519 key.
+     *
+     * <p>ED25519_SHA_512 is pure Ed25519 over the message. ED25519_PH_SHA_512 is RFC 8032
+     * Ed25519ph, and real KMS applies the SHA-512 pre-hash to the bytes the caller sends rather
+     * than treating them as an already computed digest. That is measurably different from
+     * MessageType=DIGEST on RSA and ECDSA keys, where the bytes are signed as they arrive.
+     *
+     * <p>The JDK has no Ed25519ph, so that branch uses BouncyCastle's lightweight signer,
+     * instantiated directly rather than resolved through a JCA provider, the same way the
+     * secp256k1 path does.
+     */
+    private static byte[] signEd25519(PrivateKey privateKey, byte[] message, String algorithm) throws Exception {
+        if (KmsKeySpec.Algorithm.ED25519_SHA_512.name().equals(algorithm)) {
+            var signature = Signature.getInstance("Ed25519");
+            signature.initSign(privateKey);
+            signature.update(message);
+            return signature.sign();
+        }
+        var signer = new Ed25519phSigner(new byte[0]);
+        signer.init(true, new Ed25519PrivateKeyParameters(ed25519Seed(privateKey), 0));
+        signer.update(message, 0, message.length);
+        return signer.generateSignature();
+    }
+
+    private static boolean verifyEd25519(PublicKey publicKey, byte[] message, byte[] signature, String algorithm)
+            throws Exception {
+        if (KmsKeySpec.Algorithm.ED25519_SHA_512.name().equals(algorithm)) {
+            var verifier = Signature.getInstance("Ed25519");
+            verifier.initVerify(publicKey);
+            verifier.update(message);
+            return verifier.verify(signature);
+        }
+        var verifier = new Ed25519phSigner(new byte[0]);
+        verifier.init(false, new Ed25519PublicKeyParameters(ed25519Point(publicKey), 0));
+        verifier.update(message, 0, message.length);
+        return verifier.verifySignature(signature);
+    }
+
+    private static byte[] ed25519Seed(PrivateKey privateKey) throws InvalidKeyException {
+        if (privateKey instanceof EdECPrivateKey edEC) {
+            return edEC.getBytes().orElseThrow(() -> new InvalidKeyException("Ed25519 private key is not extractable"));
+        }
+        throw new InvalidKeyException("Expected an Ed25519 private key but got " + privateKey.getAlgorithm());
+    }
+
+    private static byte[] ed25519Point(PublicKey publicKey) {
+        return SubjectPublicKeyInfo.getInstance(publicKey.getEncoded()).getPublicKeyData().getBytes();
+    }
+
     private static boolean isPKCS1v1_5(KmsKeySpec.Algorithm spec) {
         return spec == KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_256
                 || spec == KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_384
@@ -1226,7 +1329,11 @@ public class KmsService implements ResourceProvider {
     }
 
     private static KeyFactory buildKeyFactory(KmsKeySpec spec) throws Exception {
-        return KeyFactory.getInstance(spec.getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "EC");
+        return KeyFactory.getInstance(switch (spec.getKeyType()) {
+            case RSA -> "RSA";
+            case ED25519 -> "Ed25519";
+            default -> "EC";
+        });
     }
 
     private KmsKey resolveKey(String keyIdOrArn, String region) {

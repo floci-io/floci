@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
@@ -84,6 +85,28 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void describeNetworkInterfacesGroupIdFilterSkipsNullGroupEntry() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+        String groupId = inst.getNetworkInterfaces().getFirst().getGroups().getFirst().getGroupId();
+        // A null entry in an interface's group list must not crash the group-id filter: the interface
+        // is still matched on its real group and the null is skipped. Regression: matchesFilter
+        // dereferenced the entry with no null-guard, so DescribeNetworkInterfaces returned a 500 that
+        // hung a Terraform/Pulumi security-group delete (it polls this call until the group is gone).
+        inst.getNetworkInterfaces().getFirst().getGroups().add(null);
+
+        NetworkInterfaceListResult result = service.describeNetworkInterfaces("us-east-1", List.of(),
+                Map.of("group-id", List.of(groupId)), 0, null);
+
+        assertEquals(1, result.networkInterfaces().size());
+    }
+
+    @Test
     void awaitContainerLaunchReportsTerminatedContainer() {
         Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
@@ -115,6 +138,76 @@ class Ec2ServiceTest {
         assertEquals("InternalError", error.getErrorCode());
         assertTrue(error.getMessage().contains("did not reach running state before the launch timeout"));
         verify(containerManager).cancelLaunch(instance);
+    }
+
+    /**
+     * A container-backed launch that fails or is cancelled terminates the instance inside the
+     * container manager, never passing through TerminateInstances, so an ENI the launch had
+     * already marked in-use would stay pinned to an instance that no longer runs, and could
+     * never be reused. The attachment is reconciled when the interface is next read instead.
+     */
+    @Test
+    void anInterfaceIsReleasedWhenItsInstanceDiedWithoutTerminateInstances() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null,
+                eni.getNetworkInterfaceId(), 0);
+        Instance instance = reservation.getInstances().getFirst();
+        assertEquals("in-use", service.describeNetworkInterfaces("us-east-1",
+                List.of(eni.getNetworkInterfaceId()), Map.of(), 0, null)
+                .networkInterfaces().getFirst().getStatus());
+
+        // What a failed launch leaves behind: terminated, with no TerminateInstances call.
+        instance.setState(InstanceState.terminated());
+
+        NetworkInterface afterFailure = service.describeNetworkInterfaces("us-east-1",
+                List.of(eni.getNetworkInterfaceId()), Map.of(), 0, null)
+                .networkInterfaces().getFirst();
+        assertEquals("available", afterFailure.getStatus());
+        assertNull(afterFailure.getAttachment());
+        // The dead instance lets go of its copy too. Leaving it there would have the terminated
+        // instance still reporting an interface that a later launch is free to take, so two
+        // instance records would claim it.
+        assertTrue(instance.getNetworkInterfaces().stream()
+                .noneMatch(e -> eni.getNetworkInterfaceId().equals(e.getNetworkInterfaceId())));
+
+        // And it really is free: a second launch can take it, which the in-use check would refuse.
+        Reservation retry = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null,
+                eni.getNetworkInterfaceId(), 0);
+        assertEquals(1, retry.getInstances().size());
+    }
+
+    /**
+     * A NetworkInterface can carry a real GroupIdentifier entry whose groupId is null (a name-only
+     * association). The group-id filter must skip that entry instead of NPE-ing on
+     * {@code null.matches(...)} in the shared value matcher, while a real group on the same interface
+     * still matches. The null entry is evaluated first so the filter actually exercises the null path.
+     */
+    @Test
+    void describeNetworkInterfacesGroupIdFilterToleratesNullGroupId() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of());
+        eni.getGroups().add(new GroupIdentifier(null, "name-only"));
+        eni.getGroups().add(new GroupIdentifier("sg-realgroup000000", "real"));
+
+        List<NetworkInterface> matched = service.describeNetworkInterfaces("us-east-1", List.of(),
+                Map.of("group-id", List.of("sg-realgroup000000")), 0, null).networkInterfaces();
+
+        assertTrue(matched.stream()
+                .anyMatch(n -> eni.getNetworkInterfaceId().equals(n.getNetworkInterfaceId())));
     }
 
     @Test
@@ -2842,6 +2935,33 @@ class Ec2ServiceTest {
         Address refreshed = service.describeAddresses("us-east-1", List.of(allocated.getAllocationId()), Map.of())
                 .getFirst();
         assertEquals("192.168.215.42", refreshed.getPublicIp());
+    }
+
+    /**
+     * The re-resolution must run BEFORE the filter pass: a public-ip filter is judged against
+     * the address the response will carry, not the one persisted before the restart. A
+     * regression back to filter-before-refresh makes the current IP miss and the stale IP hit.
+     */
+    @Test
+    void describeAddressesFiltersOnTheRefreshedAssociationState() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.9");
+        Ec2Service service = eipService(containerManager);
+        String instanceId = launchOne(service);
+        Address allocated = service.allocateAddress("us-east-1");
+        service.associateAddress("us-east-1", allocated.getAllocationId(), instanceId);
+
+        // The container restarts and Docker hands the instance a different bridge IP.
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.42");
+
+        List<Address> byCurrentIp = service.describeAddresses("us-east-1", List.of(),
+                Map.of("public-ip", List.of("192.168.215.42")));
+        assertEquals(1, byCurrentIp.size());
+        assertEquals(allocated.getAllocationId(), byCurrentIp.getFirst().getAllocationId());
+        assertEquals("192.168.215.42", byCurrentIp.getFirst().getPublicIp());
+
+        assertTrue(service.describeAddresses("us-east-1", List.of(),
+                Map.of("public-ip", List.of("192.168.215.9"))).isEmpty());
     }
 
     /** With no instance behind it there is nothing reachable left, so the allocation is restored. */

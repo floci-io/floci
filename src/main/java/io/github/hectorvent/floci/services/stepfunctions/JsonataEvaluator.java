@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import com.dashjoin.jsonata.Functions;
 import com.dashjoin.jsonata.JException;
 import com.dashjoin.jsonata.Jsonata;
+import com.dashjoin.jsonata.Utils;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -13,6 +14,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -21,6 +23,7 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.Iterator;
@@ -91,14 +94,54 @@ public class JsonataEvaluator {
     static final long EVALUATION_TIMEOUT_MILLIS = 5_000;
 
     /**
-     * How deep evaluation may nest before the state fails. A non-tail-recursive function nests at
-     * roughly {@code 3n+5} for {@code $f(n)}; measured against AWS with {@code test-state}, AWS
-     * accepts {@code n=30} (depth 95) and refuses {@code n=40} (depth 125), so its own ceiling
-     * sits near 100. Five times that leaves no expression AWS accepts able to reach this bound,
-     * and it still trips before the JVM stack does: on a 1 MB thread stack the bound raises a
-     * JSONata error while 1000 or more overflows the stack instead.
+     * How deep evaluation may nest before the state fails, which is the ceiling AWS itself holds:
+     * AWS accepts an evaluation at depth 100 and refuses one at 101, whatever the nesting is made
+     * of. An addition chain nests one level per term, parentheses, brackets and the chain operator
+     * nest one level more than their count, and a non-tail-recursive {@code $f(n)} nests
+     * {@code 3n+5}.
+     *
+     * <p>The bound trips before the JVM stack does: on a 1 MB thread stack it raises a JSONata
+     * error, which the state fails on, where 1000 or more overflows the stack instead.
      */
-    static final int MAX_EVALUATION_DEPTH = 500;
+    static final int MAX_EVALUATION_DEPTH = 100;
+
+    /** What one number, boolean or null of a value counts as against {@link #MAX_EXPRESSION_BYTES}. */
+    private static final int BYTES_PER_SCALAR = 8;
+
+    /**
+     * How much memory one value an expression builds may hold before the state fails, 6,990,256
+     * bytes, which is the bound AWS itself holds: AWS accepts {@code [1..873782]} and refuses one
+     * element more, and it accepts a string of 2^22 characters and refuses one of 2^23. Both of
+     * those refusals land just past this bound when a number counts as {@link #BYTES_PER_SCALAR}
+     * bytes and a character as one.
+     *
+     * <p>What is bounded is the largest single value an evaluation step produces, not the sum of
+     * everything alive at once. Checking it walks that value and stops as soon as the walk passes
+     * the bound, so one check costs at most 873,783 steps, and a lazy range is counted from its
+     * length without being materialised.
+     */
+    static final long MAX_EXPRESSION_BYTES = 873_782L * BYTES_PER_SCALAR;
+
+    /**
+     * The largest number of elements a single {@code $range} call may produce before floci
+     * refuses it, the bound AWS itself holds specifically for {@code $range}: AWS accepts
+     * {@code $range(1, 360145, 1)}, returning all 360,145 elements, and refuses one element more
+     * with the same memory refusal as {@link #MAX_EXPRESSION_BYTES}. That general bound is looser
+     * (873,782 scalars) and is checked only on the value an evaluation step has already built; a
+     * lazy literal range such as {@code [1..873782]} is exempt from it on AWS, and stays exempt
+     * here. {@code $range} gets a bound of its own because it is the one construct that actually
+     * allocates a list of that size, so the general check would see the memory only after the
+     * allocation already happened.
+     */
+    static final int MAX_RANGE_ELEMENTS = 360_145;
+
+    /**
+     * AWS's own sentence for an expression that exceeded its evaluation memory limit, shared by
+     * the bound on a built value ({@link #boundHeldMemory}) and the pre-allocation cap on
+     * {@code $range} ({@link #range}).
+     */
+    private static final String MEMORY_LIMIT_EXCEEDED =
+            "Expression evaluation memory limit exceeded: Check for excessive memory usage";
 
     private final ObjectMapper objectMapper;
     private final ObjectReader strictJsonReader;
@@ -161,6 +204,7 @@ public class JsonataEvaluator {
 
     JsonNode evaluate(String expression, JsonNode statesVar, JsonNode variables) {
         String expr = isExpression(expression) ? unwrap(expression) : expression;
+        ExpressionNesting nesting = new ExpressionNesting();
         try {
             Jsonata jsonataExpr = jsonata(expr);
             // Off, the library keeps JSONata's null marker in the result instead of flattening it
@@ -173,7 +217,12 @@ public class JsonataEvaluator {
             // case loops for ever and the execution never leaves RUNNING. The bounds raise a
             // JSONata error, which the catch below turns into States.QueryEvaluationError.
             frame.setRuntimeBounds(evaluationTimeoutMillis, maxEvaluationDepth);
+            nesting.trackOn(frame);
+            boundHeldMemory(frame);
             stepFunctionsExtensions.forEach(frame::bind);
+            // AWS disables $eval, and the library ships it. An unbound name called as a function is
+            // the library's own T1006, which is the code AWS answers. $parse is the replacement.
+            frame.bind("eval", (Object) null);
             // Workflow variables (the Assign field) are referenced as top-level $name in AWS's
             // JSONata dialect, e.g. $CheckpointCount. They are bound alongside $states, never
             // inside it: AWS reserves $states for input/result/errorOutput/context only. $states is
@@ -190,36 +239,165 @@ public class JsonataEvaluator {
             Object result = jsonataExpr.evaluate(null, frame);
             return toJsonNode(result);
         } catch (Exception e) {
-            throw new AslExecutor.FailStateException("States.QueryEvaluationError", queryEvaluationCause(e));
+            JsonNode nonFinite = nesting.isTheWholeExpression() ? nonFiniteRefusal(e) : null;
+            if (nonFinite != null) {
+                return nonFinite;
+            }
+            throw queryEvaluationFailure(e);
+        } catch (StackOverflowError | OutOfMemoryError e) {
+            // These two are the resource an expression itself spends: nesting deep enough to
+            // exhaust the parser's stack, and asking for a value larger than the JVM can hold.
+            // AWS bounds both and fails the state with States.QueryEvaluationError, so the state's
+            // own Retry and Catch (and a Catch on States.ALL) still see it. Every other Error says
+            // the runtime is broken rather than this expression, and it keeps going to
+            // AslExecutor's terminal catch (Error e), which fails the execution as States.Runtime
+            // and rethrows. The message is often null here, so toString() carries the diagnosis,
+            // the same way that terminal catch already renders it. QueryEvaluationFailure (rather
+            // than a bare FailStateException) is what lets evaluateField prepend AWS's sentence,
+            // colon-separated since this cause carries no JSONata code.
+            throw new QueryEvaluationFailure(e.toString(), ": ");
         }
     }
 
     /**
-     * The cause AWS reports for a failed JSONata expression: the error code, then the message
-     * jsonata-js renders for it, as in {@code T0412: Argument 1 of function "sum" must be an array
-     * of "numbers"}. AWS puts a sentence naming the expression and the field in front of that,
-     * which needs the field path {@link #resolveTemplate} does not thread today (#2665).
-     *
-     * <p>The dashjoin port renders the message itself, and three things go wrong on the way. Its
-     * copy of the catalog has the word "function" replaced by "Object" throughout; its substituter
-     * fills the first two placeholders of a template and leaves a third one standing; and it quotes
-     * every value it inserts, where jsonata-js JSON-renders it. So the message is composed here
-     * from the code and the values {@link JException} carries instead.
+     * How deeply nested the evaluation step running is, the expression's own root node being 1.
+     * A step that fails never leaves, so once an exception has unwound the count is the depth of
+     * the step that raised it.
      */
-    private String queryEvaluationCause(Exception e) {
+    private static final class ExpressionNesting {
+
+        private int depth;
+
+        /**
+         * Counts on the same pair of callbacks the library installs its bounds through, keeping
+         * the library's own and running after it.
+         */
+        void trackOn(Jsonata.Frame frame) {
+            Jsonata.EntryCallback boundsOnEntry = (Jsonata.EntryCallback) frame.lookup("__evaluate_entry");
+            frame.setEvaluateEntryCallback((expression, input, environment) -> {
+                boundsOnEntry.callback(expression, input, environment);
+                depth++;
+            });
+            afterEachEvaluationStep(frame, (expression, input, environment, result) -> depth--);
+        }
+
+        /** Whether the step that failed is the expression itself rather than a step inside it. */
+        boolean isTheWholeExpression() {
+            return depth == 1;
+        }
+    }
+
+    /**
+     * The value behind a D1001, which the library raises rather than carrying a non-finite number:
+     * {@code 1/0} and {@code 1e308*10} both fail there where AWS answers {@code "Infinity"}. The
+     * exception is the only place the library leaves the value, and it carries no way back to where
+     * the arithmetic ran, so this recovers the value only when the step that raised it is the whole
+     * expression. {@code [1/0]} fails the state instead of answering AWS's {@code ["Infinity"]},
+     * which is the conservative half of the divergence: a state that fails is one a Catch fires on.
+     */
+    private JsonNode nonFiniteRefusal(Exception e) {
+        if (e instanceof JException jsonataError && "D1001".equals(jsonataError.getError())
+                && jsonataError.getCurrent() instanceof Number value) {
+            return fromJsonataValue(value.doubleValue());
+        }
+        return null;
+    }
+
+    /**
+     * Adds the memory bound to the time and depth bounds the library installs. The exit callback
+     * carries the value every evaluation step produces, which is what the bound is on.
+     */
+    private static void boundHeldMemory(Jsonata.Frame frame) {
+        afterEachEvaluationStep(frame, (expression, input, environment, result) -> {
+            if (heldBytes(result, 0) > MAX_EXPRESSION_BYTES) {
+                throw new JException(MEMORY_LIMIT_EXCEEDED, -1);
+            }
+        });
+    }
+
+    /**
+     * Runs {@code addition} after every evaluation step, keeping whatever the frame already runs
+     * there. The library installs its time and depth bounds through that same callback, so an
+     * addition extends them rather than replacing them.
+     */
+    private static void afterEachEvaluationStep(Jsonata.Frame frame, Jsonata.ExitCallback addition) {
+        Jsonata.ExitCallback installed = (Jsonata.ExitCallback) frame.lookup("__evaluate_exit");
+        frame.setEvaluateExitCallback((expression, input, environment, result) -> {
+            installed.callback(expression, input, environment, result);
+            addition.callback(expression, input, environment, result);
+        });
+    }
+
+    /**
+     * What {@code value} adds to the {@code held} bytes already counted, stopping as soon as the
+     * total passes {@link #MAX_EXPRESSION_BYTES} so a value far over the bound costs no more to
+     * refuse than one just over it. A range is counted from its length: the library materialises it
+     * lazily, and AWS refuses it on the elements it stands for rather than on what it has built.
+     */
+    private static long heldBytes(Object value, long held) {
+        if (held > MAX_EXPRESSION_BYTES) {
+            return held;
+        }
+        if (value instanceof String text) {
+            return held + text.length();
+        }
+        if (value instanceof Utils.RangeList range) {
+            return held + (long) range.size() * BYTES_PER_SCALAR;
+        }
+        if (value instanceof List<?> list) {
+            return elementsHeldBytes(list, held);
+        }
+        if (value instanceof Map<?, ?> map) {
+            return elementsHeldBytes(map.entrySet(), held);
+        }
+        if (value instanceof Map.Entry<?, ?> entry) {
+            return heldBytes(entry.getValue(), heldBytes(entry.getKey(), held));
+        }
+        return held + BYTES_PER_SCALAR;
+    }
+
+    private static long elementsHeldBytes(Iterable<?> elements, long held) {
+        long total = held;
+        for (Object element : elements) {
+            total = heldBytes(element, total);
+            if (total > MAX_EXPRESSION_BYTES) {
+                return total;
+            }
+        }
+        return total;
+    }
+
+    /**
+     * The state failure AWS reports for an expression that threw. Its cause is the error code and
+     * the message jsonata-js renders for it, as in {@code T0412: Argument 1 of function "sum" must
+     * be an array of "numbers"}; for the handful of failures with no JSONata code of their own (a
+     * timeout, a stack-depth bound) it is the bare message the exception came with.
+     *
+     * <p>The dashjoin port renders the coded message itself, and three things go wrong on the way.
+     * Its copy of the catalog has the word "function" replaced by "Object" throughout; its
+     * substituter fills the first two placeholders of a template and leaves a third one standing;
+     * and it quotes every value it inserts, where jsonata-js JSON-renders it. So the message is
+     * composed here from the code and the values {@link JException} carries instead.
+     */
+    private QueryEvaluationFailure queryEvaluationFailure(Exception e) {
         if (!(e instanceof JException jsonataError) || jsonataError.getError() == null) {
-            return e.getMessage();
+            return new QueryEvaluationFailure(e.getMessage(), ": ");
         }
         String code = jsonataError.getError();
         Object current = jsonataError.getCurrent();
         Object expected = jsonataError.getExpected();
         // Both this class's own functions and a few library call sites throw with the whole
         // message in the code slot. The catalog lookup then misses and dashjoin prefixes its own
-        // class name, which AWS never emits; the message is the code slot itself.
+        // class name, which AWS never emits; the message is the code slot itself. Most of these
+        // already open with a real code ("D3137: Invalid JSON"), a sentence of its own that joins
+        // AWS's with ". "; the two bound messages (a timeout, a stack-depth or memory ceiling) open
+        // with English instead and are bare, joining with ": " like any other uncoded message.
         if ((UNKNOWN_CODE_PREFIX + code).equals(jsonataError.getMessage())) {
-            return code;
+            String bound = withoutDepthBoundSuffix(code);
+            String separator = bound.matches("[A-Z]\\d{4}:.*") ? ". " : ": ";
+            return new QueryEvaluationFailure(bound, separator);
         }
-        return switch (code) {
+        String tail = switch (code) {
             // The only two templates in the catalog with a third placeholder. Neither third value
             // reaches the exception: T0412 carries the offending argument and the element type it
             // wanted but not the argument index nor the function name, and T2009 carries the two
@@ -230,6 +408,32 @@ public class JsonataEvaluator {
                     + " either side of the operator must be of the same data type";
             default -> code + ": " + renderTemplate(code, current, expected);
         };
+        return new QueryEvaluationFailure(tail, ". ");
+    }
+
+    /**
+     * The library's stack-depth bound names the depth and the ceiling it hit,
+     * {@code ". Depth=101 max=100"}, which AWS's own sentence for the same failure never carries.
+     * Every other bare message this method renders has no such suffix, so stripping it here is
+     * specific to that one failure without needing to name it.
+     */
+    private static String withoutDepthBoundSuffix(String message) {
+        return message.replaceFirst("\\. Depth=\\d+ max=\\d+$", "");
+    }
+
+    /**
+     * A States.QueryEvaluationError the expression itself raised, carrying the punctuation that
+     * joins its cause to the sentence {@link #evaluateField} puts in front: {@code ". "} after a
+     * coded JSONata message, which is a sentence of its own, and {@code ": "} before a bare one.
+     */
+    private static final class QueryEvaluationFailure extends FailStateException {
+
+        final String sentenceSeparator;
+
+        QueryEvaluationFailure(String cause, String sentenceSeparator) {
+            super("States.QueryEvaluationError", cause);
+            this.sentenceSeparator = sentenceSeparator;
+        }
     }
 
     /**
@@ -256,19 +460,29 @@ public class JsonataEvaluator {
     }
 
     /**
-     * Evaluate the single expression an ASL field holds, failing the state when it returns nothing.
-     * AWS names the field in the cause and a {@code Catch} on States.QueryEvaluationError fires:
-     * a Wait whose Seconds returned nothing does not wait zero seconds, it fails.
+     * Evaluate the single expression an ASL field holds, failing the state when it returns nothing
+     * or when the expression itself throws. AWS names the expression and the field in the cause
+     * either way and a {@code Catch} on States.QueryEvaluationError fires: a Wait whose Seconds
+     * returned nothing does not wait zero seconds, it fails, and {@code $abs("x")} in a field fails
+     * it with AWS's "threw an error during evaluation" sentence in front of the JSONata message.
      *
      * <p>{@code field} is the field's path relative to the state, as AWS writes it: {@code Seconds},
      * {@code Choices[1]/Condition}, {@code Output/a/b}.
      */
     JsonNode evaluateField(String expression, String field, JsonNode statesVar, JsonNode variables) {
-        JsonNode value = evaluate(expression, statesVar, variables);
+        String expr = isExpression(expression) ? unwrap(expression) : expression;
+        JsonNode value;
+        try {
+            value = evaluate(expression, statesVar, variables);
+        } catch (QueryEvaluationFailure failure) {
+            throw new FailStateException(failure.error,
+                    "The JSONata expression '" + expr + "' specified for the field '" + field
+                            + "' threw an error during evaluation" + failure.sentenceSeparator + failure.cause);
+        }
         if (value.isMissingNode()) {
             throw new FailStateException("States.QueryEvaluationError",
-                    "The JSONata expression '" + (isExpression(expression) ? unwrap(expression) : expression)
-                            + "' specified for the field '" + field + "' returned nothing (undefined).");
+                    "The JSONata expression '" + expr + "' specified for the field '" + field
+                            + "' returned nothing (undefined).");
         }
         return value;
     }
@@ -356,7 +570,20 @@ public class JsonataEvaluator {
             list.forEach(element -> array.add(fromJsonataValue(element)));
             return array;
         }
+        // JSON has no literal for a non-finite number, so AWS writes each one as the string
+        // JavaScript names it by: 1/0 comes back as "Infinity" and $parseInteger("abc","0") as
+        // "NaN".
+        if (value instanceof Double number && !Double.isFinite(number)) {
+            return TextNode.valueOf(nonFiniteName(number));
+        }
         return objectMapper.valueToTree(value);
+    }
+
+    private static String nonFiniteName(double value) {
+        if (Double.isNaN(value)) {
+            return "NaN";
+        }
+        return value > 0 ? "Infinity" : "-Infinity";
     }
 
     /**
@@ -364,8 +591,10 @@ public class JsonataEvaluator {
      * Functions dialect adds on top of the JSONata language, per
      * https://docs.aws.amazon.com/step-functions/latest/dg/transforming-data.html: five the
      * dashjoin library does not have at all, and $random it has with the wrong arity, so the
-     * binding shadows it to accept AWS's optional seed. The seventh, $string, is a JSONata
-     * function the library has but writes with a different number notation than AWS.
+     * binding shadows it to accept AWS's optional seed. The other three are JSONata functions the
+     * library has and answers differently from AWS: $string writes a number in another notation,
+     * $parseInteger answers nothing where AWS answers NaN, and $formatNumber accepts picture
+     * strings AWS refuses.
      *
      * <p>Each of the six declares one optional slot more than the arity AWS documents. The library
      * pads a short call with Java nulls up to the declared arity and refuses a call longer than
@@ -385,7 +614,42 @@ public class JsonataEvaluator {
                 "hash", new Jsonata.JFunction((input, arguments) -> hash(arguments), "<x?x?x?:x>"),
                 "random", new Jsonata.JFunction((input, arguments) -> random(arguments), "<x?x?:x>"),
                 "uuid", new Jsonata.JFunction((input, arguments) -> uuid(arguments), "<x?:x>"),
-                "string", new Jsonata.JFunction((input, arguments) -> string(arguments), "<x-b?:s>"));
+                "string", new Jsonata.JFunction((input, arguments) -> string(arguments), "<x-b?:s>"),
+                "parseInteger", new Jsonata.JFunction((input, arguments) -> parseInteger(arguments), "<s-s:n>"),
+                "formatNumber", new Jsonata.JFunction((input, arguments) -> formatNumber(arguments), "<n-so?:s>"));
+    }
+
+    /**
+     * $parseInteger(value, picture): the JSONata function, answering NaN where the picture cannot
+     * read the value, which is what AWS answers. The library answers nothing there, and an ASL
+     * field that evaluates to nothing fails the state.
+     */
+    private static Object parseInteger(List<Object> arguments) {
+        Object value = argument(arguments, 0);
+        if (value == null) {
+            return null;
+        }
+        try {
+            Number parsed = Functions.parseInteger((String) value, (String) argument(arguments, 1));
+            return parsed == null ? Double.NaN : parsed;
+        } catch (ParseException e) {
+            throw new JException(e.getMessage(), -1);
+        }
+    }
+
+    /**
+     * $formatNumber(value, picture, options): the JSONata function, with the picture string checked
+     * against the rules AWS applies to it first. See {@link FormatNumberPicture}.
+     */
+    private static Object formatNumber(List<Object> arguments) {
+        Object value = argument(arguments, 0);
+        if (value == null) {
+            return null;
+        }
+        Map<?, ?> options = (Map<?, ?>) argument(arguments, 2);
+        String picture = (String) argument(arguments, 1);
+        FormatNumberPicture.validate(picture, options);
+        return Functions.formatNumber((Number) value, picture, options);
     }
 
     /**
@@ -607,6 +871,9 @@ public class JsonataEvaluator {
                 .subtract(BigInteger.valueOf(start))
                 .divide(BigInteger.valueOf(step))
                 .add(BigInteger.ONE);
+        if (elements.compareTo(BigInteger.valueOf(MAX_RANGE_ELEMENTS)) > 0) {
+            throw new JException(MEMORY_LIMIT_EXCEEDED, -1);
+        }
         List<Object> values = new ArrayList<>();
         long value = start;
         for (BigInteger emitted = BigInteger.ZERO;

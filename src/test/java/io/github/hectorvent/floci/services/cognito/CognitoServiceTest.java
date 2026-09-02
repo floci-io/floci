@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
+import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
@@ -67,6 +68,23 @@ class CognitoServiceTest {
         return pool;
     }
 
+    private UserPool createPoolWithStrictPasswordPolicy() {
+        return service.createUserPool(Map.of(
+                "PoolName", "StrictPasswordPool",
+                "Policies", Map.of(
+                        "PasswordPolicy", Map.of(
+                                "MinimumLength", 12,
+                                "RequireUppercase", true,
+                                "RequireLowercase", true,
+                                "RequireNumbers", true,
+                                "RequireSymbols", true,
+                                "PasswordHistorySize", 10,
+                                "TemporaryPasswordValidityDays", 2
+                        )
+                )
+        ), "us-east-1");
+    }
+
     @Test
     void createUserPoolWithFullConfig() {
         List<Map<String, Object>> schema = List.of(
@@ -88,8 +106,163 @@ class CognitoServiceTest {
         assertEquals("FullConfigPool", pool.getName());
         assertEquals("arn:aws:cognito-idp:us-east-1:000000000000:userpool/" + pool.getId(), pool.getArn());
         assertEquals(schema, pool.getSchemaAttributes());
-        assertEquals(policies, pool.getPolicies());
+        // A supplied PasswordPolicy is normalized with AWS's defaults for the fields left unset
+        // (MinimumLength here was explicit; the rest were not), matching what DescribeUserPool
+        // returns on real Cognito for a policy submitted this way.
+        Map<String, Object> expectedPasswordPolicy = new HashMap<>();
+        expectedPasswordPolicy.put("MinimumLength", 12);
+        expectedPasswordPolicy.put("RequireUppercase", true);
+        expectedPasswordPolicy.put("RequireLowercase", true);
+        expectedPasswordPolicy.put("RequireNumbers", true);
+        expectedPasswordPolicy.put("RequireSymbols", true);
+        expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
         assertEquals(List.of("email"), pool.getUsernameAttributes());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "Short1!a",
+            "lowercase123!",
+            "UPPERCASE123!",
+            "NoNumbersHere!",
+            "NoSymbols1234",
+            "NoSymbols 123"
+    })
+    void signUpRejectsPasswordsThatDoNotMatchTheUserPoolPolicy(String password) {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "strict-client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.signUp(client.getClientId(), "alice@example.com", password, Map.of(
+                        "email", "alice@example.com",
+                        "phone_number", "+4915112345678"
+                )));
+
+        assertEquals("InvalidPasswordException", exception.getErrorCode());
+    }
+
+    @Test
+    void signUpAcceptsAPasswordThatMatchesTheUserPoolPolicy() {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "strict-client", false, false, List.of(), List.of());
+
+        CognitoUser user = service.signUp(
+                client.getClientId(),
+                "alice@example.com",
+                "ValidPassword1!",
+                Map.of("email", "alice@example.com", "phone_number", "+4915112345678")
+        );
+
+        assertEquals("alice@example.com", user.getUsername());
+    }
+
+    @Test
+    void passwordHistoryRejectsARecentlyUsedPassword() {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        service.adminCreateUser(
+                pool.getId(),
+                "alice",
+                Map.of("email", "alice@example.com"),
+                "InitialPass1!"
+        );
+        service.adminSetUserPassword(pool.getId(), "alice", "Replacement2!", true);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "InitialPass1!", true));
+
+        // AWS declares PasswordHistoryPolicyViolationException specifically for password reuse,
+        // distinct from InvalidPasswordException for a password that fails the complexity rules.
+        assertEquals("PasswordHistoryPolicyViolationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void passwordHistoryCountsTheCurrentPasswordAsOneOfN() {
+        // PasswordHistorySize: 1 blocks the current password and nothing else — AWS counts the
+        // current password as one of the n, not an extra entry on top of n stored ones.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "HistorySizeOnePool",
+                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 1))
+        ), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "PasswordA1!");
+        service.adminSetUserPassword(pool.getId(), "alice", "PasswordB1!", true);
+
+        AwsException reuseOfCurrent = assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "PasswordB1!", true));
+        assertEquals("PasswordHistoryPolicyViolationException", reuseOfCurrent.getErrorCode());
+
+        // Two changes back, real Cognito allows this at PasswordHistorySize: 1.
+        assertDoesNotThrow(() -> service.adminSetUserPassword(pool.getId(), "alice", "PasswordA1!", true));
+    }
+
+    @Test
+    void adminResetUserPasswordDoesNotBypassPasswordHistory() {
+        UserPool pool = createPoolWithStrictPasswordPolicy();
+        service.adminCreateUser(
+                pool.getId(), "alice", Map.of("email", "alice@example.com"), "InitialPass1!");
+        service.adminSetUserPassword(pool.getId(), "alice", "Replacement2!", true);
+
+        // Resetting must archive the outgoing password into history rather than discarding it,
+        // or an admin reset becomes a way around PasswordHistorySize.
+        service.adminResetUserPassword(pool.getId(), "alice");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "Replacement2!", true));
+        assertEquals("PasswordHistoryPolicyViolationException", exception.getErrorCode());
+    }
+
+    @Test
+    void adminResetUserPasswordDoesNotShortenTheHistoryWindow() {
+        // A reset clears the current password without replacing it, so the freed slot must go
+        // to history, not be dropped: with PasswordHistorySize 2, Pass1 -> Pass2 -> Pass3 already
+        // ages Pass1 out (only Pass3 + Pass2 are within the window) -- a reset right after must
+        // not additionally age Pass2 out just because the current slot is temporarily empty.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "ResetHistoryWindowPool",
+                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 2))
+        ), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Pass1word!");
+        service.adminSetUserPassword(pool.getId(), "alice", "Pass2word!", true);
+        service.adminSetUserPassword(pool.getId(), "alice", "Pass3word!", true);
+
+        service.adminResetUserPassword(pool.getId(), "alice");
+
+        // Both passwords still within the window (Pass3 was current, Pass2 was the one prior)
+        // must still be blocked immediately after the reset, before any new password is set.
+        assertEquals("PasswordHistoryPolicyViolationException", assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "Pass3word!", true)).getErrorCode());
+        assertEquals("PasswordHistoryPolicyViolationException", assertThrows(AwsException.class, () ->
+                service.adminSetUserPassword(pool.getId(), "alice", "Pass2word!", true)).getErrorCode());
+
+        // Setting a new password re-occupies the current slot, so the window shrinks back to
+        // n-1 in history and Pass2 (now two changes back) is free to reuse again.
+        service.adminSetUserPassword(pool.getId(), "alice", "Pass4word!", true);
+        assertDoesNotThrow(() -> service.adminSetUserPassword(pool.getId(), "alice", "Pass2word!", true));
+    }
+
+    @Test
+    void createUserPoolDefaultsAnUnsetMinimumLengthToEight() {
+        // A policy present but silent on MinimumLength gets AWS's default (8), not policyInt's
+        // fallback of 0 for an absent key — and the unset RequireUppercase/Lowercase/Numbers
+        // default to enabled too, the same "Cognito defaults" a console-created pool gets.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "SymbolsOnlyPool",
+                "Policies", Map.of("PasswordPolicy", Map.of("RequireSymbols", true))
+        ), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "symbols-only-client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.signUp(client.getClientId(), "alice@example.com", "a!", Map.of(
+                        "email", "alice@example.com", "phone_number", "+4915112345678")));
+        assertEquals("InvalidPasswordException", exception.getErrorCode());
+
+        assertDoesNotThrow(() -> service.signUp(
+                client.getClientId(), "bob@example.com", "Eightplus1!", Map.of(
+                        "email", "bob@example.com", "phone_number", "+4915112345679")));
     }
 
     @Test
@@ -1212,6 +1385,8 @@ class CognitoServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 "http://localhost:4566",
                 regionResolver,
                 null,
@@ -1243,6 +1418,8 @@ class CognitoServiceTest {
                 .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any());
 
         CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -2428,6 +2605,29 @@ class CognitoServiceTest {
 
     }
 
+    @Test
+    void updateIdentityProviderDoesNotMutateAlreadyReturnedInstances() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "IdpCopyPool"), "us-east-1");
+        Map<String, String> details = Map.of(
+                "client_id", "before",
+                "client_secret", "secret",
+                "attributes_request_method", "GET",
+                "oidc_issuer", "https://issuer.example.com",
+                "authorize_scopes", "openid");
+        service.createIdentityProvider(pool.getId(), "CopyOidc", "OIDC", details, null, null);
+
+        IdentityProvider held = service.describeIdentityProvider(pool.getId(), "CopyOidc");
+
+        Map<String, String> updated = new java.util.LinkedHashMap<>(details);
+        updated.put("client_id", "after");
+        service.updateIdentityProvider(pool.getId(), "CopyOidc", updated, null, null);
+
+        assertEquals("before", held.getProviderDetails().get("client_id"),
+                "update must write a copy, not mutate the instance the store already handed out");
+        assertEquals("after",
+                service.describeIdentityProvider(pool.getId(), "CopyOidc").getProviderDetails().get("client_id"));
+    }
+
     // Issue #1654: ConfirmSignUp updates verified attribute
     @Nested
     class ConfirmSignUpVerifiedAttributes {
@@ -2634,6 +2834,8 @@ class CognitoServiceTest {
             when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                     .thenReturn("123456");
             return new CognitoService(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
                     new InMemoryStorage<>(),
                     new InMemoryStorage<>(),
                     new InMemoryStorage<>(),
@@ -2959,7 +3161,46 @@ class CognitoServiceTest {
         assertTrue(id.contains("\"email\":\"reader@example.com\""), "readable attribute present: " + id);
         assertFalse(id.contains("\"name\""), "non-readable attribute must be filtered out: " + id);
     }
+    @Test
+    void adminSetUserMFAPreferenceUpdatesEmailMfaSettings() {
+        UserPool pool = createPoolAndUser();
 
+        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        assertNotNull(user.getEmailMfaSettings());
+        assertTrue(user.getEmailMfaSettings().isEnabled());
+        assertTrue(user.getEmailMfaSettings().isPreferredMfa());
+    }
+
+    @Test
+    void adminSetUserMFAPreferenceDoesNotMutateOnInvalidUpdate() {
+        UserPool pool = createPoolAndUser();
+
+        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+
+        assertThrows(AwsException.class, () ->
+                service.adminSetUserMFAPreference(pool.getId(), "alice", false, true));
+
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        assertTrue(user.getEmailMfaSettings().isEnabled());
+        assertTrue(user.getEmailMfaSettings().isPreferredMfa());
+    }
+    @Test
+    void adminSetUserMFAPreferenceDisablingEmailMfaClearsPreferredMfa() {
+        UserPool pool = createPoolAndUser();
+
+        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+
+        service.adminSetUserMFAPreference(pool.getId(), "alice", false, null);
+
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        assertFalse(user.getEmailMfaSettings().isEnabled());
+        assertFalse(user.getEmailMfaSettings().isPreferredMfa());
+   }
     private static String jwtPayload(String token) {
         String segment = token.split("\\.")[1];
         int pad = (4 - segment.length() % 4) % 4;
