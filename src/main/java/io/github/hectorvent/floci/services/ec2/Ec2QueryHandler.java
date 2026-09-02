@@ -790,11 +790,13 @@ public class Ec2QueryHandler {
             if (!launchedInstanceIds.isEmpty()) {
                 LOG.warnv("CreateFleet failed after launching instances {0}; rolling them back: {1}",
                         launchedInstanceIds, e.getMessage());
-                try {
-                    service.terminateInstances(region, launchedInstanceIds);
-                } catch (RuntimeException cleanupFailure) {
-                    LOG.warnv("CreateFleet rollback failed for instances {0}: {1}",
-                            launchedInstanceIds, cleanupFailure.getMessage());
+                for (String instanceId : launchedInstanceIds) {
+                    try {
+                        service.terminateInstances(region, List.of(instanceId));
+                    } catch (RuntimeException cleanupFailure) {
+                        LOG.warnv("CreateFleet rollback failed for instance {0}: {1}",
+                                instanceId, cleanupFailure.getMessage());
+                    }
                 }
             }
             throw e;

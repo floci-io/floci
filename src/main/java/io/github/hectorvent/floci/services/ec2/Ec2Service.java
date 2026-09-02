@@ -2264,6 +2264,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         Subnet subnet = null;
         if (subnetId != null && !subnetId.isEmpty()) {
             subnet = requireSubnet(region, subnetId);
+            if (availabilityZone != null && !availabilityZone.isBlank()
+                    && !availabilityZone.equals(subnet.getAvailabilityZone())) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The subnet '" + subnetId + "' is not in availability zone '"
+                                + availabilityZone + "'.",
+                        400);
+            }
         } else if (availabilityZone != null && !availabilityZone.isBlank()) {
             subnet = resolveSubnetForAvailabilityZone(region, availabilityZone);
         } else {

@@ -60,6 +60,28 @@ class Ec2CreateFleetIntegrationTest {
 
     @Test
     @Order(2)
+    void createFleetRejectsConflictingSubnetAndAvailabilityZone() {
+        given()
+                .formParam("Action", "CreateFleet")
+                .formParam("Type", "instant")
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", launchTemplateId)
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", "subnet-default-us-east-1-a")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.AvailabilityZone", "us-east-1b")
+                .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
+                .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body(containsString("InvalidParameterCombination"));
+    }
+
+    @Test
+    @Order(3)
     void createFleetRollsBackEarlierLaunchesWhenLaterLaunchFails() {
         given()
                 .formParam("Action", "CreateFleet")
@@ -95,7 +117,7 @@ class Ec2CreateFleetIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     void createFleetLaunchesInstanceAndReturnsFleetShape() {
         if (launchTemplateId == null) {
             launchTemplateId = createLaunchTemplate();
