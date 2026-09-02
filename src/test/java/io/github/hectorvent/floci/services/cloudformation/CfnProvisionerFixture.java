@@ -40,7 +40,9 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaAdd
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SnsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
@@ -65,7 +67,9 @@ import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -132,6 +136,8 @@ final class CfnProvisionerFixture {
         private FirehoseService firehoseService;
         private DocDbService docDbService;
         private CloudFrontService cloudFrontService;
+        private Route53Service route53Service;
+        private SchedulerService schedulerService;
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
@@ -250,6 +256,12 @@ final class CfnProvisionerFixture {
                 discovered.add(new Ec2NetworkAclCfnProvisioner(ec2Service));
                 discovered.add(new Ec2SecurityGroupRuleCfnProvisioner(ec2Service));
                 discovered.add(new Ec2LaunchTemplateCfnProvisioner(ec2Service));
+            }
+            if (route53Service != null) {
+                discovered.add(new Route53CfnProvisioner(route53Service));
+            }
+            if (schedulerService != null) {
+                discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
             }
             return discovered;
         }
@@ -371,6 +383,16 @@ final class CfnProvisionerFixture {
 
         public Builder rds(RdsService v) {
             this.rdsService = v;
+            return this;
+        }
+
+        public Builder route53(Route53Service v) {
+            this.route53Service = v;
+            return this;
+        }
+
+        public Builder scheduler(SchedulerService v) {
+            this.schedulerService = v;
             return this;
         }
 
