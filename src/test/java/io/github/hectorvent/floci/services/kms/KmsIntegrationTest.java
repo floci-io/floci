@@ -1397,4 +1397,87 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
     }
+
+    /**
+     * Ed25519 keys, checked against what real AWS KMS returns for the same calls.
+     *
+     * <p>ED25519_SHA_512 takes MessageType RAW and ED25519_PH_SHA_512 takes DIGEST. Real KMS
+     * rejects the other pairing, and rejects any other signing algorithm for the key spec. Note
+     * that ED25519_PH_SHA_512 pre-hashes the bytes it is given rather than signing them as a
+     * digest, so the two algorithms produce different signatures over the same input.
+     */
+    @Test
+    void ed25519KeyIsAnEd25519KeyAndSignsWithBothAlgorithms() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_NIST_EDWARDS25519\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.KeySpec", equalTo("ECC_NIST_EDWARDS25519"))
+                .body("KeyMetadata.SigningAlgorithms", equalTo(List.of("ED25519_SHA_512", "ED25519_PH_SHA_512")))
+                .extract().path("KeyMetadata.KeyId");
+
+        // Real AWS returns a 44 byte SubjectPublicKeyInfo carrying a 32 byte Ed25519 point.
+        // A NIST P-521 key, which this used to be, is far larger.
+        String publicKey = given()
+                .header("X-Amz-Target", "TrentService.GetPublicKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("PublicKey");
+        assertEquals(44, Base64.getDecoder().decode(publicKey).length);
+
+        String message = Base64.getEncoder().encodeToString("message".getBytes(StandardCharsets.UTF_8));
+        for (String[] pair : List.of(new String[]{"ED25519_SHA_512", "RAW"}, new String[]{"ED25519_PH_SHA_512", "DIGEST"})) {
+            String signature = given()
+                    .header("X-Amz-Target", "TrentService.Sign")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                            .formatted(keyId, message, pair[1], pair[0]))
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("SigningAlgorithm", equalTo(pair[0]))
+                    .extract().path("Signature");
+            assertEquals(64, Base64.getDecoder().decode(signature).length);
+
+            given()
+                    .header("X-Amz-Target", "TrentService.Verify")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"%s\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                            .formatted(keyId, message, pair[1], signature, pair[0]))
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("SignatureValid", equalTo(true));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "ED25519_SHA_512, DIGEST, ValidationException, Message type DIGEST is incompatible with algorithm ED25519_SHA_512.",
+            "ED25519_PH_SHA_512, RAW, ValidationException, Message type RAW is incompatible with algorithm ED25519_PH_SHA_512.",
+            "ECDSA_SHA_512, RAW, InvalidKeyUsageException, Algorithm ECDSA_SHA_512 is incompatible with key spec ECC_NIST_EDWARDS25519."
+    })
+    void ed25519RejectsTheCombinationsRealKmsRejects(String algorithm, String messageType, String error, String expectedMessage) {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_NIST_EDWARDS25519\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.Sign")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"MessageType\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                        .formatted(keyId, messageType, algorithm))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo(error))
+                .body("message", equalTo(expectedMessage));
+    }
 }
