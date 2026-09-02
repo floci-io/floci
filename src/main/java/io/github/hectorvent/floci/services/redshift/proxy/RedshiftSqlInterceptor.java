@@ -80,26 +80,39 @@ public final class RedshiftSqlInterceptor {
         if (sql == null || sql.isEmpty()) {
             return sql;
         }
-        if (!TABLE_DDL_PROBE.matcher(sql).find()) {
-            return sql; // Not table DDL: never touch it.
-        }
 
         List<String> literals = new ArrayList<>();
         String masked = maskStringLiterals(sql, literals);
 
-        String s = DISTSTYLE_PATTERN.matcher(masked).replaceAll("");
+        String[] statements = masked.split(";", -1);
+        boolean anyRewritten = false;
+        for (int i = 0; i < statements.length; i++) {
+            if (TABLE_DDL_PROBE.matcher(statements[i]).find()) {
+                String rewritten = rewriteTableDdl(statements[i]);
+                if (!rewritten.equals(statements[i])) {
+                    statements[i] = rewritten;
+                    anyRewritten = true;
+                }
+            }
+        }
+
+        if (!anyRewritten) {
+            return sql; // nothing matched: hand back the original instance
+        }
+        String joined = String.join(";", statements);
+        return unmaskStringLiterals(joined.trim(), literals);
+    }
+
+    private static String rewriteTableDdl(String maskedDdl) {
+        String s = DISTSTYLE_PATTERN.matcher(maskedDdl).replaceAll("");
         s = DISTKEY_PAREN_PATTERN.matcher(s).replaceAll("");
         s = SORTKEY_PAREN_PATTERN.matcher(s).replaceAll("");
         s = TABLE_LEVEL_KEY_IDENT_PATTERN.matcher(s).replaceAll("");
         s = KEY_COLUMN_CONSTRAINT_PATTERN.matcher(s).replaceAll("");
         s = ENCODE_PATTERN.matcher(s).replaceAll("");
-
-        if (s.length() == masked.length()) {
-            return sql; // nothing matched: hand back the original instance
-        }
         s = DOUBLE_COMMA_PATTERN.matcher(s).replaceAll(",");
         s = COMMA_CLOSE_PAREN_PATTERN.matcher(s).replaceAll(")");
-        return unmaskStringLiterals(s.trim(), literals);
+        return s;
     }
 
     private static String maskStringLiterals(String sql, List<String> out) {

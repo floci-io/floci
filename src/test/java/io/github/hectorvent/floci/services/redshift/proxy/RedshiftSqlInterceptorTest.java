@@ -183,6 +183,25 @@ class RedshiftSqlInterceptorTest {
     }
 
     @Test
+    void shouldPreserveNonDdlStatementsInMultiStatementBatch() {
+        // Functions or column identifiers named like Redshift keywords in later statements must not be rewritten.
+        String sql = "CREATE TABLE t (x int DISTKEY); SELECT distkey(a), encode FROM s;";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertEquals("CREATE TABLE t (x int); SELECT distkey(a), encode FROM s;", rewritten);
+
+        String sql2 = "CREATE TABLE t (x int DISTKEY); SELECT a, distkey, b FROM s;";
+        String rewritten2 = RedshiftSqlInterceptor.rewrite(sql2);
+        assertEquals("CREATE TABLE t (x int); SELECT a, distkey, b FROM s;", rewritten2);
+    }
+
+    @Test
+    void shouldHandleSemicolonInsideStringLiteralInDdl() {
+        String sql = "CREATE TABLE t (x varchar DEFAULT ';', id int DISTKEY);";
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+        assertEquals("CREATE TABLE t (x varchar DEFAULT ';', id int);", rewritten);
+    }
+
+    @Test
     void shouldHandleComprehensiveComplexDdl() {
         String complexSql = """
                 CREATE TABLE public.orders (
