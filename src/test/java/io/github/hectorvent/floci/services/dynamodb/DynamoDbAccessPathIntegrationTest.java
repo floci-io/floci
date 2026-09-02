@@ -287,6 +287,31 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void scanGsiRejectsConsistentReads() {
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "ConsistentRead":true
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Consistent reads are not supported on global secondary indexes"));
+
+        // Consistent reads stay legal on a local secondary index.
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"alternate-index",
+                  "ConsistentRead":true
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+    }
+
+    @Test
     @Order(9)
     void queryAndScanRejectWrongExclusiveStartKeyTypes() {
         request("DynamoDB_20120810.Query", """

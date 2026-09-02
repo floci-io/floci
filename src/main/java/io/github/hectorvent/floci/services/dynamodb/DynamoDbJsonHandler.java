@@ -870,16 +870,7 @@ public class DynamoDbJsonHandler {
                 keyConditionExpr, filterExpr, queryFilter, exprAttrNames, exprAttrValues);
         DynamoDbAccessPathValidator.validateSelection(queryTable, queryAccessPath, select,
                 projectionExpression, attributesToGet, exprAttrNames);
-
-        // ConsistentRead on GSI check
-        boolean consistentRead = request.path("ConsistentRead").asBoolean(false);
-        if (consistentRead && indexName != null) {
-            if (queryTable.findGsi(indexName).isPresent()) {
-                throw new AwsException("ValidationException",
-                        "Consistent reads are not supported on global secondary indexes", 400);
-            }
-        }
-
+        rejectConsistentReadOnGsi(request, queryAccessPath);
         // Validate EAN/EAV usage when using expression format
         if (keyConditionExpr != null) {
             // Check undefined #tokens in FilterExpression
@@ -944,6 +935,13 @@ public class DynamoDbJsonHandler {
         }
         addConsumedCapacity(response, request, tableName, queryItems.size(), false);
         return Response.ok(response).build();
+    }
+
+    private static void rejectConsistentReadOnGsi(JsonNode request, DynamoDbAccessPath accessPath) {
+        if (request.path("ConsistentRead").asBoolean(false) && accessPath.isGlobalSecondaryIndex()) {
+            throw new AwsException("ValidationException",
+                    "Consistent reads are not supported on global secondary indexes", 400);
+        }
     }
 
     private Response handleScan(JsonNode request, String region) {
@@ -1017,6 +1015,7 @@ public class DynamoDbJsonHandler {
         DynamoDbAccessPath scanAccessPath = DynamoDbAccessPath.resolve(scanTable, indexNameScan);
         DynamoDbAccessPathValidator.validateSelection(scanTable, scanAccessPath, select,
                 projectionExpressionScan, attributesToGetScan, exprAttrNames);
+        rejectConsistentReadOnGsi(request, scanAccessPath);
 
         if (exclusiveStartKey != null) {
             validateExclusiveStartKey(exclusiveStartKey, scanTable, scanAccessPath, true);
