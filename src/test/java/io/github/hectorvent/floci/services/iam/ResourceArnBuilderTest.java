@@ -51,6 +51,7 @@ class ResourceArnBuilderTest {
     }
 
     private void setJsonBody(String json) {
+        contextProperties.clear();
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
         ByteArrayInputStream in = new ByteArrayInputStream(bytes);
         when(ctx.getEntityStream()).thenReturn(in);
@@ -137,6 +138,45 @@ class ResourceArnBuilderTest {
     @Test
     void dynamoDbBuildsArnsFromMultiTableTransactRequest() {
         setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"TableA\"}},{\"Delete\":{\"TableName\":\"TableB\"}},{\"Get\":{\"TableName\":\"TableA\"}}]}");
+        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of(
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
+        ), arns);
+    }
+
+    @Test
+    void dynamoDbBuildsArnFromPartiQLStatement() {
+        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"UsersTable\\\" WHERE id = '1'\"}");
+        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/UsersTable"), arns);
+
+        setJsonBody("{\"Statement\":\"INSERT INTO OrdersTable VALUE {'id': '1'}\"}");
+        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/OrdersTable"), arns);
+
+        setJsonBody("{\"Statement\":\"UPDATE \\\"ProductsTable\\\" SET price=10 WHERE id='1'\"}");
+        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/ProductsTable"), arns);
+
+        setJsonBody("{\"Statement\":\"DELETE FROM \\\"LogsTable\\\" WHERE id='1'\"}");
+        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/LogsTable"), arns);
+    }
+
+    @Test
+    void dynamoDbBuildsArnsFromPartiQLBatchStatements() {
+        setJsonBody("{\"Statements\":[{\"Statement\":\"SELECT * FROM \\\"TableA\\\" WHERE id = '1'\"},{\"Statement\":\"SELECT * FROM TableB WHERE id = '2'\"}]}");
+        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of(
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
+        ), arns);
+    }
+
+    @Test
+    void dynamoDbBuildsArnsFromPartiQLTransactStatements() {
+        setJsonBody("{\"TransactStatements\":[{\"Statement\":\"INSERT INTO \\\"TableA\\\" VALUE {'id': '1'}\"},{\"Statement\":\"UPDATE \\\"TableB\\\" SET x=1 WHERE id='2'\"}]}");
         List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
         assertEquals(List.of(
                 "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",

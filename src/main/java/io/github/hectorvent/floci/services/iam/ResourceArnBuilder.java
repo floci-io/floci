@@ -207,8 +207,57 @@ public class ResourceArnBuilder {
                     return new ArrayList<>(arns);
                 }
             }
+            if (json.hasNonNull("Statement")) {
+                String stmt = json.get("Statement").asText().trim();
+                String table = extractDynamoDbTableFromPartiQL(stmt);
+                if (table != null && !table.isEmpty()) {
+                    return List.of(toDynamoDbTableArn(table, region, accountId));
+                }
+            }
+            if (json.hasNonNull("Statements") && json.get("Statements").isArray()) {
+                Set<String> arns = new LinkedHashSet<>();
+                for (JsonNode s : json.get("Statements")) {
+                    if (s.hasNonNull("Statement")) {
+                        String table = extractDynamoDbTableFromPartiQL(s.get("Statement").asText());
+                        if (table != null && !table.isEmpty()) {
+                            arns.add(toDynamoDbTableArn(table, region, accountId));
+                        }
+                    }
+                }
+                if (!arns.isEmpty()) {
+                    return new ArrayList<>(arns);
+                }
+            }
+            if (json.hasNonNull("TransactStatements") && json.get("TransactStatements").isArray()) {
+                Set<String> arns = new LinkedHashSet<>();
+                for (JsonNode s : json.get("TransactStatements")) {
+                    if (s.hasNonNull("Statement")) {
+                        String table = extractDynamoDbTableFromPartiQL(s.get("Statement").asText());
+                        if (table != null && !table.isEmpty()) {
+                            arns.add(toDynamoDbTableArn(table, region, accountId));
+                        }
+                    }
+                }
+                if (!arns.isEmpty()) {
+                    return new ArrayList<>(arns);
+                }
+            }
         }
         return List.of("*");
+    }
+
+    private static final java.util.regex.Pattern PARTIQL_TABLE_PATTERN =
+            java.util.regex.Pattern.compile("(?i)\\b(?:FROM|INTO|UPDATE)\\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?");
+
+    private static String extractDynamoDbTableFromPartiQL(String statement) {
+        if (statement == null || statement.isBlank()) {
+            return null;
+        }
+        var matcher = PARTIQL_TABLE_PATTERN.matcher(statement);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
     }
 
     private String toDynamoDbTableArn(String tableName, String region, String accountId) {
