@@ -247,7 +247,7 @@ public class ResourceArnBuilder {
     }
 
     private static final java.util.regex.Pattern PARTIQL_TABLE_PATTERN =
-            java.util.regex.Pattern.compile("(?i)\\b(?:FROM|INTO|UPDATE)\\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?");
+            java.util.regex.Pattern.compile("(?i)\\b(?:FROM|INTO|UPDATE)\\s+(?:\"([^\"]+)\"|'([^']+)'|([a-zA-Z0-9_.-]+))");
 
     private static String extractDynamoDbTableFromPartiQL(String statement) {
         if (statement == null || statement.isBlank()) {
@@ -255,7 +255,13 @@ public class ResourceArnBuilder {
         }
         var matcher = PARTIQL_TABLE_PATTERN.matcher(statement);
         if (matcher.find()) {
-            return matcher.group(1);
+            if (matcher.group(1) != null) {
+                return matcher.group(1);
+            }
+            if (matcher.group(2) != null) {
+                return matcher.group(2);
+            }
+            return matcher.group(3);
         }
         return null;
     }

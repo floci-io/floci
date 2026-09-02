@@ -162,6 +162,14 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"Statement\":\"DELETE FROM \\\"LogsTable\\\" WHERE id='1'\"}");
         arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
         assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/LogsTable"), arns);
+
+        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"Table With Spaces & Special:Chars\\\" WHERE id = '1'\"}");
+        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Table With Spaces & Special:Chars"), arns);
+
+        setJsonBody("{\"Statement\":\"SELECT * FROM 'Table.With.Single.Quotes#1' WHERE id = '1'\"}");
+        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Table.With.Single.Quotes#1"), arns);
     }
 
     @Test
