@@ -162,6 +162,31 @@ class Ec2ServiceTest {
         assertEquals(1, retry.getInstances().size());
     }
 
+    /**
+     * A NetworkInterface can carry a real GroupIdentifier entry whose groupId is null (a name-only
+     * association). The group-id filter must skip that entry instead of NPE-ing on
+     * {@code null.matches(...)} in the shared value matcher, while a real group on the same interface
+     * still matches. The null entry is evaluated first so the filter actually exercises the null path.
+     */
+    @Test
+    void describeNetworkInterfacesGroupIdFilterToleratesNullGroupId() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of());
+        eni.getGroups().add(new GroupIdentifier(null, "name-only"));
+        eni.getGroups().add(new GroupIdentifier("sg-realgroup000000", "real"));
+
+        List<NetworkInterface> matched = service.describeNetworkInterfaces("us-east-1", List.of(),
+                Map.of("group-id", List.of("sg-realgroup000000")), 0, null).networkInterfaces();
+
+        assertTrue(matched.stream()
+                .anyMatch(n -> eni.getNetworkInterfaceId().equals(n.getNetworkInterfaceId())));
+    }
+
     @Test
     void runInstancesRequiresImageIdInsteadOfDefaulting() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),

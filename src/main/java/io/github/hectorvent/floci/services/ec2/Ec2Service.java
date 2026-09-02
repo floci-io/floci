@@ -5732,8 +5732,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesValue(List<String> patterns, String value) {
+        String normalizedValue = Objects.toString(value, "");
         return patterns.stream()
-                .anyMatch(pattern -> value.matches(wildcardToRegex(pattern)));
+                .anyMatch(pattern -> normalizedValue.matches(wildcardToRegex(pattern)));
     }
 
     private boolean matchesFilters(Object resource, Map<String, List<String>> filters, String region) {
