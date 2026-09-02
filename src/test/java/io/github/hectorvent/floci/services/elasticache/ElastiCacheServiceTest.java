@@ -677,4 +677,41 @@ class ElastiCacheServiceTest {
         assertThrows(AwsException.class, () -> svc.getReplicationGroup("g1"),
                 "the deleted group must not come back from the modify");
     }
+
+    private static ElastiCacheService.CreateReplicationGroupRequest requestWithParameterGroup(
+            String groupId, String parameterGroupName) {
+        return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
+                AuthMode.NO_AUTH, null, "us-east-1", null, null, null,
+                parameterGroupName, null, null, null, null,
+                null, null, null, ReplicationGroupSettings.defaults(), Map.of());
+    }
+
+    @Test
+    void createReferencingAnUnknownParameterGroupIsRefusedBeforeProvisioning() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(requestWithParameterGroup("grp", "absent-pg")));
+
+        assertEquals("CacheParameterGroupNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+        verify(containerManager, never()).start(anyString(), anyString());
+        verify(containerManager, never()).start(anyString(), anyString(), any());
+        assertThrows(AwsException.class, () -> service.getReplicationGroup("grp"));
+    }
+
+    @Test
+    void aParameterGroupStillReferencedByAReplicationGroupCannotBeDeleted() {
+        service.createCacheParameterGroup("custom-pg", "redis7", "in use", Map.of());
+        service.createReplicationGroup(requestWithParameterGroup("grp", "custom-pg"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.deleteCacheParameterGroup("custom-pg"));
+        assertEquals("InvalidCacheParameterGroupState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(service.findParameterGroup("custom-pg").isPresent(),
+                "a refused delete must leave the group in place");
+
+        service.deleteReplicationGroup("grp");
+        service.deleteCacheParameterGroup("custom-pg");
+        assertTrue(service.findParameterGroup("custom-pg").isEmpty());
+    }
 }
