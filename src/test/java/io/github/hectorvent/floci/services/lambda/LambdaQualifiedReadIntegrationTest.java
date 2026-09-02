@@ -115,4 +115,42 @@ class LambdaQualifiedReadIntegrationTest {
         given().when().get("/2015-03-31/functions/" + fn + ":1?Qualifier=2")
             .then().statusCode(400);
     }
+
+    @Test
+    void aWeightedAliasReadsDeterministicallyAsItsPrimaryVersion() throws Exception {
+        // An alias with AdditionalVersionWeights shifts traffic, so the invoke path picks among the
+        // weighted versions at random. That is right for running the function and wrong for
+        // describing it: two reads of one alias must not disagree. AWS reports the alias's primary
+        // FunctionVersion, so a 50/50 split must still read as version 1 every time.
+        String fn = "qual-alias-" + Long.toString(System.nanoTime(), 36);
+        createFunction(fn, "v1");
+        given().contentType("application/json").body("{}")
+        .when().post("/2015-03-31/functions/" + fn + "/versions")
+        .then().statusCode(201).body("Version", equalTo("1"));
+
+        given()
+            .contentType("application/json")
+            .body("{\"ZipFile\": \"%s\"}".formatted(zipB64("v2")))
+        .when().put("/2015-03-31/functions/" + fn + "/code").then().statusCode(200);
+        given().contentType("application/json").body("{\"Description\": \"second\"}")
+        .when().post("/2015-03-31/functions/" + fn + "/versions")
+        .then().statusCode(201).body("Version", equalTo("2"));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"Name": "live", "FunctionVersion": "1",
+                 "RoutingConfig": {"AdditionalVersionWeights": {"2": 0.5}}}
+                """)
+        .when().post("/2015-03-31/functions/" + fn + "/aliases")
+        .then().statusCode(org.hamcrest.Matchers.anyOf(equalTo(200), equalTo(201)));
+
+        // Repeat enough that a random pick would almost certainly show version 2 at least once.
+        for (int i = 0; i < 20; i++) {
+            given().when().get("/2015-03-31/functions/" + fn + "?Qualifier=live")
+                .then().statusCode(200).body("Configuration.Version", equalTo("1"));
+            given().when().get("/2015-03-31/functions/" + fn + "/configuration?Qualifier=live")
+                .then().statusCode(200).body("Version", equalTo("1"));
+        }
+    }
 }

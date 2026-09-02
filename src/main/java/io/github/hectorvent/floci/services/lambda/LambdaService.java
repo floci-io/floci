@@ -498,9 +498,9 @@ public class LambdaService implements ResourceProvider {
         }
         if (functionName.startsWith("arn:")) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
-            return resolveInvokeTargetForAccount(arn.accountId(), region, ref.name(), effective);
+            return resolveReadTargetForAccount(arn.accountId(), region, ref.name(), effective);
         }
-        return resolveInvokeTarget(region, ref.name(), effective);
+        return resolveReadTarget(region, ref.name(), effective);
     }
 
     /**
@@ -939,6 +939,22 @@ public class LambdaService implements ResourceProvider {
     }
 
     private LambdaFunction resolveInvokeTarget(String region, String name, String qualifier) {
+        return resolveTarget(region, name, qualifier, this::pickAliasVersion);
+    }
+
+    /**
+     * Resolves a qualifier for a <em>read</em>. Identical to the invoke path except for aliases:
+     * an alias with {@code AdditionalVersionWeights} shifts traffic, so {@link #pickAliasVersion}
+     * chooses randomly among the weighted versions, which is right for running the function and
+     * wrong for describing it. Two reads of one alias must not disagree, so a read follows the
+     * alias's primary {@code FunctionVersion}, which is what AWS reports.
+     */
+    private LambdaFunction resolveReadTarget(String region, String name, String qualifier) {
+        return resolveTarget(region, name, qualifier, LambdaAlias::getFunctionVersion);
+    }
+
+    private LambdaFunction resolveTarget(String region, String name, String qualifier,
+                                         java.util.function.Function<LambdaAlias, String> aliasVersion) {
         if (qualifier == null || qualifier.equals("$LATEST")) {
             return functionStore.get(region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
@@ -950,7 +966,7 @@ public class LambdaService implements ResourceProvider {
         }
         // qualifier is an alias name
         LambdaAlias alias = getAlias(region, name, qualifier);
-        String version = pickAliasVersion(alias);
+        String version = aliasVersion.apply(alias);
         if (version == null || version.equals("$LATEST")) {
             return functionStore.get(region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
@@ -962,6 +978,18 @@ public class LambdaService implements ResourceProvider {
 
     private LambdaFunction resolveInvokeTargetForAccount(
             String accountId, String region, String name, String qualifier) {
+        return resolveTargetForAccount(accountId, region, name, qualifier, this::pickAliasVersion);
+    }
+
+    /** The read counterpart of {@link #resolveInvokeTargetForAccount}; see {@link #resolveReadTarget}. */
+    private LambdaFunction resolveReadTargetForAccount(
+            String accountId, String region, String name, String qualifier) {
+        return resolveTargetForAccount(accountId, region, name, qualifier, LambdaAlias::getFunctionVersion);
+    }
+
+    private LambdaFunction resolveTargetForAccount(
+            String accountId, String region, String name, String qualifier,
+            java.util.function.Function<LambdaAlias, String> aliasVersion) {
         if (qualifier == null || qualifier.equals("$LATEST")) {
             return functionStore.getForAccount(accountId, region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -980,7 +1008,7 @@ public class LambdaService implements ResourceProvider {
         if (alias == null) {
             throw new AwsException("ResourceNotFoundException", "Alias not found: " + qualifier, 404);
         }
-        String version = pickAliasVersion(alias);
+        String version = aliasVersion.apply(alias);
         if (version == null || version.equals("$LATEST")) {
             return functionStore.getForAccount(accountId, region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
