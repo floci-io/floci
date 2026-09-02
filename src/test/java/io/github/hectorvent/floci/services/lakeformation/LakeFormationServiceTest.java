@@ -83,16 +83,14 @@ class LakeFormationServiceTest {
     void testUpdateResource() {
         UpdateResourceRequest req = new UpdateResourceRequest();
         req.setResourceArn("arn:aws:s3:::my-bucket");
-        req.setRoleArn("arn:aws:iam::123:role/UpdatedRole");
+        req.setRoleArn("arn:aws-us-gov:iam::123:role/UpdatedRole");
         req.setHybridAccessEnabled(true);
-
-        when(storage.describeResource("us-east-1", "arn:aws:s3:::my-bucket")).thenReturn(Optional.of(new ResourceInfo()));
 
         UpdateResourceResponse res = service.updateResource("us-east-1", req);
 
         assertNotNull(res);
         verify(storage).updateResource(
-                "us-east-1", "arn:aws:s3:::my-bucket", "arn:aws:iam::123:role/UpdatedRole", null, true, null);
+            "us-east-1", "arn:aws:s3:::my-bucket", "arn:aws-us-gov:iam::123:role/UpdatedRole", null, true, null);
     }
 
     @Test
@@ -100,12 +98,13 @@ class LakeFormationServiceTest {
         UpdateResourceRequest req = new UpdateResourceRequest();
         req.setResourceArn("arn:aws:s3:::my-bucket");
         req.setRoleArn("arn:aws:iam::123:role/UpdatedRole");
-        when(storage.describeResource(anyString(), anyString())).thenReturn(Optional.empty());
+        doThrow(new AwsException("EntityNotFoundException", "Resource not found", 400))
+            .when(storage).updateResource(anyString(), anyString(), anyString(), any(), any(), any());
 
         AwsException ex = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", req));
 
         assertEquals("EntityNotFoundException", ex.getErrorCode());
-        verify(storage, never()).updateResource(anyString(), anyString(), anyString(), any(), any(), any());
+        verify(storage).updateResource(anyString(), anyString(), anyString(), any(), any(), any());
     }
 
     @Test
@@ -113,6 +112,18 @@ class LakeFormationServiceTest {
         UpdateResourceRequest req = new UpdateResourceRequest();
         req.setResourceArn("not-an-arn");
         req.setRoleArn("not-an-arn");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", req));
+
+        assertEquals("InvalidInputException", ex.getErrorCode());
+        verifyNoInteractions(storage);
+    }
+
+    @Test
+    void testUpdateResourceRejectsMalformedResourceArn() {
+        UpdateResourceRequest req = new UpdateResourceRequest();
+        req.setResourceArn("arn:aws:s3");
+        req.setRoleArn("arn:aws:iam::123:role/UpdatedRole");
 
         AwsException ex = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", req));
 

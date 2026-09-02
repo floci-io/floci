@@ -52,9 +52,12 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void updateResource(String region, String resourceArn, String roleArn, String expectedResourceOwnerAccount,
+    public synchronized void updateResource(String region, String resourceArn, String roleArn, String expectedResourceOwnerAccount,
                                Boolean hybridAccessEnabled, Boolean withFederation) {
-        ResourceInfo info = resourcesStorage.get(region + ":" + resourceArn).orElseThrow();
+        String resourceKey = region + ":" + resourceArn;
+        ResourceInfo info = resourcesStorage.get(resourceKey)
+                .orElseThrow(() -> new io.github.hectorvent.floci.core.common.AwsException(
+                        "EntityNotFoundException", "Resource not found", 400));
         info.setRoleArn(roleArn);
         if (expectedResourceOwnerAccount != null) {
             info.setExpectedResourceOwnerAccount(expectedResourceOwnerAccount);
@@ -65,11 +68,11 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
         if (withFederation != null) {
             info.setWithFederation(withFederation);
         }
-        resourcesStorage.put(region + ":" + resourceArn, info);
+        resourcesStorage.put(resourceKey, info);
     }
 
     @Override
-    public void deregisterResource(String region, String resourceArn) {
+    public synchronized void deregisterResource(String region, String resourceArn) {
         resourcesStorage.delete(region + ":" + resourceArn);
     }
 
