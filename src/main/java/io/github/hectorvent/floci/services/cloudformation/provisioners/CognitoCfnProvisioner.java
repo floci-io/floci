@@ -49,9 +49,11 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         Integer managedLoginVersion = resolveManagedLoginVersion(props, ctx);
 
         // Domain and UserPoolId are createOnly in the schema: a change to either replaces the
-        // domain, and the prior one is removed once the new one exists. Anything else, a renewed
-        // certificate or another managed login version, is applied in place so the CloudFront
-        // distribution a DNS alias points at survives, as on AWS.
+        // domain, and the prior one is removed once the new one exists. Domain names are unique
+        // across pools, so a change to UserPoolId alone fails on the create, as it does on AWS,
+        // where CloudFormation also creates the replacement before deleting the original. Anything
+        // else, a renewed certificate or another managed login version, is applied in place so the
+        // CloudFront distribution a DNS alias points at survives, as on AWS.
         UserPoolDomain existing = ctx.isUpdate() ? findExisting(ctx.priorPhysicalId()) : null;
         UserPoolDomain provisioned;
         if (existing != null && domain.equals(existing.getDomain()) && userPoolId.equals(existing.getUserPoolId())) {
@@ -115,7 +117,12 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         Map<String, Object> config = new LinkedHashMap<>();
-        resolved.fields().forEachRemaining(field -> config.put(field.getKey(), field.getValue().asText()));
+        resolved.fields().forEachRemaining(field -> {
+            // A JSON null is an absent value, not the text "null" that asText() would make of it.
+            if (!field.getValue().isNull()) {
+                config.put(field.getKey(), field.getValue().asText());
+            }
+        });
         return config;
     }
 

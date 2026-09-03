@@ -470,8 +470,16 @@ public class CognitoJsonHandler {
                 : null;
     }
 
+    /** Absent or null yields null; a value of another JSON type is a SerializationException, as on AWS. */
     private static Integer managedLoginVersion(JsonNode request) {
-        return request.has("ManagedLoginVersion") ? request.path("ManagedLoginVersion").asInt() : null;
+        JsonNode node = request.get("ManagedLoginVersion");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber()) {
+            throw new AwsException("SerializationException", "Expected integer or null", 400);
+        }
+        return node.intValue();
     }
 
     /** CreateUserPoolDomain and UpdateUserPoolDomain share this result shape. */

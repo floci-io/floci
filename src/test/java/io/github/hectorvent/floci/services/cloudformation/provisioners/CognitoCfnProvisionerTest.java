@@ -131,6 +131,20 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
+    void customDomainConfigSkipsNullValues() {
+        // A JSON null must not reach the service as the text "null", where it would pass for an ARN.
+        when(cognito.createUserPoolDomain(any(), any(), any(), any())).thenReturn(domain(DOMAIN, POOL_ID, CLOUDFRONT));
+        ObjectNode props = mapper.createObjectNode().put("Domain", DOMAIN).put("UserPoolId", POOL_ID);
+        props.putObject("CustomDomainConfig")
+                .putNull("CertificateArn")
+                .put("SecurityPolicy", "TLS_V1_2_2021");
+
+        provisioner.provision(resource(), props, ctx());
+
+        verify(cognito).createUserPoolDomain(DOMAIN, POOL_ID, Map.of("SecurityPolicy", "TLS_V1_2_2021"), null);
+    }
+
+    @Test
     void requiresDomainAndUserPoolId() {
         assertThrows(IllegalArgumentException.class, () -> provisioner.provision(
                 resource(), mapper.createObjectNode().put("UserPoolId", POOL_ID), ctx()));
@@ -182,18 +196,23 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
-    void updateWithChangedUserPoolReplacesTheDomainAndRemovesItFromThePriorPool() {
+    void updateWithChangedUserPoolFailsWhileTheDomainNameIsTaken() {
+        // CloudFormation creates the replacement before deleting the original, and domain names are
+        // unique across pools, so moving an unchanged domain to another pool fails on AWS too. The
+        // original is left untouched for the rollback.
         String otherPool = "us-east-1_ZzZzZzZzZ";
         when(cognito.describeUserPoolDomain(DOMAIN)).thenReturn(domain(DOMAIN, otherPool, CLOUDFRONT));
         when(cognito.createUserPoolDomain(DOMAIN, POOL_ID, Map.of("CertificateArn", CERTIFICATE_ARN), 2))
-                .thenReturn(domain(DOMAIN, POOL_ID, CLOUDFRONT));
+                .thenThrow(new AwsException("InvalidParameterException",
+                        "Domain " + DOMAIN + " already associated with another user pool", 400));
         StackResource r = resource(DOMAIN, Map.of("UserPoolId", otherPool, "CloudFrontDistribution", CLOUDFRONT));
 
-        provisioner.provision(r, customDomainProps(CERTIFICATE_ARN), ctx(DOMAIN));
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, customDomainProps(CERTIFICATE_ARN), ctx(DOMAIN)));
 
+        assertEquals("InvalidParameterException", failure.getErrorCode());
         verify(cognito, never()).updateUserPoolDomain(any(), any(), any(), any());
-        verify(cognito).deleteUserPoolDomain(DOMAIN, otherPool);
-        assertEquals(Map.of("UserPoolId", POOL_ID, "CloudFrontDistribution", CLOUDFRONT), r.getAttributes());
+        verify(cognito, never()).deleteUserPoolDomain(any(), any());
     }
 
     @Test
