@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
@@ -14,8 +16,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -3274,5 +3278,67 @@ class DynamoDbServiceTest {
 
         JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
         assertEquals("2", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void batchWriteItem_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = org.mockito.Mockito.mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> writeRequests = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "u" + i));
+            ObjectNode putReq = mapper.createObjectNode();
+            putReq.set("Item", item);
+            ObjectNode req = mapper.createObjectNode();
+            req.set("PutRequest", putReq);
+            writeRequests.add(req);
+        }
+
+        serviceWithMock.batchWriteItem(Map.of("Users", writeRequests), "us-east-1");
+
+        // Verify that itemStore.put was called exactly once for the table, not 5 times
+        org.mockito.Mockito.verify(mockItemStore, org.mockito.Mockito.times(1))
+                .put(org.mockito.ArgumentMatchers.eq("us-east-1::Users"), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void transactWriteItems_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = org.mockito.Mockito.mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> transactItems = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "tx-u" + i));
+            ObjectNode put = mapper.createObjectNode();
+            put.put("TableName", "Users");
+            put.set("Item", item);
+            ObjectNode txItem = mapper.createObjectNode();
+            txItem.set("Put", put);
+            transactItems.add(txItem);
+        }
+
+        serviceWithMock.transactWriteItems(transactItems, "us-east-1");
+
+        org.mockito.Mockito.verify(mockItemStore, org.mockito.Mockito.times(1))
+                .put(org.mockito.ArgumentMatchers.eq("us-east-1::Users"), org.mockito.ArgumentMatchers.any());
     }
 }
