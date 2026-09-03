@@ -62,7 +62,7 @@ public class AcmCfnProvisioner implements CfnResourceProvisioner {
             arn = acmService.requestCertificate(domainName, sans, validationMethod, null,
                     keyAlgorithm, null, null, tags, ctx.region()).getArn();
             if (existing != null) {
-                delete(r.getResourceType(), existing.getArn(), ctx.region());
+                deletePriorOrUnwind(r, existing.getArn(), arn, ctx.region());
             }
         }
         r.setPhysicalId(arn);
@@ -73,6 +73,24 @@ public class AcmCfnProvisioner implements CfnResourceProvisioner {
     public void delete(String resourceType, String physicalId, String region) {
         CfnDeletes.safeDelete("certificate", physicalId,
                 () -> acmService.deleteCertificate(physicalId, region), "ResourceNotFoundException");
+    }
+
+    /**
+     * Removes the certificate a replacement supersedes. If that fails (ResourceInUseException, for
+     * one), the update fails and CloudFormationService restores the previous StackResource without
+     * ever learning the new ARN, so the certificate this attempt created is removed here and the
+     * rollback walker is told the prior one is intact.
+     */
+    private void deletePriorOrUnwind(StackResource r, String priorArn, String newArn, String region) {
+        try {
+            delete(r.getResourceType(), priorArn, region);
+        } catch (AwsException failure) {
+            LOG.warnv("Could not delete certificate {0} replaced by {1}, removing the replacement: {2}",
+                    priorArn, newArn, failure.getMessage());
+            acmService.deleteCertificate(newArn, region);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+            throw failure;
+        }
     }
 
     private Certificate findExisting(String arn, String region) {

@@ -18,6 +18,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -151,6 +152,52 @@ class AcmCfnProvisionerTest {
         verify(acm).deleteCertificate(ARN, REGION);
         assertEquals(newArn, r.getPhysicalId());
         assertEquals(Map.of("CertificateArn", newArn), r.getAttributes());
+    }
+
+    @Test
+    void replacementThatCannotDeleteThePriorCertificateRemovesTheNewOneAndFails() {
+        // CloudFormationService restores the previous StackResource when an update fails and never
+        // learns the new ARN, so the certificate this attempt created must not be left behind.
+        String newArn = "arn:aws:acm:us-east-1:000000000000:certificate/99999999-2222-3333-4444-555555555555";
+        Certificate stored = certificate(ARN, "old.example.com");
+        stored.setSubjectAlternativeNames(List.of("old.example.com"));
+        stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
+        when(acm.requestCertificate(eq("new.example.com"), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
+                .thenReturn(certificate(newArn, "new.example.com"));
+        doThrow(new AwsException("ResourceInUseException", "in use", 409))
+                .when(acm).deleteCertificate(ARN, REGION);
+        StackResource r = resource();
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
+                r, mapper.createObjectNode().put("DomainName", "new.example.com"), ctx(ARN)));
+
+        assertEquals("ResourceInUseException", failure.getErrorCode());
+        verify(acm).deleteCertificate(newArn, REGION);
+        assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        assertNull(r.getPhysicalId());
+    }
+
+    @Test
+    void updateChangingOnlyValidationMethodKeepsTheCertificate() {
+        // ValidationMethod is writeOnly in the registry schema and "No interruption" in the AWS
+        // docs: it matters only while a certificate is being issued, and ACM has no call to change
+        // it afterwards. So, as on AWS, an issued certificate is neither replaced nor touched.
+        Certificate stored = certificate(ARN, "api.example.com");
+        stored.setSubjectAlternativeNames(List.of("api.example.com"));
+        stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
+        stored.setValidationMethod(ValidationMethod.DNS);
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("ValidationMethod", "EMAIL");
+
+        provisioner.provision(r, props, ctx(ARN));
+
+        verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(acm, never()).deleteCertificate(any(), any());
+        assertEquals(ARN, r.getPhysicalId());
     }
 
     @Test
