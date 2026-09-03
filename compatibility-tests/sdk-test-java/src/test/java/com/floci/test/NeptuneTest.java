@@ -8,16 +8,20 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.neptune.NeptuneClient;
-import software.amazon.awssdk.services.neptune.model.CreateDbClusterRequest;
+import software.amazon.awssdk.services.neptune.model.AddRoleToDbClusterRequest;
+import software.amazon.awssdk.services.neptune.model.AddTagsToResourceRequest;import software.amazon.awssdk.services.neptune.model.CreateDbClusterRequest;
 import software.amazon.awssdk.services.neptune.model.CreateDbInstanceRequest;
 import software.amazon.awssdk.services.neptune.model.DeleteDbClusterRequest;
 import software.amazon.awssdk.services.neptune.model.DeleteDbInstanceRequest;
 import software.amazon.awssdk.services.neptune.model.DescribeDbClustersRequest;
 import software.amazon.awssdk.services.neptune.model.DescribeDbInstancesRequest;
 import software.amazon.awssdk.services.neptune.model.InvalidDbClusterStateException;
-import software.amazon.awssdk.services.neptune.model.ModifyDbClusterRequest;
+import software.amazon.awssdk.services.neptune.model.ListTagsForResourceRequest;import software.amazon.awssdk.services.neptune.model.ModifyDbClusterRequest;
 import software.amazon.awssdk.services.neptune.model.ModifyDbInstanceRequest;
-
+import software.amazon.awssdk.services.neptune.model.NeptuneException;
+import software.amazon.awssdk.services.neptune.model.RemoveRoleFromDbClusterRequest;
+import software.amazon.awssdk.services.neptune.model.RemoveTagsFromResourceRequest;
+import software.amazon.awssdk.services.neptune.model.Tag;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -58,6 +62,7 @@ class NeptuneTest {
         var response = neptune.createDBCluster(CreateDbClusterRequest.builder()
                 .dbClusterIdentifier(CLUSTER_ID)
                 .engine("neptune")
+                .tags(Tag.builder().key("Name").value(CLUSTER_ID).build())
                 .build());
 
         var cluster = response.dbCluster();
@@ -66,6 +71,14 @@ class NeptuneTest {
         assertThat(cluster.status()).isEqualTo("available");
         assertThat(cluster.dbClusterArn()).startsWith("arn:aws:neptune:");
         assertThat(cluster.port()).isGreaterThan(0);
+        assertThat(cluster.storageEncrypted()).isFalse();
+        assertThat(cluster.backupRetentionPeriod()).isEqualTo(1);
+        assertThat(cluster.availabilityZones()).hasSize(1);
+        assertThat(cluster.dbClusterParameterGroup()).isEqualTo("default.neptune1.3");
+        assertThat(cluster.dbSubnetGroup()).isEqualTo("default");
+        assertThat(cluster.deletionProtection()).isFalse();
+        assertThat(cluster.preferredBackupWindow()).isNotBlank();
+        assertThat(cluster.preferredMaintenanceWindow()).isNotBlank();
     }
 
     @Test
@@ -106,6 +119,77 @@ class NeptuneTest {
 
     @Test
     @Order(5)
+    @DisplayName("Tags round-trip through ListTagsForResource, AddTagsToResource and RemoveTagsFromResource")
+    void tagsRoundTrip() {
+        String arn = neptune.describeDBClusters(DescribeDbClustersRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID).build()).dbClusters().get(0).dbClusterArn();
+
+        var created = neptune.listTagsForResource(ListTagsForResourceRequest.builder().resourceName(arn).build());
+        assertThat(created.tagList()).containsExactly(Tag.builder().key("Name").value(CLUSTER_ID).build());
+
+        neptune.addTagsToResource(AddTagsToResourceRequest.builder()
+                .resourceName(arn)
+                .tags(Tag.builder().key("team").value("graph").build())
+                .build());
+        neptune.removeTagsFromResource(RemoveTagsFromResourceRequest.builder()
+                .resourceName(arn)
+                .tagKeys("Name")
+                .build());
+
+        var updated = neptune.listTagsForResource(ListTagsForResourceRequest.builder().resourceName(arn).build());
+        assertThat(updated.tagList()).containsExactly(Tag.builder().key("team").value("graph").build());
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("AddRoleToDBCluster and RemoveRoleFromDBCluster maintain AssociatedRoles")
+    void rolesRoundTrip() {
+        String roleArn = "arn:aws:iam::000000000000:role/" + CLUSTER_ID;
+
+        neptune.addRoleToDBCluster(AddRoleToDbClusterRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID).roleArn(roleArn).build());
+        var withRole = neptune.describeDBClusters(DescribeDbClustersRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID).build()).dbClusters().get(0);
+        assertThat(withRole.associatedRoles()).hasSize(1);
+        assertThat(withRole.associatedRoles().get(0).roleArn()).isEqualTo(roleArn);
+        assertThat(withRole.associatedRoles().get(0).status()).isEqualTo("ACTIVE");
+
+        neptune.removeRoleFromDBCluster(RemoveRoleFromDbClusterRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID).roleArn(roleArn).build());
+        var withoutRole = neptune.describeDBClusters(DescribeDbClustersRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID).build()).dbClusters().get(0);
+        assertThat(withoutRole.associatedRoles()).isEmpty();
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("ModifyDBCluster applies backup and protection settings and protection blocks delete")
+    void modifySettingsAndDeletionProtection() {
+        var modified = neptune.modifyDBCluster(ModifyDbClusterRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID)
+                .backupRetentionPeriod(7)
+                .deletionProtection(true)
+                .build()).dbCluster();
+        assertThat(modified.backupRetentionPeriod()).isEqualTo(7);
+        assertThat(modified.deletionProtection()).isTrue();
+
+        assertThatThrownBy(() -> neptune.deleteDBCluster(DeleteDbClusterRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID)
+                .skipFinalSnapshot(true)
+                .build()))
+                .isInstanceOf(NeptuneException.class)
+                .hasMessageContaining("deletion protection");
+
+        var unprotected = neptune.modifyDBCluster(ModifyDbClusterRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID)
+                .deletionProtection(false)
+                .build()).dbCluster();
+        assertThat(unprotected.deletionProtection()).isFalse();
+        assertThat(unprotected.backupRetentionPeriod()).isEqualTo(7);
+    }
+
+    @Test
+    @Order(15)
     @DisplayName("CreateDBInstance returns valid instance descriptor")
     void createInstance() {
         var response = neptune.createDBInstance(CreateDbInstanceRequest.builder()
@@ -123,7 +207,7 @@ class NeptuneTest {
     }
 
     @Test
-    @Order(6)
+    @Order(16)
     @DisplayName("DescribeDBInstances returns created instance")
     void describeInstances() {
         var response = neptune.describeDBInstances(DescribeDbInstancesRequest.builder()
@@ -132,10 +216,15 @@ class NeptuneTest {
 
         assertThat(response.dbInstances()).hasSize(1);
         assertThat(response.dbInstances().get(0).dbInstanceIdentifier()).isEqualTo(INSTANCE_ID);
+
+        var cluster = neptune.describeDBClusters(DescribeDbClustersRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID).build()).dbClusters().get(0);
+        assertThat(cluster.dbClusterMembers()).hasSize(1);
+        assertThat(cluster.dbClusterMembers().get(0).dbInstanceIdentifier()).isEqualTo(INSTANCE_ID);
     }
 
     @Test
-    @Order(7)
+    @Order(17)
     @DisplayName("ModifyDBInstance updates instance class")
     void modifyInstance() {
         var response = neptune.modifyDBInstance(ModifyDbInstanceRequest.builder()
@@ -147,7 +236,7 @@ class NeptuneTest {
     }
 
     @Test
-    @Order(8)
+    @Order(18)
     @DisplayName("DeleteDBCluster fails when instances still exist")
     void deleteClusterWithInstancesFails() {
         assertThatThrownBy(() ->
@@ -159,7 +248,7 @@ class NeptuneTest {
     }
 
     @Test
-    @Order(9)
+    @Order(19)
     @DisplayName("DeleteDBInstance removes instance")
     void deleteInstance() {
         neptune.deleteDBInstance(DeleteDbInstanceRequest.builder()
@@ -168,7 +257,7 @@ class NeptuneTest {
     }
 
     @Test
-    @Order(10)
+    @Order(20)
     @DisplayName("DeleteDBCluster removes cluster after instances are gone")
     void deleteCluster() {
         neptune.deleteDBCluster(DeleteDbClusterRequest.builder()
