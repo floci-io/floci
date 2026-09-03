@@ -391,6 +391,11 @@ account key carries no identity policies of its own.
 - `DateEquals`, `DateNotEquals`, `DateLessThan`, `DateGreaterThan` (and Equals variants)
 - `Bool`, `IpAddress`, `NotIpAddress`, `Null`
 - Supports `...IfExists` variants for all operators.
+- Set operators `ForAllValues:` and `ForAnyValue:` over multi-valued condition keys, in AWS's
+  own spelling (the prefix match is case-sensitive). They compose with `IfExists`
+  (`ForAnyValue:StringEqualsIfExists`). `ForAllValues:` over an empty set matches vacuously
+  and `ForAnyValue:` over an empty set does not match, so pair `ForAllValues:` with
+  `"Null":{"<key>":"false"}` as you would on AWS.
 
 #### Condition keys floci populates
 
@@ -403,6 +408,19 @@ floci populates:
   `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),
   matching the ARN shape AWS itself reports for the account root. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `dynamodb:LeadingKeys`, `dynamodb:Attributes`, `dynamodb:Select` — from the DynamoDB request
+  body, for `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchGetItem` and
+  `BatchWriteItem` (`dynamodb:Select` for `Query` and `Scan`). `LeadingKeys` holds the
+  partition-key values the request names — from `Key`, `Item`, the `KeyConditionExpression`
+  equality, or each `RequestItems` entry. `Attributes` holds the attribute names the request
+  touches. Each key is **omitted** when it cannot be determined (unknown table, a `Key` that
+  omits the partition attribute, an unparseable `KeyConditionExpression`, a multi-table batch),
+  so a policy scoping access through it denies the request rather than allowing an unproven one.
+
+  **Consequence:** with enforcement on and access scoped purely through `dynamodb:LeadingKeys`,
+  a malformed request — a `GetItem` whose `Key` omits the partition attribute — is answered with
+  `AccessDeniedException` instead of the `ValidationException` DynamoDB would return. Failing
+  closed is the correct direction for a security boundary.
 
 **Any other condition key is absent from the request context.** A plain (non-`IfExists`)
 operator on an absent key makes the whole statement *not apply* — it neither matches nor
@@ -414,7 +432,9 @@ being bounded by SCPs (below): both forms of root enforcement now agree.
 so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a
 different session name. This matches what `sts:GetCallerIdentity` already reports.
 
-**Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource policy).
+**Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource
+policy), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the
+PartiQL operations.
 
 ### Assumed roles
 
