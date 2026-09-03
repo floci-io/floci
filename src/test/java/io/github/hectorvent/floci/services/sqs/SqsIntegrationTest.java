@@ -724,4 +724,34 @@ class SqsIntegrationTest {
             .when().post("/");
         }
     }
+
+    @Test
+    void receiveMessageRejectsInvalidWaitTimeSeconds() {
+        String rangeQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-wait-time-range-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            for (String invalid : new String[]{"-1", "21", "abc"}) {
+                given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ReceiveMessage")
+                    .formParam("QueueUrl", rangeQueueUrl)
+                    .formParam("WaitTimeSeconds", invalid)
+                .when().post("/").then()
+                    .statusCode(400)
+                    .body(containsString("<Code>InvalidParameterValue</Code>"))
+                    .body(containsString("WaitTimeSeconds"));
+            }
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", rangeQueueUrl)
+            .when().post("/");
+        }
+    }
 }

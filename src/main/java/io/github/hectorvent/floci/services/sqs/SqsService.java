@@ -35,6 +35,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SqsService.class);
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
+    private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
@@ -633,7 +634,7 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     public List<Message> receiveMessage(String queueUrl, int maxMessages, int visibilityTimeout,
-                                        int waitTimeSeconds, String region) {
+                                        Integer waitTimeSeconds, String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -641,6 +642,11 @@ public class SqsService implements Resettable, ResourceProvider {
 
         if (maxMessages < 1 || maxMessages > 10) {
             maxMessages = 1;
+        }
+        if (waitTimeSeconds != null && (waitTimeSeconds < 0 || waitTimeSeconds > MAX_RECEIVE_WAIT_TIME_SECONDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + waitTimeSeconds + " for parameter WaitTimeSeconds is invalid. "
+                            + "Reason: Must be >= 0 and <= " + MAX_RECEIVE_WAIT_TIME_SECONDS + ".", 400);
         }
 
         long start = System.currentTimeMillis();
@@ -685,11 +691,13 @@ public class SqsService implements Resettable, ResourceProvider {
         }
     }
 
-    private int resolveWaitTimeSeconds(Queue queue, int requestedWaitTimeSeconds) {
-        if (requestedWaitTimeSeconds >= 0) {
+    private int resolveWaitTimeSeconds(Queue queue, Integer requestedWaitTimeSeconds) {
+        if (requestedWaitTimeSeconds != null) {
             return requestedWaitTimeSeconds;
         }
-        return parseNonNegativeSecondsAttribute(queue.getAttributes().get("ReceiveMessageWaitTimeSeconds"));
+        int queueWaitTimeSeconds = parseNonNegativeSecondsAttribute(
+                queue.getAttributes().get("ReceiveMessageWaitTimeSeconds"));
+        return Math.min(queueWaitTimeSeconds, MAX_RECEIVE_WAIT_TIME_SECONDS);
     }
 
     private RedrivePolicy getOrParseRedrivePolicy(Queue queue, String storageKey) {

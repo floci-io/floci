@@ -82,7 +82,7 @@ curl -X DELETE "http://localhost:4566/_aws/sqs/messages?QueueUrl=$QUEUE_URL"
 
 ## Long Polling
 
-`ReceiveMessage` waits up to `WaitTimeSeconds` for a message to arrive and returns as soon as one is available. When the request omits `WaitTimeSeconds`, the queue's `ReceiveMessageWaitTimeSeconds` attribute applies (default `0`, short polling), matching AWS.
+`ReceiveMessage` waits up to `WaitTimeSeconds` (0 to 20) for a message to arrive and returns as soon as one is available. Values outside that range are rejected with `InvalidParameterValue`. When the request omits `WaitTimeSeconds`, the queue's `ReceiveMessageWaitTimeSeconds` attribute applies (default `0`, short polling), matching AWS.
 
 ```bash
 # Enable long polling for every consumer of the queue

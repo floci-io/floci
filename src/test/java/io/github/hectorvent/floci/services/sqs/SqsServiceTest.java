@@ -1076,7 +1076,7 @@ class SqsServiceTest {
                 Map.of("ReceiveMessageWaitTimeSeconds", "1"), region);
 
         long start = System.nanoTime();
-        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, -1, region);
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, null, region);
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
         assertTrue(result.isEmpty());
@@ -1106,12 +1106,32 @@ class SqsServiceTest {
         assertEquals("0", queue.getAttributes().get("ReceiveMessageWaitTimeSeconds"));
 
         long start = System.nanoTime();
-        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, -1, region);
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, null, region);
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
         assertTrue(result.isEmpty());
         assertTrue(elapsedMs < 1000,
                 "A queue without ReceiveMessageWaitTimeSeconds must short poll, but returned after " + elapsedMs + "ms");
+    }
+
+    @Test
+    void receiveMessageRejectsWaitTimeOutsideAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-longpoll-range",
+                Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
+        String queueUrl = queue.getQueueUrl();
+
+        for (int invalid : new int[]{-1, 21}) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> sqsService.receiveMessage(queueUrl, 1, 30, invalid, region));
+            assertEquals("InvalidParameterValue", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("WaitTimeSeconds"),
+                    "The error must name the offending parameter, got: " + ex.getMessage());
+        }
+
+        sqsService.sendMessage(queueUrl, "in-range", 0, region);
+        List<Message> result = sqsService.receiveMessage(queueUrl, 1, 30, 20, region);
+        assertEquals(1, result.size(), "WaitTimeSeconds=20 is the AWS maximum and must be accepted");
     }
 
     @Test
@@ -1125,7 +1145,7 @@ class SqsServiceTest {
         final var result = new AtomicReference<List<Message>>();
         Thread poller = new Thread(() -> {
             pollerEntered.countDown();
-            result.set(sqsService.receiveMessage(queueUrl, 1, 30, -1, region));
+            result.set(sqsService.receiveMessage(queueUrl, 1, 30, null, region));
         });
         poller.start();
         assertTrue(pollerEntered.await(5, TimeUnit.SECONDS));
