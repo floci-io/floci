@@ -61,14 +61,19 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         String region = ctx.region();
 
-        IotDomainConfiguration existing = ctx.reusesPriorEntity(name) ? findExisting(name, region) : null;
+        // The configuration this resource had before, if any. It is kept when its name and the
+        // createOnly properties are unchanged, and removed once its replacement exists otherwise:
+        // there is no generic replacement flow, so a renamed or replaced configuration must not
+        // outlive the stack that created it.
+        IotDomainConfiguration prior = ctx.isUpdate() ? findExisting(ctx.priorPhysicalId(), region) : null;
+        boolean sameConfiguration = prior != null && name.equals(prior.getDomainConfigurationName());
         IotDomainConfiguration provisioned;
-        if (existing != null && sameCreateOnlyProperties(existing, request)) {
+        if (sameConfiguration && sameCreateOnlyProperties(prior, request)) {
             provisioned = domainConfigurationService.updateDomainConfiguration(
-                    name, updateBody(request, status, existing), region);
-            reconcileTags(provisioned.getDomainConfigurationArn(), existing.getTags(), tags);
+                    name, updateBody(request, status, prior), region);
+            reconcileTags(provisioned.getDomainConfigurationArn(), prior.getTags(), tags);
         } else {
-            if (existing != null && (explicitName == null || explicitName.isBlank())) {
+            if (sameConfiguration && (explicitName == null || explicitName.isBlank())) {
                 // A createOnly property changed under a name CloudFormation generated, so the
                 // replacement gets a fresh generated name, as it does on AWS. Under an explicit
                 // name the create below fails with ResourceAlreadyExistsException, also as on AWS.
@@ -81,8 +86,8 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
             if ("DISABLED".equals(status)) {
                 provisioned = domainConfigurationService.updateDomainConfiguration(name, statusBody("DISABLED"), region);
             }
-            if (existing != null) {
-                delete(r.getResourceType(), existing.getDomainConfigurationName(), region);
+            if (prior != null) {
+                delete(r.getResourceType(), prior.getDomainConfigurationName(), region);
             }
         }
         r.setPhysicalId(name);
@@ -164,7 +169,10 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
                 && desiredCertificates.equals(storedCertificates);
     }
 
-    /** The in-place update: everything the API lets UpdateDomainConfiguration change. */
+    /**
+     * The in-place update: everything the API lets UpdateDomainConfiguration change. A template
+     * without DomainConfigurationStatus leaves the status alone, as the AWS handler does.
+     */
     private static ObjectNode updateBody(ObjectNode request, String status, IotDomainConfiguration existing) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
         request.fields().forEachRemaining(field -> {
@@ -172,7 +180,9 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
                 body.set(field.getKey(), field.getValue());
             }
         });
-        body.put("domainConfigurationStatus", status == null ? "ENABLED" : status);
+        if (status != null) {
+            body.put("domainConfigurationStatus", status);
+        }
         if (!request.has("authorizerConfig") && existing.getAuthorizerConfig() != null) {
             body.put("removeAuthorizerConfig", true);
         }

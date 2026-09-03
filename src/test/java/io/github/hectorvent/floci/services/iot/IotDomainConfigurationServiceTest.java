@@ -129,6 +129,36 @@ class IotDomainConfigurationServiceTest {
     }
 
     @Test
+    void createStoresATagWithoutAValueAsEmpty() {
+        ObjectNode request = customDomainRequest();
+        request.putArray("tags").addObject().put("Key", "env");
+
+        assertEquals(Map.of("env", ""), service.createDomainConfiguration("iot-domain", request, REGION).getTags());
+    }
+
+    @Test
+    void createRejectsAStructuredValueWhereAStringIsExpected() {
+        ObjectNode request = customDomainRequest();
+        request.putObject("domainName");
+
+        assertAwsError("InvalidRequestException", 400,
+                () -> service.createDomainConfiguration("iot-domain", request, REGION));
+        assertAwsError("ResourceNotFoundException", 404, () -> service.describeDomainConfiguration("iot-domain", REGION));
+    }
+
+    @Test
+    void updateRejectsAnAuthorizerConfigThatIsNotAnObjectAndKeepsTheStoredOne() {
+        ObjectNode create = customDomainRequest();
+        create.putObject("authorizerConfig").put("defaultAuthorizerName", "first");
+        service.createDomainConfiguration("iot-domain", create, REGION);
+
+        assertAwsError("InvalidRequestException", 400, () -> service.updateDomainConfiguration("iot-domain",
+                mapper.createObjectNode().put("authorizerConfig", "not-an-object"), REGION));
+        assertEquals(new IotDomainConfiguration.AuthorizerConfig("first", null),
+                service.describeDomainConfiguration("iot-domain", REGION).getAuthorizerConfig());
+    }
+
+    @Test
     void createRejectsADuplicateName() {
         service.createDomainConfiguration("iot-domain", customDomainRequest(), REGION);
 
@@ -196,7 +226,7 @@ class IotDomainConfigurationServiceTest {
     void updateFlipsTheStatusAndRecordsWhenItChanged() throws InterruptedException {
         Instant createdAt = service.createDomainConfiguration("iot-domain", customDomainRequest(), REGION)
                 .getLastStatusChangeDate();
-        Thread.sleep(2);
+        Thread.sleep(10);
 
         IotDomainConfiguration updated = service.updateDomainConfiguration("iot-domain",
                 mapper.createObjectNode().put("domainConfigurationStatus", "DISABLED"), REGION);
@@ -210,7 +240,7 @@ class IotDomainConfigurationServiceTest {
     void updateWithTheSameStatusKeepsLastStatusChangeDate() throws InterruptedException {
         Instant createdAt = service.createDomainConfiguration("iot-domain", customDomainRequest(), REGION)
                 .getLastStatusChangeDate();
-        Thread.sleep(2);
+        Thread.sleep(10);
 
         IotDomainConfiguration updated = service.updateDomainConfiguration("iot-domain",
                 mapper.createObjectNode().put("domainConfigurationStatus", "ENABLED"), REGION);

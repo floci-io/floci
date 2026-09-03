@@ -69,7 +69,7 @@ public class IotDomainConfigurationService {
         }
         JsonNode body = request == null ? JsonNodeFactory.instance.objectNode() : request;
         String domainName = text(body, "domainName");
-        List<String> certificateArns = textList(body.path("serverCertificateArns"));
+        List<String> certificateArns = textList(body, "serverCertificateArns");
         if (certificateArns.size() > 1) {
             throw invalid("serverCertificateArns can hold at most one certificate");
         }
@@ -110,26 +110,32 @@ public class IotDomainConfigurationService {
     public IotDomainConfiguration updateDomainConfiguration(String name, JsonNode request, String region) {
         IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
         JsonNode body = request == null ? JsonNodeFactory.instance.objectNode() : request;
-        // Validate everything before touching the stored record so a bad value changes nothing.
+        // Parse and validate everything before touching the stored record, so a bad value changes nothing.
         String status = enumValue(body, "domainConfigurationStatus", STATUSES, null);
         String authenticationType = enumValue(body, "authenticationType", AUTHENTICATION_TYPES, null);
         String applicationProtocol = enumValue(body, "applicationProtocol", APPLICATION_PROTOCOLS, null);
+        AuthorizerConfig authorizerConfig = parseAuthorizerConfig(body.path("authorizerConfig"));
+        boolean removeAuthorizerConfig = body.path("removeAuthorizerConfig").asBoolean(false);
+        TlsConfig tlsConfig = present(body.path("tlsConfig")) ? parseTlsConfig(body.path("tlsConfig")) : null;
+        ServerCertificateConfig serverCertificateConfig = present(body.path("serverCertificateConfig"))
+                ? parseServerCertificateConfig(body.path("serverCertificateConfig")) : null;
+        ClientCertificateConfig clientCertificateConfig = parseClientCertificateConfig(body.path("clientCertificateConfig"));
 
-        if (body.hasNonNull("authorizerConfig")) {
-            configuration.setAuthorizerConfig(parseAuthorizerConfig(body.get("authorizerConfig")));
+        if (authorizerConfig != null) {
+            configuration.setAuthorizerConfig(authorizerConfig);
         }
-        if (body.path("removeAuthorizerConfig").asBoolean(false)) {
+        if (removeAuthorizerConfig) {
             configuration.setAuthorizerConfig(null);
         }
         if (status != null && !status.equals(configuration.getDomainConfigurationStatus())) {
             configuration.setDomainConfigurationStatus(status);
             configuration.setLastStatusChangeDate(Instant.now());
         }
-        if (body.hasNonNull("tlsConfig")) {
-            configuration.setTlsConfig(parseTlsConfig(body.get("tlsConfig")));
+        if (tlsConfig != null) {
+            configuration.setTlsConfig(tlsConfig);
         }
-        if (body.hasNonNull("serverCertificateConfig")) {
-            configuration.setServerCertificateConfig(parseServerCertificateConfig(body.get("serverCertificateConfig")));
+        if (serverCertificateConfig != null) {
+            configuration.setServerCertificateConfig(serverCertificateConfig);
         }
         if (authenticationType != null) {
             configuration.setAuthenticationType(authenticationType);
@@ -137,8 +143,8 @@ public class IotDomainConfigurationService {
         if (applicationProtocol != null) {
             configuration.setApplicationProtocol(applicationProtocol);
         }
-        if (body.hasNonNull("clientCertificateConfig")) {
-            configuration.setClientCertificateConfig(parseClientCertificateConfig(body.get("clientCertificateConfig")));
+        if (clientCertificateConfig != null) {
+            configuration.setClientCertificateConfig(clientCertificateConfig);
         }
         store.put(key(region, name), configuration);
         return configuration;
@@ -172,39 +178,36 @@ public class IotDomainConfigurationService {
     }
 
     public Map<String, String> listTagsForResource(String resourceArn) {
-        return new TreeMap<>(storedByArn(resourceArn).getTags());
+        return new TreeMap<>(storedByArn(resourceArn).configuration().getTags());
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
-        IotDomainConfiguration configuration = storedByArn(resourceArn);
-        Map<String, String> updated = new TreeMap<>(configuration.getTags());
+        Stored stored = storedByArn(resourceArn);
+        Map<String, String> updated = new TreeMap<>(stored.configuration().getTags());
         updated.putAll(tags);
-        configuration.setTags(updated);
-        store.put(keyForArn(resourceArn, configuration), configuration);
+        stored.configuration().setTags(updated);
+        store.put(stored.key(), stored.configuration());
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys) {
-        IotDomainConfiguration configuration = storedByArn(resourceArn);
-        Map<String, String> updated = new TreeMap<>(configuration.getTags());
+        Stored stored = storedByArn(resourceArn);
+        Map<String, String> updated = new TreeMap<>(stored.configuration().getTags());
         tagKeys.forEach(updated::remove);
-        configuration.setTags(updated);
-        store.put(keyForArn(resourceArn, configuration), configuration);
+        stored.configuration().setTags(updated);
+        store.put(stored.key(), stored.configuration());
     }
 
     /** The configuration an ARN names; the random suffix has to match too, as it does on AWS. */
-    private IotDomainConfiguration storedByArn(String resourceArn) {
+    private Stored storedByArn(String resourceArn) {
         AwsArnUtils.Arn arn = parseDomainConfigurationArn(resourceArn);
         String rest = arn.resource().substring("domainconfiguration/".length());
         int slash = rest.indexOf('/');
-        String name = slash < 0 ? rest : rest.substring(0, slash);
-        return store.get(key(arn.region(), name))
+        String storeKey = key(arn.region(), slash < 0 ? rest : rest.substring(0, slash));
+        return store.get(storeKey)
                 .filter(configuration -> resourceArn.equals(configuration.getDomainConfigurationArn()))
+                .map(configuration -> new Stored(storeKey, configuration))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource not found: " + resourceArn, 404));
-    }
-
-    private static String keyForArn(String resourceArn, IotDomainConfiguration configuration) {
-        return key(parseDomainConfigurationArn(resourceArn).region(), configuration.getDomainConfigurationName());
     }
 
     private static AwsArnUtils.Arn parseDomainConfigurationArn(String resourceArn) {
@@ -233,30 +236,37 @@ public class IotDomainConfigurationService {
     }
 
     private static AuthorizerConfig parseAuthorizerConfig(JsonNode node) {
-        if (!node.isObject()) {
+        if (!present(node)) {
             return null;
         }
+        requireObject(node, "authorizerConfig");
         return new AuthorizerConfig(text(node, "defaultAuthorizerName"), bool(node, "allowAuthorizerOverride"));
     }
 
     private static TlsConfig parseTlsConfig(JsonNode node) {
-        String securityPolicy = node.isObject() ? text(node, "securityPolicy") : null;
+        String securityPolicy = null;
+        if (present(node)) {
+            requireObject(node, "tlsConfig");
+            securityPolicy = text(node, "securityPolicy");
+        }
         return new TlsConfig(securityPolicy == null ? DEFAULT_SECURITY_POLICY : securityPolicy);
     }
 
     private static ServerCertificateConfig parseServerCertificateConfig(JsonNode node) {
-        if (!node.isObject()) {
+        if (!present(node)) {
             return new ServerCertificateConfig(false, null, null);
         }
+        requireObject(node, "serverCertificateConfig");
         Boolean enableOcspCheck = bool(node, "enableOCSPCheck");
         return new ServerCertificateConfig(enableOcspCheck != null && enableOcspCheck,
                 text(node, "ocspLambdaArn"), text(node, "ocspAuthorizedResponderArn"));
     }
 
     private static ClientCertificateConfig parseClientCertificateConfig(JsonNode node) {
-        if (!node.isObject()) {
+        if (!present(node)) {
             return null;
         }
+        requireObject(node, "clientCertificateConfig");
         return new ClientCertificateConfig(text(node, "clientCertificateCallbackArn"));
     }
 
@@ -286,21 +296,57 @@ public class IotDomainConfigurationService {
         return value;
     }
 
+    private static boolean present(JsonNode node) {
+        return node != null && !node.isMissingNode() && !node.isNull();
+    }
+
+    private static void requireObject(JsonNode node, String field) {
+        if (!node.isObject()) {
+            throw invalid(field + " must be an object");
+        }
+    }
+
     private static String text(JsonNode node, String field) {
-        return node != null && node.hasNonNull(field) ? node.get(field).asText() : null;
+        if (node == null || !node.hasNonNull(field)) {
+            return null;
+        }
+        JsonNode value = node.get(field);
+        if (value.isContainerNode()) {
+            throw invalid(field + " must be a string");
+        }
+        return value.asText();
     }
 
+    /** A boolean, or the strings "true" and "false" a CloudFormation template may carry instead. */
     private static Boolean bool(JsonNode node, String field) {
-        return node != null && node.hasNonNull(field) ? node.get(field).asBoolean() : null;
+        if (node == null || !node.hasNonNull(field)) {
+            return null;
+        }
+        JsonNode value = node.get(field);
+        if (value.isBoolean()) {
+            return value.booleanValue();
+        }
+        if (value.isTextual() && ("true".equalsIgnoreCase(value.asText()) || "false".equalsIgnoreCase(value.asText()))) {
+            return Boolean.parseBoolean(value.asText());
+        }
+        throw invalid(field + " must be a boolean");
     }
 
-    private static List<String> textList(JsonNode node) {
+    private static List<String> textList(JsonNode node, String field) {
         List<String> values = new ArrayList<>();
-        if (node.isArray()) {
-            for (JsonNode item : node) {
-                if (!item.isNull() && !item.asText().isBlank()) {
-                    values.add(item.asText());
-                }
+        JsonNode list = node.path(field);
+        if (!present(list)) {
+            return values;
+        }
+        if (!list.isArray()) {
+            throw invalid(field + " must be a list");
+        }
+        for (JsonNode item : list) {
+            if (item.isContainerNode()) {
+                throw invalid(field + " must be a list of strings");
+            }
+            if (!item.isNull() && !item.asText().isBlank()) {
+                values.add(item.asText());
             }
         }
         return values;
@@ -312,5 +358,8 @@ public class IotDomainConfigurationService {
 
     private static String key(String region, String name) {
         return "domain-configuration:" + region + ":" + name;
+    }
+
+    private record Stored(String key, IotDomainConfiguration configuration) {
     }
 }

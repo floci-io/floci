@@ -267,7 +267,47 @@ class IotDomainConfigurationCfnProvisionerTest {
         JsonNode update = capturedUpdateBody(NAME);
         assertEquals("new-authorizer", update.path("authorizerConfig").path("defaultAuthorizerName").asText());
         assertFalse(update.has("removeAuthorizerConfig"));
-        assertEquals("ENABLED", update.path("domainConfigurationStatus").asText());
+        // No DomainConfigurationStatus in the template leaves the status alone, as the AWS handler does.
+        assertFalse(update.has("domainConfigurationStatus"));
+    }
+
+    @Test
+    void updateWithoutANameKeepsTheGeneratedNameAndUpdatesInPlace() {
+        String generated = "my-stack-Domain-aaaaaaaaaaaa";
+        when(service.describeDomainConfiguration(generated, REGION))
+                .thenReturn(stored(generated, ARN, "iot.example.com", "ENABLED"));
+        when(service.updateDomainConfiguration(eq(generated), any(), eq(REGION)))
+                .thenReturn(stored(generated, ARN, "iot.example.com", "ENABLED"));
+        StackResource r = resource();
+
+        provisioner.provision(r, customDomainProps(null), ctx(generated));
+
+        verify(service, never()).createDomainConfiguration(any(), any(), any());
+        verify(service, never()).deleteDomainConfiguration(any(), any());
+        verify(service).updateDomainConfiguration(eq(generated), any(), eq(REGION));
+        assertEquals(generated, r.getPhysicalId());
+    }
+
+    @Test
+    void updateRenamingTheConfigurationCreatesTheNewOneAndRemovesTheOld() {
+        // DomainConfigurationName is createOnly: a new name is a replacement, and the previous
+        // configuration must not outlive the stack that created it.
+        String oldArn = "arn:aws:iot:us-east-1:000000000000:domainconfiguration/old-name/aaaaa";
+        when(service.describeDomainConfiguration("old-name", REGION))
+                .thenReturn(stored("old-name", oldArn, "iot.example.com", "ENABLED"));
+        when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        StackResource r = resource();
+
+        provisioner.provision(r, customDomainProps(NAME), ctx("old-name"));
+
+        InOrder order = inOrder(service);
+        order.verify(service).createDomainConfiguration(eq(NAME), any(), eq(REGION));
+        order.verify(service).updateDomainConfiguration(eq("old-name"),
+                argThat(body -> "DISABLED".equals(body.path("domainConfigurationStatus").asText())), eq(REGION));
+        order.verify(service).deleteDomainConfiguration("old-name", REGION);
+        assertEquals(NAME, r.getPhysicalId());
+        assertEquals(ARN, r.getAttributes().get("Arn"));
     }
 
     @Test
