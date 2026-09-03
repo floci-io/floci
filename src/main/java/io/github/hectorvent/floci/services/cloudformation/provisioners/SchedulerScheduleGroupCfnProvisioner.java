@@ -47,19 +47,13 @@ public class SchedulerScheduleGroupCfnProvisioner implements CfnResourceProvisio
                     ? r.getPhysicalId()
                     : ctx.generatePhysicalName(r.getLogicalId(), 64, false);
         }
-        // Tags wrapped in an intrinsic (e.g. Fn::If choosing between two tag lists) is not resolved
-        // here: the engine's Fn::If support is scalar-only, so a conditional list would collapse to
-        // a string rather than the chosen array. tagsAreResolvable is true both when Tags is absent
-        // (the template genuinely wants no tags) and when it is a plain array (the template's actual
-        // desired tags), and false only when Tags is present but not a plain array - the one case
-        // where the desired state genuinely cannot be read, so the retry path below must not treat
-        // "couldn't resolve the intended tags" as "the intended tags are empty" and delete everything
-        // live.
+        // Preserve live tags when a present property still cannot resolve to a tag list.
         boolean hasTagsProperty = props != null && props.has("Tags");
-        boolean tagsAreResolvable = !hasTagsProperty || props.get("Tags").isArray();
+        JsonNode tagsNode = hasTagsProperty ? ctx.engine().resolveNode(props.get("Tags")) : null;
+        boolean tagsAreResolvable = !hasTagsProperty || (tagsNode != null && tagsNode.isArray());
         Map<String, String> tags = new HashMap<>();
         if (hasTagsProperty && tagsAreResolvable) {
-            for (JsonNode tag : props.get("Tags")) {
+            for (JsonNode tag : tagsNode) {
                 String key = ctx.engine().resolve(tag.path("Key"));
                 if (!key.isEmpty()) {
                     tags.put(key, ctx.engine().resolve(tag.path("Value")));
@@ -82,7 +76,7 @@ public class SchedulerScheduleGroupCfnProvisioner implements CfnResourceProvisio
             // Reconcile tags both ways: a key dropped from the template (or the whole Tags list
             // emptied, or Tags removed entirely) must not linger on the live resource, matching how
             // the same-stack retry path applies every other property change rather than only ever
-            // adding. Skipped only when Tags is present but unresolvable (Fn::If) - untagging every
+            // adding. Skipped only when Tags is present but unresolvable: untagging every
             // live key there would erase tags for a reason unrelated to what the template asked for.
             if (tagsAreResolvable) {
                 Set<String> staleKeys = new HashSet<>(group.getTags().keySet());
