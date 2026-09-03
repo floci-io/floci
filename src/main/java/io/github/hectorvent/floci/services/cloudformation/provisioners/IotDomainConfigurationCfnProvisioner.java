@@ -148,8 +148,8 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
             r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
         } catch (RuntimeException cleanupFailure) {
             failure.addSuppressed(cleanupFailure);
-            String reason = "Could not remove domain configuration " + name + " after its replacement of "
-                    + prior.getDomainConfigurationName() + " failed: " + cleanupFailure.getMessage();
+            String reason = "Could not roll back the replacement of domain configuration "
+                    + prior.getDomainConfigurationName() + " by " + name + ": " + cleanupFailure.getMessage();
             LOG.warn(reason);
             r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
         }

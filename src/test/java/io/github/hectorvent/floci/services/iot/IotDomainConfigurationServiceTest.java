@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -214,6 +215,63 @@ class IotDomainConfigurationServiceTest {
         String jobsArn = service.describeDomainConfiguration("iot:Jobs", REGION).getDomainConfigurationArn();
         service.tagResource(jobsArn, Map.of("team", "devices"));
         assertEquals(Map.of("team", "devices"), service.listTagsForResource(jobsArn));
+    }
+
+    @Test
+    void configurationSurvivesTheJsonRoundTripPersistentStorageUses() throws Exception {
+        ObjectNode request = customDomainRequest()
+                .put("serviceType", "JOBS")
+                .put("validationCertificateArn", OTHER_CERTIFICATE_ARN)
+                .put("authenticationType", "CUSTOM_AUTH")
+                .put("applicationProtocol", "MQTT_WSS");
+        request.putObject("authorizerConfig").put("defaultAuthorizerName", "my-authorizer").put("allowAuthorizerOverride", true);
+        request.putObject("serverCertificateConfig").put("enableOCSPCheck", true)
+                .put("ocspLambdaArn", "arn:aws:lambda:us-east-1:000000000000:function:ocsp");
+        request.putObject("clientCertificateConfig").put("clientCertificateCallbackArn", "arn:aws:lambda:us-east-1:000000000000:function:cb");
+        request.putArray("tags").addObject().put("Key", "env").put("Value", "test");
+        IotDomainConfiguration created = service.createDomainConfiguration("iot-domain", request, REGION);
+
+        // The same mapper setup PersistentStorage uses: defaults plus java.time, so an unmapped
+        // property or an unreadable record would fail the reload of a persisted store.
+        ObjectMapper persistence = new ObjectMapper().registerModule(new JavaTimeModule());
+        String json = persistence.writeValueAsString(created);
+        IotDomainConfiguration reloaded = persistence.readValue(json, IotDomainConfiguration.class);
+
+        assertEquals(json, persistence.writeValueAsString(reloaded));
+        assertEquals(created.getDomainConfigurationArn(), reloaded.getDomainConfigurationArn());
+        assertEquals(created.getServerCertificates(), reloaded.getServerCertificates());
+        assertEquals(created.getAuthorizerConfig(), reloaded.getAuthorizerConfig());
+        assertEquals(created.getTlsConfig(), reloaded.getTlsConfig());
+        assertEquals(created.getServerCertificateConfig(), reloaded.getServerCertificateConfig());
+        assertEquals(created.getClientCertificateConfig(), reloaded.getClientCertificateConfig());
+        assertEquals(created.getLastStatusChangeDate(), reloaded.getLastStatusChangeDate());
+        assertEquals(created.getTags(), reloaded.getTags());
+    }
+
+    @Test
+    void concurrentTagWritesOnOneConfigurationKeepEveryKey() throws Exception {
+        String arn = service.createDomainConfiguration("iot-domain", customDomainRequest(), REGION).getDomainConfigurationArn();
+        int writers = 16;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        try {
+            List<Future<?>> writes = new ArrayList<>();
+            for (int i = 0; i < writers; i++) {
+                String tagKey = "key" + i;
+                writes.add(pool.submit(() -> {
+                    start.await();
+                    service.tagResource(arn, Map.of(tagKey, "v"));
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> write : writes) {
+                write.get();
+            }
+            assertEquals(writers, service.listTagsForResource(arn).size(), "a concurrent tag write must not drop another writer's key");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test

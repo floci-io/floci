@@ -56,8 +56,12 @@ public class IotDomainConfigurationService {
     private final StorageBackend<String, IotDomainConfiguration> store;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
-    /** Makes the duplicate check and the store of a new configuration one step, so a name is taken once. */
-    private final Object createLock = new Object();
+    /**
+     * Guards every read-modify-write on the store: the duplicate check and store of a create, the
+     * seeding of the AWS-managed configurations, and the update, delete and tag paths, which all
+     * read a record, change it and write it back. Without it two overlapping writers lose updates.
+     */
+    private final Object lock = new Object();
 
     @Inject
     public IotDomainConfigurationService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -108,7 +112,7 @@ public class IotDomainConfigurationService {
         configuration.setClientCertificateConfig(parseClientCertificateConfig(body.path("clientCertificateConfig")));
         configuration.setTags(parseTags(body.path("tags")));
         configuration.setLastStatusChangeDate(Instant.now());
-        synchronized (createLock) {
+        synchronized (lock) {
             if (store.get(key).isPresent()) {
                 throw new AwsException("ResourceAlreadyExistsException",
                         "Domain configuration already exists: " + name, 409);
@@ -125,7 +129,6 @@ public class IotDomainConfigurationService {
     }
 
     public IotDomainConfiguration updateDomainConfiguration(String name, JsonNode request, String region) {
-        IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
         JsonNode body = request == null ? JsonNodeFactory.instance.objectNode() : request;
         // Parse and validate everything before touching the stored record, so a bad value changes nothing.
         String status = enumValue(body, "domainConfigurationStatus", STATUSES, null);
@@ -138,45 +141,50 @@ public class IotDomainConfigurationService {
                 ? parseServerCertificateConfig(body.path("serverCertificateConfig")) : null;
         ClientCertificateConfig clientCertificateConfig = parseClientCertificateConfig(body.path("clientCertificateConfig"));
 
-        if (authorizerConfig != null) {
-            configuration.setAuthorizerConfig(authorizerConfig);
+        synchronized (lock) {
+            IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
+            if (authorizerConfig != null) {
+                configuration.setAuthorizerConfig(authorizerConfig);
+            }
+            if (removeAuthorizerConfig) {
+                configuration.setAuthorizerConfig(null);
+            }
+            if (status != null && !status.equals(configuration.getDomainConfigurationStatus())) {
+                configuration.setDomainConfigurationStatus(status);
+                configuration.setLastStatusChangeDate(Instant.now());
+            }
+            if (tlsConfig != null) {
+                configuration.setTlsConfig(tlsConfig);
+            }
+            if (serverCertificateConfig != null) {
+                configuration.setServerCertificateConfig(serverCertificateConfig);
+            }
+            if (authenticationType != null) {
+                configuration.setAuthenticationType(authenticationType);
+            }
+            if (applicationProtocol != null) {
+                configuration.setApplicationProtocol(applicationProtocol);
+            }
+            if (clientCertificateConfig != null) {
+                configuration.setClientCertificateConfig(clientCertificateConfig);
+            }
+            store.put(key(region, name), configuration);
+            return configuration;
         }
-        if (removeAuthorizerConfig) {
-            configuration.setAuthorizerConfig(null);
-        }
-        if (status != null && !status.equals(configuration.getDomainConfigurationStatus())) {
-            configuration.setDomainConfigurationStatus(status);
-            configuration.setLastStatusChangeDate(Instant.now());
-        }
-        if (tlsConfig != null) {
-            configuration.setTlsConfig(tlsConfig);
-        }
-        if (serverCertificateConfig != null) {
-            configuration.setServerCertificateConfig(serverCertificateConfig);
-        }
-        if (authenticationType != null) {
-            configuration.setAuthenticationType(authenticationType);
-        }
-        if (applicationProtocol != null) {
-            configuration.setApplicationProtocol(applicationProtocol);
-        }
-        if (clientCertificateConfig != null) {
-            configuration.setClientCertificateConfig(clientCertificateConfig);
-        }
-        store.put(key(region, name), configuration);
-        return configuration;
     }
 
     /** AWS refuses to delete an ENABLED configuration, and never deletes an AWS-managed one. */
     public void deleteDomainConfiguration(String name, String region) {
-        IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
-        if ("AWS_MANAGED".equals(configuration.getDomainType())) {
-            throw invalid("Domain configuration " + name + " is managed by AWS and cannot be deleted");
+        synchronized (lock) {
+            IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
+            if ("AWS_MANAGED".equals(configuration.getDomainType())) {
+                throw invalid("Domain configuration " + name + " is managed by AWS and cannot be deleted");
+            }
+            if ("ENABLED".equals(configuration.getDomainConfigurationStatus())) {
+                throw invalid("Domain configuration " + name + " must be DISABLED before it can be deleted");
+            }
+            store.delete(key(region, name));
         }
-        if ("ENABLED".equals(configuration.getDomainConfigurationStatus())) {
-            throw invalid("Domain configuration " + name + " must be DISABLED before it can be deleted");
-        }
-        store.delete(key(region, name));
     }
 
     public IotService.Page<IotDomainConfiguration> listDomainConfigurations(String region, String serviceType,
@@ -203,19 +211,23 @@ public class IotDomainConfigurationService {
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
-        Stored stored = storedByArn(resourceArn);
-        Map<String, String> updated = new TreeMap<>(stored.configuration().getTags());
-        updated.putAll(tags);
-        stored.configuration().setTags(updated);
-        store.put(stored.key(), stored.configuration());
+        synchronized (lock) {
+            Stored stored = storedByArn(resourceArn);
+            Map<String, String> updated = new TreeMap<>(stored.configuration().getTags());
+            updated.putAll(tags);
+            stored.configuration().setTags(updated);
+            store.put(stored.key(), stored.configuration());
+        }
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys) {
-        Stored stored = storedByArn(resourceArn);
-        Map<String, String> updated = new TreeMap<>(stored.configuration().getTags());
-        tagKeys.forEach(updated::remove);
-        stored.configuration().setTags(updated);
-        store.put(stored.key(), stored.configuration());
+        synchronized (lock) {
+            Stored stored = storedByArn(resourceArn);
+            Map<String, String> updated = new TreeMap<>(stored.configuration().getTags());
+            tagKeys.forEach(updated::remove);
+            stored.configuration().setTags(updated);
+            store.put(stored.key(), stored.configuration());
+        }
     }
 
     /** The configuration an ARN names; the random suffix has to match too, as it does on AWS. */
@@ -262,7 +274,7 @@ public class IotDomainConfigurationService {
      * be updated and tagged like any other, but not deleted.
      */
     private void seedAwsManaged(String region) {
-        synchronized (createLock) {
+        synchronized (lock) {
             AWS_MANAGED.forEach((name, serviceType) -> {
                 String key = key(region, name);
                 if (store.get(key).isEmpty()) {
