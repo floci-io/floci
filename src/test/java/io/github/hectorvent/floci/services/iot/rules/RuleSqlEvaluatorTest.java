@@ -145,12 +145,18 @@ class RuleSqlEvaluatorTest {
     }
 
     @Test
-    void comparesNumbersThatDoNotFitADoubleOrALong() {
-        assertTrue(evaluate("SELECT * FROM 'a/b' WHERE level > 1", "a/b", "{\"level\":1e400}").isPresent());
-        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level < 1", "a/b", "{\"level\":1e400}").isPresent());
+    void comparesNumbersThatDoNotFitALong() {
         assertTrue(evaluate("SELECT * FROM 'a/b' WHERE level > 1", "a/b",
                 "{\"level\":99999999999999999999999}").isPresent());
         assertTrue(evaluate("SELECT * FROM 'a/b' WHERE level = 3", "a/b", "{\"level\":3.0}").isPresent());
+    }
+
+    @Test
+    void treatsAPayloadNumberTooLargeForADoubleAsUndefined() {
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level > 1", "a/b", "{\"level\":1e400}").isPresent());
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level < 1", "a/b", "{\"level\":1e400}").isPresent());
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level = 1" + "0".repeat(400) + ".0", "a/b",
+                "{\"level\":1e400}").isPresent());
     }
 
     @Test

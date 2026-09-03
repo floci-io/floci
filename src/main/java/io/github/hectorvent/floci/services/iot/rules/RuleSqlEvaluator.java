@@ -160,25 +160,21 @@ public final class RuleSqlEvaluator {
             return null;
         }
         if (left.isNumber() && right.isNumber()) {
-            return booleanNode(matches(comparison.operator(), compareNumbers(left, right)));
+            return representable(left) && representable(right)
+                    ? booleanNode(matches(comparison.operator(), left.decimalValue().compareTo(right.decimalValue())))
+                    : null;
         }
         return equality(comparison.operator(), left, right);
     }
 
     /**
      * Numbers are compared exactly, so a value wider than a long or a double still orders
-     * correctly against a literal. Only an infinity, which Jackson produces for a payload value
-     * too large for a double, goes through {@code double}: {@code decimalValue} cannot represent
-     * it and would throw.
+     * correctly. A JSON number too large for a double reaches us as an infinity, which has no
+     * exact value left to compare: it is Undefined, like any other operand the rule cannot
+     * evaluate.
      */
-    private int compareNumbers(JsonNode left, JsonNode right) {
-        return isInfinite(left) || isInfinite(right)
-                ? Double.compare(left.doubleValue(), right.doubleValue())
-                : left.decimalValue().compareTo(right.decimalValue());
-    }
-
-    private boolean isInfinite(JsonNode value) {
-        return (value.isDouble() || value.isFloat()) && !Double.isFinite(value.doubleValue());
+    private boolean representable(JsonNode value) {
+        return !(value.isDouble() || value.isFloat()) || Double.isFinite(value.doubleValue());
     }
 
     /**
