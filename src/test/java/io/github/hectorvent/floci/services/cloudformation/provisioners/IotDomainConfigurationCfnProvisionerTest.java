@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -370,9 +371,9 @@ class IotDomainConfigurationCfnProvisionerTest {
     void replacementWhoseFollowUpDisableFailsRemovesTheNewConfigurationAndKeepsThePrior() {
         // CloudFormationService restores the previous StackResource on a failed update and never
         // learns the new name, so the configuration created here must not be left behind.
+        String oldArn = "arn:aws:iot:us-east-1:000000000000:domainconfiguration/old-name/aaaaa";
         when(service.describeDomainConfiguration("old-name", REGION))
-                .thenReturn(stored("old-name", "arn:aws:iot:us-east-1:000000000000:domainconfiguration/old-name/aaaaa",
-                        "iot.example.com", "ENABLED"));
+                .thenReturn(stored("old-name", oldArn, "iot.example.com", "ENABLED"));
         when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
                 .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
         when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
@@ -389,6 +390,10 @@ class IotDomainConfigurationCfnProvisionerTest {
         verify(service, never()).deleteDomainConfiguration("old-name", REGION);
         verify(service, never()).updateDomainConfiguration(eq("old-name"), any(), eq(REGION));
         assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        // The resource describes the configuration that is still there, not the removed one.
+        assertEquals("old-name", r.getPhysicalId());
+        assertEquals(oldArn, r.getAttributes().get("Arn"));
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
     }
 
     @Test
@@ -418,6 +423,9 @@ class IotDomainConfigurationCfnProvisionerTest {
         order.verify(service).updateDomainConfiguration(eq("old-name"),
                 argThat(body -> "ENABLED".equals(body.path("domainConfigurationStatus").asText())), eq(REGION));
         assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        assertEquals("old-name", r.getPhysicalId());
+        assertEquals(oldArn, r.getAttributes().get("Arn"));
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
     }
 
     @Test

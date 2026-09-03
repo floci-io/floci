@@ -128,8 +128,9 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
     /**
      * A replacement failed after its new configuration existed. CloudFormationService restores the
      * previous StackResource and never learns the new name, so the configuration created here is
-     * removed again, and the prior one, disabled on the way to deleting it, is enabled again. The
-     * stack must report the original failure, so a cleanup failure is logged and attached to it.
+     * removed again, the prior one, disabled on the way to deleting it, is enabled again, and the
+     * resource is pointed back at the prior configuration. The stack must report the original
+     * failure, so a cleanup failure is logged and attached to it.
      */
     private void unwindReplacement(StackResource r, IotDomainConfiguration prior, String name, String region,
                                    RuntimeException failure) {
@@ -141,6 +142,8 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
                 domainConfigurationService.updateDomainConfiguration(
                         prior.getDomainConfigurationName(), statusBody("ENABLED"), region);
             }
+            record(r, prior.getDomainConfigurationName(), prior);
+            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
             r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
         } catch (RuntimeException cleanupFailure) {
             failure.addSuppressed(cleanupFailure);
