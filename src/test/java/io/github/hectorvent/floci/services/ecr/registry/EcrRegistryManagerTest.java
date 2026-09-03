@@ -59,6 +59,7 @@ class EcrRegistryManagerTest {
     private EmulatorConfig.DockerConfig docker;
     private EmulatorConfig.EcrServiceConfig ecr;
     private EmulatorConfig.StorageConfig storage;
+    private ContainerBuilder containerBuilder;
     private ContainerBuilder.Builder builder;
     private DockerClient dockerClient;
     private InspectImageCmd inspectImage;
@@ -68,9 +69,10 @@ class EcrRegistryManagerTest {
     void setUp() {
         portAllocator = new PortAllocator();
 
-        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        containerBuilder = Mockito.mock(ContainerBuilder.class);
         builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(inv -> inv.getArgument(0));
         when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
 
         lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
@@ -246,6 +248,37 @@ class EcrRegistryManagerTest {
 
         assertEquals("123456789012.dkr.ecr.us-east-1.localhost:" + BASE_PORT + "/backend-user:1", rewritten);
         verify(dockerClient, Mockito.never()).inspectImageCmd(anyString());
+    }
+
+    @Test
+    void rewriteImageUri_imageRegistryBaseConfigured_inspectsResolvedReference() {
+        String mirrored = "ghcr.io/floci-io/mirror/" + AWS_ECR_IMAGE;
+        when(containerBuilder.resolveImage(AWS_ECR_IMAGE)).thenReturn(mirrored);
+        Mockito.doReturn(new InspectImageResponse()).when(inspectImage).exec();
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals(AWS_ECR_IMAGE, rewritten);
+        verify(dockerClient).inspectImageCmd(mirrored);
+        verify(dockerClient, Mockito.never()).inspectImageCmd(AWS_ECR_IMAGE);
+        verify(lifecycleManager, Mockito.never()).createAndStart(any());
+    }
+
+    @Test
+    void rewriteImageUri_imageRegistryBaseConfigured_unprefixedLocalImageDoesNotCount() {
+        String mirrored = "ghcr.io/floci-io/mirror/" + AWS_ECR_IMAGE;
+        when(containerBuilder.resolveImage(AWS_ECR_IMAGE)).thenReturn(mirrored);
+        InspectImageCmd inspectUnprefixed = Mockito.mock(InspectImageCmd.class);
+        Mockito.doReturn(new InspectImageResponse()).when(inspectUnprefixed).exec();
+        when(dockerClient.inspectImageCmd(AWS_ECR_IMAGE)).thenReturn(inspectUnprefixed);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:" + BASE_PORT + "/backend-user:1", rewritten);
+        verify(dockerClient).inspectImageCmd(mirrored);
+        verify(lifecycleManager).createAndStart(any());
     }
 
     @Test

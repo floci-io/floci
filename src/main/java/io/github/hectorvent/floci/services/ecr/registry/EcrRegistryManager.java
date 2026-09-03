@@ -97,7 +97,9 @@ public class EcrRegistryManager {
      * match the AWS ECR URI shape (e.g. a plain Docker Hub reference or an image
      * already pointing at Floci's registry) is returned unchanged, without starting
      * the registry container, as is an AWS-shaped URI naming an image the Docker
-     * daemon already has while {@code floci.services.ecr.prefer-local-images} is on.
+     * daemon already has (under the reference {@link ContainerBuilder#resolveImage}
+     * launches, so {@code floci.docker.image-registry-base} is honoured) while
+     * {@code floci.services.ecr.prefer-local-images} is on.
      */
     public String rewriteImageUri(String image) {
         if (image == null) {
@@ -107,9 +109,12 @@ public class EcrRegistryManager {
         if (!m.matches()) {
             return image;
         }
-        if (config.services().ecr().preferLocalImages() && isPresentOnDaemon(image)) {
-            LOG.infov("Using locally present image {0} as-is (not rewriting to the emulated ECR registry)", image);
-            return image;
+        if (config.services().ecr().preferLocalImages()) {
+            String resolved = containerBuilder.resolveImage(image);
+            if (isPresentOnDaemon(resolved)) {
+                LOG.infov("Using locally present image {0} as-is (not rewriting to the emulated ECR registry)", resolved);
+                return image;
+            }
         }
         String account = m.group(1);
         String region = m.group(2);

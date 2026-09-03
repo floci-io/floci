@@ -651,7 +651,7 @@ When unset (default), Floci injects execution-role credentials for a known role.
 
 ### Locally built images
 
-A container image function whose `ImageUri` names an image already present on the Docker daemon runs that image directly. This includes AWS-shaped `<account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>` URIs, which are otherwise rewritten to [Floci's emulated ECR registry](ecr.md) at pull time: build the image under the exact URI the function declares (`docker build -t <ImageUri> .`) and no push is needed. Set `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES=false` to always resolve AWS-shaped URIs through the emulated registry.
+A container image function whose `ImageUri` names an image already present on the Docker daemon runs that image directly. This includes AWS-shaped `<account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>` URIs, which are otherwise rewritten to [Floci's emulated ECR registry](ecr.md) at pull time: build the image under the exact URI the function declares (`docker build -t <ImageUri> .`) and no push is needed. With `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` set, tag it as `<base>/<ImageUri>` instead, since that is the reference Floci launches. Set `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES=false` to always resolve AWS-shaped URIs through the emulated registry.
 
 ### Private registry authentication
 
