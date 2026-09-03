@@ -130,7 +130,8 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
      * previous StackResource and never learns the new name, so the configuration created here is
      * removed again, the prior one, disabled on the way to deleting it, is enabled again, and the
      * resource is pointed back at the prior configuration. The stack must report the original
-     * failure, so a cleanup failure is logged and attached to it.
+     * failure, so a cleanup failure is attached to it and recorded as a rollback failure, which
+     * makes the stack end in UPDATE_ROLLBACK_FAILED rather than claim the prior one is intact.
      */
     private void unwindReplacement(StackResource r, IotDomainConfiguration prior, String name, String region,
                                    RuntimeException failure) {
@@ -147,8 +148,10 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
             r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
         } catch (RuntimeException cleanupFailure) {
             failure.addSuppressed(cleanupFailure);
-            LOG.warnv("Could not remove domain configuration {0} after its replacement of {1} failed: {2}",
-                    name, prior.getDomainConfigurationName(), cleanupFailure.getMessage());
+            String reason = "Could not remove domain configuration " + name + " after its replacement of "
+                    + prior.getDomainConfigurationName() + " failed: " + cleanupFailure.getMessage();
+            LOG.warn(reason);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
         }
     }
 

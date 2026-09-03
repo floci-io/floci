@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -426,6 +427,36 @@ class IotDomainConfigurationCfnProvisionerTest {
         assertEquals("old-name", r.getPhysicalId());
         assertEquals(oldArn, r.getAttributes().get("Arn"));
         assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void replacementWhoseCleanupAlsoFailsReportsTheRollbackFailureInsteadOfClaimingARestore() {
+        // If the new configuration cannot be removed, the engine must not report a clean rollback:
+        // the failure marker makes it end in UPDATE_ROLLBACK_FAILED with the reason.
+        String oldArn = "arn:aws:iot:us-east-1:000000000000:domainconfiguration/old-name/aaaaa";
+        when(service.describeDomainConfiguration("old-name", REGION))
+                .thenReturn(stored("old-name", oldArn, "iot.example.com", "ENABLED"));
+        when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        // A fresh exception per call, as a real service raises: the follow-up disable fails, and so
+        // does the disable the cleanup attempts.
+        when(service.updateDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenAnswer(inv -> {
+                    throw new AwsException("InternalFailureException", "boom", 500);
+                });
+        StackResource r = resource();
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
+                r, customDomainProps(NAME).put("DomainConfigurationStatus", "DISABLED"), ctx("old-name")));
+
+        assertEquals("InternalFailureException", failure.getErrorCode());
+        assertEquals(1, failure.getSuppressed().length);
+        String reason = r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
+        assertNotNull(reason);
+        assertTrue(reason.contains(NAME), reason);
+        assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        verify(service, never()).deleteDomainConfiguration(any(), any());
     }
 
     @Test
