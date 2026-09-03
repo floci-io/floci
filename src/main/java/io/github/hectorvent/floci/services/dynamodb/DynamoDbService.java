@@ -503,6 +503,15 @@ public class DynamoDbService implements ResourceProvider {
                          String conditionExpression,
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
                          String region, String returnValuesOnConditionCheckFailure) {
+        putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
+                        region, returnValuesOnConditionCheckFailure, true);
+    }
+
+    private void putItemInternal(String tableName, JsonNode item,
+                                  String conditionExpression,
+                                  JsonNode exprAttrNames, JsonNode exprAttrValues,
+                                  String region, String returnValuesOnConditionCheckFailure,
+                                  boolean shouldPersist) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -524,7 +533,9 @@ public class DynamoDbService implements ResourceProvider {
             }
 
             tableItems.put(itemKey, normalizedItem);
-            persistItems(storageKey);
+            if (shouldPersist) {
+                persistItems(storageKey);
+            }
             LOG.debugv("Put item in {0}: key={1}", canonicalTableName, itemKey);
             LOG.tracev("Put item in {0}: key={1} item={2}", canonicalTableName, itemKey, item);
 
@@ -567,6 +578,15 @@ public class DynamoDbService implements ResourceProvider {
                                 String conditionExpression,
                                 JsonNode exprAttrNames, JsonNode exprAttrValues,
                                 String region, String returnValuesOnConditionCheckFailure) {
+        return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
+                                  region, returnValuesOnConditionCheckFailure, true);
+    }
+
+    private JsonNode deleteItemInternal(String tableName, JsonNode key,
+                                         String conditionExpression,
+                                         JsonNode exprAttrNames, JsonNode exprAttrValues,
+                                         String region, String returnValuesOnConditionCheckFailure,
+                                         boolean shouldPersist) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -584,7 +604,9 @@ public class DynamoDbService implements ResourceProvider {
             }
 
             JsonNode removed = items.remove(itemKey);
-            persistItems(storageKey);
+            if (shouldPersist) {
+                persistItems(storageKey);
+            }
             LOG.debugv("Deleted item from {0}: key={1}", canonicalTableName, itemKey);
             LOG.tracev("Deleted item from {0}: key={1} removed={2}", canonicalTableName, itemKey, removed);
 
@@ -614,6 +636,17 @@ public class DynamoDbService implements ResourceProvider {
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                                     String returnValues, String conditionExpression, String region,
                                     String returnValuesOnConditionCheckFailure) {
+        return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
+                expressionAttrNames, expressionAttrValues, returnValues,
+                conditionExpression, region, returnValuesOnConditionCheckFailure, true);
+    }
+
+    private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
+                                             String updateExpression,
+                                             JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                                             String returnValues, String conditionExpression, String region,
+                                             String returnValuesOnConditionCheckFailure,
+                                             boolean shouldPersist) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -738,7 +771,9 @@ public class DynamoDbService implements ResourceProvider {
             validateIndexKeyTypes(table, item, true);
 
             items.put(itemKey, item);
-            persistItems(storageKey);
+            if (shouldPersist) {
+                persistItems(storageKey);
+            }
             LOG.tracev("Updated item in {0}: key={1} updateExpression={2} item={3}",
                     canonicalTableName, itemKey, updateExpression, item);
 
@@ -1032,17 +1067,24 @@ public class DynamoDbService implements ResourceProvider {
     public record BatchWriteResult(Map<String, List<JsonNode>> unprocessedItems) {}
 
     public BatchWriteResult batchWriteItem(Map<String, List<JsonNode>> requestItems, String region) {
+        Set<String> affectedStorageKeys = new LinkedHashSet<>();
         for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
             String tableName = canonicalTableName(region, entry.getKey());
+            String storageKey = regionKey(region, tableName);
             for (JsonNode writeRequest : entry.getValue()) {
                 if (writeRequest.has("PutRequest")) {
                     JsonNode item = writeRequest.get("PutRequest").get("Item");
-                    putItem(tableName, item, region);
+                    putItemInternal(tableName, item, null, null, null, region, "NONE", false);
+                    affectedStorageKeys.add(storageKey);
                 } else if (writeRequest.has("DeleteRequest")) {
                     JsonNode key = writeRequest.get("DeleteRequest").get("Key");
-                    deleteItem(tableName, key, region);
+                    deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
+                    affectedStorageKeys.add(storageKey);
                 }
             }
+        }
+        for (String storageKey : affectedStorageKeys) {
+            persistItems(storageKey);
         }
         return new BatchWriteResult(Map.of());
     }
@@ -1168,17 +1210,20 @@ public class DynamoDbService implements ResourceProvider {
 
             // Second pass: apply all writes. Inner methods re-acquire their own locks,
             // which is a no-op thanks to ReentrantLock.
+            Set<String> affectedStorageKeys = new LinkedHashSet<>();
             for (JsonNode transactItem : transactItems) {
                 if (transactItem.has("Put")) {
                     JsonNode put = transactItem.get("Put");
                     String tableName = put.path("TableName").asText();
                     JsonNode item = put.get("Item");
-                    putItem(tableName, item, region);
+                    putItemInternal(tableName, item, null, null, null, region, "NONE", false);
+                    affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
                 } else if (transactItem.has("Delete")) {
                     JsonNode del = transactItem.get("Delete");
                     String tableName = del.path("TableName").asText();
                     JsonNode key = del.get("Key");
-                    deleteItem(tableName, key, region);
+                    deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
+                    affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
                 } else if (transactItem.has("Update")) {
                     JsonNode upd = transactItem.get("Update");
                     String tableName = upd.path("TableName").asText();
@@ -1187,10 +1232,14 @@ public class DynamoDbService implements ResourceProvider {
                     JsonNode exprAttrNames = upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null;
                     JsonNode exprAttrValues = upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null;
                     //there is no ConditionExpression, so setting returnValuesOnConditionCheckFailure = "NONE"
-                    updateItem(tableName, key, null, updateExpression, exprAttrNames, exprAttrValues,
-                               "NONE", null, region, "NONE");
+                    updateItemInternal(tableName, key, null, updateExpression, exprAttrNames, exprAttrValues,
+                               "NONE", null, region, "NONE", false);
+                    affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
                 }
                 // ConditionCheck-only items are handled in the first pass only
+            }
+            for (String storageKey : affectedStorageKeys) {
+                persistItems(storageKey);
             }
         } finally {
             for (int i = acquired.size() - 1; i >= 0; i--) {
