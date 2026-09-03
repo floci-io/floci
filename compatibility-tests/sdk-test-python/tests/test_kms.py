@@ -40,6 +40,15 @@ class TestKMSKey:
         response = kms_client.describe_key(KeyId=key_id)
         assert response["KeyMetadata"]["KeyState"] == "PendingDeletion"
 
+    def test_create_key_rejects_incompatible_key_usage(self, kms_client):
+        """CreateKey rejects a KeyUsage that AWS KMS does not allow for the KeySpec."""
+        with pytest.raises(ClientError) as excinfo:
+            kms_client.create_key(
+                KeySpec="ECC_NIST_EDWARDS25519",
+                KeyUsage="ENCRYPT_DECRYPT",
+            )
+        assert excinfo.value.response["Error"]["Code"] == "ValidationException"
+
 
 class TestKMSGrants:
     """Test KMS grant operations."""
