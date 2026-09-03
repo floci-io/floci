@@ -274,6 +274,7 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname                     # hostname | path
+      prefer-local-images: true
 ```
 
 ### Initialization hooks

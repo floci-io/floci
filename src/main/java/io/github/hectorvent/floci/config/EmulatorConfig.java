@@ -1804,6 +1804,13 @@ public interface EmulatorConfig {
         @WithDefault("hostname")
         String uriStyle();
 
+        /**
+         * When true, an AWS-shaped ECR image URI that names an image already present on the Docker
+         * daemon is used as-is instead of being rewritten to Floci's loopback registry.
+         */
+        @WithDefault("true")
+        boolean preferLocalImages();
+
         Optional<String> dockerNetwork();
     }
 
