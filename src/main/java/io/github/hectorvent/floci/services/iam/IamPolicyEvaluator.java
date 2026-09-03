@@ -343,14 +343,37 @@ public class IamPolicyEvaluator {
         return new ParsedOperator(quantifier, baseOp, ifExists);
     }
 
-    /** OR across the policy's condition values for one request value. */
-    private boolean matchesAnyCondValue(String baseOp, String ctxValue, List<String> condValues) {
+    /**
+     * Combines the policy's condition values for a single request value. Positive operators
+     * OR — the request value may match any listed value. Negated operators AND — the request
+     * value must differ from every listed value, which is AWS's documented rule for a
+     * multi-valued negated condition and the deny-list idiom for keys such as
+     * {@code dynamodb:Attributes} ({@code ForAllValues:StringNotEquals}).
+     */
+    private boolean matchesCondValues(String baseOp, String ctxValue, List<String> condValues) {
+        if (isNegatedOperator(baseOp)) {
+            for (String condValue : condValues) {
+                if (!evaluateSingleCondition(baseOp, ctxValue, condValue)) {
+                    return false;
+                }
+            }
+            return true;
+        }
         for (String condValue : condValues) {
             if (evaluateSingleCondition(baseOp, ctxValue, condValue)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean isNegatedOperator(String baseOp) {
+        return switch (baseOp) {
+            case "StringNotEquals", "StringNotEqualsIgnoreCase", "StringNotLike",
+                 "ArnNotEquals", "ArnNotLike", "NumericNotEquals", "DateNotEquals",
+                 "NotIpAddress" -> true;
+            default -> false;
+        };
     }
 
     private boolean evaluateConditionBlock(String operator,
@@ -361,7 +384,7 @@ public class IamPolicyEvaluator {
         boolean ifExists = parsed.ifExists();
 
         for (Map.Entry<String, List<String>> entry : keyValueMap.entrySet()) {
-            String condKey = entry.getKey().toLowerCase();
+            String condKey = entry.getKey().toLowerCase(java.util.Locale.ROOT);
             List<String> condValues = entry.getValue();
             List<String> ctxValues = ctx.get(condKey);
 
@@ -381,10 +404,13 @@ public class IamPolicyEvaluator {
             }
 
             if ("Null".equalsIgnoreCase(baseOp)) {
-                // Key is present — Null:{key:"true"} should fail, Null:{key:"false"} should pass
+                // Key is present. An empty set counts as nonexistent for Null, matching AWS,
+                // so the Null:{key:"false"} guard that policies pair with ForAllValues still
+                // blocks a vacuous match. Null:{key:"true"} passes only when effectively absent.
                 boolean expectAbsent = condValues.stream().anyMatch("true"::equalsIgnoreCase);
-                if (expectAbsent) {
-                    return false; // expected absent but key has value
+                boolean effectivelyAbsent = ctxValues.isEmpty();
+                if (expectAbsent != effectivelyAbsent) {
+                    return false;
                 }
                 continue;
             }
@@ -394,14 +420,14 @@ public class IamPolicyEvaluator {
                 // matches vacuously, which is why real policies pair ForAllValues with a
                 // Null:{key:"false"} guard.
                 case FOR_ALL_VALUES -> ctxValues.stream()
-                        .allMatch(ctxValue -> matchesAnyCondValue(baseOp, ctxValue, condValues));
+                        .allMatch(ctxValue -> matchesCondValues(baseOp, ctxValue, condValues));
                 // At least one request value must match. An empty set never matches.
                 case FOR_ANY_VALUE -> ctxValues.stream()
-                        .anyMatch(ctxValue -> matchesAnyCondValue(baseOp, ctxValue, condValues));
+                        .anyMatch(ctxValue -> matchesCondValues(baseOp, ctxValue, condValues));
                 // A bare operator against a multi-valued key is a policy authoring error in
                 // AWS; mirror that by comparing only the first value.
                 case NONE -> !ctxValues.isEmpty()
-                        && matchesAnyCondValue(baseOp, ctxValues.getFirst(), condValues);
+                        && matchesCondValues(baseOp, ctxValues.getFirst(), condValues);
             };
             if (!keyMatch) {
                 return false;

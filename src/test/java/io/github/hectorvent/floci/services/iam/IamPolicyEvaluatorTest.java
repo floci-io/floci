@@ -222,13 +222,62 @@ class IamPolicyEvaluatorTest {
     void setOperatorPrefixIsMatchedCaseSensitively() {
         // AWS spells these exactly "ForAllValues:" / "ForAnyValue:". A different spelling is
         // an unknown operator and must not silently behave like the real thing.
-        String policy = """
+        String allValues = """
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
                "Condition":{"forallvalues:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
             ]}""";
+        String anyValue = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"forAnyValue:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+            ]}""";
 
         assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(allValues), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(anyValue), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+    }
+
+    @Test
+    void forAllValuesWithANegatedOperatorAndsAcrossThePolicyValues() {
+        // The deny-list idiom for dynamodb:Attributes: allow only while none of the
+        // attributes the request touches is one of the forbidden names. AWS ANDs the
+        // negated match across the listed values; an OR would let "ssn" through as long
+        // as it differed from "secret".
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"ForAllValues:StringNotEquals":{"dynamodb:Attributes":["secret","ssn"]}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:Attributes", List.of("name", "email"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:Attributes", List.of("name", "ssn"))));
+    }
+
+    @Test
+    void nullTreatsAPresentButEmptySetAsAbsent() {
+        // Same idiomatic pairing as the key-absent case, but here the key is present with an
+        // empty set. AWS treats an empty-set key as nonexistent for Null, so the Null:false
+        // guard must still block the vacuous ForAllValues allow.
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{
+                 "ForAllValues:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]},
+                 "Null":{"dynamodb:LeadingKeys":"false"}}}
+            ]}""";
+
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of())));
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
                 List.of(policy), "dynamodb:GetItem", "*",
                 Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
     }
