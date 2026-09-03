@@ -94,28 +94,28 @@ class EksClusterManagerTest {
     @Test
     void registriesYamlMirrorsEveryRegionHostnameAndThePathStyleForm() {
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "000000000000", AwsRegions.ALL, 5100, "http://floci-ecr-registry:5000");
+                "000000000000", AwsRegions.ALL, 4566, "http://floci:4566");
 
         assertTrue(yaml.startsWith("mirrors:\n"));
         for (String region : AwsRegions.ALL) {
-            assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:5100\":"),
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:4566\":"),
                     "should mirror the " + region + " hostname");
         }
-        assertTrue(yaml.contains("\"localhost:5100\":"), "should mirror the path-style form");
+        assertTrue(yaml.contains("\"localhost:4566\":"), "should mirror the path-style form");
         assertFalse(yaml.contains("\"*\""), "must not catch-all public registries");
-        long endpoints = yaml.lines().filter(l -> l.contains("- \"http://floci-ecr-registry:5000\"")).count();
+        long endpoints = yaml.lines().filter(l -> l.contains("- \"http://floci:4566\"")).count();
         assertEquals(AwsRegions.ALL.size() + 1, endpoints,
-                "every mirror should point at the registry's in-network endpoint");
+                "every mirror should point at Floci's in-network data plane");
     }
 
     @Test
     void registriesYamlUsesTheActualRegistryPortAndEndpoint() {
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "111122223333", List.of("eu-central-1"), 5142, "http://my-registry:5000");
+                "111122223333", List.of("eu-central-1"), 4566, "http://floci:4566");
 
-        assertTrue(yaml.contains("\"111122223333.dkr.ecr.eu-central-1.localhost:5142\":"));
-        assertTrue(yaml.contains("\"localhost:5142\":"));
-        assertTrue(yaml.contains("- \"http://my-registry:5000\""));
+        assertTrue(yaml.contains("\"111122223333.dkr.ecr.eu-central-1.localhost:4566\":"));
+        assertTrue(yaml.contains("\"localhost:4566\":"));
+        assertTrue(yaml.contains("- \"http://floci:4566\""));
     }
 
     @Test
@@ -528,8 +528,6 @@ class EksClusterManagerTest {
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
 
             registryManager = Mockito.mock(EcrRegistryManager.class);
-            when(registryManager.effectivePort()).thenReturn(5100);
-            when(registryManager.internalEndpoint()).thenReturn("http://floci-ecr-registry:5000");
 
             EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
             eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
@@ -537,16 +535,19 @@ class EksClusterManagerTest {
             when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
             when(config.services().eks()).thenReturn(eks);
             when(config.services().ecr()).thenReturn(ecr);
+            when(config.port()).thenReturn(4566);
             when(config.defaultRegion()).thenReturn("us-east-1");
             when(config.defaultAccountId()).thenReturn("000000000000");
             when(eks.ecrRegistryMirror()).thenReturn(true);
             when(eks.dataPath()).thenReturn(tempDir.toString());
             when(ecr.enabled()).thenReturn(true);
 
+            DockerHostResolver dockerHostResolver = Mockito.mock(DockerHostResolver.class);
+            when(dockerHostResolver.resolve()).thenReturn("floci");
             manager = new EksClusterManager(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
-                    Mockito.mock(DockerHostResolver.class), registryManager, config,
+                    dockerHostResolver, registryManager, config,
                     Mockito.mock(RegionResolver.class));
         }
 
