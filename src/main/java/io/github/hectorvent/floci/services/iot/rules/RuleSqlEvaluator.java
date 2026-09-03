@@ -166,14 +166,19 @@ public final class RuleSqlEvaluator {
     }
 
     /**
-     * Whole numbers are compared exactly, so a value wider than a long still orders correctly.
-     * Anything with a fraction goes through {@code double}, which also keeps a payload holding a
-     * value too large for a double (Jackson reads it as infinity) from failing the comparison.
+     * Numbers are compared exactly, so a value wider than a long or a double still orders
+     * correctly against a literal. Only an infinity, which Jackson produces for a payload value
+     * too large for a double, goes through {@code double}: {@code decimalValue} cannot represent
+     * it and would throw.
      */
     private int compareNumbers(JsonNode left, JsonNode right) {
-        return left.isIntegralNumber() && right.isIntegralNumber()
-                ? left.decimalValue().compareTo(right.decimalValue())
-                : Double.compare(left.doubleValue(), right.doubleValue());
+        return isInfinite(left) || isInfinite(right)
+                ? Double.compare(left.doubleValue(), right.doubleValue())
+                : left.decimalValue().compareTo(right.decimalValue());
+    }
+
+    private boolean isInfinite(JsonNode value) {
+        return (value.isDouble() || value.isFloat()) && !Double.isFinite(value.doubleValue());
     }
 
     /**

@@ -43,9 +43,10 @@ public final class RuleSqlParser {
             Set.of("SELECT", "FROM", "WHERE", "AS", "AND", "OR", "NOT", "TRUE", "FALSE", "NULL");
 
     /**
-     * Bounds the work one statement can cost. Real rules are a few dozen tokens, so this only
-     * stops a pathological statement from driving the recursive descent, or the equally
-     * recursive evaluation of the tree it produces, into a stack overflow.
+     * Bounds the work one statement can cost, counting real tokens only: {@link #tokenize} appends
+     * an end marker. Real rules are a few dozen tokens, so this only stops a pathological statement
+     * from driving the recursive descent, or the equally recursive evaluation of the tree it
+     * produces, into a stack overflow.
      */
     private static final int MAX_TOKENS = 1000;
 
@@ -64,9 +65,10 @@ public final class RuleSqlParser {
             throw new RuleSqlParseException("Empty topic rule SQL statement", "", 0);
         }
         List<Token> tokens = tokenize(sql);
-        if (tokens.size() > MAX_TOKENS) {
+        if (tokens.size() - 1 > MAX_TOKENS) {
+            Token beyondLimit = tokens.get(MAX_TOKENS);
             throw new RuleSqlParseException("Statement has more than " + MAX_TOKENS + " tokens",
-                    tokens.get(MAX_TOKENS).text(), tokens.get(MAX_TOKENS).position());
+                    beyondLimit.text(), beyondLimit.position());
         }
         return new RuleSqlParser(tokens).statement();
     }
