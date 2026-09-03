@@ -29,6 +29,11 @@ import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.DigestInfo;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.crypto.Digest;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.digests.SHA384Digest;
+import org.bouncycastle.crypto.digests.SHA512Digest;
+import org.bouncycastle.crypto.engines.RSABlindedEngine;
 import org.bouncycastle.crypto.params.ECDomainParameters;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -37,6 +42,9 @@ import org.bouncycastle.crypto.params.ECPublicKeyParameters;
 import org.bouncycastle.crypto.params.ParametersWithRandom;
 import org.bouncycastle.crypto.signers.ECDSASigner;
 import org.bouncycastle.crypto.signers.Ed25519phSigner;
+import org.bouncycastle.crypto.signers.PSSSigner;
+import org.bouncycastle.crypto.util.PrivateKeyFactory;
+import org.bouncycastle.crypto.util.PublicKeyFactory;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPrivateKey;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPublicKey;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyFactorySpi;
@@ -950,6 +958,9 @@ public class KmsService implements ResourceProvider {
             if (ed25519) {
                 return signEd25519(privateKey, message, algorithm);
             }
+            if (messageType == DIGEST && isRsaPssRequest(kmsKey.getKeySpec(), algorithm)) {
+                return signRsaPssDigest(privateKey, message, algorithm);
+            }
             String jcaAlgo = switch (messageType) {
                 // If message is already a digest, we need a "NONEwith..." algorithm
                 case DIGEST -> "NONEwith" + (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "ECDSA");
@@ -996,6 +1007,9 @@ public class KmsService implements ResourceProvider {
             String jcaAlgo = KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName();
 
             if (DIGEST.equals(messageType)) {
+                if (isRsaPssRequest(kmsKey.getKeySpec(), algorithm)) {
+                    return verifyRsaPssDigest(publicKey, message, signature, algorithm);
+                }
                 jcaAlgo = "NONEwith" + (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "ECDSA");
                 if (isPKCS1v1_5(kmsKey.getKeySpec().getAlgorithm().getFirst())) {
                     // Mirror sign(): verify against DigestInfo{hashOID, digest} (RFC 8017 9.2).
@@ -1292,6 +1306,44 @@ public class KmsService implements ResourceProvider {
         var signature = Signature.getInstance("RSASSA-PSS");
         signature.setParameter(new PSSParameterSpec(digest, "MGF1", maskGeneration, saltLength, 1));
         return signature;
+    }
+
+    private static boolean isRsaPssRequest(KmsKeySpec spec, String algorithm) {
+        return spec.getKeyType() == KmsKeySpec.KeyType.RSA && algorithm.startsWith("RSASSA_PSS");
+    }
+
+    /**
+     * Signs a pre-computed digest with RSASSA-PSS.
+     *
+     * <p>Real KMS applies the PSS encoding directly to the digest a {@code MessageType=DIGEST}
+     * caller sends. The JDK's {@code RSASSA-PSS} Signature always hashes its input first, so
+     * this uses BouncyCastle's lightweight raw PSS signer, instantiated directly like the
+     * secp256k1 and Ed25519ph paths. The raw signer defaults to MGF1 over the same digest with
+     * a salt as long as that digest, matching {@link #signatureFor(String)}, so RAW and DIGEST
+     * signatures verify against each other.
+     */
+    private static byte[] signRsaPssDigest(PrivateKey privateKey, byte[] digest, String algorithm) throws Exception {
+        var signer = rawPssSigner(algorithm);
+        signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKey.getEncoded()), new SecureRandom()));
+        signer.update(digest, 0, digest.length);
+        return signer.generateSignature();
+    }
+
+    private static boolean verifyRsaPssDigest(PublicKey publicKey, byte[] digest, byte[] signature, String algorithm) throws Exception {
+        var signer = rawPssSigner(algorithm);
+        signer.init(false, PublicKeyFactory.createKey(publicKey.getEncoded()));
+        signer.update(digest, 0, digest.length);
+        return signer.verifySignature(signature);
+    }
+
+    private static PSSSigner rawPssSigner(String algorithm) {
+        Digest digest = switch (algorithm) {
+            case "RSASSA_PSS_SHA_256" -> new SHA256Digest();
+            case "RSASSA_PSS_SHA_384" -> new SHA384Digest();
+            case "RSASSA_PSS_SHA_512" -> new SHA512Digest();
+            default -> throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + algorithm, 400);
+        };
+        return PSSSigner.createRawSigner(new RSABlindedEngine(), digest);
     }
 
     private static boolean isPKCS1v1_5(KmsKeySpec.Algorithm spec) {
