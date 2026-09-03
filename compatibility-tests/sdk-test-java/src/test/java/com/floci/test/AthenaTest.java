@@ -152,22 +152,30 @@ class AthenaTest {
                 )
         );
 
-        GetTableMetadataResponse response = athena.getTableMetadata(
-                GetTableMetadataRequest.builder()
-                        .catalogName("AwsDataCatalog")
-                        .databaseName(dbName)
-                        .tableName(tableName)
-                        .build()
-        );
+        try {
+            GetTableMetadataResponse response = athena.getTableMetadata(
+                    GetTableMetadataRequest.builder()
+                            .catalogName("AwsDataCatalog")
+                            .databaseName(dbName)
+                            .tableName(tableName)
+                            .build()
+            );
 
-        assertThat(response.tableMetadata().createTime())
-                .as("createTime must be parseable by the AWS SDK")
-                .isNotNull();
-        assertThat(response.tableMetadata().lastAccessTime())
-                .as("lastAccessTime must be parseable by the AWS SDK")
-                .isNotNull();
-
-        glue.close();
+            assertThat(response.tableMetadata().createTime())
+                    .as("createTime must be parseable by the AWS SDK")
+                    .isNotNull();
+            assertThat(response.tableMetadata().lastAccessTime())
+                    .as("lastAccessTime must be parseable by the AWS SDK")
+                    .isNotNull();
+        } finally {
+            try {
+                glue.deleteTable(r -> r.databaseName(dbName).name(tableName));
+                glue.deleteDatabase(r -> r.name(dbName));
+            } catch (Exception ignored) {
+                // Best-effort test cleanup
+            }
+            glue.close();
+        }
     }
 
     @Test
@@ -178,31 +186,39 @@ class AthenaTest {
         String location = "s3://test-bucket/" + dbName + "/";
 
         try (GlueClient glue = TestFixtures.glueClient()) {
-            StartQueryExecutionResponse started = athena.startQueryExecution(
-                    StartQueryExecutionRequest.builder()
-                            .queryString("CREATE DATABASE IF NOT EXISTS " + dbName
-                                    + " LOCATION '" + location + "'")
-                            .workGroup("primary")
-                            .build());
+            try {
+                StartQueryExecutionResponse started = athena.startQueryExecution(
+                        StartQueryExecutionRequest.builder()
+                                .queryString("CREATE DATABASE IF NOT EXISTS " + dbName
+                                        + " LOCATION '" + location + "'")
+                                .workGroup("primary")
+                                .build());
 
-            QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
-                    athena, started.queryExecutionId(), Duration.ofSeconds(60));
-            assertThat(status.state())
-                    .as("Athena DDL did not succeed: %s", status.stateChangeReason())
-                    .isEqualTo(QueryExecutionState.SUCCEEDED);
+                QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                        athena, started.queryExecutionId(), Duration.ofSeconds(60));
+                assertThat(status.state())
+                        .as("Athena DDL did not succeed: %s", status.stateChangeReason())
+                        .isEqualTo(QueryExecutionState.SUCCEEDED);
 
-            QueryExecution execution = athena.getQueryExecution(r -> r
-                    .queryExecutionId(started.queryExecutionId())).queryExecution();
-            assertThat(execution.statementType()).isEqualTo(StatementType.DDL);
-            assertThat(execution.resultConfiguration()).isNull();
+                QueryExecution execution = athena.getQueryExecution(r -> r
+                        .queryExecutionId(started.queryExecutionId())).queryExecution();
+                assertThat(execution.statementType()).isEqualTo(StatementType.DDL);
+                assertThat(execution.resultConfiguration()).isNull();
 
-            GetQueryResultsResponse results = athena.getQueryResults(r -> r
-                    .queryExecutionId(started.queryExecutionId()));
-            assertThat(results.resultSet().rows()).isEmpty();
-            assertThat(results.resultSet().resultSetMetadata().columnInfo()).isEmpty();
+                GetQueryResultsResponse results = athena.getQueryResults(r -> r
+                        .queryExecutionId(started.queryExecutionId()));
+                assertThat(results.resultSet().rows()).isEmpty();
+                assertThat(results.resultSet().resultSetMetadata().columnInfo()).isEmpty();
 
-            assertThat(glue.getDatabase(r -> r.name(dbName)).database().locationUri())
-                    .isEqualTo(location);
+                assertThat(glue.getDatabase(r -> r.name(dbName)).database().locationUri())
+                        .isEqualTo(location);
+            } finally {
+                try {
+                    glue.deleteDatabase(r -> r.name(dbName));
+                } catch (Exception ignored) {
+                    // Best-effort test cleanup
+                }
+            }
         }
     }
 }

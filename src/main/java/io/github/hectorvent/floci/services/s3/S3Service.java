@@ -312,6 +312,13 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucketStore.scan(key -> true);
     }
 
+    public boolean bucketExists(String bucketName) {
+        if (bucketName == null || bucketName.isBlank()) {
+            return false;
+        }
+        return resolveBucket(bucketName).isPresent();
+    }
+
     public void putBucketLogging(String bucketName, String loggingConfigurationXml) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));

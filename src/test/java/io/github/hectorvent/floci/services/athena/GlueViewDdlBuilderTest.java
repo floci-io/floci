@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -224,6 +225,36 @@ class GlueViewDdlBuilderTest {
         String ddl = builder.build(null);
         assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"db\".\"user_events\" AS SELECT * FROM read_csv_auto('s3://bucket/it''s-a-dir/data/**');\n"));
         assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"db\".\"parquet_events\" AS SELECT * FROM read_parquet('s3://bucket/user''s-store/parquet/**', union_by_name = true);\n"));
+    }
+
+    @Test
+    void testTableWithNonExistentS3BucketIsSkippedWhenS3ServiceProvided() {
+        S3Service s3 = Mockito.mock(S3Service.class);
+        GlueViewDdlBuilder s3Builder = new GlueViewDdlBuilder(glueService, s3);
+
+        Database db = createDatabase("db");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+
+        Table missingBucketTable = createTable("orphan", "s3://nonexistent-bucket/data/", null, null);
+        Table existingBucketTable = createTable("valid", "s3://real-bucket/data/", null, null);
+        when(glueService.getTables("db")).thenReturn(List.of(missingBucketTable, existingBucketTable));
+
+        when(s3.bucketExists("nonexistent-bucket")).thenReturn(false);
+        when(s3.bucketExists("real-bucket")).thenReturn(true);
+
+        String ddl = s3Builder.build("db");
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"db\".\"valid\""));
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"valid\""));
+        assertFalse(ddl.contains("orphan"));
+    }
+
+    @Test
+    void testExtractBucket() {
+        assertEquals("my-bucket", GlueViewDdlBuilder.extractBucket("s3://my-bucket/path/to/data"));
+        assertEquals("my-bucket", GlueViewDdlBuilder.extractBucket("s3://my-bucket/"));
+        assertEquals("my-bucket", GlueViewDdlBuilder.extractBucket("s3://my-bucket"));
+        org.junit.jupiter.api.Assertions.assertNull(GlueViewDdlBuilder.extractBucket(null));
+        org.junit.jupiter.api.Assertions.assertNull(GlueViewDdlBuilder.extractBucket("http://example.com/data"));
     }
 }
 
