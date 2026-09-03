@@ -764,6 +764,14 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /**
+         * Reject a topic rule whose SQL falls outside the subset Floci evaluates, as AWS does.
+         * Off by default, so such a rule is stored and keeps firing on every matching topic
+         * with the whole payload.
+         */
+        @WithDefault("false")
+        boolean ruleSqlStrict();
+
         MqttConfig mqtt();
     }
 
