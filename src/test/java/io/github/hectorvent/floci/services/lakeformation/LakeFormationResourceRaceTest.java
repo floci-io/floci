@@ -26,7 +26,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>The update is a read-modify-write under the storage monitor: read the record, mutate it,
  * write it back. A register landing between the read and the write would be overwritten by that
- * write, losing the fresh registration — so the register takes the same monitor the update and
+ * write, losing the fresh registration, so the register takes the same monitor the update and
  * deregister already hold.
  */
 class LakeFormationResourceRaceTest {
