@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkAclCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
@@ -205,6 +206,9 @@ final class CfnProvisionerFixture {
             }
             if (pipesService != null) {
                 discovered.add(new PipesCfnProvisioner(pipesService));
+            }
+            if (cognitoService != null) {
+                discovered.add(new CognitoCfnProvisioner(cognitoService));
             }
             if (firehoseService != null) {
                 discovered.add(new FirehoseCfnProvisioner(firehoseService));
