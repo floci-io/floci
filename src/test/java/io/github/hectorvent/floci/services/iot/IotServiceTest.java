@@ -7,7 +7,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -21,6 +24,8 @@ import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -38,8 +44,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * Rules engine behaviour of {@link IotService} with in-memory stores and mocked action targets:
- * one failing action never fails the publish or the other actions, and the error action receives
- * the failure document.
+ * one failing action never fails the publish or the other actions, the error action receives the
+ * failure document, and the {@code firehose} and {@code cloudwatchLogs} actions deliver the payload.
  */
 class IotServiceTest {
 
@@ -54,6 +60,8 @@ class IotServiceTest {
     private final SqsService sqs = mock(SqsService.class);
     private final LambdaService lambda = mock(LambdaService.class);
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
+    private final FirehoseService firehose = mock(FirehoseService.class);
+    private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
     private IotService service;
 
     @BeforeEach
@@ -84,7 +92,9 @@ class IotServiceTest {
                 mock(S3Service.class),
                 mock(KinesisService.class),
                 dynamoDb,
-                lambda);
+                lambda,
+                firehose,
+                logs);
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {
@@ -197,6 +207,151 @@ class IotServiceTest {
         assertEquals("SqsAction", failures.get(0).get("failedAction").asText());
         assertEquals("DynamoDBv2Action", failures.get(1).get("failedAction").asText());
         assertEquals("metrics", failures.get(1).get("failedResource").asText());
+    }
+
+    private static String firehoseRule(String separator, boolean batchMode) {
+        String separatorMember = separator == null ? "" : ", \"separator\": \"" + separator + "\"";
+        return """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [{"firehose": {"deliveryStreamName": "metrics", "roleArn": "arn:aws:iam::000000000000:role/rule"%s, "batchMode": %s}}]
+            }
+            """.formatted(separatorMember, batchMode);
+    }
+
+    private static String text(Record record) {
+        return new String(record.getData(), StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void firehoseActionPutsThePayloadWithTheSeparatorAppended() throws Exception {
+        createRule("metricsRule", firehoseRule("\\n", false));
+
+        publish("{\"v\":1}");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("{\"v\":1}\n", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionWithoutASeparatorPutsThePayloadAsIs() throws Exception {
+        createRule("metricsRule", firehoseRule(null, false));
+
+        publish("{\"v\":1}");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("{\"v\":1}", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionInBatchModeDeliversEachElementOfAJsonArrayAsOneRecord() throws Exception {
+        createRule("metricsRule", firehoseRule("\\n", true));
+
+        publish("[{\"v\":1},{\"v\":2}]");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Record>> records = ArgumentCaptor.forClass(List.class);
+        verify(firehose).putRecordBatch(eq("metrics"), records.capture());
+        assertEquals(List.of("{\"v\":1}\n", "{\"v\":2}\n"), records.getValue().stream().map(IotServiceTest::text).toList());
+        verify(firehose, never()).putRecord(anyString(), any());
+    }
+
+    @Test
+    void firehoseActionInBatchModeDeliversAnythingElseAsOneRecord() throws Exception {
+        createRule("metricsRule", firehoseRule(null, true));
+
+        publish("plain text");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("plain text", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionFailureIsReportedWithTheDeliveryStreamName() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"firehose": {"deliveryStreamName": "metrics", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": %s}
+            """.formatted(lambdaErrorAction()));
+        doThrow(new AwsException("ResourceNotFoundException", "Delivery stream not found: metrics", 400))
+                .when(firehose).putRecord(eq("metrics"), any());
+
+        publish("{\"v\":1}");
+
+        JsonNode failure = capturedInvocationPayload(ERROR_FUNCTION_ARN).get("failures").get(0);
+        assertEquals("FirehoseAction", failure.get("failedAction").asText());
+        assertEquals("metrics", failure.get("failedResource").asText());
+    }
+
+    private static String cloudwatchLogsRule(boolean batchMode) {
+        return """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [{"cloudwatchLogs": {"logGroupName": "/iot/metrics", "roleArn": "arn:aws:iam::000000000000:role/rule", "batchMode": %s}}]
+            }
+            """.formatted(batchMode);
+    }
+
+    private List<Map<String, Object>> capturedLogEvents() {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(logs).putLogEvents(eq("/iot/metrics"), eq("metricsRule"), events.capture(), eq(REGION));
+        return events.getValue();
+    }
+
+    @Test
+    void cloudwatchLogsActionWritesThePayloadToAStreamNamedAfterTheRule() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(false));
+
+        publish("{\"v\":1}");
+
+        verify(logs).createLogStream("/iot/metrics", "metricsRule", REGION);
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(1, events.size());
+        assertEquals("{\"v\":1}", events.get(0).get("message"));
+        assertTrue(events.get(0).get("timestamp") instanceof Long);
+    }
+
+    @Test
+    void cloudwatchLogsActionReusesAnExistingStream() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(false));
+        doThrow(new AwsException("ResourceAlreadyExistsException", "The specified log stream already exists", 400))
+                .when(logs).createLogStream("/iot/metrics", "metricsRule", REGION);
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        assertEquals("{\"v\":1}", capturedLogEvents().get(0).get("message"));
+    }
+
+    @Test
+    void cloudwatchLogsActionInBatchModeWritesOneEventPerArrayElement() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(true));
+
+        publish("[{\"v\":1},{\"v\":2}]");
+
+        assertEquals(List.of("{\"v\":1}", "{\"v\":2}"),
+                capturedLogEvents().stream().map(event -> event.get("message")).toList());
+    }
+
+    @Test
+    void cloudwatchLogsActionFailsWhenTheLogGroupDoesNotExist() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"cloudwatchLogs": {"logGroupName": "/iot/missing", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": %s}
+            """.formatted(lambdaErrorAction()));
+        doThrow(new AwsException("ResourceNotFoundException", "The specified log group does not exist: /iot/missing", 400))
+                .when(logs).createLogStream("/iot/missing", "metricsRule", REGION);
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        JsonNode failure = capturedInvocationPayload(ERROR_FUNCTION_ARN).get("failures").get(0);
+        assertEquals("CloudwatchLogsAction", failure.get("failedAction").asText());
+        assertEquals("/iot/missing", failure.get("failedResource").asText());
+        verify(logs, never()).putLogEvents(anyString(), anyString(), any(), anyString());
     }
 
     @Test
