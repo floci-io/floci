@@ -35,7 +35,6 @@ import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -43,16 +42,11 @@ import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -61,20 +55,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SesService {
 
     private static final Logger LOG = Logger.getLogger(SesService.class);
 
-    private static final Pattern TEMPLATE_VARIABLE = Pattern.compile("\\{\\{\\s*([\\w-]+)\\s*\\}\\}");
-
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
-    private static final SecureRandom BOUNDARY_RANDOM = new SecureRandom();
-
     // Identities extracted to SesIdentityService (CRUD, verification, MAIL FROM, notifications,
     // tags, and the DKIM state machine with its Route53 lookup). The facade keeps the cross-domain
     // flows and send-path reads, reaching the store through its find/save.
@@ -110,7 +98,6 @@ public class SesService {
     // Tenants (multi-tenancy) live in SesTenantService. The facade delegates.
     private final SesTenantService tenantService;
     private final SmtpRelay smtpRelay;
-    private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
     // Base URL used to build functional list-management unsubscribe links (the {{amazonSESUnsubscribeUrl}}
@@ -127,7 +114,7 @@ public class SesService {
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
                        SesTenantService tenantService, SesConfigurationSetService configSetService,
-                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SmtpRelay smtpRelay,
                        SesEventPublisher eventPublisher, EmulatorConfig config,
                        RegionResolver regionResolver) {
         this.identityService = identityService;
@@ -143,7 +130,6 @@ public class SesService {
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
-        this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
         this.baseUrl = config.effectiveBaseUrl();
@@ -162,8 +148,7 @@ public class SesService {
                SesReceiptRuleService receiptRuleService,
                SesCvetService cvetService,
                SesTenantService tenantService,
-               SmtpRelay smtpRelay,
-               ObjectMapper objectMapper) {
+               SmtpRelay smtpRelay) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
         this.accountService = accountService;
@@ -177,7 +162,6 @@ public class SesService {
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
-        this.objectMapper = objectMapper;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
         this.baseUrl = "http://localhost:4566";
@@ -2008,84 +1992,7 @@ public class SesService {
     }
 
     public String renderTestTemplate(String templateName, String templateDataRaw, String region) {
-        EmailTemplate template = getTemplate(templateName, region);
-        JsonNode templateData = parseRenderingData(objectMapper, templateDataRaw);
-        String subject = applyTemplateData(template.getSubject(), templateData);
-        String text = applyTemplateData(template.getTextPart(), templateData);
-        String html = applyTemplateData(template.getHtmlPart(), templateData);
-        return buildTestRenderMime(subject, text, html, ZonedDateTime.now(ZoneOffset.UTC), nextBoundary());
-    }
-
-    static JsonNode parseRenderingData(ObjectMapper mapper, String raw) {
-        if (raw == null || raw.isBlank()) {
-            throw new AwsException("InvalidRenderingParameter",
-                    "Template rendering data is required.", 400);
-        }
-        JsonNode node;
-        try {
-            node = mapper.readTree(raw);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("InvalidRenderingParameter",
-                    "Template rendering data is invalid: " + e.getOriginalMessage(), 400);
-        }
-        if (!node.isObject()) {
-            throw new AwsException("InvalidRenderingParameter",
-                    "Template rendering data must be a JSON object.", 400);
-        }
-        return node;
-    }
-
-    static String buildTestRenderMime(String subject, String text, String html,
-                                       ZonedDateTime date, String boundary) {
-        String safeSubject = sanitizeSubject(subject);
-        String safeText = text == null ? "" : text;
-        String safeHtml = html == null ? "" : html;
-        String dateHeader = DateTimeFormatter.RFC_1123_DATE_TIME.format(date);
-        StringBuilder out = new StringBuilder();
-        out.append("Date: ").append(dateHeader).append("\r\n");
-        out.append("Subject: ").append(safeSubject).append("\r\n");
-        out.append("MIME-Version: 1.0\r\n");
-        out.append("Content-Type: multipart/alternative; boundary=\"").append(boundary).append("\"\r\n");
-        out.append("\r\n");
-        appendMimePart(out, boundary, "text/plain", safeText);
-        appendMimePart(out, boundary, "text/html", safeHtml);
-        out.append("--").append(boundary).append("--\r\n");
-        return out.toString();
-    }
-
-    private static void appendMimePart(StringBuilder out, String boundary, String mimeType, String body) {
-        out.append("--").append(boundary).append("\r\n");
-        out.append("Content-Type: ").append(mimeType).append("; charset=UTF-8\r\n");
-        out.append("Content-Transfer-Encoding: ").append(pickTransferEncoding(body)).append("\r\n");
-        out.append("\r\n");
-        String normalized = normalizeToCrlf(body);
-        out.append(normalized);
-        if (!normalized.endsWith("\r\n")) {
-            out.append("\r\n");
-        }
-    }
-
-    static String normalizeToCrlf(String body) {
-        return body.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n");
-    }
-
-    static String pickTransferEncoding(String body) {
-        return body.codePoints().allMatch(c -> c < 128) ? "7bit" : "8bit";
-    }
-
-    static String sanitizeSubject(String subject) {
-        if (subject == null) {
-            return "";
-        }
-        // Strip C0 control characters (U+0000-U+001F) and DEL (U+007F): RFC 5322
-        // forbids them in unstructured header field bodies. Replace with spaces so
-        // visible content is preserved when template data accidentally injects them.
-        StringBuilder out = new StringBuilder(subject.length());
-        for (int i = 0; i < subject.length(); i++) {
-            char c = subject.charAt(i);
-            out.append((c < 0x20 || c == 0x7F) ? ' ' : c);
-        }
-        return out.toString();
+        return templateService.renderTestTemplate(templateName, templateDataRaw, region);
     }
 
     static String stripXml10InvalidChars(String s) {
@@ -2114,12 +2021,6 @@ public class SesService {
                 || (cp >= 0x10000 && cp <= 0x10FFFF);
     }
 
-    private static String nextBoundary() {
-        byte[] bytes = new byte[6];
-        BOUNDARY_RANDOM.nextBytes(bytes);
-        return "===_floci_" + HexFormat.of().formatHex(bytes) + "_===";
-    }
-
     /**
      * Also called by the controller ahead of the tenant send gate: AWS reports an empty inline
      * template before it looks the tenant up (probe-confirmed), so the check must not stay behind
@@ -2144,9 +2045,9 @@ public class SesService {
                                             ListManagementOptions listManagement, String region) {
         requireInlineTemplateContent(subject, textPart, htmlPart);
         return sendEmail(source, toAddresses, ccAddresses, bccAddresses, replyToAddresses,
-                applyTemplateData(subject, templateData),
-                applyTemplateData(textPart, templateData),
-                applyTemplateData(htmlPart, templateData),
+                SesTemplateService.applyTemplateData(subject, templateData),
+                SesTemplateService.applyTemplateData(textPart, templateData),
+                SesTemplateService.applyTemplateData(htmlPart, templateData),
                 configurationSetName, emailTags, additionalHeaders, listManagement, region);
     }
 
@@ -2195,9 +2096,9 @@ public class SesService {
                 String messageId = sendEmail(source,
                         entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses(),
                         replyToAddresses,
-                        applyTemplateData(subject, merged),
-                        applyTemplateData(textPart, merged),
-                        applyTemplateData(htmlPart, merged),
+                        SesTemplateService.applyTemplateData(subject, merged),
+                        SesTemplateService.applyTemplateData(textPart, merged),
+                        SesTemplateService.applyTemplateData(htmlPart, merged),
                         configurationSetName, mergedTags, mergedHeaders, null, region);
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
@@ -2295,33 +2196,6 @@ public class SesService {
         ObjectNode merged = ((ObjectNode) defaults).deepCopy();
         replacement.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
         return merged;
-    }
-
-    static String applyTemplateData(String text, JsonNode data) {
-        if (text == null || text.isEmpty()) {
-            return text;
-        }
-        Matcher matcher = TEMPLATE_VARIABLE.matcher(text);
-        StringBuilder out = new StringBuilder();
-        while (matcher.find()) {
-            String key = matcher.group(1);
-            if ("amazonSESUnsubscribeUrl".equals(key)) {
-                // Reserved list-management placeholder: leave it intact for post-render replacement
-                // in the send path, so a templated body can carry {{amazonSESUnsubscribeUrl}} without
-                // failing as a missing rendering attribute.
-                matcher.appendReplacement(out, Matcher.quoteReplacement(matcher.group(0)));
-                continue;
-            }
-            if (data == null || !data.hasNonNull(key)) {
-                throw new AwsException("MissingRenderingAttribute",
-                        "Attribute '" + key + "' is not present in the rendering data.", 400);
-            }
-            JsonNode value = data.get(key);
-            String replacement = value.isValueNode() ? value.asText() : value.toString();
-            matcher.appendReplacement(out, Matcher.quoteReplacement(replacement));
-        }
-        matcher.appendTail(out);
-        return out.toString();
     }
 
     /**

@@ -238,7 +238,7 @@ class SesServiceListManagementTest {
 
     @Test
     void applyTemplateData_leavesUnsubscribePlaceholderIntact() {
-        String rendered = SesService.applyTemplateData("<p>{{amazonSESUnsubscribeUrl}} {{name}}</p>",
+        String rendered = SesTemplateService.applyTemplateData("<p>{{amazonSESUnsubscribeUrl}} {{name}}</p>",
                 new ObjectMapper().createObjectNode().put("name", "Bob"));
         assertEquals("<p>{{amazonSESUnsubscribeUrl}} Bob</p>", rendered);
     }
