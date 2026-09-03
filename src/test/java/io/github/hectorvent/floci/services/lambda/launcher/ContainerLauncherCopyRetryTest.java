@@ -2,12 +2,14 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,7 +38,17 @@ class ContainerLauncherCopyRetryTest {
     }
 
     private ContainerLauncher launcher() {
-        return new ContainerLauncher(null, null, null, null, null, null, null, null, null, null, null);
+        // The constructor derives its populate-concurrency semaphore from config.services()
+        // unconditionally (ContainerLauncherPopulateConcurrencyTest covers that path); these
+        // copy-retry tests don't exercise it, but a null config still NPEs at construction, so a
+        // minimally-stubbed one is needed even though nothing here asserts on it.
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambda);
+        when(lambda.codeVolumePopulateConcurrency()).thenReturn(Optional.empty());
+        return new ContainerLauncher(null, null, null, null, null, null, config, null, null, null, null);
     }
 
     @Test
