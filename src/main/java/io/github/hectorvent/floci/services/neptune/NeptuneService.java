@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneClusterSettings;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneInstance;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneInstanceSettings;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -24,6 +25,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -327,6 +329,15 @@ public class NeptuneService {
     public NeptuneInstance createDbInstance(String id, String dbClusterIdentifier,
                                             String dbInstanceClass, String engineVersion,
                                             boolean iamEnabled, Map<String, String> tags) {
+        return createDbInstance(id, dbClusterIdentifier, dbInstanceClass, engineVersion, iamEnabled,
+                NeptuneInstanceSettings.defaults(), tags);
+    }
+
+    public NeptuneInstance createDbInstance(String id, String dbClusterIdentifier,
+                                            String dbInstanceClass, String engineVersion,
+                                            boolean iamEnabled, NeptuneInstanceSettings settings,
+                                            Map<String, String> tags) {
+        settings.validate();
         if (instances.get(id).isPresent()) {
             throw new AwsException("DBInstanceAlreadyExists",
                     "Neptune instance " + id + " already exists.", 400);
@@ -348,6 +359,7 @@ public class NeptuneService {
         instance.setDbiResourceId("db-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase());
         instance.setCreatedAt(Instant.now());
+        settings.applyTo(instance);
         if (tags != null && !tags.isEmpty()) {
             instance.setTags(tags);
         }
@@ -358,6 +370,10 @@ public class NeptuneService {
         instances.put(id, instance);
         LOG.infov("Neptune instance {0} created in cluster {1}", id, dbClusterIdentifier);
         return instance;
+    }
+
+    public Optional<NeptuneCluster> findDbCluster(String id) {
+        return id == null ? Optional.empty() : clusters.get(id);
     }
 
     public NeptuneInstance getDbInstance(String id) {
@@ -381,6 +397,12 @@ public class NeptuneService {
     }
 
     public NeptuneInstance modifyDbInstance(String id, String dbInstanceClass, Boolean iamEnabled) {
+        return modifyDbInstance(id, dbInstanceClass, iamEnabled, NeptuneInstanceSettings.unchanged());
+    }
+
+    public NeptuneInstance modifyDbInstance(String id, String dbInstanceClass, Boolean iamEnabled,
+                                            NeptuneInstanceSettings settings) {
+        settings.validate();
         NeptuneInstance instance = getDbInstance(id);
         if (dbInstanceClass != null && !dbInstanceClass.isBlank()) {
             instance.setDbInstanceClass(dbInstanceClass);
@@ -388,6 +410,7 @@ public class NeptuneService {
         if (iamEnabled != null) {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
+        settings.applyTo(instance);
         instances.put(id, instance);
         LOG.infov("Neptune instance {0} modified", id);
         return instance;

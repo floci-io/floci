@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneClusterSettings;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneInstance;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneInstanceSettings;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -351,5 +353,63 @@ class NeptuneServiceTest {
         assertEquals("neptune1.4", NeptuneService.parameterGroupFamily("1.4.5.1"));
         assertEquals("neptune1.3", NeptuneService.parameterGroupFamily(null));
         assertEquals("neptune1.3", NeptuneService.parameterGroupFamily("latest"));
+    }
+
+    // --- Instance settings the Terraform aws_neptune_cluster_instance resource reads back ---
+
+    @Test
+    void createDbInstanceStoresTheRequestedSettingsAndAwsDefaultsOtherwise() {
+        service.createDbCluster("instance-settings", "1.3.2.1", false);
+
+        NeptuneInstance requested = service.createDbInstance("with-settings", "instance-settings",
+                "db.r5.large", null, false,
+                new NeptuneInstanceSettings("us-east-1b", false, 0, true, "custom-params", "custom-subnets",
+                        "07:00-08:00", "Sun:05:00-Sun:06:00"),
+                Map.of("Name", "with-settings"));
+        assertEquals("us-east-1b", requested.getAvailabilityZone());
+        assertFalse(requested.isAutoMinorVersionUpgrade());
+        assertEquals(0, requested.getPromotionTier());
+        assertTrue(requested.isPubliclyAccessible());
+        assertEquals("custom-params", requested.getDbParameterGroupName());
+        assertEquals("custom-subnets", requested.getDbSubnetGroupName());
+        assertEquals("07:00-08:00", requested.getPreferredBackupWindow());
+        assertEquals("sun:05:00-sun:06:00", requested.getPreferredMaintenanceWindow());
+        assertEquals("with-settings", requested.getTags().get("Name"));
+
+        NeptuneInstance defaults = service.createDbInstance("bare", "instance-settings", "db.r5.large", null, false);
+        assertTrue(defaults.isAutoMinorVersionUpgrade());
+        assertEquals(1, defaults.getPromotionTier());
+        assertFalse(defaults.isPubliclyAccessible());
+        assertNull(defaults.getAvailabilityZone());
+        assertNull(defaults.getDbParameterGroupName());
+        assertNull(defaults.getPreferredMaintenanceWindow());
+    }
+
+    @Test
+    void modifyDbInstanceAppliesOnlyTheSettingsTheRequestCarries() {
+        service.createDbCluster("instance-modify", "1.3.2.1", false);
+        service.createDbInstance("to-modify", "instance-modify", "db.r5.large", null, false,
+                new NeptuneInstanceSettings(null, true, 2, null, null, null, null, null), Map.of());
+
+        NeptuneInstance modified = service.modifyDbInstance("to-modify", null, null,
+                new NeptuneInstanceSettings(null, false, null, null, "tuned", null, null, "Mon:02:00-Mon:03:00"));
+
+        assertFalse(modified.isAutoMinorVersionUpgrade());
+        assertEquals(2, modified.getPromotionTier(), "An omitted PromotionTier must keep its value");
+        assertEquals("tuned", modified.getDbParameterGroupName());
+        assertEquals("mon:02:00-mon:03:00", modified.getPreferredMaintenanceWindow());
+        assertEquals("db.r5.large", modified.getDbInstanceClass(), "An omitted DBInstanceClass must keep its value");
+    }
+
+    @Test
+    void instanceSettingsRejectAPromotionTierOutsideTheAwsRange() {
+        service.createDbCluster("instance-invalid", "1.3.2.1", false);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createDbInstance("bad-tier",
+                "instance-invalid", "db.r5.large", null, false,
+                new NeptuneInstanceSettings(null, null, 16, null, null, null, null, null), Map.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertFalse(service.hasInstance("bad-tier"), "A rejected create must not leave an instance behind");
     }
 }

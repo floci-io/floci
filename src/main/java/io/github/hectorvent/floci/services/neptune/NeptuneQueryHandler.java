@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneClusterSettings;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneInstance;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneInstanceSettings;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -230,7 +231,7 @@ public class NeptuneQueryHandler {
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
 
         NeptuneInstance instance = service.createDbInstance(id, dbClusterIdentifier,
-                dbInstanceClass, engineVersion, iamEnabled, parseTags(params));
+                dbInstanceClass, engineVersion, iamEnabled, instanceSettings(params, true), parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS,
                 instanceXml(instance))).build();
     }
@@ -281,7 +282,8 @@ public class NeptuneQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
 
-        NeptuneInstance instance = service.modifyDbInstance(id, dbInstanceClass, iamEnabled);
+        NeptuneInstance instance = service.modifyDbInstance(id, dbInstanceClass, iamEnabled,
+                instanceSettings(params, false));
         return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS,
                 instanceXml(instance))).build();
     }
@@ -329,6 +331,18 @@ public class NeptuneQueryHandler {
                 create ? params.getFirst("ReplicationSourceIdentifier") : null,
                 optionalDouble(params.getFirst("ServerlessV2ScalingConfiguration.MinCapacity")),
                 optionalDouble(params.getFirst("ServerlessV2ScalingConfiguration.MaxCapacity")));
+    }
+
+    private static NeptuneInstanceSettings instanceSettings(MultivaluedMap<String, String> params, boolean create) {
+        return new NeptuneInstanceSettings(
+                create ? params.getFirst("AvailabilityZone") : null,
+                optionalBoolean(params.getFirst("AutoMinorVersionUpgrade")),
+                optionalInt(params.getFirst("PromotionTier")),
+                create ? optionalBoolean(params.getFirst("PubliclyAccessible")) : null,
+                params.getFirst("DBParameterGroupName"),
+                create ? params.getFirst("DBSubnetGroupName") : null,
+                params.getFirst("PreferredBackupWindow"),
+                params.getFirst("PreferredMaintenanceWindow"));
     }
 
     private static List<String> listParam(MultivaluedMap<String, String> params, String name, String memberName) {
@@ -482,11 +496,12 @@ public class NeptuneQueryHandler {
             xml.end("ServerlessV2ScalingConfiguration");
         }
         xml.start("DBClusterMembers");
-        if (c.getDbClusterMembers() != null) {
-            for (String memberId : c.getDbClusterMembers()) {
+        List<String> members = c.getDbClusterMembers();
+        if (members != null) {
+            for (String memberId : members) {
                 xml.start("DBClusterMember")
                    .elem("DBInstanceIdentifier", memberId)
-                   .elem("IsClusterWriter", true)
+                   .elem("IsClusterWriter", memberId.equals(members.get(0)))
                    .end("DBClusterMember");
             }
         }
@@ -499,7 +514,16 @@ public class NeptuneQueryHandler {
     }
 
     private String instanceInnerXml(NeptuneInstance i) {
-        return new XmlBuilder()
+        NeptuneCluster cluster = service.findDbCluster(i.getDbClusterIdentifier()).orElse(null);
+        String backupWindow = i.getPreferredBackupWindow() != null ? i.getPreferredBackupWindow()
+                : cluster != null && cluster.getPreferredBackupWindow() != null ? cluster.getPreferredBackupWindow()
+                : BackupWindows.DEFAULT_BACKUP_WINDOW;
+        String subnetGroup = i.getDbSubnetGroupName() != null ? i.getDbSubnetGroupName()
+                : cluster != null && cluster.getDbSubnetGroupName() != null ? cluster.getDbSubnetGroupName()
+                : "default";
+        String parameterGroup = i.getDbParameterGroupName() != null ? i.getDbParameterGroupName()
+                : "default." + NeptuneService.parameterGroupFamily(i.getEngineVersion());
+        XmlBuilder xml = new XmlBuilder()
                 .elem("DBInstanceIdentifier", i.getDbInstanceIdentifier())
                 .elem("DBClusterIdentifier", i.getDbClusterIdentifier())
                 .elem("DBInstanceClass", i.getDbInstanceClass())
@@ -512,11 +536,34 @@ public class NeptuneQueryHandler {
                 .end("Endpoint")
                 .elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
                 .elem("MultiAZ", false)
-                .elem("StorageEncrypted", true)
-                .elem("AvailabilityZone", config.defaultAvailabilityZone())
+                .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
+                .elem("PromotionTier", i.getPromotionTier())
+                .elem("PubliclyAccessible", i.isPubliclyAccessible())
+                .elem("StorageEncrypted", cluster != null && cluster.isStorageEncrypted())
+                .elem("KmsKeyId", cluster != null ? cluster.getKmsKeyId() : null)
+                .elem("StorageType", cluster != null ? cluster.getStorageType() : null)
+                .elem("AvailabilityZone", i.getAvailabilityZone() != null
+                        ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
+                .elem("PreferredBackupWindow", backupWindow)
+                .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
+                        ? i.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
                 .elem("DbiResourceId", i.getDbiResourceId())
-                .elem("DBInstanceArn", i.getDbInstanceArn())
-                .build();
+                .elem("DBInstanceArn", i.getDbInstanceArn());
+        if (i.getCreatedAt() != null) {
+            xml.elem("InstanceCreateTime",
+                    DateTimeFormatter.ISO_INSTANT.format(i.getCreatedAt().truncatedTo(ChronoUnit.MILLIS)));
+        }
+        xml.start("DBSubnetGroup")
+           .elem("DBSubnetGroupName", subnetGroup)
+           .elem("SubnetGroupStatus", "Complete")
+           .end("DBSubnetGroup")
+           .start("DBParameterGroups")
+           .start("DBParameterGroup")
+           .elem("DBParameterGroupName", parameterGroup)
+           .elem("ParameterApplyStatus", "in-sync")
+           .end("DBParameterGroup")
+           .end("DBParameterGroups");
+        return xml.build();
     }
 
     private static String extractFilterValue(MultivaluedMap<String, String> params, String filterName) {

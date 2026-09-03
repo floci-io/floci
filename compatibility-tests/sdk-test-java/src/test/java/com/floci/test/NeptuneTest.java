@@ -9,14 +9,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.neptune.NeptuneClient;
 import software.amazon.awssdk.services.neptune.model.AddRoleToDbClusterRequest;
-import software.amazon.awssdk.services.neptune.model.AddTagsToResourceRequest;import software.amazon.awssdk.services.neptune.model.CreateDbClusterRequest;
+import software.amazon.awssdk.services.neptune.model.AddTagsToResourceRequest;
+import software.amazon.awssdk.services.neptune.model.CreateDbClusterRequest;
 import software.amazon.awssdk.services.neptune.model.CreateDbInstanceRequest;
 import software.amazon.awssdk.services.neptune.model.DeleteDbClusterRequest;
 import software.amazon.awssdk.services.neptune.model.DeleteDbInstanceRequest;
 import software.amazon.awssdk.services.neptune.model.DescribeDbClustersRequest;
 import software.amazon.awssdk.services.neptune.model.DescribeDbInstancesRequest;
 import software.amazon.awssdk.services.neptune.model.InvalidDbClusterStateException;
-import software.amazon.awssdk.services.neptune.model.ListTagsForResourceRequest;import software.amazon.awssdk.services.neptune.model.ModifyDbClusterRequest;
+import software.amazon.awssdk.services.neptune.model.ListTagsForResourceRequest;
+import software.amazon.awssdk.services.neptune.model.ModifyDbClusterRequest;
 import software.amazon.awssdk.services.neptune.model.ModifyDbInstanceRequest;
 import software.amazon.awssdk.services.neptune.model.NeptuneException;
 import software.amazon.awssdk.services.neptune.model.RemoveRoleFromDbClusterRequest;
@@ -24,6 +26,7 @@ import software.amazon.awssdk.services.neptune.model.RemoveTagsFromResourceReque
 import software.amazon.awssdk.services.neptune.model.Tag;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 @DisplayName("Neptune Cluster and Instance Management")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -190,13 +193,17 @@ class NeptuneTest {
 
     @Test
     @Order(15)
-    @DisplayName("CreateDBInstance returns valid instance descriptor")
+    @DisplayName("CreateDBInstance returns the descriptor Terraform's aws_neptune_cluster_instance reads back")
     void createInstance() {
         var response = neptune.createDBInstance(CreateDbInstanceRequest.builder()
                 .dbInstanceIdentifier(INSTANCE_ID)
                 .dbClusterIdentifier(CLUSTER_ID)
                 .dbInstanceClass("db.r5.large")
                 .engine("neptune")
+                .autoMinorVersionUpgrade(true)
+                .promotionTier(0)
+                .publiclyAccessible(false)
+                .tags(Tag.builder().key("Name").value(INSTANCE_ID).build())
                 .build());
 
         var instance = response.dbInstance();
@@ -204,6 +211,19 @@ class NeptuneTest {
         assertThat(instance.dbClusterIdentifier()).isEqualTo(CLUSTER_ID);
         assertThat(instance.dbInstanceStatus()).isEqualTo("available");
         assertThat(instance.dbInstanceArn()).startsWith("arn:aws:neptune:");
+        assertThat(instance.autoMinorVersionUpgrade()).isTrue();
+        assertThat(instance.promotionTier()).isZero();
+        assertThat(instance.publiclyAccessible()).isFalse();
+        assertThat(instance.storageEncrypted()).isFalse();
+        assertThat(instance.availabilityZone()).isNotBlank();
+        assertThat(instance.preferredBackupWindow()).isNotBlank();
+        assertThat(instance.preferredMaintenanceWindow()).isNotBlank();
+        assertThat(instance.instanceCreateTime()).isNotNull();
+        assertThat(instance.dbSubnetGroup().dbSubnetGroupName()).isEqualTo("default");
+        assertThat(instance.dbParameterGroups()).hasSize(1);
+        assertThat(instance.dbParameterGroups().get(0).dbParameterGroupName()).startsWith("default.neptune");
+        assertThat(instance.endpoint().port()).isEqualTo(neptune.describeDBClusters(DescribeDbClustersRequest.builder()
+                .dbClusterIdentifier(CLUSTER_ID).build()).dbClusters().get(0).port());
     }
 
     @Test
@@ -216,23 +236,43 @@ class NeptuneTest {
 
         assertThat(response.dbInstances()).hasSize(1);
         assertThat(response.dbInstances().get(0).dbInstanceIdentifier()).isEqualTo(INSTANCE_ID);
+        assertThat(response.dbInstances().get(0).promotionTier()).isZero();
 
         var cluster = neptune.describeDBClusters(DescribeDbClustersRequest.builder()
                 .dbClusterIdentifier(CLUSTER_ID).build()).dbClusters().get(0);
         assertThat(cluster.dbClusterMembers()).hasSize(1);
         assertThat(cluster.dbClusterMembers().get(0).dbInstanceIdentifier()).isEqualTo(INSTANCE_ID);
+        assertThat(cluster.dbClusterMembers().get(0).isClusterWriter()).isTrue();
+
+        var tags = neptune.listTagsForResource(ListTagsForResourceRequest.builder()
+                .resourceName(response.dbInstances().get(0).dbInstanceArn()).build()).tagList();
+        assertThat(tags).extracting(Tag::key, Tag::value).containsExactly(tuple("Name", INSTANCE_ID));
     }
 
     @Test
     @Order(17)
-    @DisplayName("ModifyDBInstance updates instance class")
+    @DisplayName("ModifyDBInstance updates the settings Terraform changes in place")
     void modifyInstance() {
         var response = neptune.modifyDBInstance(ModifyDbInstanceRequest.builder()
                 .dbInstanceIdentifier(INSTANCE_ID)
                 .dbInstanceClass("db.r5.xlarge")
+                .autoMinorVersionUpgrade(false)
+                .promotionTier(3)
+                .preferredMaintenanceWindow("sun:05:00-sun:06:00")
+                .applyImmediately(true)
                 .build());
 
-        assertThat(response.dbInstance().dbInstanceClass()).isEqualTo("db.r5.xlarge");
+        var instance = response.dbInstance();
+        assertThat(instance.dbInstanceClass()).isEqualTo("db.r5.xlarge");
+        assertThat(instance.autoMinorVersionUpgrade()).isFalse();
+        assertThat(instance.promotionTier()).isEqualTo(3);
+        assertThat(instance.preferredMaintenanceWindow()).isEqualTo("sun:05:00-sun:06:00");
+        assertThat(instance.publiclyAccessible()).isFalse();
+
+        var described = neptune.describeDBInstances(DescribeDbInstancesRequest.builder()
+                .dbInstanceIdentifier(INSTANCE_ID).build()).dbInstances().get(0);
+        assertThat(described.promotionTier()).isEqualTo(3);
+        assertThat(described.autoMinorVersionUpgrade()).isFalse();
     }
 
     @Test
