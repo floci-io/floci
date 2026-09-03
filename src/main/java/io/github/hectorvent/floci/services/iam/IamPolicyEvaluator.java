@@ -72,15 +72,15 @@ public class IamPolicyEvaluator {
      * @param resourcePolicies resource-based policy documents (Phase 2); may be null or empty
      * @param action        IAM action, e.g. "s3:GetObject"
      * @param resource      resource ARN, e.g. "arn:aws:s3:::my-bucket/key"
-     * @param conditionCtx  condition context key-value pairs; may be null or empty
+     * @param conditionCtx  condition context key → values; may be null or empty
      * @return {@link Decision#ALLOW} or {@link Decision#DENY}
      */
     public Decision evaluate(CallerContext caller,
                              List<String> resourcePolicies,
                              String action,
                              String resource,
-                             Map<String, String> conditionCtx) {
-        Map<String, String> ctx = normalizeConditionContext(conditionCtx);
+                             Map<String, List<String>> conditionCtx) {
+        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
 
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
         List<PolicyStatement> resourceStmts = resourcePolicies == null ? List.of() : parseAll(resourcePolicies);
@@ -139,15 +139,15 @@ public class IamPolicyEvaluator {
     public Decision simulateCustomPolicy(List<String> policyDocuments,
                                           String action,
                                           String resource,
-                                          Map<String, String> conditionCtx) {
+                                          Map<String, List<String>> conditionCtx) {
         return evaluate(CallerContext.of(policyDocuments), null, action, resource, conditionCtx);
     }
 
     public SimulationDecision simulatePrincipalPolicy(CallerContext caller,
                                                       String action,
                                                       String resource,
-                                                      Map<String, String> conditionCtx) {
-        Map<String, String> ctx = normalizeConditionContext(conditionCtx);
+                                                      Map<String, List<String>> conditionCtx) {
+        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
         List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
                 ? null : parseAll(List.of(caller.sessionPolicyDocument()));
@@ -183,7 +183,7 @@ public class IamPolicyEvaluator {
      * everything the operator meant to forbid.</p>
      */
     private boolean scpAllows(List<List<String>> scpLevels, String action, String resource,
-                              Map<String, String> ctx) {
+                              Map<String, List<String>> ctx) {
         if (scpLevels == null) {
             return true;
         }
@@ -208,20 +208,31 @@ public class IamPolicyEvaluator {
     // Statement matching
     // -----------------------------------------------------------------------
 
-    private Map<String, String> normalizeConditionContext(Map<String, String> conditionCtx) {
+    /**
+     * Lower-cases keys and copies the value lists, dropping null keys, null lists and null
+     * members. An empty list is preserved: an empty set is not the same thing as an absent
+     * key — AWS's set operators give it its own semantics (ForAllValues matches vacuously,
+     * ForAnyValue does not match).
+     */
+    private Map<String, List<String>> normalizeConditionContext(Map<String, List<String>> conditionCtx) {
         if (conditionCtx == null || conditionCtx.isEmpty()) {
             return Map.of();
         }
-        return conditionCtx.entrySet().stream()
-                .filter(entry -> entry.getKey() != null && entry.getValue() != null)
-                .collect(java.util.stream.Collectors.toMap(
-                        entry -> entry.getKey().toLowerCase(java.util.Locale.ROOT),
-                        Map.Entry::getValue,
-                        (first, ignored) -> first));
+        Map<String, List<String>> normalized = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : conditionCtx.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            List<String> values = entry.getValue().stream()
+                    .filter(java.util.Objects::nonNull)
+                    .toList();
+            normalized.putIfAbsent(entry.getKey().toLowerCase(java.util.Locale.ROOT), values);
+        }
+        return normalized;
     }
 
     private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
-                                     Map<String, String> ctx) {
+                                     Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
             if (stmt.isDeny() && matchesStatement(stmt, action, resource, ctx)) {
                 return true;
@@ -231,7 +242,7 @@ public class IamPolicyEvaluator {
     }
 
     private boolean anyExplicitAllow(List<PolicyStatement> stmts, String action, String resource,
-                                      Map<String, String> ctx) {
+                                      Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
             if (stmt.isAllow() && matchesStatement(stmt, action, resource, ctx)) {
                 return true;
@@ -241,7 +252,7 @@ public class IamPolicyEvaluator {
     }
 
     private boolean matchesStatement(PolicyStatement stmt, String action, String resource,
-                                      Map<String, String> ctx) {
+                                      Map<String, List<String>> ctx) {
         return matchesAction(stmt, action)
                 && matchesResource(stmt, resource)
                 && matchesConditions(stmt.getConditions(), ctx);
@@ -290,7 +301,7 @@ public class IamPolicyEvaluator {
      * Returns true if ALL blocks pass (or there are no conditions).
      */
     private boolean matchesConditions(Map<String, Map<String, List<String>>> conditions,
-                                       Map<String, String> ctx) {
+                                       Map<String, List<String>> ctx) {
         if (conditions == null || conditions.isEmpty()) {
             return true;
         }
@@ -304,16 +315,16 @@ public class IamPolicyEvaluator {
 
     private boolean evaluateConditionBlock(String operator,
                                             Map<String, List<String>> keyValueMap,
-                                            Map<String, String> ctx) {
+                                            Map<String, List<String>> ctx) {
         boolean ifExists = operator.endsWith("IfExists");
         String baseOp = ifExists ? operator.substring(0, operator.length() - "IfExists".length()) : operator;
 
         for (Map.Entry<String, List<String>> entry : keyValueMap.entrySet()) {
             String condKey = entry.getKey().toLowerCase();
             List<String> condValues = entry.getValue();
-            String ctxValue = ctx.get(condKey);
+            List<String> ctxValues = ctx.get(condKey);
 
-            if (ctxValue == null) {
+            if (ctxValues == null) {
                 if ("Null".equalsIgnoreCase(baseOp)) {
                     // Null: {key: "true"} → key must be absent → pass when any condValue is "true"
                     boolean expectAbsent = condValues.stream().anyMatch("true"::equalsIgnoreCase);
@@ -336,6 +347,14 @@ public class IamPolicyEvaluator {
                 }
                 continue;
             }
+
+            // A bare operator against a multi-valued key is a policy authoring error in AWS;
+            // mirror that by comparing only the first value, which is behaviour-preserving for
+            // every key that is single-valued today.
+            if (ctxValues.isEmpty()) {
+                return false;
+            }
+            String ctxValue = ctxValues.getFirst();
 
             // OR across condValues for this key
             boolean keyMatch = false;

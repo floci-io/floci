@@ -148,7 +148,7 @@ class IamEnforcementIntegrationTest {
                         List.of(policy),
                         "s3:GetObject",
                         "arn:aws:s3:::bucket/key",
-                        Map.of("AWS:SourceIP", "127.0.0.1")));
+                        Map.of("AWS:SourceIP", List.of("127.0.0.1"))));
     }
 
     // =========================================================================

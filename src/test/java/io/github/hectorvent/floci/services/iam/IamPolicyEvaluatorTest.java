@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -100,5 +101,23 @@ class IamPolicyEvaluatorTest {
         CallerContext caller = adminWithScps(List.of(List.of(), List.of(ALLOW_ALL)));
         assertEquals(Decision.ALLOW,
                 evaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+    }
+
+    @Test
+    void singleValuedConditionKeyStillMatchesUnderTheMultiValuedContext() {
+        // A plain (non-set) operator against a one-element list keeps today's semantics:
+        // the first value is compared against the OR of the policy's condition values.
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:GetObject","Resource":"*",
+               "Condition":{"StringEquals":{"aws:PrincipalArn":"arn:aws:iam::111122223333:user/alice"}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "s3:GetObject", "arn:aws:s3:::bucket/key",
+                Map.of("aws:PrincipalArn", List.of("arn:aws:iam::111122223333:user/alice"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "s3:GetObject", "arn:aws:s3:::bucket/key",
+                Map.of("aws:PrincipalArn", List.of("arn:aws:iam::111122223333:user/bob"))));
     }
 }

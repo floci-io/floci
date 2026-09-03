@@ -6,6 +6,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,11 +30,11 @@ class IamConditionContextResolverTest {
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
         when(uriInfo.getQueryParameters()).thenReturn(query);
 
-        Map<String, String> conditions = resolver.resolve("s3", "s3:ListBucket", containerRequest);
+        Map<String, List<String>> conditions = resolver.resolve("s3", "s3:ListBucket", containerRequest);
 
-        assertEquals("my_namespace/table/", conditions.get("s3:prefix"));
-        assertEquals("/", conditions.get("s3:delimiter"));
-        assertEquals("100", conditions.get("s3:max-keys"));
+        assertEquals(List.of("my_namespace/table/"), conditions.get("s3:prefix"));
+        assertEquals(List.of("/"), conditions.get("s3:delimiter"));
+        assertEquals(List.of("100"), conditions.get("s3:max-keys"));
     }
 
     @Test

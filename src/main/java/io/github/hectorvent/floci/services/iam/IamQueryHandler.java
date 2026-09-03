@@ -1174,7 +1174,7 @@ public class IamQueryHandler {
         if (resourceArns.isEmpty()) {
             resourceArns = List.of("*");
         }
-        Map<String, String> context = extractContextEntries(params);
+        Map<String, List<String>> context = extractContextEntries(params);
 
         XmlBuilder results = new XmlBuilder().start("EvaluationResults");
         for (String actionName : actionNames) {
@@ -1402,14 +1402,14 @@ public class IamQueryHandler {
         return values;
     }
 
-    private Map<String, String> extractContextEntries(MultivaluedMap<String, String> params) {
-        Map<String, String> context = new HashMap<>();
+    private Map<String, List<String>> extractContextEntries(MultivaluedMap<String, String> params) {
+        Map<String, List<String>> context = new HashMap<>();
         for (int i = 1; ; i++) {
             String name = params.getFirst("ContextEntries.member." + i + ".ContextKeyName");
             if (name == null) break;
             String value = params.getFirst("ContextEntries.member." + i + ".ContextKeyValues.member.1");
             if (value != null) {
-                context.put(name, value);
+                context.put(name, List.of(value));
             }
         }
         return context;
