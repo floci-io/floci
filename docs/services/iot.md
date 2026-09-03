@@ -48,6 +48,25 @@ Current MVP 2 limitations:
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
 - Dynamic thing groups, fleet indexing, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled.
 
+## Domain Configurations
+
+Status: control plane only.
+
+`CreateDomainConfiguration`, `DescribeDomainConfiguration`, `UpdateDomainConfiguration`, `DeleteDomainConfiguration` and `ListDomainConfigurations` are served on the REST-JSON paths the AWS SDKs use, with the AWS shapes and error codes:
+
+- A new configuration is `ENABLED` and `CUSTOMER_MANAGED`, its server certificate is reported `VALID`, and its ARN carries the short id AWS appends (`domainconfiguration/<name>/<id>`). A configuration created without a domain name has the `ENDPOINT` domain type.
+- `UpdateDomainConfiguration` changes the status, the authorizer (or removes it with `removeAuthorizerConfig`), the TLS, server certificate and client certificate settings, the authentication type and the application protocol.
+- `DeleteDomainConfiguration` refuses an `ENABLED` configuration with `InvalidRequestException`; disable it first, as on AWS.
+- `ListDomainConfigurations` filters by `serviceType` and pages with `marker` and `pageSize`.
+- Tags work through `TagResource`, `UntagResource` and `ListTagsForResource` on the configuration ARN.
+- CloudFormation provisions `AWS::IoT::DomainConfiguration` through the same operations; see the CloudFormation service page for the attribute list.
+
+Current limitations:
+
+- A custom domain does not change where the broker listens. `DescribeEndpoint` keeps returning Floci's own address, and pointing DNS at the emulator is outside its scope.
+- The AWS-managed configurations (`iot:Data-ATS`, `iot:Data`, `iot:CredentialProvider`, `iot:Jobs`) are not listed or described.
+- Server certificate ARNs are stored as given and reported `VALID`; they are not checked against ACM.
+
 ## MQTT Broker
 
 Status: complete.
