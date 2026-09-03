@@ -2144,7 +2144,8 @@ public class DynamoDbJsonHandler {
         PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
                 .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
-                .consistentRead(request.path("ConsistentRead").asBoolean(false));
+                .consistentRead(request.path("ConsistentRead").asBoolean(false))
+                .tokenBinding(partiQLHandler.tokenBinding(statement, parameters));
         JsonNode result = partiQLHandler.execute(stmt, ctx, region);
         return Response.ok(result).build();
     }

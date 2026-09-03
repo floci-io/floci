@@ -22,6 +22,7 @@ class DynamoDbAccessPathIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String TABLE = "access-path-validation";
+    private static final String SIBLING_TABLE = "access-path-validation-sibling";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -638,6 +639,120 @@ class DynamoDbAccessPathIntegrationTest {
             .body("Responses[1].Error.Code", equalTo("ValidationError"))
             .body("Responses[1].Error.Message", equalTo(
                     "Select statements within BatchExecuteStatement must specify the primary key in the where clause."));
+    }
+
+    @Test
+    @Order(27)
+    void executeStatementRejectsForeignNextTokens() {
+        // The NextToken is opaque and bound to the issuing statement text and
+        // parameters (characterised on real AWS, eu-west-1, 2026-09-03):
+        // replaying one against a different statement, parameter set or access
+        // path is rejected, while a different Limit is accepted.
+        String scanToken = request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE status = 'partiql-page'","Limit":1}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", lessThanOrEqualTo(1))
+            .extract().jsonPath().getString("NextToken");
+
+        // Different statement over the same table.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\"","Limit":1,"NextToken":"%s"}
+                """.formatted(TABLE, scanToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // Base-table token replayed on an index-qualified statement.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\".\\"status-index\\" WHERE status = 'partiql-page'","Limit":1,"NextToken":"%s"}
+                """.formatted(TABLE, scanToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // Index-qualified token replayed on the base table.
+        String gsiToken = request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\".\\"status-index\\" WHERE status = 'partiql-page'","Limit":1}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .extract().jsonPath().getString("NextToken");
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE status = 'partiql-page'","Limit":1,"NextToken":"%s"}
+                """.formatted(TABLE, gsiToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // Same statement text with different parameters.
+        String parameterToken = request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Limit":1,"Parameters":[{"S":"partiql-gsi"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .extract().jsonPath().getString("NextToken");
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Limit":1,"Parameters":[{"S":"partiql-page-1"}],"NextToken":"%s"}
+                """.formatted(TABLE, parameterToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // A different Limit is not part of the binding.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Limit":2,"Parameters":[{"S":"partiql-gsi"}],"NextToken":"%s"}
+                """.formatted(TABLE, parameterToken))
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(28)
+    void executeStatementRejectsNextTokenFromAnotherTable() {
+        // Even with an identical key schema, a token minted against one table
+        // is rejected on another (characterised on real AWS, eu-west-1,
+        // 2026-09-03).
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "TableName":"%s",
+                  "AttributeDefinitions":[
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"sk","AttributeType":"S"}
+                  ],
+                  "KeySchema":[
+                    {"AttributeName":"pk","KeyType":"HASH"},
+                    {"AttributeName":"sk","KeyType":"RANGE"}
+                  ],
+                  "BillingMode":"PAY_PER_REQUEST"
+                }
+                """.formatted(SIBLING_TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        try {
+            String token = request("DynamoDB_20120810.ExecuteStatement", """
+                    {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'partiql-gsi' AND begins_with(sk, 's')","Limit":1}
+                    """.formatted(TABLE))
+                .statusCode(200)
+                .extract().jsonPath().getString("NextToken");
+            request("DynamoDB_20120810.ExecuteStatement", """
+                    {"Statement":"SELECT * FROM \\"%s\\"","Limit":1,"NextToken":"%s"}
+                    """.formatted(SIBLING_TABLE, token))
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("NextToken does not match request"));
+        } finally {
+            given()
+                .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+                .contentType(CONTENT_TYPE)
+                .body("{\"TableName\":\"" + SIBLING_TABLE + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
     }
 
     @Test

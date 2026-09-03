@@ -327,4 +327,26 @@ class DynamoDbPartiQLTest {
         assertThat(resp.responses().get(0).error().message()).isEqualTo(
                 "Select statements within BatchExecuteStatement must specify the primary key in the where clause.");
     }
+
+    @Test
+    @Order(19)
+    void executeStatementRejectsForeignNextToken() {
+        ExecuteStatementResponse page = ddb.executeStatement(r -> r
+                .statement("SELECT * FROM \"" + INDEX_TABLE + "\" WHERE pk = 'idxpk'")
+                .limit(1));
+        assertThat(page.nextToken()).isNotBlank();
+
+        // Characterised on real AWS (eu-west-1, 2026-09-03): the token is bound
+        // to the issuing statement, so replaying it on another statement or
+        // access path is rejected even when the target key schema matches.
+        assertThatThrownBy(() -> ddb.executeStatement(r -> r
+                .statement("SELECT * FROM \"" + INDEX_TABLE + "\".\"status-index\" WHERE status = 'active'")
+                .limit(1)
+                .nextToken(page.nextToken())))
+                .isInstanceOfSatisfying(DynamoDbException.class, e -> {
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+                    assertThat(e.awsErrorDetails().errorMessage())
+                            .isEqualTo("NextToken does not match request");
+                });
+    }
 }

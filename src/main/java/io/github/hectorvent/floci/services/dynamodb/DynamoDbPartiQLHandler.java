@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -9,6 +10,9 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.*;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.Base64;
 
@@ -103,7 +107,7 @@ class DynamoDbPartiQLHandler {
                 scanFilters.add(skCond);
             }
             String fe = buildFe(scanFilters, eav, ean);
-            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken());
+            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
             DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, true);
             DynamoDbService.ScanResult result = service.scan(stmt.table(), fe,
                     ean.isEmpty() ? null : ean.toNode(mapper),
@@ -122,7 +126,7 @@ class DynamoDbPartiQLHandler {
             ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
             String kce = buildKce(pkEq, skCond, pkName, skName, eav, ean);
             String fe = buildFe(filterConds, eav, ean);
-            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken());
+            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
             DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
             DynamoDbService.QueryResult result = service.query(
                     stmt.table(), null, eav.toNode(mapper), kce, fe,
@@ -160,26 +164,56 @@ class DynamoDbPartiQLHandler {
         ObjectNode resp = mapper.createObjectNode();
         resp.set("Items", arr);
         if (lastEvaluatedKey != null) {
-            resp.put("NextToken", encodeNextToken(lastEvaluatedKey));
+            resp.put("NextToken", encodeNextToken(lastEvaluatedKey, ctx.tokenBinding()));
         }
         return resp;
     }
 
-    private String encodeNextToken(JsonNode lastEvaluatedKey) {
+    // NextToken is opaque to the client, so it carries a digest binding it to
+    // the statement text and parameter values that minted it. Real AWS rejects
+    // a token replayed against any other statement, table or access path with
+    // "NextToken does not match request", while a changed Limit or a dropped
+    // ConsistentRead is accepted (characterised on real AWS, eu-west-1,
+    // 2026-09-03).
+    String tokenBinding(String statement, List<JsonNode> parameters) {
         try {
-            return Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(lastEvaluatedKey));
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(statement.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            for (JsonNode parameter : parameters) {
+                digest.update(mapper.writeValueAsBytes(parameter));
+                digest.update((byte) 0);
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException | JsonProcessingException e) {
+            throw new IllegalStateException("Failed to bind the PartiQL NextToken to its statement", e);
+        }
+    }
+
+    private String encodeNextToken(JsonNode lastEvaluatedKey, String tokenBinding) {
+        try {
+            ObjectNode payload = mapper.createObjectNode();
+            payload.set("k", lastEvaluatedKey);
+            payload.put("b", tokenBinding);
+            return Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(payload));
         } catch (Exception e) {
             throw new AwsException("InternalServerError", "Failed to encode NextToken", 500);
         }
     }
 
-    private JsonNode decodeNextToken(String nextToken) {
+    private JsonNode decodeNextToken(String nextToken, String tokenBinding) {
         if (nextToken == null) return null;
+        JsonNode payload;
         try {
-            return mapper.readTree(Base64.getDecoder().decode(nextToken));
+            payload = mapper.readTree(Base64.getDecoder().decode(nextToken));
         } catch (Exception e) {
             throw new AwsException("ValidationException", "Invalid NextToken", 400);
         }
+        if (!payload.isObject() || !payload.hasNonNull("k")
+                || !tokenBinding.equals(payload.path("b").asText())) {
+            throw new AwsException("ValidationException", "NextToken does not match request", 400);
+        }
+        return payload.get("k");
     }
 
     private String buildKce(Cond.Eq pkEq, Cond skCond, String pkName, String skName,
