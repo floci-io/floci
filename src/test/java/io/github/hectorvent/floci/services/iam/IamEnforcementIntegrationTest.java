@@ -188,4 +188,48 @@ class IamEnforcementIntegrationTest {
                 "arn:aws:s3:::my-bucket/*",
                 "arn:aws:s3:::other-bucket/file.txt"));
     }
+
+    // =========================================================================
+    // DynamoDB fine-grained access control (issue #2926)
+    // =========================================================================
+
+    private static final String LEADING_KEYS_SCOPED_POLICY = """
+        {"Version":"2012-10-17","Statement":[
+          {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:Query"],
+           "Resource":"arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable",
+           "Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+        ]}""";
+
+    @Test
+    void leadingKeysConditionAllowsTheInScopeItemAndDeniesTheOutOfScopeOne() {
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_SCOPED_POLICY), "dynamodb:GetItem",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_SCOPED_POLICY), "dynamodb:GetItem",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_bob"))));
+
+        // The leading key could not be resolved from the request: fail closed.
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_SCOPED_POLICY), "dynamodb:GetItem",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable",
+                Map.of()));
+    }
+
+    @Test
+    void wildcardActionAndResourcePolicyStillAllowsRegardlessOfLeadingKeys() {
+        // Control: the condition is what discriminates above, not the action or the ARN.
+        String wildcard = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"*","Resource":"*"}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(wildcard), "dynamodb:GetItem",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_bob"))));
+    }
 }
