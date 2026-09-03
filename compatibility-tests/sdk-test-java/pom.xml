@@ -333,6 +333,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>bedrockagentcore</artifactId>
         </dependency>
+        <!-- Bedrock Runtime client (Converse/ConverseStream) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockruntime</artifactId>
+        </dependency>
         <!-- AWS IoT client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
