@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.iot;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -29,13 +31,16 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -47,6 +52,8 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class IotService {
+
+    private static final Logger LOG = Logger.getLogger(IotService.class);
 
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
@@ -861,6 +868,9 @@ public class IotService {
         rule.setRuleDisabled(payload.path("ruleDisabled").asBoolean(false));
         JsonNode actions = payload.path("actions");
         rule.setActionsJson(actions.isArray() ? actions.toString() : "[]");
+        rule.setAwsIotSqlVersion(payload.path("awsIotSqlVersion").asText(null));
+        JsonNode errorAction = payload.path("errorAction");
+        rule.setErrorActionJson(errorAction.isObject() ? errorAction.toString() : null);
         rule.setCreatedAt(createdAt == null ? Instant.now() : createdAt);
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
         return rule;
@@ -897,7 +907,7 @@ public class IotService {
         }
         for (IotTopicRule rule : rulesForPublish(region)) {
             if (!rule.isRuleDisabled() && topicMatches(extractTopicPattern(rule.getSql()), topic)) {
-                executeTopicRule(rule, eventPayload);
+                executeTopicRule(rule, topic, eventPayload);
             }
         }
     }
@@ -999,73 +1009,146 @@ public class IotService {
         }
     }
 
-    private void executeTopicRule(IotTopicRule rule, byte[] payload) {
+    /**
+     * Runs the actions of a matching rule. One failing action never fails the publish or the actions
+     * after it, as on AWS: the failure is logged, and once every action ran the rule's error action,
+     * if it has one, receives the failure document listing every action that failed.
+     */
+    private void executeTopicRule(IotTopicRule rule, String topic, byte[] payload) {
         String ruleRegion = AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion());
-        try {
-            JsonNode actions = objectMapper.readTree(rule.getActionsJson());
-            if (!actions.isArray()) {
-                return;
+        List<ObjectNode> failures = new ArrayList<>();
+        for (JsonNode action : storedJson(rule.getRuleName(), rule.getActionsJson())) {
+            String type = actionType(action);
+            try {
+                runAction(type, action.path(type), payload, ruleRegion);
+            } catch (RuntimeException e) {
+                LOG.warnv("Action {0} of topic rule {1} failed: {2}", type, rule.getRuleName(), e.getMessage());
+                failures.add(failure(type, action.path(type), e));
             }
-            for (JsonNode action : actions) {
-                JsonNode republish = action.path("republish");
-                if (republish.isObject()) {
-                    String targetTopic = republish.path("topic").asText(null);
-                    if (targetTopic != null && !targetTopic.isBlank()) {
-                        handlePublish(targetTopic, payload, false, ruleRegion);
-                        mqttBrokerService.publish(targetTopic, payload);
-                    }
-                }
-                JsonNode sqs = action.path("sqs");
-                if (sqs.isObject()) {
-                    String queueUrl = sqs.path("queueUrl").asText(null);
-                    if (queueUrl != null && !queueUrl.isBlank()) {
-                        String body = sqs.path("useBase64").asBoolean(false)
-                                ? Base64.getEncoder().encodeToString(payload)
-                                : new String(payload, StandardCharsets.UTF_8);
-                        sqsService.sendMessage(queueUrl, body, 0, ruleRegion);
-                    }
-                }
-                JsonNode sns = action.path("sns");
-                if (sns.isObject()) {
-                    String targetArn = sns.path("targetArn").asText(null);
-                    if (targetArn != null && !targetArn.isBlank()) {
-                        snsService.publish(targetArn, null, new String(payload, StandardCharsets.UTF_8), null, ruleRegion);
-                    }
-                }
-                JsonNode s3 = action.path("s3");
-                if (s3.isObject()) {
-                    String bucketName = s3.path("bucketName").asText(null);
-                    String key = s3.path("key").asText(null);
-                    if (bucketName != null && !bucketName.isBlank() && key != null && !key.isBlank()) {
-                        s3Service.putObject(bucketName, key, payload, "application/octet-stream", Map.of());
-                    }
-                }
-                JsonNode kinesis = action.path("kinesis");
-                if (kinesis.isObject()) {
-                    String streamName = kinesis.path("streamName").asText(null);
-                    String partitionKey = kinesis.path("partitionKey").asText("floci-iot");
-                    if (streamName != null && !streamName.isBlank()) {
-                        kinesisService.putRecord(streamName, payload, partitionKey, ruleRegion);
-                    }
-                }
-                JsonNode dynamoDBv2 = action.path("dynamoDBv2");
-                if (dynamoDBv2.isObject()) {
-                    String tableName = dynamoDBv2.path("putItem").path("tableName").asText(null);
-                    if (tableName != null && !tableName.isBlank()) {
-                        dynamoDbService.putItem(tableName, toDynamoDbItem(payload), ruleRegion);
-                    }
-                }
-                JsonNode lambda = action.path("lambda");
-                if (lambda.isObject()) {
-                    String functionArn = lambda.path("functionArn").asText(null);
-                    if (functionArn != null && !functionArn.isBlank()) {
-                        lambdaService.invoke(ruleRegion, functionArn, payload, InvocationType.Event);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            throw new AwsException("InvalidRequestException", "Invalid topic rule action for " + rule.getRuleName() + ": " + e.getMessage(), 400);
         }
+        if (failures.isEmpty() || rule.getErrorActionJson() == null) {
+            return;
+        }
+        JsonNode errorAction = storedJson(rule.getRuleName(), rule.getErrorActionJson());
+        String type = actionType(errorAction);
+        try {
+            runAction(type, errorAction.path(type), failureDocument(rule, topic, payload, failures), ruleRegion);
+        } catch (RuntimeException e) {
+            LOG.warnv("Error action {0} of topic rule {1} failed: {2}", type, rule.getRuleName(), e.getMessage());
+        }
+    }
+
+    private JsonNode storedJson(String ruleName, String json) {
+        try {
+            return objectMapper.readTree(json);
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Stored actions of topic rule {0} are not JSON and were skipped: {1}", ruleName, e.getMessage());
+            return objectMapper.createArrayNode();
+        }
+    }
+
+    /** The one member an action object carries, naming its kind, or null when it carries none. */
+    private static String actionType(JsonNode action) {
+        if (action == null || !action.isObject()) {
+            return null;
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = action.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (field.getValue().isObject()) {
+                return field.getKey();
+            }
+        }
+        return null;
+    }
+
+    private void runAction(String type, JsonNode action, byte[] payload, String region) {
+        if (type == null) {
+            return;
+        }
+        switch (type) {
+            case "republish" -> {
+                String targetTopic = action.path("topic").asText(null);
+                if (targetTopic != null && !targetTopic.isBlank()) {
+                    handlePublish(targetTopic, payload, false, region);
+                    mqttBrokerService.publish(targetTopic, payload);
+                }
+            }
+            case "sqs" -> {
+                String queueUrl = action.path("queueUrl").asText(null);
+                if (queueUrl != null && !queueUrl.isBlank()) {
+                    String body = action.path("useBase64").asBoolean(false)
+                            ? Base64.getEncoder().encodeToString(payload)
+                            : new String(payload, StandardCharsets.UTF_8);
+                    sqsService.sendMessage(queueUrl, body, 0, region);
+                }
+            }
+            case "sns" -> {
+                String targetArn = action.path("targetArn").asText(null);
+                if (targetArn != null && !targetArn.isBlank()) {
+                    snsService.publish(targetArn, null, new String(payload, StandardCharsets.UTF_8), null, region);
+                }
+            }
+            case "s3" -> {
+                String bucketName = action.path("bucketName").asText(null);
+                String key = action.path("key").asText(null);
+                if (bucketName != null && !bucketName.isBlank() && key != null && !key.isBlank()) {
+                    s3Service.putObject(bucketName, key, payload, "application/octet-stream", Map.of());
+                }
+            }
+            case "kinesis" -> {
+                String streamName = action.path("streamName").asText(null);
+                String partitionKey = action.path("partitionKey").asText("floci-iot");
+                if (streamName != null && !streamName.isBlank()) {
+                    kinesisService.putRecord(streamName, payload, partitionKey, region);
+                }
+            }
+            case "dynamoDBv2" -> {
+                String tableName = action.path("putItem").path("tableName").asText(null);
+                if (tableName != null && !tableName.isBlank()) {
+                    dynamoDbService.putItem(tableName, toDynamoDbItem(payload), region);
+                }
+            }
+            case "lambda" -> {
+                String functionArn = action.path("functionArn").asText(null);
+                if (functionArn != null && !functionArn.isBlank()) {
+                    lambdaService.invoke(region, functionArn, payload, InvocationType.Event);
+                }
+            }
+            default -> LOG.debugv("Topic rule action {0} is not supported and was skipped", type);
+        }
+    }
+
+    /** One entry of the failure document: the action kind and target as AWS names them. */
+    private ObjectNode failure(String type, JsonNode action, RuntimeException e) {
+        ObjectNode failure = objectMapper.createObjectNode();
+        failure.put("failedAction", Character.toUpperCase(type.charAt(0)) + type.substring(1) + "Action");
+        failure.put("failedResource", targetOf(type, action));
+        failure.put("errorMessage", e.getMessage() == null ? e.toString() : e.getMessage());
+        return failure;
+    }
+
+    private static String targetOf(String type, JsonNode action) {
+        return switch (type) {
+            case "republish" -> action.path("topic").asText("");
+            case "sqs" -> action.path("queueUrl").asText("");
+            case "sns" -> action.path("targetArn").asText("");
+            case "s3" -> action.path("bucketName").asText("");
+            case "kinesis" -> action.path("streamName").asText("");
+            case "dynamoDBv2" -> action.path("putItem").path("tableName").asText("");
+            case "lambda" -> action.path("functionArn").asText("");
+            default -> "";
+        };
+    }
+
+    private byte[] failureDocument(IotTopicRule rule, String topic, byte[] payload, List<ObjectNode> failures) {
+        ObjectNode document = objectMapper.createObjectNode();
+        document.put("ruleName", rule.getRuleName());
+        document.put("topic", topic);
+        document.put("base64OriginalPayload", Base64.getEncoder().encodeToString(payload));
+        ArrayNode list = document.putArray("failures");
+        failures.forEach(list::add);
+        return document.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private ObjectNode toDynamoDbItem(byte[] payload) {

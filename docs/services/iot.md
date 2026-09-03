@@ -21,7 +21,7 @@ Current MVP 1 limitations:
 
 - Certificate CSR handling creates emulator-local certificates; it does not perform real CA signing.
 - MQTT auth remains permissive; certificate and policy resources are modeled for provisioning compatibility, not enforced as broker authorization yet.
-- Rules support basic topic filter extraction and action dispatch only; SQL projection, WHERE evaluation, substitutions, and error actions remain follow-up scope.
+- Rules support basic topic filter extraction and action dispatch only; SQL projection, WHERE evaluation, and substitutions remain follow-up scope.
 
 ## MVP 2 Coverage
 
@@ -151,10 +151,12 @@ Supported rule behavior:
 - `dynamoDBv2` action writes JSON object payload fields as DynamoDB attribute values through Floci's DynamoDB service boundary.
 - `kinesis` action puts the original payload into a Kinesis stream through Floci's Kinesis service boundary.
 - `lambda` action invokes the configured function ARN through Floci's Lambda service boundary.
+- One failing action never fails the publish or the other actions of the rule. The failure is logged, and once every action ran the rule's `errorAction` receives the AWS failure document: `ruleName`, `topic`, `base64OriginalPayload` and `failures` with `failedAction`, `failedResource` and `errorMessage` per failed action.
+- `GetTopicRule` returns `awsIotSqlVersion` and `errorAction` as they were given to `CreateTopicRule` or `ReplaceTopicRule`.
 
 Current limitations:
 
-- SQL projection, WHERE clauses, functions, substitutions, error actions, and less common AWS IoT rule action types are follow-up scope.
+- SQL projection, WHERE clauses, functions, substitutions, and less common AWS IoT rule action types are follow-up scope.
 
 Open follow-up scope for phase 7 unless explicitly deferred:
 
