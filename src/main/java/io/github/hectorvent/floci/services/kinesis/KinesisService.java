@@ -386,7 +386,7 @@ public class KinesisService implements ResourceProvider {
             // is size-based, so two sequential adds would either collide (both ids computed pre-add)
             // or expose a half-published topology (child1 visible before child2). Compute base+0 and
             // base+1 up front so the ids stay distinct, then publish BOTH children in one atomic
-            // CopyOnWriteArrayList.addAll — a lock-free reader can never observe {parent, child1}
+            // CopyOnWriteArrayList.addAll, so a lock-free reader can never observe {parent, child1}
             // without child2.
             int base = stream.getShards().size();
             KinesisShard child1 = new KinesisShard(String.format("shardId-%012d", base), start, subtractOne(newStartingHashKey), String.valueOf(sequenceGenerator.get()));

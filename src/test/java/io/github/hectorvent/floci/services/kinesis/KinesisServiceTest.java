@@ -332,12 +332,12 @@ class KinesisServiceTest {
     }
 
     /**
-     * A lock-free reader must never observe a half-published split — a closed parent with only one of
-     * its two children. splitShard publishes both children in one atomic CopyOnWriteArrayList.addAll,
+     * A lock-free reader must never observe a half-published split: a closed parent with only one
+     * of its two children. splitShard publishes both children in one atomic CopyOnWriteArrayList.addAll,
      * so every snapshot holds either zero or both split-children of any given parent.
      *
      * <p>Fail-without-fix: reverting the addAll to two sequential {@code add()} calls opens a window
-     * (between the two adds — widened by the child2 shard construction) in which the list holds child1
+     * (between the two adds, widened by the child2 shard construction) in which the list holds child1
      * but not child2; the hammering reader below catches it and records a violation.
      */
     @RepeatedTest(3)
@@ -712,7 +712,7 @@ class KinesisServiceTest {
 
         // T2 signals the instant before it calls putRecord and publishes its thread, so we can
         // prove it was actually scheduled and reached the critical section (BLOCKED on the stream
-        // monitor) — not merely never scheduled, which would let a timeout pass vacuously on a
+        // monitor), not merely never scheduled, which would let a timeout pass vacuously on a
         // loaded worker even if the lock had been removed.
         CountDownLatch t2Started = new CountDownLatch(1);
         AtomicReference<Thread> t2Thread = new AtomicReference<>();
@@ -817,7 +817,7 @@ class KinesisServiceTest {
             pool.shutdownNow();
         }
 
-        // The delete ran after the producer's persist, so the stream must be gone — not resurrected
+        // The delete ran after the producer's persist, so the stream must be gone, not resurrected
         // by a stale trailing store.put.
         assertTrue(kinesisService.listStreams(REGION).isEmpty(),
                 "a deleted stream must not be resurrected by an overlapping append");

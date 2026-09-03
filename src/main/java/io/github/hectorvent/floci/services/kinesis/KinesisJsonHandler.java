@@ -669,7 +669,7 @@ public class KinesisJsonHandler {
     /**
      * Take a ListShards page, snapshotting first. The shard list is a live
      * {@link java.util.concurrent.CopyOnWriteArrayList}: its {@code subList} view is NOT an independent
-     * snapshot — it stays bound to the backing array and throws {@link java.util.ConcurrentModificationException}
+     * snapshot. It stays bound to the backing array and throws {@link java.util.ConcurrentModificationException}
      * the moment a concurrent split/merge appends a shard. Copying to an immutable list first gives a page
      * that reads consistently regardless of concurrent resharding.
      */

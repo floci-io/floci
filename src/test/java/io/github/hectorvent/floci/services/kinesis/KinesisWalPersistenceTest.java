@@ -55,7 +55,7 @@ class KinesisWalPersistenceTest {
                 snapshot, wal, new TypeReference<Map<String, KinesisStream>>() {}, 3_600_000L);
         WalStorage<String, KinesisStream> store2 = null;
         try {
-            store1.load(); // opens the WAL writer — appends before load() are silent no-ops
+            store1.load(); // opens the WAL writer: appends before load() are silent no-ops
             KinesisService writer = new KinesisService(store1, new InMemoryStorage<>(), rr);
             writer.createStream("wal-stream", 1, REGION);
 
@@ -65,7 +65,7 @@ class KinesisWalPersistenceTest {
 
             // Copy the still-uncompacted WAL (and snapshot, if one exists) aside for replay. Each
             // appendPut flushes to the file, so the copy holds every entry. Reloading from the copy
-            // lets us shut store1 down cleanly in the finally — shutdown() compacts and truncates
+            // lets us shut store1 down cleanly in the finally: shutdown() compacts and truncates
             // store1's own WAL, but that no longer touches the files the reader replays.
             Path snapshot2 = tmp.resolve("reload-streams.json");
             Path wal2 = tmp.resolve("reload-streams.wal");

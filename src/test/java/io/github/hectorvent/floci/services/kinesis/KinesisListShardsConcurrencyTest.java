@@ -15,9 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * Regression for the ListShards {@code CopyOnWriteArrayList} sub-list hazard.
  *
- * <p>Exercises {@link KinesisJsonHandler#paginateShards(List, int)} — the exact production step that
- * ListShards uses to take a {@code MaxResults} page — directly, so the test needs no JAX-RS runtime
- * (absent from the sandbox launcher) and no timing window.
+ * <p>Exercises {@link KinesisJsonHandler#paginateShards(List, int)} directly. That is the exact
+ * production step ListShards uses to take a {@code MaxResults} page, so the test needs no JAX-RS
+ * runtime (absent from the sandbox launcher) and no timing window.
  */
 class KinesisListShardsConcurrencyTest {
 
@@ -50,8 +50,8 @@ class KinesisListShardsConcurrencyTest {
         // The page ListShards would build for MaxResults=2 against the live shard list.
         List<KinesisShard> page = KinesisJsonHandler.paginateShards(stream.getShards(), 2);
 
-        // A concurrent split closes the parent and atomically appends two children — mutating the live
-        // backing list the pre-fix sub-list page still points at.
+        // A concurrent split closes the parent and atomically appends two children, mutating the
+        // live backing list the pre-fix sub-list page still points at.
         String firstShardId = stream.getShards().getFirst().getShardId();
         service.splitShard("reshard-stream", firstShardId,
                 "170141183460469231731687303715884105728", REGION);

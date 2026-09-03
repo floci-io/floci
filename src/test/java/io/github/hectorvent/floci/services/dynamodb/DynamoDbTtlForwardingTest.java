@@ -158,7 +158,7 @@ class DynamoDbTtlForwardingTest {
 
         // Direct proof of persistence: the sweep must have written the trimmed map back to the
         // underlying item store. Inspecting the stored map (rather than getItem) is what makes this
-        // fail if persistItemsForAccount is dropped — getItem would still return null for expired
+        // fail if persistItemsForAccount is dropped: getItem would still return null for expired
         // rows via isExpired even though the stale rows remained physically persisted. putItem
         // during seeding persisted 'expired' rows here, so the store must now hold none of them.
         Map<String, JsonNode> persisted = itemStore.get("us-east-1::TtlTable").orElseGet(Map::of);
