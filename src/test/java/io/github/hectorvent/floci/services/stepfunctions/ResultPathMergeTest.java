@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Unit tests for {@link ResultPathMerge} — the extracted ResultPath merge, including the AWS
+ * Unit tests for {@link ResultPathMerge}: the extracted ResultPath merge, including the AWS
  * {@code States.ResultPathMatchFailure} case (previously a silent input-discard) and the documented
  * residuals. Plain JUnit5 + Jackson, so it runs in the offline sandbox.
  */

@@ -85,7 +85,7 @@ public final class ChoiceOperators {
 
     // RFC3339 profile AWS accepts: uppercase 'T'; seconds required; optional fraction of 1-9 digits
     // (java.time's nanosecond ceiling); 'Z' or a colonized numeric offset. Leap seconds (:60) and
-    // fractions beyond 9 digits are not supported and are treated as invalid — a stated limitation.
+    // fractions beyond 9 digits are not supported and are treated as invalid, a stated limitation.
     private static final Pattern RFC3339 = Pattern.compile(
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})$");
 

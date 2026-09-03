@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for {@link NestedExecutionInput} — the shared intrinsic function-name parse, the
+ * Unit tests for {@link NestedExecutionInput}: the shared intrinsic function-name parse, the
  * States.JsonToString provenance check, and the child-input encoding matrix. Plain JUnit5 + Jackson,
  * so it runs in the offline sandbox (unlike the Vert.x-bound AslExecutor end-to-end path).
  */

@@ -41,7 +41,7 @@ import static org.mockito.Mockito.mock;
  * doc examples; a computed SHA-256/SHA-1/MD5 of "input data"). AWS's published SHA-1 example digest
  * is a 39-character typo, so the true 40-character digest is asserted instead. Every failure case
  * asserts the exact {@code States.IntrinsicFailure} error name (catchable), never a bare
- * RuntimeException — a reverted implementation would instead throw the uncatchable
+ * RuntimeException. A reverted implementation would instead throw the uncatchable
  * {@code States.Runtime}, so a bare-throw assertion would silently pass against broken code.
  */
 class AslExecutorIntrinsicFunctionsTest {

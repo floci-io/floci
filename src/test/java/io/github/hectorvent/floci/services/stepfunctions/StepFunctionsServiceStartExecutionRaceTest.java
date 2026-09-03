@@ -41,7 +41,7 @@ import static org.mockito.Mockito.when;
  * Concurrency-race coverage for {@code StartExecution}: concurrent same-name starts must launch exactly
  * once (the check-and-create is serialized). The execution store's {@code get} is delayed to widen the
  * check→create window, so the {@code executeAsync} count deterministically distinguishes a serialized
- * implementation (exactly one launch) from an unserialized one (one launch per thread) — the test fails
+ * implementation (exactly one launch) from an unserialized one (one launch per thread). The test fails
  * if the lock is removed.
  *
  * <p>CI-only: {@code mock(AslExecutor.class)} forces AslExecutor to load, which needs Vert.x (absent in

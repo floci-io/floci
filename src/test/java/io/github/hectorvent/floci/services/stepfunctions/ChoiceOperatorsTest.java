@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for {@link ChoiceOperators} — the extracted, dependency-light Choice comparator
+ * Unit tests for {@link ChoiceOperators}: the extracted, dependency-light Choice comparator
  * evaluator + validator. Exercises all 39 data-test operators, type strictness, RFC3339 timestamp
  * handling, missing-path/unknown-operator errors, And/Or/Not, and structural validation. Runs as
  * plain JUnit5 (no Quarkus), which is what makes it executable in this sandbox.
@@ -292,7 +292,7 @@ class ChoiceOperatorsTest {
 
     @Test
     void dataTestOperatorsMatchAuthoritativeLiteralSet() {
-        // Independent literal list — must equal the production set exactly (not self-referential).
+        // Independent literal list: must equal the production set exactly (not self-referential).
         Set<String> expected = Set.of(
                 "StringEquals", "StringEqualsPath", "StringLessThan", "StringLessThanPath",
                 "StringGreaterThan", "StringGreaterThanPath", "StringLessThanEquals", "StringLessThanEqualsPath",

@@ -31,7 +31,7 @@ import static org.mockito.Mockito.mock;
  * {@code ChoiceEvaluationException} to a {@code States.Runtime} execution failure. Complements the
  * unit-level {@link ChoiceOperatorsTest} by exercising the actual wiring the comparator fix depends on.
  *
- * <p>Plain JUnit5 (mirrors {@code AslExecutorIntrinsicFunctionsTest}'s harness); executed by CI —
+ * <p>Plain JUnit5 (mirrors {@code AslExecutorIntrinsicFunctionsTest}'s harness), executed by CI only:
  * it cannot run in the offline sandbox because a full {@code AslExecutor} compile pulls in Vert.x.
  */
 class AslExecutorChoiceRuntimeTest {

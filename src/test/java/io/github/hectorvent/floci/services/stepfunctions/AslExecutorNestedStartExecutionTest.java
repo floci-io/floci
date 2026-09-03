@@ -33,7 +33,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * End-to-end coverage for nested {@code states:startExecution}: the parent's resolved {@code Input} and
- * {@code Name} reach the child {@code StartExecution} correctly. Verifies the fix — a
+ * {@code Name} reach the child {@code StartExecution} correctly. Verifies the fix: a
  * {@code States.JsonToString} Input is passed as JSON text (child {@code $} becomes an object), a plain
  * string stays a string, {@code Name}/{@code Name.$} are honored (previously ignored), and a supplied
  * {@code Name} that does not resolve to a non-empty string fails rather than silently generating one.

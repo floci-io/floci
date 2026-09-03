@@ -5,13 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * Applies a state's JSONPath {@code ResultPath} — merging the state result into the effective input.
+ * Applies a state's JSONPath {@code ResultPath}, merging the state result into the effective input.
  * Extracted from {@link AslExecutor} so the merge rules (including the AWS
  * {@code States.ResultPathMatchFailure} case) are unit-testable without the Vert.x-bound executor.
  *
  * <p>AWS: {@code ResultPath} names where the result is inserted into the state's raw input. When the
  * input is not a JSON object but {@code ResultPath} addresses an object member (a {@code $.field} path),
- * the path cannot apply and the interpreter fails with {@code States.ResultPathMatchFailure} — it does
+ * the path cannot apply and the interpreter fails with {@code States.ResultPathMatchFailure}. It does
  * NOT silently discard the input.
  *
  * @see <a href="https://states-language.net/spec.html#filters">ASL ResultPath</a>
@@ -56,7 +56,7 @@ public final class ResultPathMerge {
                 throw new ResultPathMatchException(
                         "Failed to apply ResultPath '" + resultPath + "': the state input is not a JSON object");
             }
-            return result; // non-$. paths ($[...]) are a documented residual — unchanged behavior
+            return result; // non-$. paths ($[...]) are a documented residual: unchanged behavior
         }
         ObjectNode merged = input.deepCopy();
         setPath(merged, resultPath, result, mapper);

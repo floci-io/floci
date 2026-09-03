@@ -18,7 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * <p>AWS semantics: {@code StartExecution}'s wire input is a string that the child parses as JSON.
  * {@code States.JsonToString(x)} returns a string whose content is JSON text, so that content is used
  * verbatim as the wire input (the child gets {@code x} back as an object). Any other resolved value is
- * serialized as a JSON value — an object stays an object, a plain string stays a JSON string literal.
+ * serialized as a JSON value: an object stays an object, a plain string stays a JSON string literal.
  */
 public final class NestedExecutionInput {
 
@@ -75,8 +75,8 @@ public final class NestedExecutionInput {
         }
         // Use the value verbatim only when it is genuinely JSON text (a States.JsonToString result always
         // is). This guards a malformed template with colliding Input / Input.$ keys, where the winning
-        // resolved value may not be JSON despite the Input.$ provenance — such a value is quoted instead of
-        // sent verbatim (avoiding parseInput's {} fallback).
+        // resolved value may not be JSON despite the Input.$ provenance. Such a value is quoted instead
+        // of sent verbatim (avoiding parseInput's {} fallback).
         if (fromJsonToString && inputNode.isTextual() && isJsonText(inputNode.asText(), mapper)) {
             return inputNode.asText();
         }
