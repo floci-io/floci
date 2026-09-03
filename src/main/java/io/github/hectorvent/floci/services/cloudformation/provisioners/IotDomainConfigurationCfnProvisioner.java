@@ -67,33 +67,42 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
         // outlive the stack that created it.
         IotDomainConfiguration prior = ctx.isUpdate() ? findExisting(ctx.priorPhysicalId(), region) : null;
         boolean sameConfiguration = prior != null && name.equals(prior.getDomainConfigurationName());
-        IotDomainConfiguration provisioned;
         if (sameConfiguration && sameCreateOnlyProperties(prior, request)) {
-            provisioned = domainConfigurationService.updateDomainConfiguration(
+            IotDomainConfiguration updated = domainConfigurationService.updateDomainConfiguration(
                     name, updateBody(request, status, prior), region);
-            reconcileTags(provisioned.getDomainConfigurationArn(), prior.getTags(), tags);
-        } else {
-            if (sameConfiguration && (explicitName == null || explicitName.isBlank())) {
-                // A createOnly property changed under a name CloudFormation generated, so the
-                // replacement gets a fresh generated name, as it does on AWS. Under an explicit
-                // name the create below fails with ResourceAlreadyExistsException, also as on AWS.
-                name = ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);
-            }
-            if (!tags.isEmpty()) {
-                request.set("tags", tagList(tags));
-            }
-            provisioned = domainConfigurationService.createDomainConfiguration(name, request, region);
+            reconcileTags(updated.getDomainConfigurationArn(), prior.getTags(), tags);
+            record(r, name, updated);
+            return;
+        }
+        if (sameConfiguration && (explicitName == null || explicitName.isBlank())) {
+            // A createOnly property changed under a name CloudFormation generated, so the
+            // replacement gets a fresh generated name, as it does on AWS. Under an explicit
+            // name the create below fails with ResourceAlreadyExistsException, also as on AWS.
+            name = ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);
+        }
+        if (!tags.isEmpty()) {
+            request.set("tags", tagList(tags));
+        }
+        IotDomainConfiguration created = domainConfigurationService.createDomainConfiguration(name, request, region);
+        // Recorded at once and marked as owned by this stack: the create rollback deletes only a
+        // resource that has a physical id and carries that marker, so a failure in the calls
+        // below still leaves nothing behind.
+        record(r, name, created);
+        r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        try {
             if ("DISABLED".equals(status)) {
-                provisioned = domainConfigurationService.updateDomainConfiguration(name, statusBody("DISABLED"), region);
+                record(r, name, domainConfigurationService.updateDomainConfiguration(name, statusBody("DISABLED"), region));
             }
             if (prior != null) {
                 delete(r.getResourceType(), prior.getDomainConfigurationName(), region);
             }
+        } catch (RuntimeException failure) {
+            if (prior != null) {
+                unwindReplacement(r, prior, name, region, failure);
+            }
+            throw failure;
         }
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", provisioned.getDomainConfigurationArn());
-        r.getAttributes().put("DomainType", provisioned.getDomainType());
-        r.getAttributes().put("ServerCertificates", serverCertificatesJson(provisioned));
+        r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
     }
 
     @Override
@@ -107,6 +116,37 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
         }
         CfnDeletes.safeDelete("domain configuration", physicalId,
                 () -> domainConfigurationService.deleteDomainConfiguration(physicalId, region), NOT_FOUND);
+    }
+
+    private static void record(StackResource r, String name, IotDomainConfiguration configuration) {
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn", configuration.getDomainConfigurationArn());
+        r.getAttributes().put("DomainType", configuration.getDomainType());
+        r.getAttributes().put("ServerCertificates", serverCertificatesJson(configuration));
+    }
+
+    /**
+     * A replacement failed after its new configuration existed. CloudFormationService restores the
+     * previous StackResource and never learns the new name, so the configuration created here is
+     * removed again, and the prior one, disabled on the way to deleting it, is enabled again. The
+     * stack must report the original failure, so a cleanup failure is logged and attached to it.
+     */
+    private void unwindReplacement(StackResource r, IotDomainConfiguration prior, String name, String region,
+                                   RuntimeException failure) {
+        try {
+            delete(r.getResourceType(), name, region);
+            IotDomainConfiguration priorNow = findExisting(prior.getDomainConfigurationName(), region);
+            if (priorNow != null && "ENABLED".equals(prior.getDomainConfigurationStatus())
+                    && !"ENABLED".equals(priorNow.getDomainConfigurationStatus())) {
+                domainConfigurationService.updateDomainConfiguration(
+                        prior.getDomainConfigurationName(), statusBody("ENABLED"), region);
+            }
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+            LOG.warnv("Could not remove domain configuration {0} after its replacement of {1} failed: {2}",
+                    name, prior.getDomainConfigurationName(), cleanupFailure.getMessage());
+        }
     }
 
     private IotDomainConfiguration findExisting(String name, String region) {

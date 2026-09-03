@@ -9,8 +9,14 @@ import io.github.hectorvent.floci.services.iot.model.IotDomainConfiguration;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -164,6 +170,52 @@ class IotDomainConfigurationServiceTest {
 
         assertAwsError("ResourceAlreadyExistsException", 409,
                 () -> service.createDomainConfiguration("iot-domain", customDomainRequest(), REGION));
+    }
+
+    @Test
+    void concurrentCreatesOfTheSameNameLetExactlyOneThrough() throws Exception {
+        int callers = 16;
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger conflicts = new AtomicInteger();
+        List<Future<String>> results = new ArrayList<>();
+        ExecutorService pool = Executors.newFixedThreadPool(callers);
+        try {
+            for (int i = 0; i < callers; i++) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        return service.createDomainConfiguration("iot-domain", customDomainRequest(), REGION)
+                                .getDomainConfigurationArn();
+                    } catch (AwsException e) {
+                        assertEquals("ResourceAlreadyExistsException", e.getErrorCode());
+                        conflicts.incrementAndGet();
+                        return null;
+                    }
+                }));
+            }
+            start.countDown();
+            List<String> arns = new ArrayList<>();
+            for (Future<String> result : results) {
+                String arn = result.get();
+                if (arn != null) {
+                    arns.add(arn);
+                }
+            }
+            assertEquals(1, arns.size(), "exactly one create may succeed");
+            assertEquals(callers - 1, conflicts.get());
+            assertEquals(arns.get(0), service.describeDomainConfiguration("iot-domain", REGION).getDomainConfigurationArn());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void createRejectsTagsThatAreNotAList() {
+        ObjectNode request = customDomainRequest();
+        request.putObject("tags").put("env", "test");
+
+        assertAwsError("InvalidRequestException", 400,
+                () -> service.createDomainConfiguration("iot-domain", request, REGION));
     }
 
     @Test

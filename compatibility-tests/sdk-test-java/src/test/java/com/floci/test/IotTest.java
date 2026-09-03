@@ -125,13 +125,15 @@ class IotTest {
     void domainConfigurationLifecycle() {
         String name = "java-iot-domain";
         String certificateArn = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-1111-1111-1111-111111111111";
-        try {
+        boolean leftOver = iot.listDomainConfigurations(ListDomainConfigurationsRequest.builder().build())
+                .domainConfigurations().stream()
+                .anyMatch(summary -> name.equals(summary.domainConfigurationName()));
+        if (leftOver) {
             iot.updateDomainConfiguration(UpdateDomainConfigurationRequest.builder()
                     .domainConfigurationName(name)
                     .domainConfigurationStatus(DomainConfigurationStatus.DISABLED)
                     .build());
             iot.deleteDomainConfiguration(DeleteDomainConfigurationRequest.builder().domainConfigurationName(name).build());
-        } catch (Exception ignored) {
         }
 
         assertThatThrownBy(() -> iot.describeDomainConfiguration(DescribeDomainConfigurationRequest.builder()

@@ -46,6 +46,8 @@ public class IotDomainConfigurationService {
 
     private final StorageBackend<String, IotDomainConfiguration> store;
     private final RegionResolver regionResolver;
+    /** Makes the duplicate check and the store of a new configuration one step, so a name is taken once. */
+    private final Object createLock = new Object();
 
     @Inject
     public IotDomainConfigurationService(StorageFactory storageFactory, RegionResolver regionResolver) {
@@ -63,10 +65,6 @@ public class IotDomainConfigurationService {
             throw invalid("Invalid domain configuration name: " + name);
         }
         String key = key(region, name);
-        if (store.get(key).isPresent()) {
-            throw new AwsException("ResourceAlreadyExistsException",
-                    "Domain configuration already exists: " + name, 409);
-        }
         JsonNode body = request == null ? JsonNodeFactory.instance.objectNode() : request;
         String domainName = text(body, "domainName");
         List<String> certificateArns = textList(body, "serverCertificateArns");
@@ -98,7 +96,13 @@ public class IotDomainConfigurationService {
         configuration.setClientCertificateConfig(parseClientCertificateConfig(body.path("clientCertificateConfig")));
         configuration.setTags(parseTags(body.path("tags")));
         configuration.setLastStatusChangeDate(Instant.now());
-        store.put(key, configuration);
+        synchronized (createLock) {
+            if (store.get(key).isPresent()) {
+                throw new AwsException("ResourceAlreadyExistsException",
+                        "Domain configuration already exists: " + name, 409);
+            }
+            store.put(key, configuration);
+        }
         return configuration;
     }
 
@@ -272,15 +276,22 @@ public class IotDomainConfigurationService {
 
     private static Map<String, String> parseTags(JsonNode node) {
         Map<String, String> tags = new TreeMap<>();
-        if (node.isArray()) {
-            for (JsonNode tag : node) {
-                String tagKey = text(tag, "Key");
-                if (tagKey == null || tagKey.isBlank()) {
-                    throw invalid("Tag keys must not be blank");
-                }
-                String value = text(tag, "Value");
-                tags.put(tagKey, value == null ? "" : value);
+        if (!present(node)) {
+            return tags;
+        }
+        if (!node.isArray()) {
+            throw invalid("tags must be a list");
+        }
+        for (JsonNode tag : node) {
+            if (!tag.isObject()) {
+                throw invalid("tags must be a list of Key and Value pairs");
             }
+            String tagKey = text(tag, "Key");
+            if (tagKey == null || tagKey.isBlank()) {
+                throw invalid("Tag keys must not be blank");
+            }
+            String value = text(tag, "Value");
+            tags.put(tagKey, value == null ? "" : value);
         }
         return tags;
     }

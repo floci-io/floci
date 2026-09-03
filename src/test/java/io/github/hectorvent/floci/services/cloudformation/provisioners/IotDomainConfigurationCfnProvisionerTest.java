@@ -348,6 +348,79 @@ class IotDomainConfigurationCfnProvisionerTest {
     }
 
     @Test
+    void createWhoseFollowUpDisableFailsLeavesAnOwnedResourceForTheRollback() {
+        // The create rollback deletes only resources that have a physical id and carry the owned
+        // marker, so both must be in place before the follow-up status update can fail.
+        when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        when(service.updateDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenThrow(new AwsException("InternalFailureException", "boom", 500));
+        StackResource r = resource();
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
+                r, customDomainProps(NAME).put("DomainConfigurationStatus", "DISABLED"), ctx()));
+
+        assertEquals("InternalFailureException", failure.getErrorCode());
+        assertEquals(NAME, r.getPhysicalId());
+        assertEquals(ARN, r.getAttributes().get("Arn"));
+        assertEquals("true", r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void replacementWhoseFollowUpDisableFailsRemovesTheNewConfigurationAndKeepsThePrior() {
+        // CloudFormationService restores the previous StackResource on a failed update and never
+        // learns the new name, so the configuration created here must not be left behind.
+        when(service.describeDomainConfiguration("old-name", REGION))
+                .thenReturn(stored("old-name", "arn:aws:iot:us-east-1:000000000000:domainconfiguration/old-name/aaaaa",
+                        "iot.example.com", "ENABLED"));
+        when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        when(service.updateDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenThrow(new AwsException("InternalFailureException", "boom", 500))
+                .thenReturn(stored(NAME, ARN, "iot.example.com", "DISABLED"));
+        StackResource r = resource();
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
+                r, customDomainProps(NAME).put("DomainConfigurationStatus", "DISABLED"), ctx("old-name")));
+
+        assertEquals("InternalFailureException", failure.getErrorCode());
+        verify(service).deleteDomainConfiguration(NAME, REGION);
+        verify(service, never()).deleteDomainConfiguration("old-name", REGION);
+        verify(service, never()).updateDomainConfiguration(eq("old-name"), any(), eq(REGION));
+        assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+    }
+
+    @Test
+    void replacementWhosePriorCannotBeDeletedRemovesTheNewConfigurationAndReEnablesThePrior() {
+        String oldArn = "arn:aws:iot:us-east-1:000000000000:domainconfiguration/old-name/aaaaa";
+        // Seen ENABLED when looked up and when deleted, then DISABLED after that delete failed
+        // half way, which is the state the unwind has to reverse.
+        when(service.describeDomainConfiguration("old-name", REGION))
+                .thenReturn(stored("old-name", oldArn, "iot.example.com", "ENABLED"))
+                .thenReturn(stored("old-name", oldArn, "iot.example.com", "ENABLED"))
+                .thenReturn(stored("old-name", oldArn, "iot.example.com", "DISABLED"));
+        when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        doThrow(new AwsException("InternalFailureException", "boom", 500))
+                .when(service).deleteDomainConfiguration("old-name", REGION);
+        StackResource r = resource();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, customDomainProps(NAME), ctx("old-name")));
+
+        assertEquals("InternalFailureException", failure.getErrorCode());
+        InOrder order = inOrder(service);
+        order.verify(service).updateDomainConfiguration(eq(NAME),
+                argThat(body -> "DISABLED".equals(body.path("domainConfigurationStatus").asText())), eq(REGION));
+        order.verify(service).deleteDomainConfiguration(NAME, REGION);
+        order.verify(service).updateDomainConfiguration(eq("old-name"),
+                argThat(body -> "ENABLED".equals(body.path("domainConfigurationStatus").asText())), eq(REGION));
+        assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+    }
+
+    @Test
     void updateWhosePriorConfigurationIsGoneCreatesAFreshOne() {
         when(service.describeDomainConfiguration(NAME, REGION))
                 .thenThrow(new AwsException("ResourceNotFoundException", "gone", 404));
