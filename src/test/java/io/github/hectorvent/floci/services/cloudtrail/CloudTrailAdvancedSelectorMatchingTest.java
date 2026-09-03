@@ -43,7 +43,7 @@ class CloudTrailAdvancedSelectorMatchingTest {
 
     @Test
     void resourcesTypeEquals_rejectsBucketLevelOperation() {
-        // Bucket-level calls (ListObjects, no object key) are AWS::S3::Bucket resources —
+        // Bucket-level calls (ListObjects, no object key) are AWS::S3::Bucket resources:
         // an AWS::S3::Object DataResource selector must never match them.
         AdvancedFieldSelector fs = new AdvancedFieldSelector(
                 "resources.type", List.of("AWS::S3::Object"), null, null, null, null, null);

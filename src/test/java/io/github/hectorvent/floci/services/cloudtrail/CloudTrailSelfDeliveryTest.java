@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * data events (the circular-logging bug PR #1194 / upstream issue #1192
  * describe). {@link CloudTrailLogWriter} writes deliveries via a direct
  * {@code S3Service} call, which must still be visible to CloudTrail's own
- * data-event capture — not just API-driven writes.
+ * data-event capture, not just API-driven writes.
  */
 @QuarkusTest
 class CloudTrailSelfDeliveryTest {
@@ -80,7 +80,7 @@ class CloudTrailSelfDeliveryTest {
         writer.flushNow();
 
         // Delivery #2: should contain a record describing delivery #1's own
-        // log-file write — the self-referential loop.
+        // log-file write, the self-referential loop.
         writer.flushNow();
 
         List<String> keys = new ArrayList<>();

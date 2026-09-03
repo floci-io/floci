@@ -12,7 +12,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * End-to-end coverage for ListTrails, AddTags, and ListTags — the trail
+ * End-to-end coverage for ListTrails, AddTags, and ListTags: the trail
  * discovery and tagging control-plane actions.
  */
 @QuarkusTest

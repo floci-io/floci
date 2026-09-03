@@ -101,7 +101,7 @@ class CloudTrailLogWriterRequeueTest {
             }
         }
         assertEquals(1, logFiles.size(),
-                "Expected exactly one delivered log file — a self-delivery emission "
+                "Expected exactly one delivered log file: a self-delivery emission "
                         + "failure must not re-queue records that were already durably "
                         + "written to S3, but found: " + logFiles);
     }
