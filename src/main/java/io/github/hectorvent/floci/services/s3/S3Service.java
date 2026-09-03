@@ -1714,7 +1714,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     // --- Metrics Configurations ---
 
-    private static final String METRICS_XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+    private static final String S3_XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 
     /**
      * Stores a CloudWatch request metrics configuration under {@code id}, replacing any
@@ -1745,7 +1745,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (innerXml == null) {
             throw noSuchMetricsConfiguration();
         }
-        return METRICS_XML_DECLARATION + new XmlBuilder()
+        return S3_XML_DECLARATION + new XmlBuilder()
                 .start("MetricsConfiguration", AwsNamespaces.S3)
                 .raw(innerXml)
                 .end("MetricsConfiguration")
@@ -1767,7 +1767,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .start("MetricsConfiguration")
                 .raw(configurations.get(id))
                 .end("MetricsConfiguration"));
-        return METRICS_XML_DECLARATION + xml
+        return S3_XML_DECLARATION + xml
                 .elem("IsTruncated", false)
                 .end("ListMetricsConfigurationsResult")
                 .build();
@@ -1844,7 +1844,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (innerXml == null) {
             throw noSuchIntelligentTieringConfiguration();
         }
-        return METRICS_XML_DECLARATION + new XmlBuilder()
+        return S3_XML_DECLARATION + new XmlBuilder()
                 .start("IntelligentTieringConfiguration", AwsNamespaces.S3)
                 .raw(innerXml)
                 .end("IntelligentTieringConfiguration")
@@ -1867,7 +1867,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .start("IntelligentTieringConfiguration")
                 .raw(configurations.get(id))
                 .end("IntelligentTieringConfiguration"));
-        return METRICS_XML_DECLARATION + xml
+        return S3_XML_DECLARATION + xml
                 .elem("IsTruncated", false)
                 .end("ListBucketIntelligentTieringConfigurationsResult")
                 .build();
