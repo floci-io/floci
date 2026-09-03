@@ -262,7 +262,7 @@ public class SqsQueryHandler {
         String queueUrl = getParam(params, "QueueUrl");
         int maxMessages = getIntParam(params, "MaxNumberOfMessages", 1);
         int visibilityTimeout = getIntParam(params, "VisibilityTimeout", -1);
-        int waitTimeSeconds = getIntParam(params, "WaitTimeSeconds", 0);
+        Integer waitTimeSeconds = getIntegerParam(params, "WaitTimeSeconds");
 
         java.util.Set<String> requestedAttrs = new java.util.LinkedHashSet<>();
         requestedAttrs.addAll(collectIndexed(params, "AttributeName."));

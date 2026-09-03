@@ -243,7 +243,7 @@ public class SqsJsonHandler {
         String queueUrl = request.path("QueueUrl").asText(null);
         int maxMessages = request.path("MaxNumberOfMessages").asInt(1);
         int visibilityTimeout = request.path("VisibilityTimeout").asInt(-1);
-        int waitTimeSeconds = request.path("WaitTimeSeconds").asInt(0);
+        Integer waitTimeSeconds = parseOptionalInteger(request.path("WaitTimeSeconds"), "WaitTimeSeconds");
 
         java.util.Set<String> requestedAttrs = new java.util.LinkedHashSet<>();
         requestedAttrs.addAll(jsonNodeToList(request.path("AttributeNames")));

@@ -294,6 +294,7 @@ public class SqsService implements Resettable, ResourceProvider {
         queue.getAttributes().putIfAbsent("VisibilityTimeout", String.valueOf(defaultVisibilityTimeout));
         queue.getAttributes().putIfAbsent("MaximumMessageSize", String.valueOf(maxMessageSize));
         queue.getAttributes().putIfAbsent("DelaySeconds", "0");
+        queue.getAttributes().putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
         queue.getAttributes().putIfAbsent("MessageRetentionPeriod", "345600");
         if (queue.isFifo()) {
             if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
@@ -609,6 +610,18 @@ public class SqsService implements Resettable, ResourceProvider {
         }
     }
 
+    private int parseReceiveMessageWaitTimeSecondsAttribute(String value) {
+        if (value == null || value.isEmpty()) {
+            return 0;
+        }
+        try {
+            int parsed = Integer.parseInt(value);
+            return parsed > 0 ? parsed : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     private void notifyReceivers(String storageKey) {
         Object lock = queueLocks.get(storageKey);
         if (lock != null) {
@@ -637,9 +650,9 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     public List<Message> receiveMessage(String queueUrl, int maxMessages, int visibilityTimeout,
-                                        int waitTimeSeconds, String region) {
+                                        Integer waitTimeSeconds, String region) {
         String storageKey = regionKey(region, queueUrl);
-        getQueueByUrl(storageKey, queueUrl)
+        Queue queueForWait = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
 
@@ -647,8 +660,11 @@ public class SqsService implements Resettable, ResourceProvider {
             maxMessages = 1;
         }
 
+        int effectiveWait = waitTimeSeconds != null ? waitTimeSeconds
+                : parseReceiveMessageWaitTimeSecondsAttribute(
+                        queueForWait.getAttributes().get("ReceiveMessageWaitTimeSeconds"));
         long start = System.currentTimeMillis();
-        long maxWait = waitTimeSeconds * 1000L;
+        long maxWait = effectiveWait * 1000L;
         Object lock = queueLocks.computeIfAbsent(storageKey, k -> new Object());
         // The queue incarnation this call polls against. DeleteQueue removes it
         // from messagesByQueue (and CreateQueue registers a fresh instance), so
