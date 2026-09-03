@@ -37,6 +37,9 @@ public class UserPoolClient {
     private long creationDate;
     private long lastModifiedDate;
 
+    /** One managed login branding per client, or null when none has been created. */
+    private ManagedLoginBranding managedLoginBranding;
+
     public UserPoolClient() {
         long now = System.currentTimeMillis() / 1000L;
         this.creationDate = now;
@@ -136,4 +139,9 @@ public class UserPoolClient {
 
     public long getLastModifiedDate() { return lastModifiedDate; }
     public void setLastModifiedDate(long lastModifiedDate) { this.lastModifiedDate = lastModifiedDate; }
+
+    public ManagedLoginBranding getManagedLoginBranding() { return managedLoginBranding; }
+    public void setManagedLoginBranding(ManagedLoginBranding managedLoginBranding) {
+        this.managedLoginBranding = managedLoginBranding;
+    }
 }

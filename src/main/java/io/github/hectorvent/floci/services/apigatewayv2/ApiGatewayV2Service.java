@@ -124,6 +124,31 @@ public class ApiGatewayV2Service {
 
         apiStore.put(apiKey(region, api.getApiId()), api);
         LOG.infov("Created {0} API: {1} ({2}) in {3}", protocolType, api.getName(), api.getApiId(), region);
+
+        // Quick create: when the caller supplies Target (a Lambda ARN or HTTP URL), AWS
+        // auto-provisions an integration, a "$default" catch-all route pointing at it, and an
+        // auto-deploy "$default" stage. Without this the API has no route and no stage, so
+        // ApiGatewayExecuteApiHostFilter's stage lookup fails and every invocation falls
+        // through to whichever other virtual-hosted-style filter claims the request next.
+        Object targetValue = request.get("target");
+        String target = targetValue != null ? String.valueOf(targetValue) : null;
+        if ("HTTP".equals(protocolType) && target != null && !target.isBlank()) {
+            boolean isLambdaTarget = target.startsWith("arn:");
+            Integration integration = createIntegration(region, apiId, Map.of(
+                    "integrationType", isLambdaTarget ? "AWS_PROXY" : "HTTP_PROXY",
+                    "integrationUri", target,
+                    "integrationMethod", isLambdaTarget ? "POST" : "ANY",
+                    "payloadFormatVersion", "2.0"));
+            createRoute(region, apiId, Map.of(
+                    "routeKey", "$default",
+                    "target", "integrations/" + integration.getIntegrationId()));
+            createStage(region, apiId, Map.of(
+                    "stageName", "$default",
+                    "autoDeploy", "true"));
+            LOG.infov("Quick create: provisioned {0} integration, $default route and stage for API {1} -> {2}",
+                    integration.getIntegrationType(), apiId, target);
+        }
+
         return api;
     }
 

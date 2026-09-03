@@ -27,8 +27,6 @@ import java.nio.file.Path;
 public class OpenSearchDomainManager {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchDomainManager.class);
-    /** Sentinel for the in-container path, which publishes no host port to release. */
-    private static final int NO_HOST_PORT = -1;
     private static final int OPENSEARCH_PORT = 9200;
 
     private final ContainerBuilder containerBuilder;
@@ -62,6 +60,13 @@ public class OpenSearchDomainManager {
 
         lifecycleManager.removeIfExists(containerName);
 
+        // A restart of an existing domain has just removed the old container, so its
+        // reservation is stale; hand the port back before allocating a fresh one.
+        if (domain.getHostPort() != null) {
+            portAllocator.release(domain.getHostPort());
+            domain.setHostPort(null);
+        }
+
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("discovery.type", "single-node")
@@ -79,15 +84,16 @@ public class OpenSearchDomainManager {
         // container-backed services (Neptune, MemoryDB, RDS) already address their
         // backends via the container's resolved IP (EndpointInfo) rather than its
         // Docker name; this container follows the same pattern below.
-        int hostPort = NO_HOST_PORT;
-        if (!containerDetector.isRunningInContainer()) {
-            hostPort = portAllocator.allocate(
-                    config.services().opensearch().proxyBasePort(),
-                    config.services().opensearch().proxyMaxPort());
-            specBuilder.withPortBinding(OPENSEARCH_PORT, hostPort);
-        } else {
-            specBuilder.withExposedPort(OPENSEARCH_PORT);
-        }
+        //
+        // Unlike those services, OpenSearch has no floci-internal proxy fronting the
+        // backend, so the Docker host-port binding is the ONLY way a client outside
+        // the Docker network (e.g. on the host, with floci itself containerized)
+        // can reach the domain. Publish it in both topologies: dropping it for the
+        // in-container case cut off host clients entirely (#2746 follow-up).
+        int hostPort = portAllocator.allocate(
+                config.services().opensearch().proxyBasePort(),
+                config.services().opensearch().proxyMaxPort());
+        specBuilder.withPortBinding(OPENSEARCH_PORT, hostPort);
 
         applyEngineEnv(specBuilder, domain.getEngineVersion());
 
@@ -113,18 +119,17 @@ public class OpenSearchDomainManager {
         try {
             info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
-            if (hostPort != NO_HOST_PORT) {
-                portAllocator.release(hostPort);
-            }
+            portAllocator.release(hostPort);
             throw e;
         }
         domain.setContainerId(info.containerId());
+        domain.setHostPort(hostPort);
 
         EndpointInfo endpoint = info.getEndpoint(OPENSEARCH_PORT);
         domain.setEndpoint("http://" + endpoint.host() + ":" + endpoint.port());
 
-        LOG.infov("OpenSearch container {0} started for domain {1} at {2}",
-                info.containerId(), domain.getDomainName(), endpoint);
+        LOG.infov("OpenSearch container {0} started for domain {1} at {2} (host port {3})",
+                info.containerId(), domain.getDomainName(), endpoint, String.valueOf(hostPort));
     }
 
     public boolean isReady(Domain domain) {
@@ -162,6 +167,14 @@ public class OpenSearchDomainManager {
             return;
         }
         lifecycleManager.stopAndRemove(domain.getContainerId(), null);
+        // The container no longer holds the binding, so the reservation must go with
+        // it. Repeated create/delete would otherwise exhaust the configured range.
+        // The keep-running early return above deliberately keeps the reservation:
+        // the surviving container still owns the binding.
+        if (domain.getHostPort() != null) {
+            portAllocator.release(domain.getHostPort());
+            domain.setHostPort(null);
+        }
         LOG.infov("Stopped OpenSearch container for domain {0}", domain.getDomainName());
     }
 

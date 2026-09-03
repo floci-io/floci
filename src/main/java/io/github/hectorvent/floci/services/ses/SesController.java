@@ -504,6 +504,7 @@ public class SesController {
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
             List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
             ListManagementOptions listManagement =
                     parseListManagementOptions(request.path("ListManagementOptions"));
@@ -521,6 +522,8 @@ public class SesController {
                     throw new AwsException("BadRequestException",
                             "At least one destination address is required.", 400);
                 }
+                sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
+                        configurationSetName, regionResolver.getAccountId(), region);
                 messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
                         configurationSetName, emailTags, listManagement, region);
             } else if (content.has("Simple")) {
@@ -534,6 +537,8 @@ public class SesController {
                 String bodyHtml = simple.path("Body").path("Html").path("Data").asText(null);
                 List<MessageHeader> additionalHeaders =
                         parseHeadersArray(simple.path("Headers"), "content.simple.headers");
+                sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
+                        null, regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
                         bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
                         configurationSetName, emailTags, additionalHeaders, listManagement, region);
@@ -564,6 +569,8 @@ public class SesController {
                     String resolvedName = hasName
                             ? templateName
                             : SesService.templateNameFromArn(templateArn);
+                    sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
+                            configurationSetName, resolvedName, regionResolver.getAccountId(), region);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
                             bccAddresses, replyToAddresses, resolvedName, templateData,
                             configurationSetName, emailTags, additionalHeaders, listManagement, region);
@@ -572,6 +579,12 @@ public class SesController {
                     String subject = inline.path("Subject").asText(null);
                     String text = inline.path("Text").asText(null);
                     String html = inline.path("Html").asText(null);
+                    // An empty inline template is reported before the tenant lookup on AWS; the
+                    // inline content is not a stored template resource, so only the identity and
+                    // configuration set pass through the gate.
+                    SesService.requireInlineTemplateContent(subject, text, html);
+                    sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
+                            configurationSetName, null, regionResolver.getAccountId(), region);
                     messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
                             ccAddresses, bccAddresses, replyToAddresses,
                             subject, text, html, templateData,
@@ -614,6 +627,7 @@ public class SesController {
             }
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
 
             JsonNode template = request.path("DefaultContent").path("Template");
             if (template.isMissingNode() || template.isNull()) {
@@ -639,15 +653,21 @@ public class SesController {
             String subject;
             String text;
             String html;
+            // Inline template content is not a stored template resource, so it stays out of the
+            // tenant gate below.
+            String gateTemplateName = null;
             if (hasInline) {
                 JsonNode inline = template.path("TemplateContent");
                 subject = inline.path("Subject").asText(null);
                 text = inline.path("Text").asText(null);
                 html = inline.path("Html").asText(null);
+                // Shape validation belongs before the tenant gate below, as on SendEmail.
+                SesService.requireInlineTemplateContent(subject, text, html);
             } else {
                 String resolvedName = hasName
                         ? templateName
                         : SesService.templateNameFromArn(templateArn);
+                gateTemplateName = resolvedName;
                 EmailTemplate stored = sesService.getTemplate(resolvedName, region);
                 subject = stored.getSubject();
                 text = stored.getTextPart();
@@ -685,6 +705,11 @@ public class SesController {
                 entries.add(new BulkEmailEntry(to, cc, bcc, replacementData, replacementTags, entryReplacementHeaders));
                 entryIndex++;
             }
+
+            // The tenant gate runs only after every part of the request has been parsed and
+            // validated — AWS reports malformed content before a missing tenant (probe-confirmed).
+            sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
+                    gateTemplateName, regionResolver.getAccountId(), region);
 
             List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
                     replyToAddresses, subject, text, html,

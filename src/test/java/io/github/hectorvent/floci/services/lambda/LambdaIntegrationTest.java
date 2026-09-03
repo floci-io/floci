@@ -551,4 +551,72 @@ class LambdaIntegrationTest {
         .then()
             .statusCode(404);
     }
+
+    // ── Environment is omitted, not empty, when no variables are set ──
+
+    @Test
+    @Order(41)
+    void environmentMemberIsAbsentUntilVariablesAreSet() {
+        String fn = "env-absent-fn";
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "env-absent-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler"
+                }
+                """)
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201)
+            .body("$", not(hasKey("Environment")));
+
+        given()
+            .when()
+            .get(BASE_PATH + "/functions/" + fn + "/configuration")
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("Environment")));
+
+        given()
+            .when()
+            .get(BASE_PATH + "/functions/" + fn)
+        .then()
+            .statusCode(200)
+            .body("Configuration", not(hasKey("Environment")));
+
+        // Setting a variable brings the member back...
+        given()
+            .contentType("application/json")
+            .body("""
+                { "Environment": { "Variables": { "FOO": "bar" } } }
+                """)
+        .when()
+            .put(BASE_PATH + "/functions/" + fn + "/configuration")
+        .then()
+            .statusCode(200)
+            .body("Environment.Variables.FOO", equalTo("bar"));
+
+        // ...and clearing it to an empty map removes it again, which is what AWS
+        // answers for a cleared function, not "Environment": {} or an empty Variables map.
+        given()
+            .contentType("application/json")
+            .body("""
+                { "Environment": { "Variables": {} } }
+                """)
+        .when()
+            .put(BASE_PATH + "/functions/" + fn + "/configuration")
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("Environment")));
+
+        given()
+            .when()
+            .delete(BASE_PATH + "/functions/" + fn)
+        .then()
+            .statusCode(anyOf(is(200), is(204)));
+    }
 }

@@ -142,6 +142,15 @@ One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the tas
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
 when the task is scheduled.
 
+## Intrinsic arguments
+
+A `$.` reference passed to a `States.*` intrinsic must find something. An argument that matches
+nothing fails the execution with `States.Runtime`, as on AWS.
+
+One deviation. Indexing something that is not an array makes AWS leak its JSONPath library and
+write `Filter: [0] can only be applied to arrays. Current context is: 1`. Floci writes its own
+`The JsonPath argument for the field '$.other[0]' could not be found in the input ...` there.
+
 ## JSONata nulls
 
 An expression that evaluates to JSON `null` produces a value, not a missing one. It keeps its key
@@ -397,6 +406,11 @@ invalid mock configuration (unparseable file, bad attempt key, missing `MockedRe
 entry, `Return` and `Throw` together, `Throw` without `Error`) as a structured 400 error
 at `StartExecution`. Step Functions Local instead returns a plain HTTP 500 for most of
 these and starts the execution only to fail it with `States.Runtime` for the last two.
+
+A mocked response with no attempt entries (`{}`) is not rejected. As in Step Functions
+Local, the execution starts and fails with `States.Runtime` only if the state that names
+it is entered. This keeps a generated mock file usable when the collection it was built
+from is empty and the state is never reached.
 
 ## Configuration
 

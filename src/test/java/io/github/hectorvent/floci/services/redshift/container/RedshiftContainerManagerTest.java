@@ -23,10 +23,15 @@ import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
+import com.github.dockerjava.api.command.CopyArchiveFromContainerCmd;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -65,6 +70,28 @@ class RedshiftContainerManagerTest {
         when(config.services().redshift().imageVersion()).thenReturn("postgres:16-alpine");
         when(config.services().redshift().dockerNetwork()).thenReturn(Optional.empty());
 
+        // Default mock for execCreateCmd/execStartCmd/inspectExecCmd to make waitForReady succeed instantly
+        ExecCreateCmd defaultCreateCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse defaultCreateResponse = mock(ExecCreateCmdResponse.class);
+        when(defaultCreateResponse.getId()).thenReturn("exec-default");
+        when(defaultCreateCmd.exec()).thenReturn(defaultCreateResponse);
+        when(dockerClient.execCreateCmd(anyString())).thenReturn(defaultCreateCmd);
+
+        ExecStartCmd defaultStartCmd = mock(ExecStartCmd.class);
+        when(defaultStartCmd.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback.Adapter<Frame> adapter = invocation.getArgument(0);
+            adapter.onComplete();
+            return adapter;
+        });
+        when(dockerClient.execStartCmd(anyString())).thenReturn(defaultStartCmd);
+
+        InspectExecCmd defaultInspectCmd = mock(InspectExecCmd.class);
+        InspectExecResponse defaultInspectResponse = mock(InspectExecResponse.class);
+        when(defaultInspectResponse.getExitCodeLong()).thenReturn(0L);
+        when(defaultInspectCmd.exec()).thenReturn(defaultInspectResponse);
+        when(dockerClient.inspectExecCmd(anyString())).thenReturn(defaultInspectCmd);
+
         manager = new RedshiftContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -79,7 +106,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testTakeSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.takeSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
+                manager.takeSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
@@ -87,7 +114,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testRestoreSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.restoreSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
+                manager.restoreSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
@@ -95,7 +122,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testCreateSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.createSnapshot(ACCOUNT_ID, null, java.nio.file.Path.of("dummy.sql")));
+                manager.createSnapshot(ACCOUNT_ID, null, Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -103,7 +130,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testRestoreSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.restoreSnapshot(ACCOUNT_ID, (Cluster) null, java.nio.file.Path.of("dummy.sql")));
+                manager.restoreSnapshot(ACCOUNT_ID, (Cluster) null, Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -143,9 +170,9 @@ class RedshiftContainerManagerTest {
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectCmd);
 
         // mock copyArchiveFromContainerCmd
-        com.github.dockerjava.api.command.CopyArchiveFromContainerCmd copyCmd = mock(com.github.dockerjava.api.command.CopyArchiveFromContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
         byte[] tarBytes = "-- PostgreSQL dump\nCREATE TABLE foo (id int);\n".getBytes(StandardCharsets.UTF_8);
-        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
             org.apache.commons.compress.archivers.tar.TarArchiveEntry entry = new org.apache.commons.compress.archivers.tar.TarArchiveEntry("dump.sql");
             entry.setSize(tarBytes.length);
@@ -153,17 +180,17 @@ class RedshiftContainerManagerTest {
             tar.write(tarBytes);
             tar.closeArchiveEntry();
         }
-        when(copyCmd.exec()).thenReturn(new java.io.ByteArrayInputStream(bos.toByteArray()));
+        when(copyCmd.exec()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
         when(dockerClient.copyArchiveFromContainerCmd("cont-123", "/tmp/dump.sql")).thenReturn(copyCmd);
 
-        java.nio.file.Path tempFile = java.nio.file.Files.createTempFile("test-take-snapshot", ".sql");
+        Path tempFile = Files.createTempFile("test-take-snapshot", ".sql");
         try {
             manager.takeSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",tempFile);
-            String dump = java.nio.file.Files.readString(tempFile);
+            String dump = Files.readString(tempFile);
             assertTrue(dump.contains("PostgreSQL dump"));
             assertTrue(dump.contains("CREATE TABLE foo"));
         } finally {
-            java.nio.file.Files.deleteIfExists(tempFile);
+            Files.deleteIfExists(tempFile);
         }
     }
 
@@ -200,7 +227,7 @@ class RedshiftContainerManagerTest {
         when(dockerClient.inspectExecCmd("exec-fail")).thenReturn(inspectCmd);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.takeSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",java.nio.file.Path.of("dummy.sql")));
+                manager.takeSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",Path.of("dummy.sql")));
         assertEquals("InternalFailure", ex.getErrorCode());
         assertEquals(500, ex.getHttpStatus());
     }
@@ -215,8 +242,8 @@ class RedshiftContainerManagerTest {
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
         // Should return cleanly without touching dockerClient
-        manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",java.nio.file.Path.of("non-existent-dump.sql"));
-        manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",(java.nio.file.Path) null);
+        manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",Path.of("non-existent-dump.sql"));
+        manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",(Path) null);
     }
 
     @Test
@@ -254,13 +281,13 @@ class RedshiftContainerManagerTest {
         when(inspectCmd.exec()).thenReturn(inspectResponse);
         when(dockerClient.inspectExecCmd("exec-restore")).thenReturn(inspectCmd);
 
-        java.nio.file.Path tempFile = java.nio.file.Files.createTempFile("test-restore-snapshot", ".sql");
+        Path tempFile = Files.createTempFile("test-restore-snapshot", ".sql");
         try {
             manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",tempFile);
             verify(dockerClient).copyArchiveToContainerCmd("cont-123");
-            verify(dockerClient).execCreateCmd("cont-123");
+            verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-123");
         } finally {
-            java.nio.file.Files.deleteIfExists(tempFile);
+            Files.deleteIfExists(tempFile);
         }
     }
 
@@ -363,7 +390,7 @@ class RedshiftContainerManagerTest {
 
         manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1");
 
-        verify(dockerClient).execCreateCmd("cont-123");
+        verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-123");
     }
 
     @Test

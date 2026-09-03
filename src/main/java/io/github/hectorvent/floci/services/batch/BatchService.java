@@ -53,6 +53,7 @@ public class BatchService {
     private static final Pattern JOB_NAME_PATTERN = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,127}");
     private static final Set<String> SUPPORTED_JOB_DEFINITION_TYPES = Set.of("container");
     private static final Set<String> SUPPORTED_COMPUTE_ENVIRONMENT_TYPES = Set.of("MANAGED", "UNMANAGED");
+    private static final Set<String> SUPPORTED_COMPUTE_ENVIRONMENT_STATES = Set.of("ENABLED", "DISABLED");
     private static final Set<String> SUPPORTED_LIST_FILTERS = Set.of(
             "JOB_NAME", "JOB_DEFINITION", "BEFORE_CREATED_AT", "AFTER_CREATED_AT", "SHARE_IDENTIFIER");
 
@@ -109,6 +110,8 @@ public class BatchService {
         String name = requiredText(request, "computeEnvironmentName");
         String type = requiredText(request, "type");
         validateComputeEnvironmentType(type);
+        String state = text(request, "state", "ENABLED");
+        validateComputeEnvironmentState(state);
         if (resolveComputeEnvironmentOptional(name).isPresent()) {
             throw client("Compute environment already exists: " + name);
         }
@@ -116,7 +119,7 @@ public class BatchService {
         env.setComputeEnvironmentName(name);
         env.setComputeEnvironmentArn(arn(region, "compute-environment/" + name));
         env.setType(type);
-        env.setState(text(request, "state", "ENABLED"));
+        env.setState(state);
         env.setStatus("VALID");
         env.setStatusReason("Compute environment is available");
         env.setComputeResources(map(request.path("computeResources")));
@@ -163,6 +166,54 @@ public class BatchService {
             out.put("nextToken", String.valueOf(end));
         }
         return out;
+    }
+
+    public synchronized ObjectNode updateComputeEnvironment(JsonNode request) {
+        BatchComputeEnvironment env = resolveComputeEnvironment(requiredText(request, "computeEnvironment"));
+        if (request.hasNonNull("state")) {
+            String state = request.path("state").asText();
+            validateComputeEnvironmentState(state);
+            env.setState(state);
+        }
+        if (request.hasNonNull("serviceRole")) {
+            env.setServiceRole(request.path("serviceRole").asText());
+        }
+        if (request.hasNonNull("computeResources")) {
+            // Partial update: AWS only overwrites the compute-resource fields the caller sends
+            // (e.g. minvCpus/maxvCpus/desiredvCpus), not the whole sub-object.
+            env.getComputeResources().putAll(map(request.path("computeResources")));
+        }
+        computeEnvironmentStore.put(env.getComputeEnvironmentArn(), env);
+
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("computeEnvironmentName", env.getComputeEnvironmentName());
+        out.put("computeEnvironmentArn", env.getComputeEnvironmentArn());
+        return out;
+    }
+
+    public synchronized ObjectNode deleteComputeEnvironment(JsonNode request) {
+        String ref = requiredText(request, "computeEnvironment");
+        Optional<BatchComputeEnvironment> env = resolveComputeEnvironmentOptional(ref);
+        if (env.isEmpty()) {
+            return objectMapper.createObjectNode();
+        }
+        BatchComputeEnvironment target = env.get();
+        if (!"DISABLED".equals(target.getState())) {
+            throw client("Cannot delete compute environment in " + target.getState() + " state: "
+                    + target.getComputeEnvironmentName());
+        }
+        boolean stillAttached = jobQueueStore.scan(k -> true).stream()
+                .flatMap(q -> q.getComputeEnvironmentOrder().stream())
+                .anyMatch(order -> resolveComputeEnvironmentOptional(order.getComputeEnvironment())
+                        .map(BatchComputeEnvironment::getComputeEnvironmentArn)
+                        .map(arn -> arn.equals(target.getComputeEnvironmentArn()))
+                        .orElse(false));
+        if (stillAttached) {
+            throw client("Cannot delete compute environment still associated with a job queue: "
+                    + target.getComputeEnvironmentName());
+        }
+        computeEnvironmentStore.delete(target.getComputeEnvironmentArn());
+        return objectMapper.createObjectNode();
     }
 
     public synchronized ObjectNode createJobQueue(JsonNode request, String region) {
@@ -788,6 +839,12 @@ public class BatchService {
     private void validateComputeEnvironmentType(String type) {
         if (!SUPPORTED_COMPUTE_ENVIRONMENT_TYPES.contains(type)) {
             throw client("type must be MANAGED or UNMANAGED");
+        }
+    }
+
+    private void validateComputeEnvironmentState(String state) {
+        if (!SUPPORTED_COMPUTE_ENVIRONMENT_STATES.contains(state)) {
+            throw client("state must be ENABLED or DISABLED");
         }
     }
 

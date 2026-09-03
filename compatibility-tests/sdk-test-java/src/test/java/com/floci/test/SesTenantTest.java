@@ -31,6 +31,8 @@ import software.amazon.awssdk.services.sesv2.model.ListTenantResourcesResponse;
 import software.amazon.awssdk.services.sesv2.model.ListTenantsRequest;
 import software.amazon.awssdk.services.sesv2.model.ListTenantsResponse;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
+import software.amazon.awssdk.services.sesv2.model.SendEmailRequest;
+import software.amazon.awssdk.services.sesv2.model.SesV2Exception;
 import software.amazon.awssdk.services.sesv2.model.SuppressionListReason;
 import software.amazon.awssdk.services.sesv2.model.Tag;
 
@@ -326,6 +328,34 @@ class SesTenantTest {
 
     @Test
     @Order(22)
+    void tenantSend_gatesOnAssociations() {
+        // The domain identity is still associated (order 6); the config set's association was
+        // removed in order 14, so using it in a tenant send must be refused with the 403.
+        SendEmailRequest.Builder send = SendEmailRequest.builder()
+                .fromEmailAddress("probe@" + IDENTITY)
+                .destination(d -> d.toAddresses("success@simulator.amazonses.com"))
+                .content(c -> c.simple(s -> s
+                        .subject(sub -> sub.data("s"))
+                        .body(b -> b.text(t -> t.data("t")))));
+
+        assertThat(sesV2.sendEmail(send.tenantName(TENANT).build()).messageId()).isNotNull();
+
+        assertThatThrownBy(() -> sesV2.sendEmail(send.tenantName("compat-send-ghost").build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Tenant compat-send-ghost for AwsAccountId")
+                .hasMessageContaining("not found.");
+
+        assertThatThrownBy(() -> sesV2.sendEmail(
+                send.tenantName(TENANT).configurationSetName(CONFIG_SET).build()))
+                .isInstanceOfSatisfying(SesV2Exception.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(403);
+                    assertThat(e.getMessage()).contains("Tenant not associated with resources [");
+                    assertThat(e.getMessage()).contains("configuration-set/" + CONFIG_SET);
+                });
+    }
+
+    @Test
+    @Order(23)
     void deleteTenant_cascadesAssociationsAndSuppressionEntries_thenGetIsNotFound() {
         sesV2.putSuppressedDestination(r -> r.emailAddress(TENANT_ADDR)
                 .reason(SuppressionListReason.COMPLAINT).tenantName(TENANT));
@@ -340,7 +370,7 @@ class SesTenantTest {
     }
 
     @Test
-    @Order(23)
+    @Order(24)
     void deleteTenant_missing_throwsNotFound() {
         assertThatThrownBy(() -> sesV2.deleteTenant(DeleteTenantRequest.builder()
                         .tenantName("compat-tenant-does-not-exist").build()))

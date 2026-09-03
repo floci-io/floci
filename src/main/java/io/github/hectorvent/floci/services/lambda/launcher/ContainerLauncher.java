@@ -146,6 +146,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         this.layerService = layerService;
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
+        this.populateSemaphore = new java.util.concurrent.Semaphore(resolvePopulateConcurrency(config));
     }
 
     @PostConstruct
@@ -603,12 +604,40 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     // overwhelmed the Docker daemon, so copies hung/failed and left half-built "Created" containers.
     // This gates ONLY the heavy populate — not every launch — so ordinary cold starts (volume mounts
     // for already-populated large code, or the small-code direct copy) are never serialized.
-    private static final java.util.concurrent.Semaphore POPULATE_SEMAPHORE =
-            new java.util.concurrent.Semaphore(Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
+    //
+    // Per-instance rather than static so the permit count can come from configuration; Floci runs a
+    // single @ApplicationScoped launcher, so this is still one gate for the whole emulator.
+    private final java.util.concurrent.Semaphore populateSemaphore;
 
-    private static void acquirePopulatePermit(String functionName) {
+    /**
+     * Permits for {@link #populateSemaphore}: the configured value when set and positive,
+     * otherwise {@code max(2, availableProcessors() / 2)}.
+     *
+     * <p>The derived default reads the JVM's view of the cgroup CPU quota, so a CPU-constrained
+     * Floci container collapses it to 2 and concurrent cold starts of distinct functions
+     * serialize into pairs. The populate itself is IO-bound (streaming a tar into a helper
+     * container), so CPU count is a weak proxy for how many the daemon can take — hence the
+     * override. The default is unchanged, since the daemon overload the cap exists to prevent is
+     * real and its safe ceiling is host-specific.
+     */
+    static int resolvePopulateConcurrency(EmulatorConfig config) {
+        int derived = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+        Optional<Integer> configured = config.services().lambda().codeVolumePopulateConcurrency();
+        if (configured.isEmpty()) {
+            return derived;
+        }
+        int permits = configured.get();
+        if (permits < 1) {
+            LOG.warnv("Ignoring floci.services.lambda.code-volume-populate-concurrency {0}: must be "
+                    + "at least 1; using {1}", permits, derived);
+            return derived;
+        }
+        return permits;
+    }
+
+    private void acquirePopulatePermit(String functionName) {
         try {
-            POPULATE_SEMAPHORE.acquire();
+            populateSemaphore.acquire();
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while waiting to populate code volume for " + functionName, ie);
@@ -871,7 +900,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     LOG.warnv("Could not remove code-volume helper {0}: {1}", helperId, e.getMessage());
                 }
             }
-            POPULATE_SEMAPHORE.release();
+            populateSemaphore.release();
         }
     }
 
@@ -1097,7 +1126,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                                            Path sourceDir, String remotePath, String functionName,
                                            DirectoryTarWriter tarWriter, boolean failOnTarFailure) {
         // No per-copy gating here: the heavy /var/task populate for large code already holds a
-        // POPULATE_SEMAPHORE permit; small-code direct copies and layer copies are light enough
+        // populateSemaphore permit; small-code direct copies and layer copies are light enough
         // to run unthrottled.
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
              java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {

@@ -99,11 +99,7 @@ public class RedshiftContainerManager {
             LOG.warnv("Failed to stream logs for {0}", containerName);
         }
 
-        try {
-            Thread.sleep(3000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        waitForReady(containerName, info.containerId(), masterUsername, "dev");
 
         containers.put(containerKey(accountId, clusterIdentifier), handle);
         return handle;
@@ -142,6 +138,8 @@ public class RedshiftContainerManager {
         } catch (Exception e) {
             LOG.warnv("Failed to stream logs for {0}", containerName);
         }
+
+        waitForReady(containerName, info.containerId(), masterUsername, "dev");
 
         containers.put(containerKey(accountId, clusterIdentifier), handle);
         return handle;
@@ -380,6 +378,41 @@ public class RedshiftContainerManager {
             tar.closeArchiveEntry();
         }
         return bos.toByteArray();
+    }
+    private void waitForReady(String containerName, String containerId, String username, String dbName) {
+        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        String[] cmd = {
+                "psql",
+                "-h", "127.0.0.1",
+                "-v", "ON_ERROR_STOP=1",
+                "-U", effectiveUser,
+                "-d", dbName,
+                "-c", "SELECT 1"
+        };
+        execUntilSuccess(containerName, containerId, cmd, "PostgreSQL readiness check");
+    }
+
+    private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
+        String lastOutput = "";
+        for (int attempt = 1; attempt <= 60; attempt++) {
+            try {
+                ExecResult result = execInContainer(containerId, cmd, 5);
+                lastOutput = result.stderr();
+                if (result.exitCode() == 0) {
+                    LOG.infov("Initialized {0} in Redshift container {1}", description, containerName);
+                    return;
+                }
+            } catch (Exception e) {
+                lastOutput = e.getMessage();
+            }
+            try {
+                java.util.concurrent.TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted initializing " + description + " in " + containerName, e);
+            }
+        }
+        throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
     }
 
     public record ExecResult(long exitCode, String stdout, String stderr) {}

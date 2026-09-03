@@ -120,7 +120,7 @@ final class SesServiceTestBuilder {
                 new SesSentEmailService(emailStore),
                 new SesAccountService(accountSettingsStore, accountVdmStore, accountDetailsStore),
                 new SesTemplateService(templateStore),
-                configSetStore,
+                new SesConfigurationSetService(configSetStore),
                 new SesSuppressionService(suppressionStore, accountSuppressionStore, new InMemoryStorage<>()),
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 new SesContactService(contactListStore, contactStore, clock),

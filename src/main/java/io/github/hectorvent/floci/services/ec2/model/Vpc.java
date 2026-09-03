@@ -19,6 +19,7 @@ public class Vpc {
     private String ownerId;
     private String region;
     private List<VpcCidrBlockAssociation> cidrBlockAssociationSet = new ArrayList<>();
+    private List<VpcIpv6CidrBlockAssociation> ipv6CidrBlockAssociationSet = new ArrayList<>();
     private boolean enableDnsSupport = true;
     private boolean enableDnsHostnames = false;
     private boolean enableNetworkAddressUsageMetrics = false;
@@ -52,6 +53,9 @@ public class Vpc {
 
     public List<VpcCidrBlockAssociation> getCidrBlockAssociationSet() { return cidrBlockAssociationSet; }
     public void setCidrBlockAssociationSet(List<VpcCidrBlockAssociation> cidrBlockAssociationSet) { this.cidrBlockAssociationSet = cidrBlockAssociationSet; }
+
+    public List<VpcIpv6CidrBlockAssociation> getIpv6CidrBlockAssociationSet() { return ipv6CidrBlockAssociationSet; }
+    public void setIpv6CidrBlockAssociationSet(List<VpcIpv6CidrBlockAssociation> ipv6CidrBlockAssociationSet) { this.ipv6CidrBlockAssociationSet = ipv6CidrBlockAssociationSet; }
 
     public boolean isEnableDnsSupport() { return enableDnsSupport; }
     public void setEnableDnsSupport(boolean enableDnsSupport) { this.enableDnsSupport = enableDnsSupport; }

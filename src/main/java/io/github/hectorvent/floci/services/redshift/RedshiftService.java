@@ -4,7 +4,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
@@ -31,6 +34,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 @ApplicationScoped
@@ -44,10 +49,15 @@ public class RedshiftService {
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final RedshiftProxyManager proxyManager;
+    private final DockerHostResolver dockerHostResolver;
+    // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
+    private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
-                            EmulatorConfig config, RegionResolver regionResolver) {
+                            EmulatorConfig config, RegionResolver regionResolver,
+                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -55,6 +65,8 @@ public class RedshiftService {
         this.containerManager = containerManager;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.proxyManager = proxyManager;
+        this.dockerHostResolver = dockerHostResolver;
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -73,14 +85,36 @@ public class RedshiftService {
                 LOG.infov("Recovering container for persisted cluster: {0}", cluster.getClusterIdentifier());
                 RedshiftContainerHandle handle = containerManager.adoptOrStart(
                         entry.accountId(), cluster.getClusterIdentifier(), cluster.getMasterUsername(), password);
-                Endpoint endpoint = new Endpoint();
-                endpoint.setAddress(handle.getHost());
-                endpoint.setPort(handle.getPort());
+
+                // A cluster persisted before the auth proxy existed has proxyPort == 0. Allocate one
+                // now; its endpoint changes exactly once after this upgrade. Existing clusters keep
+                // their stored port so the endpoint is stable across restarts.
+                int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
+                usedPorts.add(proxyPort);
+                Endpoint endpoint = proxyEndpoint(proxyPort);
+                cluster.setProxyPort(proxyPort);
+                proxyManager.startProxy(
+                        relayKey(entry.accountId(), cluster.getClusterIdentifier()), proxyPort,
+                        handle.getHost(), handle.getPort(), endpoint.getAddress(),
+                        cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
+                        passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()));
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
                 cluster.setEndpoint(endpoint);
                 clusters.putForAccount(entry.accountId(), entry.key(), cluster);
             } catch (Exception e) {
                 LOG.warnv(e, "Failed to recover container for cluster {0}, marking as unavailable",
                         cluster.getClusterIdentifier());
+                try {
+                    proxyManager.stopProxy(relayKey(entry.accountId(), cluster.getClusterIdentifier()));
+                } catch (Exception ex) {
+                    LOG.warnv(ex, "Failed to stop proxy during recovery rollback for cluster {0}", cluster.getClusterIdentifier());
+                }
+                try {
+                    containerManager.stop(entry.accountId(), cluster.getClusterIdentifier());
+                } catch (Exception ex) {
+                    LOG.warnv(ex, "Failed to stop container during recovery rollback for cluster {0}", cluster.getClusterIdentifier());
+                }
                 cluster.setClusterStatus("unavailable");
                 clusters.putForAccount(entry.accountId(), entry.key(), cluster);
             }
@@ -92,7 +126,9 @@ public class RedshiftService {
         return createCluster(identifier, nodeType, username, password, null, List.of());
     }
 
-    public Cluster createCluster(String identifier, String nodeType, String username, String password,
+    // synchronized like modify/reboot: the container + proxy + port steps must not
+    // interleave with another admin call on the same cluster.
+    public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
                                   String clusterSubnetGroupName, List<String> vpcSecurityGroupIds) {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
@@ -109,16 +145,44 @@ public class RedshiftService {
         clusters.put(identifier, cluster);
         clusters.flush();
 
-        // Start container
+        // Start container, then front it with an auth proxy so the advertised endpoint is
+        // reachable from outside the Docker network.
+        // Hoisted out of the try so a failure after allocateProxyPort() still returns the port.
+        int proxyPort = -1;
         try {
-            RedshiftContainerHandle handle = containerManager.start(clusters.accountId(), identifier, username, password);
-            Endpoint endpoint = new Endpoint();
-            endpoint.setAddress(handle.getHost());
-            endpoint.setPort(handle.getPort());
+            String accountId = clusters.accountId();
+            RedshiftContainerHandle handle = containerManager.start(accountId, identifier, username, password);
+            proxyPort = allocateProxyPort();
+            Endpoint endpoint = proxyEndpoint(proxyPort);
+            cluster.setProxyPort(proxyPort);
+            proxyManager.startProxy(relayKey(accountId, identifier), proxyPort,
+                    handle.getHost(), handle.getPort(), endpoint.getAddress(),
+                    username, password, CLUSTER_DB_NAME,
+                    passwordValidatorFor(accountId, identifier));
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
             cluster.setClusterStatus("available");
+        } catch (AwsException e) {
+            boolean proxyStopped = stopProxyAndReleasePortSafely(identifier, proxyPort);
+            try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
+            if (proxyStopped) {
+                clusters.delete(identifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(identifier, cluster);
+            }
+            clusters.flush();
+            throw e;
         } catch (Exception e) {
-            cluster.setClusterStatus("failed");
+            boolean proxyStopped = stopProxyAndReleasePortSafely(identifier, proxyPort);
+            try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
+            if (proxyStopped) {
+                clusters.delete(identifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(identifier, cluster);
+            }
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
@@ -139,13 +203,20 @@ public class RedshiftService {
         return clusters.scan(k -> true);
     }
 
-    public Cluster deleteCluster(String identifier) {
+    public synchronized Cluster deleteCluster(String identifier) {
         Optional<Cluster> clusterOpt = clusters.get(identifier);
         if (clusterOpt.isEmpty()) {
             throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
         }
         Cluster cluster = clusterOpt.get();
-        
+
+        // Tear down the auth proxy and return its port before stopping the container.
+        // If it fails, abort deletion so the metadata remains and the user can retry.
+        if (!stopProxyAndReleasePortSafely(identifier, cluster.getProxyPort())) {
+            throw new AwsException("InternalFailure",
+                    "Failed to stop auth proxy; cluster " + identifier + " was not deleted", 500);
+        }
+
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
         clusters.flush();
@@ -166,6 +237,9 @@ public class RedshiftService {
             containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
                     cluster.getMasterUsername(), masterUserPassword);
             cluster.setMasterPassword(masterUserPassword);
+            // Keep the proxy's password check in sync so new connections use the new secret.
+            proxyManager.updateMasterPassword(
+                    relayKey(clusters.accountId(), clusterIdentifier), masterUserPassword);
         }
 
         // NodeType only updates metadata — it does not resize the underlying Postgres container
@@ -201,34 +275,74 @@ public class RedshiftService {
             throw new AwsException("InternalFailure", "Failed to prepare reboot dump file: " + e.getMessage(), 500);
         }
 
+        // Hoisted so a failure after the proxy is (re)started still tears it down and
+        // returns the port, matching createCluster/restoreFromClusterSnapshot rollback.
+        int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : -1;
+        boolean originalTornDown = false; // original proxy + container already stopped
+        boolean rebooted = false;
         try {
-            containerManager.takeSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), tempDump);
-            containerManager.stop(clusters.accountId(), clusterIdentifier);
+            String accountId = clusters.accountId();
+            String key = relayKey(accountId, clusterIdentifier);
+
+            containerManager.takeSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
+            proxyManager.stopProxy(key);
+            containerManager.stop(accountId, clusterIdentifier);
+            originalTornDown = true;
 
             String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
             RedshiftContainerHandle handle = containerManager.start(
-                    clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), password);
-            Endpoint endpoint = new Endpoint();
-            endpoint.setAddress(handle.getHost());
-            endpoint.setPort(handle.getPort());
+                    accountId, clusterIdentifier, cluster.getMasterUsername(), password);
+
+            // Reuse the stored proxy port so the advertised endpoint is unchanged by a reboot.
+            if (proxyPort < 0) {
+                proxyPort = allocateProxyPort();
+            }
+            usedPorts.add(proxyPort);
+            Endpoint endpoint = proxyEndpoint(proxyPort);
+            cluster.setProxyPort(proxyPort);
+            proxyManager.startProxy(key, proxyPort, handle.getHost(), handle.getPort(),
+                    endpoint.getAddress(), cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
+                    passwordValidatorFor(accountId, clusterIdentifier));
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
 
-            containerManager.restoreSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), tempDump);
-
+            containerManager.restoreSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
             cluster.setClusterStatus("available");
+            rebooted = true;
         } catch (AwsException e) {
-            cluster.setClusterStatus("failed");
+            rollbackReboot(clusterIdentifier, originalTornDown);
+            if (originalTornDown) {
+                cluster.setClusterStatus("failed");
+            }
             clusters.flush();
             throw e;
         } catch (Exception e) {
-            cluster.setClusterStatus("failed");
+            rollbackReboot(clusterIdentifier, originalTornDown);
+            if (originalTornDown) {
+                cluster.setClusterStatus("failed");
+            }
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
         } finally {
-            try {
-                Files.deleteIfExists(tempDump);
-            } catch (IOException ignored) {
-                // best-effort cleanup of a temp file
+            if (rebooted) {
+                try {
+                    Files.deleteIfExists(tempDump);
+                } catch (IOException ex) {
+                    LOG.warnv(ex, "Failed to clean up temporary dump file {0} after rebooting cluster {1}", tempDump, clusterIdentifier);
+                }
+            } else {
+                if (originalTornDown) {
+                    // Once the original container is torn down it holds no volume, so this dump can
+                    // be the only surviving copy of the cluster's data — keep it for manual recovery.
+                    LOG.warnv("Reboot of cluster {0} did not complete; retained pre-reboot data dump at {1}",
+                            clusterIdentifier, tempDump);
+                } else {
+                    try {
+                        Files.deleteIfExists(tempDump);
+                    } catch (IOException ignored) {
+                    }
+                }
             }
         }
 
@@ -366,7 +480,7 @@ public class RedshiftService {
         return restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, null);
     }
 
-    public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
+    public synchronized Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
         if (clusters.get(clusterIdentifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + clusterIdentifier + " already exists", 400);
         }
@@ -407,11 +521,20 @@ public class RedshiftService {
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
 
+        // Hoisted out of the try so a failure after allocateProxyPort() still returns the port.
+        int proxyPort = -1;
         try {
-            RedshiftContainerHandle handle = containerManager.start(clusters.accountId(), clusterIdentifier, username, password);
-            Endpoint endpoint = new Endpoint();
-            endpoint.setAddress(handle.getHost());
-            endpoint.setPort(handle.getPort());
+            String accountId = clusters.accountId();
+            RedshiftContainerHandle handle = containerManager.start(accountId, clusterIdentifier, username, password);
+            proxyPort = allocateProxyPort();
+            Endpoint endpoint = proxyEndpoint(proxyPort);
+            cluster.setProxyPort(proxyPort);
+            proxyManager.startProxy(relayKey(accountId, clusterIdentifier), proxyPort,
+                    handle.getHost(), handle.getPort(), endpoint.getAddress(),
+                    username, password, CLUSTER_DB_NAME,
+                    passwordValidatorFor(accountId, clusterIdentifier));
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
 
             if (hasDump) {
@@ -420,11 +543,25 @@ public class RedshiftService {
 
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            cluster.setClusterStatus("failed");
+            boolean proxyStopped = stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
+            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
+            if (proxyStopped) {
+                clusters.delete(clusterIdentifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(clusterIdentifier, cluster);
+            }
             clusters.flush();
             throw e;
         } catch (Exception e) {
-            cluster.setClusterStatus("failed");
+            boolean proxyStopped = stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
+            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
+            if (proxyStopped) {
+                clusters.delete(clusterIdentifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(clusterIdentifier, cluster);
+            }
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
@@ -724,5 +861,86 @@ public class RedshiftService {
             default -> throw new AwsException("InvalidParameterValue",
                     "Tagging for resource type '" + type + "' is not supported: " + resourceName, 400);
         };
+    }
+
+    // ── Proxy Helpers (shared with modify/reboot/restore) ────────────────────
+
+    private static final String CLUSTER_DB_NAME = "dev";
+
+    private int allocateProxyPort() {
+        int base = config.services().redshift().proxyBasePort();
+        int max = config.services().redshift().proxyMaxPort();
+        for (int port = base; port <= max; port++) {
+            if (usedPorts.add(port)) {
+                return port;
+            }
+        }
+        throw new AwsException("InsufficientClusterCapacity",
+                "No available Redshift proxy ports in range " + base + "-" + max, 503);
+    }
+
+    private boolean stopProxyAndReleasePortSafely(String identifier, int proxyPort) {
+        boolean proxyStopped = false;
+        try {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), identifier));
+            proxyStopped = true;
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to stop proxy for cluster {0}; leaking proxy port {1} to prevent reallocation", identifier, proxyPort);
+        }
+        if (proxyStopped) {
+            releaseProxyPort(proxyPort);
+        }
+        return proxyStopped;
+    }
+
+    /**
+     * Undo a failed reboot. If {@code originalTornDown} is false the reboot failed before
+     * the original proxy + container were stopped, so the original data-bearing container
+     * is still running and nothing must be touched. Once it is true the original is gone:
+     * tear down the (replacement's) proxy and return its port, and remove any container
+     * running under the cluster's name — {@code containerManager.stop} works by name, so
+     * this also cleans a replacement that {@code containerManager.start} created before
+     * throwing (e.g. its readiness check timed out). The pre-reboot data dump is kept by
+     * the caller.
+     */
+    private void rollbackReboot(String identifier, boolean originalTornDown) {
+        if (!originalTornDown) {
+            return;
+        }
+        try {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), identifier));
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to stop proxy during reboot rollback for cluster {0}", identifier);
+        }
+        try {
+            containerManager.stop(clusters.accountId(), identifier);
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to stop replacement container during rollback of reboot for cluster {0}", identifier);
+        }
+    }
+
+    private void releaseProxyPort(int port) {
+        if (port > 0) {
+            usedPorts.remove(port);
+        }
+    }
+
+    private Endpoint proxyEndpoint(int proxyPort) {
+        String host = config.services().redshift().endpointHost()
+                .filter(h -> !h.isBlank())
+                .orElseGet(dockerHostResolver::resolve);
+        return new Endpoint(host, proxyPort);
+    }
+
+    private String relayKey(String accountId, String clusterIdentifier) {
+        return accountId + ":" + clusterIdentifier;
+    }
+
+    // Validates the master password at the proxy against current cluster state, so a
+    // ModifyCluster password change is reflected for new connections without a proxy restart.
+    private RdsAuthProxy.PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
+        return (user, password) -> clusters.getForAccount(accountId, clusterIdentifier)
+                .map(c -> user.equals(c.getMasterUsername()) && password.equals(c.getMasterPassword()))
+                .orElse(false);
     }
 }

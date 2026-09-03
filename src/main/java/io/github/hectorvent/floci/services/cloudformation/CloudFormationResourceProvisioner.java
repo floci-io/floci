@@ -265,7 +265,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::RDS::DBProxy",
             "AWS::RDS::DBProxyTargetGroup",
             "AWS::RDS::DBSubnetGroup",
-            "AWS::Route53::HostedZone",
             "AWS::Route53::RecordSet",
             "AWS::SecretsManager::Secret",
             "AWS::SecretsManager::SecretTargetAttachment",
@@ -423,7 +422,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SecretsManager::SecretTargetAttachment" ->
                         provisionSecretTargetAttachment(resource, properties, engine, region, stackName);
-                case "AWS::Route53::HostedZone" -> provisionRoute53HostedZone(resource, properties, engine);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
                 case "AWS::Events::EventBus" -> provisionEventBridgeEventBus(resource, properties, engine, region);
@@ -840,8 +838,10 @@ public class CloudFormationResourceProvisioner {
         String gatewayId = resolveOptional(props, "GatewayId", engine);
         String natGatewayId = resolveOptional(props, "NatGatewayId", engine);
         String egressOnlyInternetGatewayId = resolveOptional(props, "EgressOnlyInternetGatewayId", engine);
+        String vpcPeeringConnectionId = resolveOptional(props, "VpcPeeringConnectionId", engine);
         ec2Service.createRoute(region, routeTableId, destinationCidr, destinationIpv6Cidr,
-                destinationPrefixListId, gatewayId, natGatewayId, egressOnlyInternetGatewayId);
+                destinationPrefixListId, gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId);
         r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
     }
 
@@ -4141,7 +4141,7 @@ public class CloudFormationResourceProvisioner {
         JsonNode tracingConfiguration = resolveStateMachineTracingConfiguration(props, engine);
         JsonNode encryptionConfiguration = resolveStateMachineEncryptionConfiguration(props, engine);
 
-        StateMachine existing = findStateMachine(r.getPhysicalId());
+        StateMachine existing = findExistingOrStubbedStateMachine(r.getPhysicalId());
         String desiredNameMode = hasExplicitName ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED;
         String previousNameMode = r.getAttributes().get(SFN_NAME_MODE_ATTR);
         if (existing != null && previousNameMode == null) {
@@ -4234,6 +4234,19 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put(SFN_NAME_MODE_ATTR, desiredNameMode);
     }
 
+    /** Matches the non-ARN stub physical id the default provisioning arm writes, {@code <logicalId>-<8 hex>} (see :523). */
+    private static final Pattern STUB_PHYSICAL_ID = Pattern.compile("^[A-Za-z0-9]+-[0-9a-f]{8}$");
+
+    private static boolean isStubPhysicalId(String physicalId) {
+        return STUB_PHYSICAL_ID.matcher(physicalId).matches();
+    }
+
+    /**
+     * Looks up a state machine by ARN, treating {@code StateMachineDoesNotExist} as "not found".
+     * An {@code InvalidArn} error is not swallowed here: every caller of this method reads an ARN
+     * this floci instance itself recorded (a cleanup or rollback snapshot), so a malformed value
+     * reaching {@code describeStateMachine} is a real anomaly, not a legitimate "not found" case.
+     */
     private StateMachine findStateMachine(String stateMachineArn) {
         if (stateMachineArn == null || stateMachineArn.isBlank()) {
             return null;
@@ -4242,6 +4255,31 @@ public class CloudFormationResourceProvisioner {
             return stepFunctionsService.describeStateMachine(stateMachineArn);
         } catch (AwsException e) {
             if ("StateMachineDoesNotExist".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Same as {@link #findStateMachine}, but additionally treats {@code InvalidArn} as "not found"
+     * when {@code physicalId} matches the stub shape a pre-SAM-expansion floci build wrote
+     * ({@code <logicalId>-<8 hex>}, produced at :523). A stack whose
+     * {@code AWS::Serverless::StateMachine} resource was provisioned before floci expanded SAM
+     * types carries that stub value into its next update; without this, {@code describeStateMachine}
+     * throws {@code InvalidArn} for it and the update fails instead of creating the real resource.
+     * Used only at the provisioning entry point, where that upgrade path is legitimate: unlike
+     * {@link #findStateMachine}'s other callers, a stub here is expected, not an anomaly.
+     */
+    private StateMachine findExistingOrStubbedStateMachine(String physicalId) {
+        if (physicalId == null || physicalId.isBlank()) {
+            return null;
+        }
+        try {
+            return stepFunctionsService.describeStateMachine(physicalId);
+        } catch (AwsException e) {
+            if ("StateMachineDoesNotExist".equals(e.getErrorCode())
+                    || ("InvalidArn".equals(e.getErrorCode()) && isStubPhysicalId(physicalId))) {
                 return null;
             }
             throw e;
@@ -4765,11 +4803,6 @@ public class CloudFormationResourceProvisioner {
         return out;
     }
 
-    private void provisionRoute53HostedZone(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
-        String zoneId = "Z" + UUID.randomUUID().toString().substring(0, 12).toUpperCase();
-        r.setPhysicalId(zoneId);
-    }
-
     private void provisionRoute53RecordSet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
         String name = resolveOptional(props, "Name", engine);
         r.setPhysicalId(name != null ? name : "record-" + UUID.randomUUID().toString().substring(0, 8));
@@ -4783,9 +4816,10 @@ public class CloudFormationResourceProvisioner {
         if (name == null || name.isBlank()) {
             name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
         }
+        String description = resolveOptional(props, "Description", engine);
         Map<String, Object> req = new HashMap<>();
         req.put("name", name);
-        req.put("description", resolveOptional(props, "Description", engine));
+        req.put("description", description);
 
         if (props.has("EndpointConfiguration")) {
             JsonNode epNode = props.get("EndpointConfiguration");
@@ -4798,6 +4832,35 @@ public class CloudFormationResourceProvisioner {
         var api = apiGatewayService.createRestApi(region, req);
         r.setPhysicalId(api.getId());
         r.getAttributes().put("RootResourceId", apiGatewayService.getResources(region, api.getId()).get(0).getId());
+
+        // A declared Body or BodyS3Location is the whole OpenAPI document: measured against real
+        // AWS, us-east-1, create-change-set, it becomes the RestApi's Body with no synthesized
+        // AWS::ApiGateway::Resource or AWS::ApiGateway::Method, so the working OpenAPI
+        // materializer (putRestApi + applyOpenApiSpec) is the only place that turns it into
+        // resources and methods. The same probe's processed template keeps a declared Name and
+        // Description in their own properties even when Body.info carries a different title or
+        // description, but putRestApi overwrites both from the document's info, so the resolved
+        // Name and Description (null when Description is undeclared, clearing what putRestApi
+        // just set) are re-applied immediately after.
+        JsonNode openApiDocument = resolveOpenApiDocument(props, engine);
+        if (openApiDocument != null) {
+            apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
+            apiGatewayService.updateRestApi(region, api.getId(),
+                    List.of(replacePatchOp("/name", name), replacePatchOp("/description", description)));
+        }
+    }
+
+    /**
+     * A {@code replace} patch operation for {@link ApiGatewayService#updateRestApi}, allowing a
+     * {@code null} value ({@code Map.of} rejects one) so an undeclared property can still be
+     * cleared rather than left at whatever {@code putRestApi} last wrote to it.
+     */
+    private Map<String, String> replacePatchOp(String path, String value) {
+        Map<String, String> op = new HashMap<>();
+        op.put("op", "replace");
+        op.put("path", path);
+        op.put("value", value);
+        return op;
     }
 
     private void provisionApiGatewayResource(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -4939,7 +5002,7 @@ public class CloudFormationResourceProvisioner {
      */
     private void reconcileApiGatewayV2BodyRoutes(StackResource r, String region, String apiId, JsonNode props,
                                                  CloudFormationTemplateEngine engine) {
-        JsonNode body = resolveApiGatewayV2OpenApiBody(props, engine);
+        JsonNode body = resolveOpenApiDocument(props, engine);
         ApiGatewayV2BodyResourceState previous = null;
         try {
             previous = snapshotApiGatewayV2BodyResources(r, region, apiId);
@@ -4975,7 +5038,7 @@ public class CloudFormationResourceProvisioner {
                 replacement.authorizerIds());
     }
 
-    private JsonNode resolveApiGatewayV2OpenApiBody(JsonNode props, CloudFormationTemplateEngine engine) {
+    private JsonNode resolveOpenApiDocument(JsonNode props, CloudFormationTemplateEngine engine) {
         if (props == null) {
             return null;
         }
@@ -4987,7 +5050,7 @@ public class CloudFormationResourceProvisioner {
         }
 
         JsonNode location = engine.resolveNode(props.get("BodyS3Location"));
-        ApiGatewayV2BodyS3Location bodyS3Location = parseApiGatewayV2BodyS3Location(location);
+        OpenApiBodyS3Location bodyS3Location = parseOpenApiBodyS3Location(location);
 
         try {
             byte[] document = s3Service.getObject(bodyS3Location.bucket(), bodyS3Location.key(),
@@ -5006,14 +5069,14 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    private ApiGatewayV2BodyS3Location parseApiGatewayV2BodyS3Location(JsonNode location) {
+    private OpenApiBodyS3Location parseOpenApiBodyS3Location(JsonNode location) {
         if (location != null && location.isTextual()) {
             String uri = location.asText();
             if (uri.startsWith("s3://")) {
                 String withoutScheme = uri.substring("s3://".length());
                 int slash = withoutScheme.indexOf('/');
                 if (slash > 0 && slash < withoutScheme.length() - 1) {
-                    return new ApiGatewayV2BodyS3Location(withoutScheme.substring(0, slash),
+                    return new OpenApiBodyS3Location(withoutScheme.substring(0, slash),
                             withoutScheme.substring(slash + 1), null);
                 }
             }
@@ -5021,7 +5084,7 @@ public class CloudFormationResourceProvisioner {
             String bucket = textOrNull(location, "Bucket");
             String key = textOrNull(location, "Key");
             if (bucket != null && !bucket.isBlank() && key != null && !key.isBlank()) {
-                return new ApiGatewayV2BodyS3Location(bucket, key, textOrNull(location, "Version"));
+                return new OpenApiBodyS3Location(bucket, key, textOrNull(location, "Version"));
             }
         }
         throw new AwsException("ValidationException",
@@ -5498,7 +5561,7 @@ public class CloudFormationResourceProvisioner {
 
     private record OpenApiAuthorizerBinding(String authorizationType, String authorizerId) {}
 
-    private record ApiGatewayV2BodyS3Location(String bucket, String key, String version) {}
+    private record OpenApiBodyS3Location(String bucket, String key, String version) {}
 
     private static final class ApiGatewayV2BodyMaterializationException extends RuntimeException {
         private final ApiGatewayV2BodyResources resources;

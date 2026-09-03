@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
@@ -2228,103 +2229,141 @@ public class ApiGatewayService {
 
             // Create methods for each operation on this path
             var operations = pathItem.readOperationsMap();
-            if (operations == null) continue;
-
-            for (var opEntry : operations.entrySet()) {
-                String httpMethod = opEntry.getKey().name().toUpperCase();
-                var operation = opEntry.getValue();
-
-                // Create the method
-                Map<String, Object> methodRequest = new HashMap<>();
-                // Apply the operation's (or the API root's) security requirement, resolving the scheme
-                // to a method authorizationType (CUSTOM/AWS_IAM/COGNITO_USER_POOLS) + authorizerId.
-                List<SecurityRequirement> secReqs = operation.getSecurity() != null
-                        ? operation.getSecurity() : openAPI.getSecurity();
-                String authType = "NONE";
-                String authorizerId = null;
-                if (secReqs != null) {
-                    // AWS resolves the OR-list of security requirements to the first declared
-                    // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
-                    resolveAuth:
-                    for (SecurityRequirement secReq : secReqs) {
-                        for (String schemeName : secReq.keySet()) {
-                            String mapped = schemeToAuthType.get(schemeName);
-                            if (mapped == null || "NONE".equals(mapped)) {
-                                continue;
-                            }
-                            authType = mapped;
-                            authorizerId = schemeToAuthorizerId.get(schemeName);
-                            break resolveAuth;
-                        }
-                    }
-                }
-                methodRequest.put("authorizationType", authType);
-                if (authorizerId != null) {
-                    methodRequest.put("authorizerId", authorizerId);
-                }
-
-                // Link request models from operation requestBody
-                if (operation.getRequestBody() != null && operation.getRequestBody().getContent() != null) {
-                    Map<String, String> requestModels = new HashMap<>();
-                    for (var contentEntry : operation.getRequestBody().getContent().entrySet()) {
-                        String contentType = contentEntry.getKey();
-                        var mediaType = contentEntry.getValue();
-                        if (mediaType.getSchema() != null && mediaType.getSchema().get$ref() != null) {
-                            String ref = mediaType.getSchema().get$ref();
-                            // Extract model name from #/components/schemas/ModelName
-                            String modelName = ref.substring(ref.lastIndexOf('/') + 1);
-                            requestModels.put(contentType, modelName);
-                        }
-                    }
-                    if (!requestModels.isEmpty()) {
-                        methodRequest.put("requestModels", requestModels);
-                    }
-                }
-
-                // Map OpenAPI parameters to requestParameters
-                if (operation.getParameters() != null && !operation.getParameters().isEmpty()) {
-                    Map<String, Boolean> requestParameters = new HashMap<>();
-                    for (var param : operation.getParameters()) {
-                        String location = switch (param.getIn()) {
-                            case "query" -> "method.request.querystring." + param.getName();
-                            case "header" -> "method.request.header." + param.getName();
-                            case "path" -> "method.request.path." + param.getName();
-                            default -> null;
-                        };
-                        if (location != null) {
-                            requestParameters.put(location, param.getRequired() != null && param.getRequired());
-                        }
-                    }
-                    if (!requestParameters.isEmpty()) {
-                        methodRequest.put("requestParameters", requestParameters);
-                    }
-                }
-
-                // Link request validator (operation-level overrides API-level default)
-                String opValidator = null;
-                if (operation.getExtensions() != null) {
-                    opValidator = (String) operation.getExtensions()
-                            .get("x-amazon-apigateway-request-validator");
-                }
-                if (opValidator != null && validatorNameToId.containsKey(opValidator)) {
-                    methodRequest.put("requestValidatorId", validatorNameToId.get(opValidator));
-                } else if (validatorNameToId.containsKey("__default__")) {
-                    methodRequest.put("requestValidatorId", validatorNameToId.get("__default__"));
-                }
-
-                putMethod(region, apiId, resourceId, httpMethod, methodRequest);
-
-                // Extract x-amazon-apigateway-integration extension
-                Map<String, Object> integrationExt = null;
-                if (operation.getExtensions() != null) {
-                    integrationExt = (Map<String, Object>) operation.getExtensions()
-                            .get("x-amazon-apigateway-integration");
-                }
-
-                if (integrationExt != null) {
-                    applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
+            if (operations != null) {
+                for (var opEntry : operations.entrySet()) {
+                    String httpMethod = opEntry.getKey().name().toUpperCase();
+                    applyOperation(region, apiId, resourceId, httpMethod, opEntry.getValue(), openAPI,
+                            schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
                 }
             }
+
+            // "x-amazon-apigateway-any-method" is AWS's vendor extension for a pseudo-operation that
+            // matches every HTTP verb (ANY). It is not a real OpenAPI operation keyword, so the swagger
+            // parser never surfaces it via pathItem.readOperationsMap() above. It only ends up in the
+            // PathItem's raw extensions map, as an untyped Map rather than a typed Operation. Convert it
+            // and process it the same way as a normal operation so imported ANY methods are created.
+            if (pathItem.getExtensions() != null) {
+                Object anyMethodExt = pathItem.getExtensions().get("x-amazon-apigateway-any-method");
+                if (anyMethodExt != null) {
+                    try {
+                        Operation anyOperation = io.swagger.v3.core.util.Json.mapper()
+                                .convertValue(anyMethodExt, Operation.class);
+                        applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
+                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    } catch (IllegalArgumentException e) {
+                        throw new AwsException("BadRequestException",
+                                "Invalid x-amazon-apigateway-any-method definition for path " + path + ": "
+                                        + e.getMessage(),
+                                400);
+                    }
+                }
+            }
+        }
+    }
+
+    private void applyOperation(String region, String apiId, String resourceId, String httpMethod,
+            Operation operation, OpenAPI openAPI, Map<String, String> schemeToAuthorizerId,
+            Map<String, String> schemeToAuthType, Map<String, String> validatorNameToId) {
+        // Create the method
+        Map<String, Object> methodRequest = new HashMap<>();
+        // Apply the operation's (or the API root's) security requirement, resolving the scheme
+        // to a method authorizationType (CUSTOM/AWS_IAM/COGNITO_USER_POOLS) + authorizerId.
+        List<SecurityRequirement> secReqs = operation.getSecurity() != null
+                ? operation.getSecurity() : openAPI.getSecurity();
+        String authType = "NONE";
+        String authorizerId = null;
+        if (secReqs != null) {
+            // AWS resolves the OR-list of security requirements to the first declared
+            // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
+            resolveAuth:
+            for (SecurityRequirement secReq : secReqs) {
+                for (String schemeName : secReq.keySet()) {
+                    String mapped = schemeToAuthType.get(schemeName);
+                    if (mapped == null || "NONE".equals(mapped)) {
+                        continue;
+                    }
+                    authType = mapped;
+                    authorizerId = schemeToAuthorizerId.get(schemeName);
+                    break resolveAuth;
+                }
+            }
+        }
+        methodRequest.put("authorizationType", authType);
+        if (authorizerId != null) {
+            methodRequest.put("authorizerId", authorizerId);
+        }
+
+        // Link request models from operation requestBody
+        if (operation.getRequestBody() != null && operation.getRequestBody().getContent() != null) {
+            Map<String, String> requestModels = new HashMap<>();
+            for (var contentEntry : operation.getRequestBody().getContent().entrySet()) {
+                String contentType = contentEntry.getKey();
+                var mediaType = contentEntry.getValue();
+                if (mediaType.getSchema() != null && mediaType.getSchema().get$ref() != null) {
+                    String ref = mediaType.getSchema().get$ref();
+                    // Extract model name from #/components/schemas/ModelName
+                    String modelName = ref.substring(ref.lastIndexOf('/') + 1);
+                    requestModels.put(contentType, modelName);
+                }
+            }
+            if (!requestModels.isEmpty()) {
+                methodRequest.put("requestModels", requestModels);
+            }
+        }
+
+        // Map OpenAPI parameters to requestParameters
+        if (operation.getParameters() != null && !operation.getParameters().isEmpty()) {
+            Map<String, Boolean> requestParameters = new HashMap<>();
+            for (var param : operation.getParameters()) {
+                String location = switch (param.getIn()) {
+                    case "query" -> "method.request.querystring." + param.getName();
+                    case "header" -> "method.request.header." + param.getName();
+                    case "path" -> "method.request.path." + param.getName();
+                    default -> null;
+                };
+                if (location != null) {
+                    requestParameters.put(location, param.getRequired() != null && param.getRequired());
+                }
+            }
+            if (!requestParameters.isEmpty()) {
+                methodRequest.put("requestParameters", requestParameters);
+            }
+        }
+
+        // Link request validator (operation-level overrides API-level default)
+        String opValidator = null;
+        if (operation.getExtensions() != null) {
+            opValidator = (String) operation.getExtensions()
+                    .get("x-amazon-apigateway-request-validator");
+        }
+        if (opValidator != null && validatorNameToId.containsKey(opValidator)) {
+            methodRequest.put("requestValidatorId", validatorNameToId.get(opValidator));
+        } else if (validatorNameToId.containsKey("__default__")) {
+            methodRequest.put("requestValidatorId", validatorNameToId.get("__default__"));
+        }
+
+        putMethod(region, apiId, resourceId, httpMethod, methodRequest);
+
+        // Extract x-amazon-apigateway-integration extension
+        Map<String, Object> integrationExt = null;
+        Object rawIntegrationExt = operation.getExtensions() == null
+                ? null
+                : operation.getExtensions().get("x-amazon-apigateway-integration");
+        if (rawIntegrationExt != null) {
+            if (rawIntegrationExt instanceof Map<?, ?> map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> typed = (Map<String, Object>) map;
+                integrationExt = typed;
+            } else {
+                throw new AwsException("BadRequestException",
+                        "Invalid x-amazon-apigateway-integration definition for method " + httpMethod
+                                + ": expected an object",
+                        400);
+            }
+        }
+
+        if (integrationExt != null) {
+            applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
         }
     }
 

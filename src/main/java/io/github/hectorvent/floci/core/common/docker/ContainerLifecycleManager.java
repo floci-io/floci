@@ -32,6 +32,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Manages Docker container lifecycle operations including create, start, stop, and remove.
@@ -41,6 +42,13 @@ import java.util.concurrent.TimeUnit;
 public class ContainerLifecycleManager {
 
     private static final Logger LOG = Logger.getLogger(ContainerLifecycleManager.class);
+
+    // Matches crun/runc's "join keyctl '<id>': Disk quota exceeded" error, which the OCI runtime
+    // reports for the kernel session-keyring quota (kernel.keys.maxkeys), not actual disk space.
+    // Under high concurrent container counts (podman machine's Fedora CoreOS default is 200 keys
+    // per uid) this reads as a disk-space problem and sends operators looking in the wrong place.
+    private static final Pattern KEYRING_QUOTA_PATTERN =
+            Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
@@ -143,7 +151,7 @@ public class ContainerLifecycleManager {
      * @return information about the running container including resolved endpoints
      */
     public ContainerInfo startCreated(String containerId, ContainerSpec spec) {
-        dockerClient.startContainerCmd(containerId).exec();
+        startContainer(containerId);
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
@@ -161,6 +169,30 @@ public class ContainerLifecycleManager {
 
         Map<Integer, EndpointInfo> endpoints = resolveEndpoints(containerId, spec);
         return new ContainerInfo(containerId, endpoints);
+    }
+
+    /**
+     * Starts a container, translating crun/runc's kernel-keyring-quota error into a message that
+     * names the actual cause and a fix, instead of the misleading "Disk quota exceeded" the OCI
+     * runtime reports. Package-private so tests can verify a given call site routes through this
+     * translation rather than a raw {@code dockerClient.startContainerCmd(...)} call.
+     */
+    void startContainer(String containerId) {
+        try {
+            dockerClient.startContainerCmd(containerId).exec();
+        } catch (DockerException e) {
+            String message = e.getMessage();
+            if (message != null && KEYRING_QUOTA_PATTERN.matcher(message).find()) {
+                throw new IllegalStateException(
+                        "Container start failed: the container runtime's kernel session-keyring is "
+                                + "out of quota (kernel.keys.maxkeys), not disk space. This is common "
+                                + "under many concurrent containers on podman machine's default Fedora "
+                                + "CoreOS sysctls (200 keys per uid). Raise the limit in the VM, e.g.: "
+                                + "podman machine ssh \"sudo sysctl -w kernel.keys.maxkeys=20000 "
+                                + "kernel.keys.maxbytes=2000000\". Original error: " + message, e);
+            }
+            throw e;
+        }
     }
 
     /**
@@ -381,7 +413,7 @@ public class ContainerLifecycleManager {
                 .exec();
         String helperId = created.getId();
         try {
-            dockerClient.startContainerCmd(helperId).exec();
+            startContainer(helperId);
             Integer status = dockerClient.waitContainerCmd(helperId)
                     .exec(new WaitContainerResultCallback())
                     .awaitStatusCode(60, TimeUnit.SECONDS);
@@ -540,7 +572,7 @@ public class ContainerLifecycleManager {
         boolean running = Boolean.TRUE.equals(inspect.getState().getRunning());
 
         if (!running) {
-            dockerClient.startContainerCmd(containerId).exec();
+            startContainer(containerId);
             LOG.infov("Started adopted container {0}", containerId);
             inspect = dockerClient.inspectContainerCmd(containerId).exec();
         }

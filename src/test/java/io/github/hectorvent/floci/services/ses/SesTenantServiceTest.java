@@ -436,6 +436,45 @@ class SesTenantServiceTest {
         assertTrue(service.find("acme", REGION).isEmpty());
     }
 
+    // ──────────────────────── Tenant-scoped sending (Phase 4) ────────────────────────
+
+    @Test
+    void tenantForSending_hasSendFlavoredNotFoundWording() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.tenantForSending("ghost", REGION, ACCOUNT));
+        assertEquals("NotFoundException", e.getErrorCode());
+        // No angle brackets, and the account id is included — unlike the management operations.
+        assertEquals("Tenant ghost for AwsAccountId " + ACCOUNT + " not found.", e.getMessage());
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class,
+                        () -> service.tenantForSending(" ", REGION, ACCOUNT)).getMessage());
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class,
+                        () -> service.tenantForSending(null, REGION, ACCOUNT)).getMessage());
+    }
+
+    @Test
+    void requireResourcesAssociated_collectsEveryMissingArn() {
+        Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        SesTenantService.AssociationResource identity = identityRef("example.com");
+        SesTenantService.AssociationResource cs = SesTenantService.parseResourceArn(
+                "arn:aws:ses:" + REGION + ":" + ACCOUNT + ":configuration-set/cs", ACCOUNT, REGION);
+        service.associate(tenant, identity, REGION, () -> {});
+
+        service.requireResourcesAssociated(tenant, List.of(identity), REGION);
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.requireResourcesAssociated(tenant, List.of(identity, cs), REGION));
+        assertEquals("AccessDeniedException", e.getErrorCode());
+        assertEquals(403, e.getHttpStatus());
+        assertEquals("Tenant not associated with resources [" + cs.arn() + "].", e.getMessage());
+
+        service.disassociate(tenant, identity, REGION);
+        AwsException both = assertThrows(AwsException.class,
+                () -> service.requireResourcesAssociated(tenant, List.of(identity, cs), REGION));
+        assertEquals("Tenant not associated with resources [" + identity.arn() + ", " + cs.arn() + "].",
+                both.getMessage());
+    }
+
     @Test
     void validateFilterAndPaging_matchAwsMessages() {
         assertEquals("Invalid resource type NOPE specified.",

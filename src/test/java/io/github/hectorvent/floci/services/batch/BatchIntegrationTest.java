@@ -499,6 +499,87 @@ class BatchIntegrationTest {
     }
 
     @Test
+    void updateAndDeleteComputeEnvironmentSupportsTeardownFlow() {
+        String suffix = uniqueSuffix();
+        String ceName = "teardown-ce-" + suffix;
+        String ceArn = createComputeEnvironment(ceName);
+        String queueName = "teardown-ce-queue-" + suffix;
+        createQueue(queueName, ceArn);
+
+        // AWS Batch requires DISABLED before delete: rejected while ENABLED.
+        givenJson("{\"computeEnvironment\":\"%s\"}".formatted(ceName))
+        .when()
+            .post("/v1/deletecomputeenvironment")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+
+        givenJson("""
+                {
+                  "computeEnvironment": "%s",
+                  "state": "DISABLED",
+                  "serviceRole": "arn:aws:iam::000000000000:role/BatchServiceRole",
+                  "computeResources": {"desiredvCpus": 0}
+                }
+                """.formatted(ceName))
+        .when()
+            .post("/v1/updatecomputeenvironment")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironmentName", equalTo(ceName))
+            .body("computeEnvironmentArn", equalTo(ceArn));
+
+        givenJson("{\"computeEnvironments\":[\"%s\"]}".formatted(ceArn))
+        .when()
+            .post("/v1/describecomputeenvironments")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironments", hasSize(1))
+            .body("computeEnvironments[0].state", equalTo("DISABLED"))
+            .body("computeEnvironments[0].serviceRole",
+                    equalTo("arn:aws:iam::000000000000:role/BatchServiceRole"));
+
+        // DISABLED but still referenced by a job queue's computeEnvironmentOrder: still rejected.
+        givenJson("{\"computeEnvironment\":\"%s\"}".formatted(ceName))
+        .when()
+            .post("/v1/deletecomputeenvironment")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+
+        givenJson("{\"jobQueue\":\"%s\",\"state\":\"DISABLED\"}".formatted(queueName))
+        .when()
+            .post("/v1/updatejobqueue")
+        .then()
+            .statusCode(200);
+        givenJson("{\"jobQueue\":\"%s\"}".formatted(queueName))
+        .when()
+            .post("/v1/deletejobqueue")
+        .then()
+            .statusCode(200);
+
+        givenJson("{\"computeEnvironment\":\"%s\"}".formatted(ceName))
+        .when()
+            .post("/v1/deletecomputeenvironment")
+        .then()
+            .statusCode(200)
+            .body("isEmpty()", equalTo(true));
+
+        givenJson("{\"computeEnvironments\":[\"%s\"]}".formatted(ceArn))
+        .when()
+            .post("/v1/describecomputeenvironments")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironments", hasSize(0));
+
+        givenJson("{\"computeEnvironment\":\"%s\"}".formatted(ceName))
+        .when()
+            .post("/v1/deletecomputeenvironment")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void describeUnknownJobsReturnsEmptyList() {
         givenJson("{\"jobs\":[\"does-not-exist\"]}")
         .when()

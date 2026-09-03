@@ -15,6 +15,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -35,6 +40,8 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
     private RedshiftContainerManager cm;
     private io.github.hectorvent.floci.core.common.RegionResolver regionResolver;
+    private io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager proxyManager;
+    private io.github.hectorvent.floci.core.common.docker.DockerHostResolver dockerHostResolver;
     private RedshiftService service;
 
     @BeforeEach
@@ -47,11 +54,24 @@ class RedshiftServiceTest {
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
-        
+        proxyManager = mock(io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager.class);
+        dockerHostResolver = mock(io.github.hectorvent.floci.core.common.docker.DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("localhost");
+
         io.github.hectorvent.floci.config.EmulatorConfig config = mock(io.github.hectorvent.floci.config.EmulatorConfig.class);
         io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig storageConfig = mock(io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig.class);
         when(config.storage()).thenReturn(storageConfig);
         when(storageConfig.persistentPath()).thenReturn("target/test-data");
+
+        io.github.hectorvent.floci.config.EmulatorConfig.ServicesConfig servicesConfig =
+                mock(io.github.hectorvent.floci.config.EmulatorConfig.ServicesConfig.class);
+        io.github.hectorvent.floci.config.EmulatorConfig.RedshiftServiceConfig redshiftConfig =
+                mock(io.github.hectorvent.floci.config.EmulatorConfig.RedshiftServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.redshift()).thenReturn(redshiftConfig);
+        when(redshiftConfig.proxyBasePort()).thenReturn(7100);
+        when(redshiftConfig.proxyMaxPort()).thenReturn(7199);
+        when(redshiftConfig.endpointHost()).thenReturn(Optional.empty());
 
         when(sf.<Cluster>create(eq("redshift"), eq("redshift-clusters.json"), any())).thenReturn(clusterBackend);
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
@@ -61,12 +81,12 @@ class RedshiftServiceTest {
 
         regionResolver = new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "111111111111");
 
-        service = new RedshiftService(sf, cm, config, regionResolver);
+        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver);
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
     private static String dumpPath(String snapshotId) {
-        return java.nio.file.Paths.get("target/test-data", "redshift-dumps", "111111111111", snapshotId + ".sql")
+        return Paths.get("target/test-data", "redshift-dumps", "111111111111", snapshotId + ".sql")
                 .toAbsolutePath().normalize().toString();
     }
 
@@ -139,6 +159,34 @@ class RedshiftServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void onStartRestartsTheProxyForAnAdoptedCluster() {
+        Cluster persisted = new Cluster();
+        persisted.setClusterIdentifier("c1");
+        persisted.setMasterUsername("admin");
+        persisted.setMasterPassword("Secret123");
+        persisted.setClusterStatus("available");
+        persisted.setProxyPort(7108);
+
+        var entry = mock(AccountAwareStorageBackend.AccountEntry.class);
+        when(entry.value()).thenReturn(persisted);
+        when(entry.accountId()).thenReturn("111111111111");
+        when(entry.key()).thenReturn("c1");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(entry));
+        when(cm.getContainer("111111111111", "c1")).thenReturn(Optional.empty());
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.12");
+        when(handle.getPort()).thenReturn(32830);
+        when(cm.adoptOrStart("111111111111", "c1", "admin", "Secret123")).thenReturn(handle);
+
+        service.onStart(null);
+
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7108),
+                eq("172.17.0.12"), eq(32830), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
+    }
+
+    @Test
     void testCreateCluster() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
@@ -164,11 +212,112 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void createClusterStartsAProxyAndAdvertisesTheProxyEndpoint() {
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.9");
+        when(handle.getPort()).thenReturn(32800);
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+
+        Cluster cluster = service.createCluster("c1", "dc2.large", "admin", "Secret123");
+
+        // Endpoint is the proxy, not the container.
+        assertEquals("localhost", cluster.getEndpoint().getAddress());
+        assertTrue(cluster.getEndpoint().getPort() >= 7100 && cluster.getEndpoint().getPort() <= 7199);
+        assertEquals("172.17.0.9", cluster.getContainerHost());
+        assertEquals(32800, cluster.getContainerPort());
+        assertEquals(cluster.getEndpoint().getPort(), cluster.getProxyPort());
+
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(cluster.getProxyPort()),
+                eq("172.17.0.9"), eq(32800), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
+    }
+
+    @Test
     void testCreateClusterAlreadyExists() {
         when(clusterBackend.get("existing-cluster")).thenReturn(Optional.of(new Cluster()));
 
         assertThrows(AwsException.class, () ->
                 service.createCluster("existing-cluster", "dc2.large", "admin", "password123"));
+    }
+
+    @Test
+    void createClusterRemovesMetadataOnFailure() {
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
+                .thenThrow(new RuntimeException("startup failed"));
+
+        assertThrows(AwsException.class, () ->
+                service.createCluster("c1", "dc2.large", "admin", "password123"));
+
+        verify(clusterBackend).delete("c1");
+        verify(clusterBackend, atLeastOnce()).flush();
+    }
+
+    @Test
+    void createClusterKeepsMetadataWhenProxyStopFails() {
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
+                .thenThrow(new RuntimeException("startup failed"));
+        doThrow(new RuntimeException("proxy stop failed"))
+                .when(proxyManager).stopProxy("111111111111:c1");
+
+        assertThrows(AwsException.class, () ->
+                service.createCluster("c1", "dc2.large", "admin", "password123"));
+
+        verify(clusterBackend, never()).delete("c1");
+        verify(clusterBackend, atLeast(1)).put(eq("c1"), argThat(c -> "failed".equals(c.getClusterStatus())));
+        verify(clusterBackend, atLeastOnce()).flush();
+    }
+
+    @Test
+    void restoreFromClusterSnapshotRemovesMetadataOnFailure() {
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier("snap-1");
+        snapshot.setClusterIdentifier("source-c1");
+        snapshot.setMasterUsername("admin");
+        snapshot.setMasterPassword("password123");
+        snapshot.setSqlDump(null);
+
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
+                .thenThrow(new RuntimeException("startup failed"));
+
+        assertThrows(AwsException.class, () ->
+                service.restoreFromClusterSnapshot("c1", "snap-1"));
+
+        verify(clusterBackend).delete("c1");
+        verify(clusterBackend, atLeastOnce()).flush();
+    }
+
+    @Test
+    void restoreFromClusterSnapshotKeepsMetadataWhenProxyStopFails() {
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier("snap-1");
+        snapshot.setClusterIdentifier("source-c1");
+        snapshot.setMasterUsername("admin");
+        snapshot.setMasterPassword("password123");
+        snapshot.setSqlDump(null);
+
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
+                .thenThrow(new RuntimeException("startup failed"));
+        doThrow(new RuntimeException("proxy stop failed"))
+                .when(proxyManager).stopProxy("111111111111:c1");
+
+        assertThrows(AwsException.class, () ->
+                service.restoreFromClusterSnapshot("c1", "snap-1"));
+
+        verify(clusterBackend, never()).delete("c1");
+        verify(clusterBackend, atLeast(1)).put(eq("c1"), argThat(c -> "failed".equals(c.getClusterStatus())));
+        verify(clusterBackend, atLeastOnce()).flush();
     }
 
     @Test
@@ -195,6 +344,41 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void deleteClusterAbortsAndKeepsMetadataWhenTheProxyWontStop() {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier("test-c");
+        c.setProxyPort(7107);
+        when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
+        doThrow(new RuntimeException("listener close failed"))
+                .when(proxyManager).stopProxy("111111111111:test-c");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteCluster("test-c"));
+        assertEquals("InternalFailure", ex.getErrorCode());
+
+        // Container and metadata are left intact so the deletion can be retried.
+        verify(cm, never()).stop(anyString(), anyString());
+        verify(clusterBackend, never()).delete(anyString());
+    }
+
+    @Test
+    void deleteClusterRetrySucceedsOnceTheProxyStops() {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier("test-c");
+        c.setProxyPort(7107);
+        when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
+        doThrow(new RuntimeException("listener close failed"))
+                .doNothing()
+                .when(proxyManager).stopProxy("111111111111:test-c");
+
+        assertThrows(AwsException.class, () -> service.deleteCluster("test-c"));
+        Cluster deleted = service.deleteCluster("test-c");
+
+        assertEquals("deleting", deleted.getClusterStatus());
+        verify(cm).stop("111111111111", "test-c");
+        verify(clusterBackend).delete("test-c");
+    }
+
+    @Test
     void testRebootClusterDumpsAndRestoresData() throws Exception {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
@@ -205,18 +389,46 @@ class RedshiftServiceTest {
         when(cm.start(eq("111111111111"), eq("my-cluster"), eq("admin"), eq("pw")))
                 .thenReturn(new RedshiftContainerHandle("c-rebooted", "my-cluster", "localhost", 5555));
         doAnswer(invocation -> {
-            java.nio.file.Path dumpFile = invocation.getArgument(3);
-            java.nio.file.Files.writeString(dumpFile, "-- dump");
+            Path dumpFile = invocation.getArgument(3);
+            Files.writeString(dumpFile, "-- dump");
             return null;
-        }).when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        }).when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
 
         Cluster rebooted = service.rebootCluster("my-cluster");
 
         assertEquals("available", rebooted.getClusterStatus());
-        assertEquals(5555, rebooted.getEndpoint().getPort());
+        // Endpoint now advertises the auth proxy; the restarted container is tracked separately.
+        assertEquals(5555, rebooted.getContainerPort());
+        assertTrue(rebooted.getEndpoint().getPort() >= 7100 && rebooted.getEndpoint().getPort() <= 7199);
         verify(cm).stop("111111111111", "my-cluster");
         verify(cm).start("111111111111", "my-cluster", "admin", "pw");
-        verify(cm).restoreSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).restoreSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
+    }
+
+    @Test
+    void rebootClusterRestartsTheProxyOnTheSamePort() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        cluster.setEndpoint(new Endpoint("localhost", 7107));
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.11");
+        when(handle.getPort()).thenReturn(32820);
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+
+        Cluster rebooted = service.rebootCluster("c1");
+
+        assertEquals(7107, rebooted.getEndpoint().getPort());
+        assertEquals("localhost", rebooted.getEndpoint().getAddress());
+        assertEquals("172.17.0.11", rebooted.getContainerHost());
+        verify(proxyManager).stopProxy("111111111111:c1");
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107),
+                eq("172.17.0.11"), eq(32820), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
     }
 
     @Test
@@ -224,6 +436,94 @@ class RedshiftServiceTest {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.rebootCluster("missing"));
+    }
+
+    @Test
+    void rebootClusterTearsDownTheProxyWhenRestoreFails() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.11");
+        when(handle.getPort()).thenReturn(32820);
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+        doThrow(new RuntimeException("restore boom"))
+                .when(cm).restoreSnapshot(eq("111111111111"), eq("c1"), eq("admin"), any(Path.class));
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        // The proxy started during the reboot must be stopped again on failure, and the
+        // replacement container must be stopped too — once before the restart, once in
+        // rollback — so it is not left running behind a "failed" cluster.
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
+                any(), any(), any(), any(), any());
+        verify(proxyManager, times(2)).stopProxy("111111111111:c1");
+        verify(cm, times(2)).stop("111111111111", "c1");
+    }
+
+    @Test
+    void rebootClusterLeavesTheOriginalContainerAloneWhenTheDumpFails() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        doThrow(new RuntimeException("dump boom"))
+                .when(cm).takeSnapshot(eq("111111111111"), eq("c1"), eq("admin"), any(Path.class));
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        // The dump failed before the original was torn down: rollback must not stop the
+        // still-running original container or touch its proxy.
+        verify(cm, never()).stop(anyString(), anyString());
+        verify(proxyManager, never()).stopProxy(anyString());
+    }
+
+    @Test
+    void rebootClusterRemovesTheReplacementWhenItsStartupThrows() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123")))
+                .thenThrow(new RuntimeException("readiness timed out"));
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        // start() can create the container before throwing (readiness check); the
+        // original is already gone, so rollback removes anything under the name —
+        // once for the original teardown, once for the possible orphan.
+        verify(cm, times(2)).stop("111111111111", "c1");
+
+        // The reserved port belongs to the cluster and is not released by reboot rollback;
+        // it is released only when the cluster is successfully deleted.
+        assertEquals(7107, cluster.getProxyPort());
+    }
+
+    @Test
+    void rebootClusterKeepsProxyPortWhenRollbackStopFails() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123")))
+                .thenThrow(new RuntimeException("readiness timed out"));
+        
+        // The first call stops the proxy during takeSnapshot; the second call happens in rollback.
+        doNothing().doThrow(new RuntimeException("stop failed")).when(proxyManager).stopProxy(anyString());
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
+
+        assertEquals(7107, cluster.getProxyPort());
     }
 
     @Test
@@ -236,7 +536,7 @@ class RedshiftServiceTest {
 
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.empty());
-        doNothing().when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
 
         Snapshot snapshot = service.createSnapshot("my-snapshot", "my-cluster");
         assertNotNull(snapshot);
@@ -252,7 +552,7 @@ class RedshiftServiceTest {
         assertTrue(snapshot.getSqlDump().endsWith("my-snapshot.sql"));
         verify(snapshotBackend).put(eq("my-snapshot"), any(Snapshot.class));
         verify(snapshotBackend).flush();
-        verify(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
     }
 
     @Test
@@ -292,7 +592,7 @@ class RedshiftServiceTest {
             assertEquals("InvalidParameterValue", ex.getErrorCode(), id);
             assertEquals(400, ex.getHttpStatus(), id);
         }
-        verify(cm, never()).takeSnapshot(any(), any(), any(), any(java.nio.file.Path.class));
+        verify(cm, never()).takeSnapshot(any(), any(), any(), any(Path.class));
         verify(snapshotBackend, never()).put(anyString(), any(Snapshot.class));
     }
 
@@ -386,7 +686,7 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("password123")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertNotNull(cluster);
@@ -399,7 +699,7 @@ class RedshiftServiceTest {
 
         // Restore must use the source cluster's actual password, not a hardcoded one
         verify(cm).start("111111111111", "restored-cluster", "admin", "password123");
-        verify(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
         verify(clusterBackend, times(2)).put(eq("restored-cluster"), any(Cluster.class));
         verify(clusterBackend, times(2)).flush();
     }
@@ -415,7 +715,7 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("original-secret")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertEquals("original-secret", cluster.getMasterPassword());
@@ -431,7 +731,7 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("admin")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertEquals("admin", cluster.getMasterPassword());
@@ -481,6 +781,58 @@ class RedshiftServiceTest {
         verify(cm, never()).start(any(), any(), any(), any());
         verify(cm, never()).restoreSnapshot(any(), any(), any(), any());
         verify(clusterBackend, never()).put(anyString(), any(Cluster.class));
+    }
+
+    @Test
+    void deleteClusterStopsTheProxyAndReleasesThePort() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setProxyPort(7105);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+
+        service.deleteCluster("c1");
+
+        verify(proxyManager).stopProxy("111111111111:c1");
+    }
+
+    @Test
+    void modifyClusterPasswordUpdatesTheProxySnapshot() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("old");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+
+        service.modifyCluster("c1", null, null, "NewSecret1", null, null);
+
+        verify(proxyManager).updateMasterPassword("111111111111:c1", "NewSecret1");
+    }
+
+    @Test
+    void restoreFromSnapshotStartsAProxyForTheNewCluster() {
+        Snapshot snap = new Snapshot();
+        snap.setSnapshotIdentifier("s1");
+        snap.setClusterIdentifier("src");
+        snap.setMasterUsername("admin");
+        snap.setMasterPassword("Secret123");
+        snap.setSqlDump(null);
+        when(snapshotBackend.get("s1")).thenReturn(Optional.of(snap));
+        when(clusterBackend.get("restored")).thenReturn(Optional.empty());
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.10");
+        when(handle.getPort()).thenReturn(32810);
+        when(cm.start(eq("111111111111"), eq("restored"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+
+        Cluster restored = service.restoreFromClusterSnapshot("restored", "s1");
+
+        assertEquals("localhost", restored.getEndpoint().getAddress());
+        assertEquals(restored.getEndpoint().getPort(), restored.getProxyPort());
+        verify(proxyManager).startProxy(eq("111111111111:restored"), anyInt(),
+                eq("172.17.0.10"), eq(32810), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
     }
 
     @Test
@@ -580,7 +932,7 @@ class RedshiftServiceTest {
     @Test
     void testDescribeClusterParametersReturnsStoredValues() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
-        group.setParameters(new java.util.ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
+        group.setParameters(new ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
         List<Parameter> params = service.describeClusterParameters("my-pg");
@@ -614,7 +966,7 @@ class RedshiftServiceTest {
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         service.createTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster",
-                java.util.Map.of("env", "test"));
+                Map.of("env", "test"));
 
         assertEquals("test", cluster.getTags().get("env"));
         verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
@@ -624,31 +976,31 @@ class RedshiftServiceTest {
     void testDeleteTagsForCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
-        cluster.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "test", "team", "data")));
+        cluster.setTags(new LinkedHashMap<>(Map.of("env", "test", "team", "data")));
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
-        service.deleteTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster", java.util.List.of("env"));
+        service.deleteTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster", List.of("env"));
 
-        assertEquals(java.util.Map.of("team", "data"), cluster.getTags());
+        assertEquals(Map.of("team", "data"), cluster.getTags());
     }
 
     @Test
     void testCreateTagsRejectsNonArnResourceName() {
         assertThrows(AwsException.class, () ->
-                service.createTags("my-cluster", java.util.Map.of("env", "test")));
+                service.createTags("my-cluster", Map.of("env", "test")));
     }
 
     @Test
     void testCreateTagsRejectsUnknownResourceType() {
         assertThrows(AwsException.class, () ->
-                service.createTags("arn:aws:redshift:us-east-1:111111111111:reservednode:foo", java.util.Map.of("env", "test")));
+                service.createTags("arn:aws:redshift:us-east-1:111111111111:reservednode:foo", Map.of("env", "test")));
     }
 
     @Test
     void testDescribeTagsForSpecificResource() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
-        cluster.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "test")));
+        cluster.setTags(new LinkedHashMap<>(Map.of("env", "test")));
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         List<RedshiftService.TaggedResource> tagged =
@@ -664,14 +1016,14 @@ class RedshiftServiceTest {
     void testDescribeTagsScansAllResourcesOfType() {
         Cluster a = new Cluster();
         a.setClusterIdentifier("cluster-a");
-        a.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "prod")));
+        a.setTags(new LinkedHashMap<>(Map.of("env", "prod")));
         Cluster b = new Cluster();
         b.setClusterIdentifier("cluster-b");
-        b.setTags(new java.util.LinkedHashMap<>());
-        when(clusterBackend.scan(any())).thenReturn(java.util.List.of(a, b));
-        when(snapshotBackend.scan(any())).thenReturn(java.util.List.of());
-        when(parameterGroupBackend.scan(any())).thenReturn(java.util.List.of());
-        when(subnetGroupBackend.scan(any())).thenReturn(java.util.List.of());
+        b.setTags(new LinkedHashMap<>());
+        when(clusterBackend.scan(any())).thenReturn(List.of(a, b));
+        when(snapshotBackend.scan(any())).thenReturn(List.of());
+        when(parameterGroupBackend.scan(any())).thenReturn(List.of());
+        when(subnetGroupBackend.scan(any())).thenReturn(List.of());
 
         List<RedshiftService.TaggedResource> tagged = service.describeTags(null, "cluster", null);
 

@@ -311,6 +311,143 @@ class BatchServiceTest {
         assertEquals(0, repeated.size());
     }
 
+    @Test
+    void updateComputeEnvironmentChangesStateServiceRoleAndComputeResources() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        String computeArn = service.createComputeEnvironment(json("""
+                {
+                  "computeEnvironmentName":"update-ce",
+                  "type":"MANAGED",
+                  "computeResources":{"type":"EC2","minvCpus":0,"maxvCpus":4,"instanceTypes":["optimal"]}
+                }
+                """), REGION).path("computeEnvironmentArn").asText();
+
+        JsonNode updated = service.updateComputeEnvironment(json("""
+                {
+                  "computeEnvironment":"update-ce",
+                  "state":"DISABLED",
+                  "serviceRole":"arn:aws:iam::000000000000:role/BatchServiceRole",
+                  "computeResources":{"maxvCpus":8,"desiredvCpus":2}
+                }
+                """));
+        assertEquals("update-ce", updated.path("computeEnvironmentName").asText());
+        assertEquals(computeArn, updated.path("computeEnvironmentArn").asText());
+
+        JsonNode detail = service.describeComputeEnvironments(json("""
+                {"computeEnvironments":["%s"]}
+                """.formatted(computeArn))).path("computeEnvironments").get(0);
+        assertEquals("DISABLED", detail.path("state").asText());
+        assertEquals("arn:aws:iam::000000000000:role/BatchServiceRole", detail.path("serviceRole").asText());
+        // Partial update: only the sent fields change, minvCpus/instanceTypes survive untouched.
+        assertEquals(0, detail.path("computeResources").path("minvCpus").asInt());
+        assertEquals(8, detail.path("computeResources").path("maxvCpus").asInt());
+        assertEquals(2, detail.path("computeResources").path("desiredvCpus").asInt());
+        assertEquals("optimal", detail.path("computeResources").path("instanceTypes").get(0).asText());
+    }
+
+    @Test
+    void updateComputeEnvironmentRejectsUnknownEnvironment() {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        AwsException e = assertThrows(AwsException.class, () -> service.updateComputeEnvironment(json("""
+                {"computeEnvironment":"missing-ce","state":"DISABLED"}
+                """)));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void updateComputeEnvironmentRejectsInvalidState() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"invalid-state-ce","type":"MANAGED"}
+                """), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateComputeEnvironment(json("""
+                {"computeEnvironment":"invalid-state-ce","state":"SUSPENDED"}
+                """)));
+        assertEquals("ClientException", e.getErrorCode());
+
+        // Rejected before being written: the environment is still ENABLED, not stuck holding
+        // an invalid value DeleteComputeEnvironment could never match against.
+        JsonNode detail = service.describeComputeEnvironments(json("""
+                {"computeEnvironments":["invalid-state-ce"]}
+                """)).path("computeEnvironments").get(0);
+        assertEquals("ENABLED", detail.path("state").asText());
+    }
+
+    @Test
+    void createComputeEnvironmentRejectsInvalidState() {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        AwsException e = assertThrows(AwsException.class, () -> service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"bad-create-ce","type":"MANAGED","state":"SUSPENDED"}
+                """), REGION));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteComputeEnvironmentRejectsEnabledEnvironment() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"delete-enabled-ce","type":"MANAGED"}
+                """), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deleteComputeEnvironment(json("""
+                {"computeEnvironment":"delete-enabled-ce"}
+                """)));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteComputeEnvironmentRejectsEnvironmentStillAttachedToJobQueue() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        String computeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"attached-ce","type":"MANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+        service.createJobQueue(json("""
+                {
+                  "jobQueueName":"attached-queue",
+                  "priority":1,
+                  "computeEnvironmentOrder":[{"order":1,"computeEnvironment":"%s"}]
+                }
+                """.formatted(computeArn)), REGION);
+        service.updateComputeEnvironment(json("""
+                {"computeEnvironment":"attached-ce","state":"DISABLED"}
+                """));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deleteComputeEnvironment(json("""
+                {"computeEnvironment":"attached-ce"}
+                """)));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteComputeEnvironmentRemovesDisabledEnvironmentAndToleratesRepeatDeletes() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        String computeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"delete-ce","type":"MANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+
+        service.updateComputeEnvironment(json("""
+                {"computeEnvironment":"delete-ce","state":"DISABLED"}
+                """));
+        JsonNode deleted = service.deleteComputeEnvironment(json("""
+                {"computeEnvironment":"delete-ce"}
+                """));
+        assertEquals(0, deleted.size());
+
+        JsonNode envs = service.describeComputeEnvironments(json("""
+                {"computeEnvironments":["%s"]}
+                """.formatted(computeArn))).path("computeEnvironments");
+        assertEquals(0, envs.size());
+
+        JsonNode repeated = service.deleteComputeEnvironment(json("""
+                {"computeEnvironment":"delete-ce"}
+                """));
+        assertEquals(0, repeated.size());
+    }
+
     private BatchService dockerService(BatchDockerRunner runner) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

@@ -35,6 +35,7 @@ class ApiGatewayIntegrationTest {
                 .body("id", notNullValue())
                 .body("name", equalTo("test-api"))
                 .body("description", equalTo("Integration test API"))
+                .body("apiStatus", equalTo("AVAILABLE"))
                 .extract().path("id");
     }
 
@@ -45,7 +46,8 @@ class ApiGatewayIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("id", equalTo(apiId))
-                .body("name", equalTo("test-api"));
+                .body("name", equalTo("test-api"))
+                .body("apiStatus", equalTo("AVAILABLE"));
     }
 
     @Test @Order(3)

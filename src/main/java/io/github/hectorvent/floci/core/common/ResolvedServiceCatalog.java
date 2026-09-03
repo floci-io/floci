@@ -340,6 +340,14 @@ public class ResolvedServiceCatalog {
                         "elbv2", config.storage().mode(), 5000L, AwsNamespaces.ELB_V2, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("elasticloadbalancing"), Set.of(), Set.of()),
+                // Classic (v1) ELB shares the elasticloadbalancing endpoint and credential scope
+                // with ELBv2 above, so it claims neither here; AwsQueryController splits the two on
+                // the request's Version parameter. Listed so the service and its config knob are
+                // visible in status.
+                descriptor("elb", "elb", config.services().elb().enabled(), true,
+                        "elb", config.storage().mode(), 5000L, AwsNamespaces.ELB_CLASSIC, ServiceProtocol.QUERY,
+                        protocols(ServiceProtocol.QUERY),
+                        Set.of(), Set.of(), Set.of(), Set.of()),
                 descriptor("codebuild", "codebuild", config.services().codebuild().enabled(), true,
                         "codebuild", storageMode(config.storage().services().codebuild().mode(), config.storage().mode()),
                         config.storage().services().codebuild().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -468,6 +476,10 @@ public class ResolvedServiceCatalog {
                         config.storage().services().transcribe().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Transcribe."), Set.of("transcribe"), Set.of(), Set.of()),
+                descriptor("translate", "translate", config.services().translate().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSShineFrontendService_20170701."), Set.of("translate"), Set.of(), Set.of()),
                 descriptor("ce", "ce", config.services().ce().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

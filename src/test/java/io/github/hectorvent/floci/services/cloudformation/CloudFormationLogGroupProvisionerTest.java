@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,14 +39,12 @@ class CloudFormationLogGroupProvisionerTest {
     @BeforeEach
     void setUp() {
         logsService = mock(CloudWatchLogsService.class);
-        // Registering the provisioner is load-bearing, not decoration: AWS::Logs::LogGroup now lives
-        // in LogsCfnProvisioner, so with an empty registry these calls would fall through to the
-        // dispatcher's stub arm and assert against a synthetic id instead of the real logic. Going
-        // through the dispatcher rather than the provisioner directly also covers the plumbing this
-        // migration changed, that existingPhysicalId and existingAttributes reach ProvisionContext.
+        // Naming the service is enough: the fixture wires LogsCfnProvisioner from it, the way CDI
+        // does. Testing through the dispatcher rather than the provisioner directly also covers the
+        // plumbing that carries existingPhysicalId and existingAttributes into ProvisionContext.
         provisioner = CfnProvisionerFixture.builder()
                 .objectMapper(mapper)
-                .provisioners(new LogsCfnProvisioner(logsService))
+                .logs(logsService)
                 .build();
     }
 

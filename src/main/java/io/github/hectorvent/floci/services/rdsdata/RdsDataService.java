@@ -410,6 +410,19 @@ public class RdsDataService implements Resettable {
         };
     }
 
+    /**
+     * The {@code ExecuteStatement} response for {@code statement}.
+     *
+     * <p>{@code records} and {@code generatedFields} are mutually exclusive on
+     * the wire, and each is omitted rather than sent empty when it does not
+     * apply. AWS answers a statement that produced a result set with
+     * {@code records} — an empty array when the query matched no rows — and no
+     * {@code generatedFields}; a statement that produced an update count gets
+     * {@code generatedFields} and no {@code records} at all. Sending
+     * {@code "records": []} for an update would make {@code hasRecords()} on
+     * the AWS SDK models report true, and read as an empty result set to any
+     * caller that tests the field for presence.
+     */
     private ObjectNode buildResponse(Statement statement, boolean hasResultSet, boolean includeMetadata,
                                      DatabaseEngine engine) throws SQLException {
         ObjectNode response = objectMapper.createObjectNode();
@@ -424,7 +437,6 @@ public class RdsDataService implements Resettable {
             response.put("numberOfRecordsUpdated", 0L);
         } else {
             int updateCount = statement.getUpdateCount();
-            response.set("records", objectMapper.createArrayNode());
             response.put("numberOfRecordsUpdated", Math.max(updateCount, 0));
             response.set("generatedFields", generatedFields(statement, engine));
         }

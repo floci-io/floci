@@ -4,7 +4,8 @@
 </p>
 
 <p align="center">
-  <strong>Light, fluffy, and always free</strong><br />
+  <strong>Any Cloud. Locally.</strong><br />
+  Light, fluffy, and always free<br />
   No account. No auth token. No feature gates. Just <code>docker compose up</code>.
 </p>
 
@@ -35,7 +36,16 @@ Floci is a free, open-source local AWS emulator for development, testing, and CI
 
 It gives you AWS-shaped services on your machine without requiring a cloud account, an auth token, or paid feature gates. Point your AWS SDK, CLI, Terraform, CDK, OpenTofu, or test suite at `http://localhost:4566` and keep your existing workflows.
 
-Floci is named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccus), the cloud formation that looks like popcorn.
+Already using LocalStack? Floci is a drop-in replacement: swap the image and keep going. See [Migrating from LocalStack](#migrating-from-localstack).
+
+Floci is the AWS member of the [Floci](https://github.com/floci-io) emulator family, named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccus), the cloud formation that looks like popcorn.
+
+| Emulator | Cloud | Port |
+|---|---|:---:|
+| **[floci](https://github.com/floci-io/floci)** | **AWS** | **4566** |
+| [floci-az](https://github.com/floci-io/floci-az) | Azure | 4577 |
+| [floci-gcp](https://github.com/floci-io/floci-gcp) | GCP | 4588 |
+| [floci-oci](https://github.com/floci-io/floci-oci) | OCI | 4599 |
 
 ## Quick Start
 
@@ -180,7 +190,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**84 AWS services. Broad coverage. Free forever.**
+**85 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -307,7 +317,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | CloudTrail | In-process | Trails, event selectors (S3 data events with bucket/prefix matching), `StartLogging`/`StopLogging`, scheduled gzipped log file emission to the destination bucket at AWS-shaped key paths, IAM-deny path emits `AccessDenied` records |
 | CloudFront | In-process | Distributions, origins, cache behaviors, invalidations, tagging |
 | WAF v2 | In-process | Web ACLs, IP sets, regex pattern sets, rule groups, logging configs, resource associations, tagging (REGIONAL and CLOUDFRONT scopes) |
-| Resource Explorer 2 | In-process | All 32 management APIs — index and view lifecycle, multi-Region setup tasks, the full search query grammar, and tagging; 30 services expose their resources for search, gathered live rather than from an index |
+| Resource Explorer 2 | In-process | All 32 management APIs: index and view lifecycle, multi-Region setup tasks, the full search query grammar, and tagging; 30 services expose their resources for search, gathered live rather than from an index |
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
 | Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
@@ -728,7 +738,7 @@ LocalStack environment variables are translated automatically:
 | `LAMBDA_REMOVE_CONTAINERS=1` | `FLOCI_SERVICES_LAMBDA_EPHEMERAL=true` |
 | `DEBUG=1` | `QUARKUS_LOG_LEVEL=DEBUG` |
 
-Init scripts mounted under `/etc/localstack/init/` run unchanged. The `/_localstack/init` and `/_localstack/health` endpoints are still served. Once the emulator is up, the log also ends with a LocalStack-style `Ready.` line, so tooling that watches the log for it — such as the default wait strategy of Testcontainers' `LocalStackContainer` — works unchanged. Set `LOCALSTACK_PARITY=false` to opt out of automatic translation.
+Init scripts mounted under `/etc/localstack/init/` run unchanged. The `/_localstack/init` and `/_localstack/health` endpoints are still served. Once the emulator is up, the log also ends with a LocalStack-style `Ready.` line, so tooling that watches the log for it, such as the default wait strategy of Testcontainers' `LocalStackContainer`, works unchanged. Set `LOCALSTACK_PARITY=false` to opt out of automatic translation.
 
 See the [full migration guide](https://floci.io/floci/getting-started/migrate-from-localstack/).
 
@@ -753,11 +763,17 @@ image: floci/floci:latest
 image: floci/floci:latest-compat
 
 # Pinned release
-image: floci/floci:1.5.11
+image: floci/floci:x.y.z
 
 # Track main
 image: floci/floci:nightly
 ```
+
+### Release train
+
+Stable releases ship on the **1st and 3rd Tuesday of each month**. Between trains, `floci/floci:nightly` tracks `main`. Every merged fix is available the next day, and dated `nightly-mmddyyyy` tags let you pin a specific night's build.
+
+Versions are derived from Conventional Commits by [semantic-release](https://github.com/semantic-release/semantic-release); `CHANGELOG.md` is generated, never hand-edited. Releases are cut from `main` only: there are no maintenance branches.
 
 ## Configuration
 

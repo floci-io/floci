@@ -58,6 +58,8 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
         r.getAttributes().put("DomainName", bucketName + ".s3.amazonaws.com");
         r.getAttributes().put("RegionalDomainName", bucketName + ".s3." + ctx.region() + ".amazonaws.com");
+        r.getAttributes().put("DualStackDomainName",
+                bucketName + ".s3.dualstack." + ctx.region() + ".amazonaws.com");
         r.getAttributes().put("WebsiteURL",
                 "http://" + bucketName + ".s3-website." + ctx.region() + ".amazonaws.com");
         r.getAttributes().put("BucketName", bucketName);

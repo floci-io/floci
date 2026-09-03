@@ -70,8 +70,10 @@ public class LambdaController {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
             LambdaFunction fn = lambdaService.createFunction(region, request);
+            Map<String, Object> configuration = buildFunctionConfiguration(fn);
+            unqualifyArn(configuration);
             return Response.status(201)
-                    .entity(buildFunctionConfiguration(fn))
+                    .entity(configuration)
                     .build();
         } catch (AwsException e) {
             throw e;
@@ -194,9 +196,10 @@ public class LambdaController {
     @DELETE
     @Path("/functions/{functionName}")
     public Response deleteFunction(@Context HttpHeaders headers,
-                                   @PathParam("functionName") String functionName) {
+                                   @PathParam("functionName") String functionName,
+                                   @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        lambdaService.deleteFunction(region, functionName);
+        lambdaService.deleteFunction(region, functionName, qualifier);
         return Response.noContent().build();
     }
 
@@ -585,6 +588,18 @@ public class LambdaController {
         return result;
     }
 
+    /**
+     * CreateFunction reports the version it published but keeps the unqualified ARN, unlike
+     * UpdateFunctionCode and PublishVersion which both answer with the qualified form. Measured
+     * against the live service; the reference does not distinguish them.
+     */
+    private static void unqualifyArn(Map<String, Object> configuration) {
+        if (configuration.get("FunctionArn") instanceof String arn
+                && !"$LATEST".equals(configuration.get("Version"))) {
+            configuration.put("FunctionArn", arn.substring(0, arn.lastIndexOf(':')));
+        }
+    }
+
     private Map<String, Object> buildFunctionConfiguration(LambdaFunction fn) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("FunctionName", fn.getFunctionName());
@@ -657,10 +672,12 @@ public class LambdaController {
                     .put("LocalMountPath", fileSystem.getLocalMountPath()));
         }
 
-        // Environment — always present (SDK expects it even when empty)
-        ObjectNode envNode = node.putObject("Environment");
+        // Environment — omitted entirely when no variables are set, as AWS does. An empty
+        // object is not the same answer as absence: the Terraform provider reads one back as
+        // an `environment {}` block in state, so a function declared without variables plans a
+        // removal on every run. Same rule as Layers, KMSKeyArn and VpcConfig above.
         if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {
-            ObjectNode vars = envNode.putObject("Variables");
+            ObjectNode vars = node.putObject("Environment").putObject("Variables");
             fn.getEnvironment().forEach(vars::put);
         }
 

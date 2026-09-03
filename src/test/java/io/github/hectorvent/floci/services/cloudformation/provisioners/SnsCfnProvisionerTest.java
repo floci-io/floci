@@ -94,7 +94,10 @@ class SnsCfnProvisionerTest {
 
         // Ref on an SNS topic returns the ARN, unlike most types where it is the name.
         assertEquals(TOPIC_ARN, r.getPhysicalId());
-        assertEquals(Map.of("Arn", TOPIC_ARN, "TopicName", "events"), r.getAttributes());
+        // TopicArn is the attribute aws-sns-topic.json declares; Arn is kept for templates written
+        // against earlier releases.
+        assertEquals(Map.of("TopicArn", TOPIC_ARN, "Arn", TOPIC_ARN, "TopicName", "events"),
+                r.getAttributes());
     }
 
     @Test

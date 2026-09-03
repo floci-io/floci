@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -13,6 +14,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -159,6 +161,121 @@ class CloudFormationStepFunctionsCleanupIntegrationTest {
             .body(not(containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>")));
 
         deleteStack(stackName);
+    }
+
+    @Test
+    void updateAfterStubUpgradeProvisionsTheRealStateMachine() {
+        // A stack that was created by a floci build that did not yet expand
+        // AWS::Serverless::StateMachine had this resource stubbed with a non-ARN physical id
+        // (<logicalId>-<8 hex>, see CloudFormationResourceProvisioner's default provisioning arm).
+        // Its next update must provision the real state machine instead of failing with InvalidArn
+        // when findStateMachine tries to describe that non-ARN value.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-stub-upgrade-" + suffix;
+        String logicalId = "MyMachine";
+        String stateMachineName = "sfn-stub-upgrade-machine-" + suffix;
+
+        String stubbedTemplate = """
+                {
+                  "Resources": {
+                    "%s": {
+                      "Type": "AWS::Foo::Bar",
+                      "Properties": {}
+                    }
+                  }
+                }
+                """.formatted(logicalId);
+        createStack(stackName, stubbedTemplate);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PhysicalResourceId>" + logicalId + "-"));
+
+        String upgradedTemplate = """
+                {
+                  "Resources": {
+                    "%s": {
+                      "Type": "AWS::StepFunctions::StateMachine",
+                      "Properties": {
+                        "StateMachineName": "%s",
+                        "RoleArn": "arn:aws:iam::000000000000:role/sfn-stub-upgrade-role",
+                        "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"End\\":true}}}"
+                      }
+                    }
+                  }
+                }
+                """.formatted(logicalId, stateMachineName);
+        updateStack(stackName, upgradedTemplate);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        assertStateMachine(stateMachineArn(stateMachineName), "Done");
+
+        deleteStack(stackName);
+    }
+
+    @Test
+    void replacementCleanupWithMalformedPreviousArnReportsFailureInsteadOfSilentSuccess() {
+        // findStateMachine's InvalidArn widening exists for the stub-upgrade path above (the
+        // provisioning entry point, :4144, reading a pre-SAM-expansion stub physical id). The
+        // cleanup snapshot read here (:4512) carries an ARN this floci build itself recorded, so
+        // an InvalidArn from describeStateMachine on it is a real anomaly, not a legitimate
+        // "already gone" case, and must not be read as cleanup success. The first
+        // describeStateMachine(oldArn) call belongs to the provisioning entry point (real
+        // behaviour, the old machine genuinely still exists there); only the second, from cleanup,
+        // is forced to simulate the anomaly.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sfn-cleanup-invalidarn-" + suffix;
+        String oldName = "sfn-cleanup-invalidarn-old-" + suffix;
+        String newName = "sfn-cleanup-invalidarn-new-" + suffix;
+        String exportName = "sfn-cleanup-invalidarn-export-" + suffix;
+        String oldArn = stateMachineArn(oldName);
+        String newArn = stateMachineArn(newName);
+
+        createStack(stackName, template(oldName, "old-definition", "old-output", exportName));
+
+        Mockito.doCallRealMethod()
+                .doThrow(new AwsException("InvalidArn", "simulated malformed ARN", 400))
+                .when(stepFunctionsService)
+                .describeStateMachine(eq(oldArn));
+
+        updateStack(stackName, template(newName, "new-definition", "new-output", exportName));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
+            .body(containsString("<StackStatusReason>"))
+            .body(containsString(oldArn));
+
+        verify(stepFunctionsService, never())
+                .deleteStateMachineIfRevisionMatches(eq(oldArn), anyString());
+        assertStateMachine(newArn, "new-definition");
+
+        Mockito.doCallRealMethod()
+                .when(stepFunctionsService)
+                .describeStateMachine(eq(oldArn));
+        deleteStack(stackName);
+        stepFunctionsService.deleteStateMachine(oldArn);
     }
 
     private static void createStack(String stackName, String templateBody) {

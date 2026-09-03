@@ -388,4 +388,41 @@ class ContainerLifecycleManagerVolumeTest {
 
         verify(dockerClient, times(2)).createContainerCmd("busybox:stable");
     }
+
+    @Test
+    void ensureSharedVolume_startsHelperThroughTheTranslatingStartContainer() {
+        // github.com/floci-io/floci/issues/2243 (follow-up, PR #2797 review): the shared-volume
+        // init helper is a third container-start call site, distinct from createAndStart /
+        // startCreated and from adopt(). A failure here is caught as a plain RuntimeException by
+        // ensureSharedVolume's computeIfAbsent and only logged (never rethrown to the caller), so
+        // whether the logged message is the misleading raw "Disk quota exceeded" or the translated
+        // one depends entirely on whether this call site goes through startContainer(). Verifying
+        // startContainer("helper-id") is actually invoked (via a spy) is the only way to pin that
+        // routing, since the swallowed exception itself is not observable from ensureSharedVolume.
+        ContainerLifecycleManager spyManager = spy(manager);
+        doNothing().when(spyManager).startContainer("helper-id");
+
+        InspectVolumeCmd ivc = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("shared")).thenReturn(ivc);
+        when(ivc.exec()).thenReturn(mock(InspectVolumeResponse.class));
+
+        CreateContainerCmd ccc = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(ccc);
+        CreateContainerResponse resp = mock(CreateContainerResponse.class);
+        when(resp.getId()).thenReturn("helper-id");
+        when(ccc.exec()).thenReturn(resp);
+
+        WaitContainerCmd wcc = mock(WaitContainerCmd.class);
+        when(dockerClient.waitContainerCmd("helper-id")).thenReturn(wcc);
+        WaitContainerResultCallback wcb = mock(WaitContainerResultCallback.class);
+        when(wcc.exec(any(WaitContainerResultCallback.class))).thenReturn(wcb);
+        when(wcb.awaitStatusCode(anyLong(), any())).thenReturn(0);
+        when(dockerClient.removeContainerCmd("helper-id")).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+
+        spyManager.ensureSharedVolume("shared", OptionalInt.of(1001), OptionalInt.of(1001),
+                Optional.of("2775"), "busybox:stable");
+
+        verify(spyManager).startContainer("helper-id");
+        verify(dockerClient, never()).startContainerCmd("helper-id");
+    }
 }

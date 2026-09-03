@@ -143,7 +143,8 @@ public class EcsJsonHandler {
     private Response handleCreateCluster(JsonNode req, String region) {
         String name = req.path("clusterName").asText(null);
         Map<String, String> tags = parseTagMap(req.path("tags"));
-        EcsCluster cluster = service.createCluster(name, tags, region);
+        List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
+        EcsCluster cluster = service.createCluster(name, tags, settings, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", clusterNode(cluster));
         return Response.ok(resp).build();

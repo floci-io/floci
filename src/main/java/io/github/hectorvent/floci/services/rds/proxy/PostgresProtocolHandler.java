@@ -44,17 +44,17 @@ public class PostgresProtocolHandler {
     private static final int SSL_REQUEST_CODE = 80877103;
     private static final int STARTUP_PROTOCOL_VERSION = 196608; // v3.0
 
-    public static void handleAuth(Socket client, Socket backend,
-                                  String masterUsername, String masterPassword, String dbName,
-                                  boolean iamEnabled, RdsSigV4Validator sigV4,
-                                  RdsProxyTlsCertificates tlsCertificates,
-                                  PasswordValidator passwordValidator) throws IOException {
+    public static Socket authenticate(Socket client, Socket backend,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator) throws IOException {
 
         // Phase 1: Read client startup message (possibly preceded by SSL request)
         StartupMessage startup = readStartupMessage(client, tlsCertificates);
         if (startup == null) {
             closeQuietly(client);
-            return;
+            return null;
         }
         client = startup.socket();
         String clientUsername = startup.username();
@@ -69,7 +69,7 @@ public class PostgresProtocolHandler {
         String clientPassword = readPasswordMessage(clientIn);
         if (clientPassword == null) {
             closeQuietly(client);
-            return;
+            return null;
         }
 
         // Phase 4: Validate credentials.
@@ -87,7 +87,7 @@ public class PostgresProtocolHandler {
                 clientOut.flush();
                 closeQuietly(client);
                 closeQuietly(backend);
-                return;
+                return null;
             }
         } else if (isMaster) {
             if (!passwordValidator.validate(clientUsername, clientPassword)) {
@@ -96,7 +96,7 @@ public class PostgresProtocolHandler {
                 clientOut.flush();
                 closeQuietly(client);
                 closeQuietly(backend);
-                return;
+                return null;
             }
         }
 
@@ -119,7 +119,7 @@ public class PostgresProtocolHandler {
             clientOut.flush();
             closeQuietly(client);
             closeQuietly(backend);
-            return;
+            return null;
         }
 
         // Buffer all backend messages until ReadyForQuery ('Z')
@@ -133,7 +133,7 @@ public class PostgresProtocolHandler {
             clientOut.flush();
             closeQuietly(client);
             closeQuietly(backend);
-            return;
+            return null;
         }
 
         sendMessage(clientOut, 'R', intBytes(0)); // AuthenticationOK
@@ -142,7 +142,7 @@ public class PostgresProtocolHandler {
         }
         clientOut.flush();
 
-        bridge(client, backend);
+        return client;
     }
 
     // ── Startup ───────────────────────────────────────────────────────────────
@@ -536,9 +536,7 @@ public class PostgresProtocolHandler {
         return messages;
     }
 
-    // ── Bridge ────────────────────────────────────────────────────────────────
-
-    private static void bridge(Socket client, Socket backend) {
+    public static void bridge(Socket client, Socket backend) {
         InputStream clientIn, backendIn;
         OutputStream clientOut, backendOut;
         try {

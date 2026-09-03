@@ -28,6 +28,7 @@ import org.jboss.logging.Logger;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -36,6 +37,7 @@ import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -63,6 +65,7 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
@@ -92,17 +95,29 @@ import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
+import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
 import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
+
+    /**
+     * The availability zones every region is modelled with. DescribeAvailabilityZones publishes
+     * exactly these, the seeded default subnets sit in them, and CreateSubnet refuses a zone id
+     * outside them, so the three cannot drift apart.
+     */
+    private static final String[] MODELLED_ZONE_SUFFIXES = {"a", "b", "c"};
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
@@ -123,6 +138,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final long CONTAINER_LAUNCH_POLL_MILLIS = 50;
 
     private final String accountId;
+    private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
     private final EmulatorConfig config;
     private final Ec2ContainerManager containerManager;
     private final Ec2PortForwardManager portForwardManager;
@@ -156,17 +172,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments;
     private final StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations;
     private final StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes;
+    // Keyed by id alone, not region::id — see VpcPeeringConnection's class Javadoc.
+    private final StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections;
+    // Standalone (non-primary) ENIs created via CreateNetworkInterface, see #floci-kt9.
+    // Primary/implicit per-instance ENIs remain embedded in Instance#networkInterfaces.
+    private final StorageBackend<String, NetworkInterface> networkInterfaces;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
     // subnetId → counter for IP assignment (runtime-only, not persisted)
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
 
-    @Inject
+    // Public, no request context — for callers (and tests) that construct this service directly
+    // without CDI. Caller-identity resolution falls back to the configured default account.
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                       Ec2PortForwardManager portForwardManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, null);
+    }
+
+    @Inject
+    public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
@@ -195,7 +227,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 storageFactory.create("ec2", "ec2-transit-gateway-propagations.json",
                         new TypeReference<Map<String, TransitGatewayRouteTablePropagation>>() {}),
                 storageFactory.create("ec2", "ec2-transit-gateway-routes.json",
-                        new TypeReference<Map<String, TransitGatewayRoute>>() {}));
+                        new TypeReference<Map<String, TransitGatewayRoute>>() {}),
+                storageFactory.create("ec2", "ec2-vpc-peering-connections.json",
+                        new TypeReference<Map<String, VpcPeeringConnection>>() {}),
+                storageFactory.create("ec2", "ec2-network-interfaces.json",
+                        new TypeReference<Map<String, NetworkInterface>>() {}),
+                requestContextInstance);
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -227,7 +264,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>());
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), null);
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -259,8 +297,52 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
                StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
                StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
-               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes) {
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
+                addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
+                new InMemoryStorage<>(), null);
+    }
+
+    // Package-private for hermetic tests that also need to control which account a caller resolves
+    // to (e.g. cross-account VPC peering scenarios), without touching every other test fixture's arity.
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
         this.accountId = config.defaultAccountId();
+        this.requestContextInstance = requestContextInstance;
         this.config = config;
         this.containerManager = containerManager;
         this.portForwardManager = portForwardManager;
@@ -291,6 +373,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         this.transitGatewayVpcAttachments = transitGatewayVpcAttachments;
         this.transitGatewayPropagations = transitGatewayPropagations;
         this.transitGatewayRoutes = transitGatewayRoutes;
+        this.vpcPeeringConnections = vpcPeeringConnections;
+        this.networkInterfaces = networkInterfaces;
     }
 
     @PostConstruct
@@ -362,7 +446,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vpcs.put(key(region, vpcId), defaultVpc);
 
         // Default subnets (a/b/c)
-        String[] azSuffixes = {"a", "b", "c"};
+        String[] azSuffixes = MODELLED_ZONE_SUFFIXES;
         String[] cidrBlocks = {"172.31.0.0/20", "172.31.16.0/20", "172.31.32.0/20"};
         String[] subnetIds = {
                 defaultSubnetId(region, azSuffixes[0]),
@@ -375,7 +459,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             subnet.setCidrBlock(cidrBlocks[i]);
             subnet.setState("available");
             subnet.setAvailabilityZone(region + azSuffixes[i]);
-            subnet.setAvailabilityZoneId(region + "-az" + (i + 1));
+            subnet.setAvailabilityZoneId(zoneIdForZoneName(region, region + azSuffixes[i]));
             subnet.setAvailableIpAddressCount(4091);
             subnet.setDefaultForAz(true);
             subnet.setMapPublicIpOnLaunch(true);
@@ -964,6 +1048,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         Random rand = new Random();
         for (int i = 0; i < len; i++) {
             sb.append(Integer.toHexString(rand.nextInt(16)));
+        }
+        return sb.toString();
+    }
+
+    /** Synthesizes a locally-administered unicast MAC (AWS never discloses how it derives its own). */
+    private String randomMac() {
+        Random rand = new Random();
+        StringBuilder sb = new StringBuilder("02");
+        for (int i = 0; i < 5; i++) {
+            sb.append(':').append(String.format("%02x", rand.nextInt(256)));
         }
         return sb.toString();
     }
@@ -2113,10 +2207,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn,
                                     Boolean associatePublicIp) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, associatePublicIp, null, 0);
+    }
+
+    /**
+     * @param networkInterfaceId a pre-existing standalone ENI (from {@link #createNetworkInterface})
+     *                            to use as the instance's primary interface instead of creating a
+     *                            new implicit one, the override-default-eni pattern (floci-kt9).
+     *                            AWS requires {@code subnetId} be omitted when this is set; the
+     *                            interface's own subnet/VPC/security-groups govern the launch.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId, int networkInterfaceDeviceIndex) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
         ensureDefaultResources(region);
+
+        // floci-kt9: a caller-supplied primary ENI (override-default-eni) governs its own
+        // subnet/VPC/security-groups and can only ever back a single instance.
+        NetworkInterface suppliedEni = null;
+        if (networkInterfaceId != null && !networkInterfaceId.isBlank()) {
+            if (Math.max(minCount, 1) > 1) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Network interfaces may only be specified for a single instance.", 400);
+            }
+            suppliedEni = takeNetworkInterfaceForLaunch(region, networkInterfaceId);
+            subnetId = suppliedEni.getSubnetId();
+        }
 
         // Resolve subnet
         Subnet subnet = null;
@@ -2136,7 +2260,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
         // Resolve security groups
         List<GroupIdentifier> sgIdentifiers = new ArrayList<>();
-        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
+        if (suppliedEni != null) {
+            // AWS ignores instance-level SecurityGroupId when a network interface is supplied;
+            // the interface's own groups win (module main.tf sets vpc_security_group_ids = null
+            // in this case, so there is nothing to conflict with in practice).
+            sgIdentifiers.addAll(suppliedEni.getGroups());
+        } else if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             for (String sgId : securityGroupIds) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
@@ -2160,7 +2289,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String architecture = architectureFor(imageId, effectiveInstanceType);
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
-            String privateIp = assignPrivateIp(region, finalSubnetId);
+            String privateIp = suppliedEni != null
+                    ? suppliedEni.getPrivateIpAddress()
+                    : assignPrivateIp(region, finalSubnetId);
 
             Instance inst = new Instance();
             inst.setInstanceId(instanceId);
@@ -2192,21 +2323,43 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 tags.put(instanceId, new ArrayList<>(instanceTags));
             }
 
-            // Network interface
+            // Network interface, either the caller-supplied standalone ENI (override-default-eni,
+            // floci-kt9) or a freshly-minted implicit primary interface.
             InstanceNetworkInterface eni = new InstanceNetworkInterface();
-            eni.setNetworkInterfaceId("eni-" + randomHex(17));
+            eni.setNetworkInterfaceId(suppliedEni != null ? suppliedEni.getNetworkInterfaceId() : "eni-" + randomHex(17));
             eni.setSubnetId(finalSubnetId);
             eni.setVpcId(vpcId);
             eni.setOwnerId(accountId);
+            eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
+            eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
             eni.setPrivateIpAddress(privateIp);
             eni.setPrivateDnsName(inst.getPrivateDnsName());
             eni.setGroups(new ArrayList<>(sgIdentifiers));
             eni.setAttachmentId("eni-attach-" + randomHex(17));
-            eni.setDeviceIndex(0);
+            eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
             if (inst.getLaunchTime() != null) {
                 eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
             }
             inst.getNetworkInterfaces().add(eni);
+            if (suppliedEni != null) {
+                // The standalone record stays authoritative rather than being folded into the
+                // instance: AWS defaults deleteOnTermination to false for an interface the caller
+                // created and handed to a launch, so it outlives the instance and returns to
+                // "available" on termination instead of vanishing with it. Double-counting is
+                // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
+                // id the standalone store owns.
+                NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
+                launchAttachment.setAttachmentId(eni.getAttachmentId());
+                launchAttachment.setDeviceIndex(eni.getDeviceIndex());
+                launchAttachment.setStatus("attached");
+                launchAttachment.setInstanceId(instanceId);
+                launchAttachment.setInstanceOwnerId(accountId);
+                launchAttachment.setAttachTime(eni.getAttachTime());
+                launchAttachment.setDeleteOnTermination(false);
+                suppliedEni.setAttachment(launchAttachment);
+                suppliedEni.setStatus("in-use");
+                networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
+            }
 
             // Root EBS volume
             String rootVolId = "vol-" + randomHex(17);
@@ -2454,6 +2607,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (inst.getRootVolumeId() != null) {
                 volumes.delete(key(region, inst.getRootVolumeId()));
             }
+            releaseStandaloneInterfacesOnTermination(region, inst);
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
@@ -2651,6 +2805,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // ─── VPCs ──────────────────────────────────────────────────────────────────
 
     public Vpc createVpc(String region, String cidrBlock, boolean isDefault) {
+        return createVpc(region, cidrBlock, isDefault, false);
+    }
+
+    public Vpc createVpc(String region, String cidrBlock, boolean isDefault,
+                         boolean amazonProvidedIpv6CidrBlock) {
         ensureDefaultResources(region);
         String vpcId = "vpc-" + randomHex(8);
         Vpc vpc = new Vpc();
@@ -2662,6 +2821,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vpc.setRegion(region);
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
+        if (amazonProvidedIpv6CidrBlock) {
+            vpc.getIpv6CidrBlockAssociationSet().add(amazonProvidedIpv6Association(region));
+        }
         vpcs.put(key(region, vpcId), vpc);
 
         createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
@@ -2734,11 +2896,39 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return assoc;
     }
 
+    /**
+     * Associates an Amazon-provided IPv6 block with an existing VPC: the AssociateVpcCidrBlock
+     * half of {@code AmazonProvidedIpv6CidrBlock}, which the Terraform provider issues when
+     * assign_generated_ipv6_cidr_block is turned on for a VPC that already exists.
+     */
+    public VpcIpv6CidrBlockAssociation associateAmazonProvidedIpv6CidrBlock(String region, String vpcId) {
+        ensureDefaultResources(region);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+        VpcIpv6CidrBlockAssociation assoc = amazonProvidedIpv6Association(region);
+        vpc.getIpv6CidrBlockAssociationSet().add(assoc);
+        vpcs.put(key(region, vpcId), vpc);
+        return assoc;
+    }
+
+    /**
+     * Allocates a /56 the way an Amazon-provided association looks on the wire. AWS hands out a
+     * block from its own pool with no say from the caller, so the exact prefix is not something a
+     * client can predict or assert on, what matters is that one is returned at all, that it is a
+     * well-formed /56, and that it comes back unchanged on every later read.
+     */
+    private VpcIpv6CidrBlockAssociation amazonProvidedIpv6Association(String region) {
+        String block = "2600:1f18:" + randomHex(4) + ":" + randomHex(2) + "00::/56";
+        return new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), block, region);
+    }
+
     public void disassociateVpcCidrBlock(String region, String associationId) {
         ensureDefaultResources(region);
         for (Vpc vpc : vpcs.scan(k -> true)) {
             if (vpc.getRegion().equals(region)) {
                 vpc.getCidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
+                // The same operation disassociates either family; AWS takes one association id and
+                // does not ask which set it belongs to.
+                vpc.getIpv6CidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
                 vpcs.put(key(region, vpc.getVpcId()), vpc);
             }
         }
@@ -2954,12 +3144,82 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     // ─── Subnets ───────────────────────────────────────────────────────────────
 
+    /**
+     * The zone id Floci publishes for a zone name. AWS's real zone ids are opaque and per-account
+     * ({@code use1-az4}); Floci derives a deterministic one instead, and what matters is that
+     * every surface derives it the same way, DescribeAvailabilityZones, the seeded default
+     * subnets and CreateSubnet all come through here, so a subnet's zone id agrees with the zone
+     * list a client just read. A zone name that is not this region's {@code <region><letter>}
+     * keeps the first zone's id, which is what an unrecognised name resolved to before.
+     */
+    static String zoneIdForZoneName(String region, String zoneName) {
+        if (zoneName != null && zoneName.length() == region.length() + 1 && zoneName.startsWith(region)) {
+            char letter = Character.toLowerCase(zoneName.charAt(zoneName.length() - 1));
+            if (letter >= 'a' && letter <= 'z') {
+                return region + "-az" + (letter - 'a' + 1);
+            }
+        }
+        return region + "-az1";
+    }
+
+    /**
+     * Resolves the zone a new subnet lands in from whichever of AvailabilityZone and
+     * AvailabilityZoneId the caller supplied. Terraform's aws_subnet exposes both
+     * ({@code availability_zone} and {@code availability_zone_id}) and forbids setting both at
+     * once, so in practice exactly one arrives; a pair that disagrees is refused rather than
+     * silently resolved to one of them.
+     */
+    private String resolveSubnetZoneName(String region, String availabilityZone, String availabilityZoneId) {
+        if (!isSet(availabilityZoneId)) {
+            return isSet(availabilityZone) ? availabilityZone : region + "a";
+        }
+        String fromId = zoneNameForZoneId(region, availabilityZoneId);
+        if (isSet(availabilityZone) && !availabilityZone.equals(fromId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The availability zone '" + availabilityZone + "' does not match the availability zone ID '"
+                            + availabilityZoneId + "'", 400);
+        }
+        return fromId;
+    }
+
+    /**
+     * The inverse of {@link #zoneIdForZoneName}. An id outside the zones this region publishes is
+     * refused rather than resolved: placing a subnet in a zone DescribeAvailabilityZones does not
+     * list would leave a client unable to pair the two, which is the same inconsistency the
+     * hardcoded az1 produced, only quieter.
+     */
+    private static String zoneNameForZoneId(String region, String availabilityZoneId) {
+        String prefix = region + "-az";
+        if (availabilityZoneId.startsWith(prefix)) {
+            try {
+                int index = Integer.parseInt(availabilityZoneId.substring(prefix.length()));
+                if (index >= 1 && index <= MODELLED_ZONE_SUFFIXES.length) {
+                    return region + MODELLED_ZONE_SUFFIXES[index - 1];
+                }
+            } catch (NumberFormatException e) {
+                LOG.debugv("Availability zone ID {0} has a non-numeric zone index: {1}",
+                        availabilityZoneId, e.getMessage());
+            }
+        }
+        throw new AwsException("InvalidParameterValue",
+                "Invalid availability zone ID: '" + availabilityZoneId + "'. This region publishes "
+                        + MODELLED_ZONE_SUFFIXES.length + " availability zones, " + prefix + "1 to "
+                        + prefix + MODELLED_ZONE_SUFFIXES.length + ".", 400);
+    }
+
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
+        return createSubnet(region, vpcId, cidrBlock, availabilityZone, null);
+    }
+
+    public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone,
+                               String availabilityZoneId) {
         if (vpcId == null || vpcId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
         }
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
+
+        String zoneName = resolveSubnetZoneName(region, availabilityZone, availabilityZoneId);
 
         String subnetId = "subnet-" + randomHex(8);
         Subnet subnet = new Subnet();
@@ -2967,8 +3227,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         subnet.setVpcId(vpcId);
         subnet.setCidrBlock(cidrBlock);
         subnet.setState("available");
-        subnet.setAvailabilityZone(availabilityZone != null ? availabilityZone : region + "a");
-        subnet.setAvailabilityZoneId(region + "-az1");
+        subnet.setAvailabilityZone(zoneName);
+        subnet.setAvailabilityZoneId(zoneIdForZoneName(region, zoneName));
         subnet.setAvailableIpAddressCount(251);
         subnet.setOwnerId(accountId);
         subnet.setRegion(region);
@@ -4704,13 +4964,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
+    /**
+     * A peering connection is a target in its own right, same as an egress-only gateway. Without
+     * this check CreateRoute would silently accept both a gateway/NAT-gateway target and a
+     * VpcPeeringConnectionId on the same route, storing an AWS-invalid multi-target route that
+     * DescribeRouteTables would then echo back and ReplaceRoute could never reconcile.
+     */
+    private static void requireVpcPeeringConnectionIsTheOnlyTarget(String gatewayId, String natGatewayId,
+                                                                    String egressOnlyInternetGatewayId,
+                                                                    String vpcPeeringConnectionId) {
+        if (!isSet(vpcPeeringConnectionId)) {
+            return;
+        }
+        if (isSet(gatewayId) || isSet(natGatewayId) || isSet(egressOnlyInternetGatewayId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "VpcPeeringConnectionId cannot be combined with GatewayId, NatGatewayId or "
+                            + "EgressOnlyInternetGatewayId; a route takes one target.", 400);
+        }
+    }
+
     public void createRoute(String region, String routeTableId, String destinationCidrBlock,
                             String destinationIpv6CidrBlock, String destinationPrefixListId,
                             String gatewayId, String natGatewayId,
-                            String egressOnlyInternetGatewayId) {
+                            String egressOnlyInternetGatewayId, String vpcPeeringConnectionId) {
         requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId);
+        requireVpcPeeringConnectionIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId);
         final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
@@ -4733,6 +5014,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             route.setDestinationPrefixListId(destinationPrefixListId);
             route.setNatGatewayId(natGatewayId);
             route.setEgressOnlyInternetGatewayId(egressOnlyInternetGatewayId);
+            route.setVpcPeeringConnectionId(vpcPeeringConnectionId);
             next.add(route);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
@@ -4741,17 +5023,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public void replaceRoute(String region, String routeTableId, String destinationCidrBlock,
                              String destinationIpv6CidrBlock, String destinationPrefixListId,
-                             String gatewayId, String natGatewayId) {
+                             String gatewayId, String natGatewayId, String vpcPeeringConnectionId) {
         requireExactlyOneDestination("ReplaceRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
-        // emulator cannot model (transit gateway, network interface, peering connection, ...) from
-        // silently clearing the route and reporting success.
+        // emulator cannot model (transit gateway, network interface, ...) from silently clearing
+        // the route and reporting success.
         boolean hasGateway = isSet(gatewayId);
         boolean hasNatGateway = isSet(natGatewayId);
-        if (hasGateway == hasNatGateway) {
+        boolean hasPeeringConnection = isSet(vpcPeeringConnectionId);
+        if ((hasGateway ? 1 : 0) + (hasNatGateway ? 1 : 0) + (hasPeeringConnection ? 1 : 0) != 1) {
             throw new AwsException("InvalidParameterCombination",
-                    "ReplaceRoute takes exactly one target, and only GatewayId or NatGatewayId is supported.", 400);
+                    "ReplaceRoute takes exactly one target, and only GatewayId, NatGatewayId or "
+                            + "VpcPeeringConnectionId is supported.", 400);
         }
         final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
 
@@ -4775,6 +5059,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             replacement.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
             replacement.setDestinationPrefixListId(destinationPrefixListId);
             replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
+            replacement.setVpcPeeringConnectionId(hasPeeringConnection ? vpcPeeringConnectionId : null);
             next.set(next.indexOf(existing), replacement);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
@@ -4805,13 +5090,313 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return rt;
     }
 
+    // ─── VPC Peering Connections ─────────────────────────────────────────────────
+    //
+    // Real AWS never auto-accepts a connection, same-account or not (#floci-k41): every
+    // CreateVpcPeeringConnection starts "pending-acceptance" and stays there until an explicit
+    // AcceptVpcPeeringConnection. Terraform's own `auto_accept` convenience (on
+    // aws_vpc_peering_connection and aws_vpc_peering_connection_accepter) is implemented by the
+    // *provider*, which simply issues that second call itself — so the emulator does not need to
+    // special-case same-account peers to satisfy it.
+
+    public VpcPeeringConnection createVpcPeeringConnection(String region, String vpcId, String peerVpcId,
+                                                            String peerOwnerId, String peerRegion,
+                                                            List<Tag> peeringTags) {
+        ensureDefaultResources(region);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+
+        String pcxId = "pcx-" + randomHex(17);
+        VpcPeeringConnection pcx = new VpcPeeringConnection();
+        pcx.setVpcPeeringConnectionId(pcxId);
+        pcx.setRegion(region);
+
+        String callerAccountId = callerAccountId();
+        VpcPeeringConnectionVpcInfo requester = new VpcPeeringConnectionVpcInfo();
+        requester.setVpcId(vpcId);
+        requester.setOwnerId(callerAccountId);
+        requester.setRegion(region);
+        requester.setCidrBlock(vpc.getCidrBlock());
+        pcx.setRequesterVpcInfo(requester);
+
+        String accepterRegion = isSet(peerRegion) ? peerRegion : region;
+        // The accepter VPC may be a cross-account or "external" peer that this store never seeded
+        // (vpc-peering-cross-accounts, vpc-peering-external), in which case there is nothing to
+        // validate PeerOwnerId against and the caller's claim is trusted. But when the peer VPC
+        // *is* known locally, its storage partition — not the requester-supplied PeerOwnerId — is
+        // authoritative: otherwise a requester could name another account's VPC and claim itself
+        // as that account, which AcceptVpcPeeringConnection would then let it self-authorize.
+        Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> accepterVpcEntry =
+                findAnyVpcEntry(accepterRegion, peerVpcId);
+        if (accepterVpcEntry.isEmpty() && vpcKnownInSomeOtherRegion(peerVpcId)) {
+            // The peer VPC is real, but it does not live in the region the requester named. Trusting
+            // PeerOwnerId here would reopen the forgery the block above closes: a requester could
+            // name another account's VPC, point PeerRegion at a region that VPC is absent from, and
+            // have its own claimed ownership recorded unchallenged. Real AWS resolves the peer VPC
+            // globally and rejects the mismatch outright, so do the same.
+            throw new AwsException("InvalidVpcID.NotFound",
+                    "The vpc ID '" + peerVpcId + "' does not exist in region " + accepterRegion, 400);
+        }
+        String accepterOwnerId = accepterVpcEntry.map(AccountAwareStorageBackend.OwnedEntry::account)
+                .orElseGet(() -> isSet(peerOwnerId) ? peerOwnerId : callerAccountId);
+        Vpc accepterVpc = accepterVpcEntry.map(AccountAwareStorageBackend.OwnedEntry::value).orElse(null);
+        VpcPeeringConnectionVpcInfo accepter = new VpcPeeringConnectionVpcInfo();
+        accepter.setVpcId(peerVpcId);
+        accepter.setOwnerId(accepterOwnerId);
+        accepter.setRegion(accepterRegion);
+        accepter.setCidrBlock(accepterVpc != null ? accepterVpc.getCidrBlock() : null);
+        pcx.setAccepterVpcInfo(accepter);
+
+        pcx.setStatus(new VpcPeeringConnectionStateReason("pending-acceptance",
+                "Pending Acceptance by " + accepterOwnerId));
+        if (peeringTags != null) {
+            pcx.setTags(new ArrayList<>(peeringTags));
+        }
+
+        vpcPeeringConnections.put(pcxId, pcx);
+        return pcx;
+    }
+
+    /**
+     * A peering connection is visible from a region only if that region is the requester's or the
+     * accepter's — same as real AWS, where a cross-region connection shows up in exactly the two
+     * endpoints that are actually party to it. An unfiltered Describe against every other region
+     * must not leak it.
+     */
+    private static boolean visibleFromRegion(VpcPeeringConnection pcx, String region) {
+        String requesterRegion = pcx.getRequesterVpcInfo() != null ? pcx.getRequesterVpcInfo().getRegion() : null;
+        String accepterRegion = pcx.getAccepterVpcInfo() != null ? pcx.getAccepterVpcInfo().getRegion() : null;
+        return region.equals(requesterRegion) || region.equals(accepterRegion);
+    }
+
+    /**
+     * A peering connection is visible to an account only if that account is the requester or the
+     * accepter — same as real AWS, where a connection never shows up in a describe issued by an
+     * unrelated third account.
+     */
+    private static boolean visibleToAccount(VpcPeeringConnection pcx, String callerAccountId) {
+        return callerAccountId.equals(ownerId(pcx.getRequesterVpcInfo()))
+                || callerAccountId.equals(ownerId(pcx.getAccepterVpcInfo()));
+    }
+
+    private static String ownerId(VpcPeeringConnectionVpcInfo side) {
+        return side != null ? side.getOwnerId() : null;
+    }
+
+    /**
+     * Resolves a VPC across every account's partition, the same pattern used to resolve a
+     * peering connection by id — {@code vpcs} is otherwise scoped to the caller's own account,
+     * so a plain {@code get} could never find a peer VPC that belongs to a different account.
+     */
+    /**
+     * Reports whether a VPC id is stored under <em>any</em> region, in any account's partition.
+     * Only used to tell "this peer VPC is external and was never seeded here" — where trusting the
+     * requester's PeerOwnerId is the modelled behaviour — apart from "this peer VPC exists, but not
+     * in the region you named", which must not be trusted.
+     */
+    private boolean vpcKnownInSomeOtherRegion(String vpcId) {
+        String suffix = "::" + vpcId;
+        if (vpcs instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Vpc> accountAware = (AccountAwareStorageBackend<Vpc>) rawAccountAware;
+            return !accountAware.scanAllAccountEntries(k -> k.endsWith(suffix)).isEmpty();
+        }
+        return vpcs.keys().stream().anyMatch(k -> k.endsWith(suffix));
+    }
+
+    private Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> findAnyVpcEntry(String region, String vpcId) {
+        if (vpcs instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Vpc> accountAware = (AccountAwareStorageBackend<Vpc>) rawAccountAware;
+            return accountAware.findAnyAccountEntry(key(region, vpcId));
+        }
+        return vpcs.get(key(region, vpcId)).map(v -> new AccountAwareStorageBackend.OwnedEntry<>(null, v));
+    }
+
+    public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
+                                                                     Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        String caller = callerAccountId();
+        return allVpcPeeringConnections().stream()
+                .filter(pcx -> visibleToAccount(pcx, caller))
+                .filter(pcx -> visibleFromRegion(pcx, region))
+                .filter(pcx -> ids.isEmpty() || ids.contains(pcx.getVpcPeeringConnectionId()))
+                .filter(pcx -> matchesFilters(pcx, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public VpcPeeringConnection acceptVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
+        synchronized (lockFor(vpcPeeringConnectionId)) {
+            OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
+            VpcPeeringConnection current = owned.pcx();
+            String accepterOwnerId = current.getAccepterVpcInfo() != null
+                    ? current.getAccepterVpcInfo().getOwnerId() : null;
+            // Reported as absent, not as a permission error: AWS does not confirm the existence
+            // of a connection the caller cannot see, whether that's because it belongs to another
+            // account or because this endpoint's region isn't party to it (same invariant Describe
+            // enforces).
+            if (!callerAccountId().equals(accepterOwnerId) || !visibleFromRegion(current, region)) {
+                throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+            }
+            String code = current.getStatus() != null ? current.getStatus().getCode() : null;
+            if (!"pending-acceptance".equals(code)) {
+                throw new AwsException("InvalidStateTransition",
+                        "VPC Peering Connection " + vpcPeeringConnectionId
+                                + " is not eligible for acceptance (state: " + code + ")", 400);
+            }
+            current.setStatus(new VpcPeeringConnectionStateReason("active", "Active"));
+            saveVpcPeeringConnection(owned);
+            return current;
+        }
+    }
+
+    public VpcPeeringConnection modifyVpcPeeringConnectionOptions(String region, String vpcPeeringConnectionId,
+                                                                   Boolean accepterAllowRemoteVpcDnsResolution,
+                                                                   Boolean requesterAllowRemoteVpcDnsResolution) {
+        synchronized (lockFor(vpcPeeringConnectionId)) {
+            OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
+            VpcPeeringConnection current = owned.pcx();
+            if (!visibleToAccount(current, callerAccountId()) || !visibleFromRegion(current, region)) {
+                throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+            }
+            String caller = callerAccountId();
+            // Each side's options block is that side's own VPC setting: only its owner may change
+            // it. A participant setting only its own side (the normal case) never trips this; it
+            // rejects the cross-account case where one side reaches into the other's block.
+            if (accepterAllowRemoteVpcDnsResolution != null
+                    && !caller.equals(ownerId(current.getAccepterVpcInfo()))) {
+                throw new AwsException("OperationNotPermitted",
+                        "You do not have permission to modify accepterPeeringConnectionOptions on "
+                                + vpcPeeringConnectionId + "; only the accepter VPC's owner may.", 400);
+            }
+            if (requesterAllowRemoteVpcDnsResolution != null
+                    && !caller.equals(ownerId(current.getRequesterVpcInfo()))) {
+                throw new AwsException("OperationNotPermitted",
+                        "You do not have permission to modify requesterPeeringConnectionOptions on "
+                                + vpcPeeringConnectionId + "; only the requester VPC's owner may.", 400);
+            }
+            if (accepterAllowRemoteVpcDnsResolution != null) {
+                current.setAccepterAllowRemoteVpcDnsResolution(accepterAllowRemoteVpcDnsResolution);
+            }
+            if (requesterAllowRemoteVpcDnsResolution != null) {
+                current.setRequesterAllowRemoteVpcDnsResolution(requesterAllowRemoteVpcDnsResolution);
+            }
+            saveVpcPeeringConnection(owned);
+            return current;
+        }
+    }
+
+    public void deleteVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
+        // Same lock accept/modify take: without it, delete can run between one of those loading
+        // the connection and saving it back, and that unconditional save resurrects the row this
+        // call just removed.
+        synchronized (lockFor(vpcPeeringConnectionId)) {
+            OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
+            if (!visibleToAccount(owned.pcx(), callerAccountId()) || !visibleFromRegion(owned.pcx(), region)) {
+                throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+            }
+            deleteVpcPeeringConnection(owned);
+        }
+    }
+
+    /** A peering connection together with the account partition its storage entry lives under. */
+    private record OwnedVpcPeeringConnection(String storageAccountId, VpcPeeringConnection pcx) {}
+
+    /**
+     * A peering connection is a globally-addressable id, like an S3 bucket name, but is stored
+     * under whichever account created it (see the class Javadoc on {@link #vpcPeeringConnections}).
+     * The accepter — and, cross-region, either side — can be a different account than the one that
+     * created it, so lookups by id must search every account's partition rather than only the
+     * caller's own, the same pattern {@code Ec2IpamService} uses for RAM-shared IPAM resources.
+     */
+    private List<VpcPeeringConnection> allVpcPeeringConnections() {
+        if (vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            return accountAware.scanAllAccounts();
+        }
+        return vpcPeeringConnections.scan(k -> true);
+    }
+
+    private OwnedVpcPeeringConnection getRequiredOwnedVpcPeeringConnection(String vpcPeeringConnectionId) {
+        if (vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            var entry = accountAware.findAnyAccountEntry(vpcPeeringConnectionId)
+                    .orElseThrow(() -> vpcPeeringConnectionNotFound(vpcPeeringConnectionId));
+            return new OwnedVpcPeeringConnection(entry.account(), entry.value());
+        }
+        VpcPeeringConnection pcx = vpcPeeringConnections.get(vpcPeeringConnectionId)
+                .orElseThrow(() -> vpcPeeringConnectionNotFound(vpcPeeringConnectionId));
+        return new OwnedVpcPeeringConnection(null, pcx);
+    }
+
+    private void saveVpcPeeringConnection(OwnedVpcPeeringConnection owned) {
+        if (owned.storageAccountId() != null
+                && vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            accountAware.putForAccount(owned.storageAccountId(), owned.pcx().getVpcPeeringConnectionId(), owned.pcx());
+            return;
+        }
+        vpcPeeringConnections.put(owned.pcx().getVpcPeeringConnectionId(), owned.pcx());
+    }
+
+    private void deleteVpcPeeringConnection(OwnedVpcPeeringConnection owned) {
+        if (owned.storageAccountId() != null
+                && vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            accountAware.deleteForAccount(owned.storageAccountId(), owned.pcx().getVpcPeeringConnectionId());
+            return;
+        }
+        vpcPeeringConnections.delete(owned.pcx().getVpcPeeringConnectionId());
+    }
+
+    private static AwsException vpcPeeringConnectionNotFound(String vpcPeeringConnectionId) {
+        return new AwsException("InvalidVpcPeeringConnectionID.NotFound",
+                "The VPC peering connection ID '" + vpcPeeringConnectionId + "' does not exist", 400);
+    }
+
+    /**
+     * The account making the current request, resolved the same way {@code AccountAwareStorageBackend}
+     * derives its key prefix, so an identity comparison against a resolved peering connection's
+     * requester/accepter owner id is meaningful both in and out of a request scope.
+     */
+    private String callerAccountId() {
+        if (requestContextInstance != null) {
+            try {
+                String caller = requestContextInstance.get().getAccountId();
+                if (caller != null) {
+                    return caller;
+                }
+            } catch (ContextNotActiveException e) {
+                // Tolerated: callers outside a request scope (startup, internal provisioning)
+                // legitimately fall through to the default account.
+                LOG.debugv("No active request context — resolving caller as default account {0}", accountId);
+            }
+        }
+        return accountId;
+    }
+
     // ─── NAT Gateways ─────────────────────────────────────────────────────────
 
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
         Subnet subnet = requireSubnet(region, subnetId);
-        if (allocationId != null && !allocationId.isBlank()) {
+        boolean privateGateway = "private".equalsIgnoreCase(connectivityType);
+        if (privateGateway && isSet(allocationId)) {
+            // A private NAT gateway has no route to the internet and so nothing to attach an
+            // Elastic IP to. Accepting the pair would have the response report a public address
+            // on a gateway that cannot have one.
+            throw new AwsException("InvalidParameterCombination",
+                    "Elastic IP addresses cannot be associated with private NAT gateways.", 400);
+        }
+        if (isSet(allocationId)) {
             getRequiredAddress(region, allocationId);
         }
 
@@ -4823,12 +5408,35 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         natGateway.setConnectivityType(connectivityType != null && !connectivityType.isBlank() ? connectivityType : "public");
         natGateway.setCreateTime(Instant.now());
         natGateway.setRegion(region);
+        natGateway.getNatGatewayAddresses().add(natGatewayAddress(region, subnetId, allocationId));
         if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
             natGateway.setTags(new ArrayList<>(natGatewayTags));
             tags.put(natGateway.getNatGatewayId(), new ArrayList<>(natGatewayTags));
         }
         natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
         return natGateway;
+    }
+
+    /**
+     * The address a NAT gateway reports. AWS gives every gateway an interface in its subnet with a
+     * private address, and a public one additionally carries the Elastic IP it was created with,
+     * aws_nat_gateway exposes all three as resource outputs (public_ip, private_ip,
+     * network_interface_id), and Gruntwork's VPC modules re-export nat_gateway_public_ips, so an
+     * address carrying only an allocation id propagates empty values into dependent modules.
+     */
+    private NatGatewayAddress natGatewayAddress(String region, String subnetId, String allocationId) {
+        NatGatewayAddress address = new NatGatewayAddress();
+        address.setNetworkInterfaceId("eni-" + randomHex(17));
+        address.setPrivateIp(assignPrivateIp(region, subnetId));
+        if (isSet(allocationId)) {
+            address.setAllocationId(allocationId);
+            address.setAssociationId("eipassoc-" + randomHex(17));
+            // The allocation was validated above, so this resolves; a private gateway has no EIP
+            // and therefore reports no public address at all, which is what AWS returns for one.
+            addresses.get(key(region, allocationId))
+                    .ifPresent(eip -> address.setPublicIp(eip.getPublicIp()));
+        }
+        return address;
     }
 
     public List<NatGateway> describeNatGateways(String region, List<String> natGatewayIds,
@@ -5004,13 +5612,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Map<String, String>> describeAvailabilityZones(String region) {
         List<Map<String, String>> zones = new ArrayList<>();
-        String[] azSuffixes = {"a", "b", "c"};
+        String[] azSuffixes = MODELLED_ZONE_SUFFIXES;
         for (String suffix : azSuffixes) {
             Map<String, String> az = new LinkedHashMap<>();
             az.put("zoneName", region + suffix);
             az.put("state", "available");
             az.put("regionName", region);
-            az.put("zoneId", region + "-az" + (suffix.charAt(0) - 'a' + 1));
+            az.put("zoneId", zoneIdForZoneName(region, region + suffix));
             az.put("zoneType", "availability-zone");
             zones.add(az);
         }
@@ -5124,8 +5732,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesValue(List<String> patterns, String value) {
+        String normalizedValue = Objects.toString(value, "");
         return patterns.stream()
-                .anyMatch(pattern -> value.matches(wildcardToRegex(pattern)));
+                .anyMatch(pattern -> normalizedValue.matches(wildcardToRegex(pattern)));
     }
 
     private boolean matchesFilters(Object resource, Map<String, List<String>> filters, String region) {
@@ -5227,6 +5836,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // default arm silently matched every group regardless of value, which is
                 // indistinguishable from "no filter" for the caller.
                 case "description" -> matchesValue(values, sg.getDescription());
+                default -> true;
+            };
+        }
+        if (resource instanceof VpcPeeringConnection pcx) {
+            return switch (filterName) {
+                case "vpc-peering-connection-id" -> matchesValue(values, pcx.getVpcPeeringConnectionId());
+                case "status-code" -> pcx.getStatus() != null && matchesValue(values, pcx.getStatus().getCode());
+                case "requester-vpc-info.vpc-id" -> pcx.getRequesterVpcInfo() != null
+                        && matchesValue(values, pcx.getRequesterVpcInfo().getVpcId());
+                case "requester-vpc-info.owner-id" -> pcx.getRequesterVpcInfo() != null
+                        && matchesValue(values, pcx.getRequesterVpcInfo().getOwnerId());
+                case "requester-vpc-info.region" -> pcx.getRequesterVpcInfo() != null
+                        && matchesValue(values, pcx.getRequesterVpcInfo().getRegion());
+                case "accepter-vpc-info.vpc-id" -> pcx.getAccepterVpcInfo() != null
+                        && matchesValue(values, pcx.getAccepterVpcInfo().getVpcId());
+                case "accepter-vpc-info.owner-id" -> pcx.getAccepterVpcInfo() != null
+                        && matchesValue(values, pcx.getAccepterVpcInfo().getOwnerId());
+                case "accepter-vpc-info.region" -> pcx.getAccepterVpcInfo() != null
+                        && matchesValue(values, pcx.getAccepterVpcInfo().getRegion());
                 default -> true;
             };
         }
@@ -5340,7 +5968,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "subnet-id" -> matchesValue(values, ni.getSubnetId());
                 case "vpc-id" -> matchesValue(values, ni.getVpcId());
                 case "group-id" -> ni.getGroups().stream()
-                        .anyMatch(g -> matchesValue(values, g.getGroupId()));
+                        .anyMatch(g -> g != null && matchesValue(values, g.getGroupId()));
                 case "status" -> matchesValue(values, ni.getStatus());
                 case "attachment.instance-id" -> ni.getAttachment() != null
                         && matchesValue(values, ni.getAttachment().getInstanceId());
@@ -5405,6 +6033,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (resource instanceof TransitGateway gateway) return gateway.getTags();
         if (resource instanceof TransitGatewayRouteTable routeTable) return routeTable.getTags();
         if (resource instanceof TransitGatewayVpcAttachment attachment) return attachment.getTags();
+        if (resource instanceof VpcPeeringConnection pcx) return pcx.getTags();
         return Collections.emptyList();
     }
 
@@ -5592,6 +6221,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         && !networkInterfaceIds.contains(eni.getNetworkInterfaceId())) {
                     continue;
                 }
+                // A standalone ENI attached to this instance is reported from its own record
+                // below, which is the side that knows its real attach time and its
+                // deleteOnTermination, both of which the instance-side copy would guess wrong.
+                if (networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).isPresent()) {
+                    continue;
+                }
                 foundIds.add(eni.getNetworkInterfaceId());
                 NetworkInterface ni = new NetworkInterface();
                 ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
@@ -5658,6 +6293,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
         }
 
+        // floci-kt9: standalone ENIs created via CreateNetworkInterface. Only added when not
+        // already surfaced above, an ENI used as an instance's launch-time interface (e.g. via
+        // RunInstances' NetworkInterface.1.NetworkInterfaceId, the override-default-eni pattern)
+        // is represented on the instance and would otherwise be double-counted here.
+        for (NetworkInterface standalone : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
+            NetworkInterface ni = releaseIfHostIsGone(region, standalone);
+            if (foundIds.contains(ni.getNetworkInterfaceId())) {
+                continue;
+            }
+            if (!networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(ni.getNetworkInterfaceId())) {
+                continue;
+            }
+            foundIds.add(ni.getNetworkInterfaceId());
+            if (!matchesFilters(ni, filters, region)) {
+                continue;
+            }
+            result.add(ni);
+        }
+
         // Phase 6: validate requested IDs exist
         for (String id : networkInterfaceIds) {
             if (!foundIds.contains(id)) {
@@ -5680,6 +6334,262 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
 
         return new NetworkInterfaceListResult(result, null);
+    }
+
+    /**
+     * Creates a standalone (not-yet-attached) elastic network interface, floci-kt9. Covers the
+     * {@code aws_network_interface} resource: an ENI created independently of an instance and
+     * either attached later (the attach-eni pattern) or handed to an instance at launch time as
+     * its primary interface (the override-default-eni pattern, see {@link #runInstances}).
+     */
+    public NetworkInterface createNetworkInterface(String region, String subnetId, String description,
+                                                    String privateIpAddress, List<String> privateIpAddresses,
+                                                    List<String> securityGroupIds, List<Tag> tagList) {
+        if (subnetId == null || subnetId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter SubnetId", 400);
+        }
+        ensureDefaultResources(region);
+        Subnet subnet = requireSubnet(region, subnetId);
+
+        List<GroupIdentifier> sgIdentifiers = new ArrayList<>();
+        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
+            for (String sgId : securityGroupIds) {
+                SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
+                sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+            }
+        } else {
+            SecurityGroup defaultSg = securityGroups.get(key(region, resolveDefaultSecurityGroupId(region))).orElse(null);
+            if (defaultSg != null) {
+                sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
+            }
+        }
+
+        String eniId = "eni-" + randomHex(17);
+        String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
+                ? privateIpAddress : assignPrivateIp(region, subnetId);
+        String primaryDns = "ip-" + primaryIp.replace('.', '-') + ".ec2.internal";
+
+        NetworkInterface ni = new NetworkInterface();
+        ni.setNetworkInterfaceId(eniId);
+        ni.setSubnetId(subnetId);
+        ni.setVpcId(subnet.getVpcId());
+        ni.setAvailabilityZone(subnet.getAvailabilityZone());
+        ni.setDescription(description);
+        ni.setOwnerId(accountId);
+        ni.setStatus("available");
+        ni.setMacAddress(randomMac());
+        ni.setPrivateIpAddress(primaryIp);
+        ni.setPrivateDnsName(primaryDns);
+        ni.setGroups(sgIdentifiers);
+        if (tagList != null) {
+            ni.getTagSet().addAll(tagList);
+        }
+
+        List<NetworkInterfacePrivateIpAddress> ipList = new ArrayList<>();
+        NetworkInterfacePrivateIpAddress primary = new NetworkInterfacePrivateIpAddress();
+        primary.setPrivateIpAddress(primaryIp);
+        primary.setPrivateDnsName(primaryDns);
+        primary.setPrimary(true);
+        ipList.add(primary);
+        if (privateIpAddresses != null) {
+            for (String extra : privateIpAddresses) {
+                if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
+                    continue;
+                }
+                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                secondary.setPrivateIpAddress(extra);
+                secondary.setPrivateDnsName("ip-" + extra.replace('.', '-') + ".ec2.internal");
+                secondary.setPrimary(false);
+                ipList.add(secondary);
+            }
+        }
+        ni.setPrivateIpAddresses(ipList);
+
+        networkInterfaces.put(key(region, eniId), ni);
+        return ni;
+    }
+
+    /** Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9. */
+    public void deleteNetworkInterface(String region, String networkInterfaceId) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidParameterValue",
+                    "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+        }
+        networkInterfaces.delete(key(region, networkInterfaceId));
+    }
+
+    /**
+     * Attaches a standalone ENI to a running/stopped instance at the given device index,
+     * the attach-eni example's runtime pattern (its user-data script calls this via the AWS CLI
+     * after boot, rather than through the Terraform provider itself). floci-kt9.
+     */
+    public NetworkInterfaceAttachment attachNetworkInterface(String region, String networkInterfaceId,
+                                                              String instanceId, int deviceIndex) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidNetworkInterface.InUse",
+                    "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
+        }
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (!List.of("running", "stopped").contains(inst.getState().getName())) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + instanceId + "' is not in a state from which an interface can be attached", 400);
+        }
+        boolean indexTaken = inst.getNetworkInterfaces().stream()
+                .anyMatch(eni -> eni.getDeviceIndex() == deviceIndex);
+        if (indexTaken) {
+            throw new AwsException("InvalidParameterValue",
+                    "Device index " + deviceIndex + " is already in use on instance '" + instanceId + "'", 400);
+        }
+
+        NetworkInterfaceAttachment attachment = new NetworkInterfaceAttachment();
+        attachment.setAttachmentId("eni-attach-" + randomHex(17));
+        attachment.setDeviceIndex(deviceIndex);
+        attachment.setStatus("attached");
+        attachment.setInstanceId(instanceId);
+        attachment.setInstanceOwnerId(accountId);
+        attachment.setAttachTime(ISO_FMT.format(Instant.now()));
+        attachment.setDeleteOnTermination(false);
+
+        ni.setAttachment(attachment);
+        ni.setStatus("in-use");
+        networkInterfaces.put(key(region, networkInterfaceId), ni);
+
+        // The instance must carry it as well, or DescribeInstances would deny an attachment
+        // DescribeNetworkInterfaces reports, and the device-index check above, which reads this
+        // very list, would never see an interface attached by this method.
+        InstanceNetworkInterface attached = new InstanceNetworkInterface();
+        attached.setNetworkInterfaceId(ni.getNetworkInterfaceId());
+        attached.setSubnetId(ni.getSubnetId());
+        attached.setVpcId(ni.getVpcId());
+        attached.setDescription(ni.getDescription());
+        attached.setOwnerId(ni.getOwnerId());
+        attached.setStatus("in-use");
+        attached.setMacAddress(ni.getMacAddress());
+        attached.setPrivateIpAddress(ni.getPrivateIpAddress());
+        attached.setPrivateDnsName(ni.getPrivateDnsName());
+        attached.setGroups(new ArrayList<>(ni.getGroups()));
+        attached.setAttachmentId(attachment.getAttachmentId());
+        attached.setDeviceIndex(deviceIndex);
+        attached.setAttachTime(attachment.getAttachTime());
+        inst.getNetworkInterfaces().add(attached);
+        instances.put(key(region, instanceId), inst);
+        return attachment;
+    }
+
+    /** Detaches a standalone ENI by attachment id, floci-kt9. */
+    public NetworkInterfaceAttachment detachNetworkInterface(String region, String attachmentId, boolean force) {
+        if (attachmentId == null || attachmentId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter AttachmentId", 400);
+        }
+        NetworkInterface ni = networkInterfaces.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(n -> n.getAttachment() != null && attachmentId.equals(n.getAttachment().getAttachmentId()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidAttachmentID.NotFound",
+                        "The attachment ID '" + attachmentId + "' does not exist", 400));
+        NetworkInterfaceAttachment detached = ni.getAttachment();
+        ni.setAttachment(null);
+        ni.setStatus("available");
+        networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        detachFromInstance(region, detached.getInstanceId(), ni.getNetworkInterfaceId());
+        return detached;
+    }
+
+    /** Removes an interface from an instance's own list, the mirror of attaching it. */
+    private void detachFromInstance(String region, String instanceId, String networkInterfaceId) {
+        if (instanceId == null) {
+            return;
+        }
+        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        if (inst == null) {
+            return;
+        }
+        if (inst.getNetworkInterfaces().removeIf(
+                e -> networkInterfaceId.equals(e.getNetworkInterfaceId()))) {
+            instances.put(key(region, instanceId), inst);
+        }
+    }
+
+    /**
+     * Releases the standalone ENIs an instance holds when it is terminated. An interface the
+     * caller created is not the instance's to destroy unless it was attached with
+     * deleteOnTermination, AWS returns it to "available", and only a launch-created interface
+     * dies with its instance.
+     */
+    private void releaseStandaloneInterfacesOnTermination(String region, Instance inst) {
+        for (InstanceNetworkInterface e : List.copyOf(inst.getNetworkInterfaces())) {
+            NetworkInterface ni = networkInterfaces.get(key(region, e.getNetworkInterfaceId())).orElse(null);
+            if (ni == null) {
+                continue;
+            }
+            NetworkInterfaceAttachment att = ni.getAttachment();
+            // Either way the instance stops carrying it. A deleted interface obviously cannot stay
+            // on the record, and a released one must not either: once it is attached to something
+            // else, two instance records would claim it and DescribeInstances has no rule that
+            // picks the live one.
+            inst.getNetworkInterfaces().removeIf(
+                    carried -> ni.getNetworkInterfaceId().equals(carried.getNetworkInterfaceId()));
+            if (att != null && att.isDeleteOnTermination()) {
+                networkInterfaces.delete(key(region, ni.getNetworkInterfaceId()));
+                continue;
+            }
+            ni.setAttachment(null);
+            ni.setStatus("available");
+            networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
+    }
+
+    private NetworkInterface requireStandaloneNetworkInterface(String region, String networkInterfaceId) {
+        NetworkInterface ni = networkInterfaces.get(key(region, networkInterfaceId)).orElseThrow(() ->
+                new AwsException("InvalidNetworkInterfaceID.NotFound",
+                        "The network interface ID '" + networkInterfaceId + "' does not exist", 400));
+        return releaseIfHostIsGone(region, ni);
+    }
+
+    /**
+     * Clears an attachment whose instance no longer exists. TerminateInstances is not the only way
+     * an instance reaches "terminated": a container-backed launch that fails or is cancelled ends
+     * there asynchronously, inside the container manager, which has no access to this store. An
+     * interface must not stay pinned to an instance that is gone, in AWS an ENI outlives its
+     * instance as "available", it does not outlive it stuck "in-use" and unusable. Reconciling on
+     * read covers every such path at once, rather than chasing each terminal transition.
+     */
+    private NetworkInterface releaseIfHostIsGone(String region, NetworkInterface ni) {
+        NetworkInterfaceAttachment attachment = ni.getAttachment();
+        if (attachment == null || attachment.getInstanceId() == null) {
+            return ni;
+        }
+        Instance host = instances.get(key(region, attachment.getInstanceId())).orElse(null);
+        boolean hostIsGone = host == null || host.getState() == null
+                || "terminated".equals(host.getState().getName());
+        if (!hostIsGone) {
+            return ni;
+        }
+        ni.setAttachment(null);
+        ni.setStatus("available");
+        networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        // The dead instance has to let go of its copy as well. Releasing only the standalone
+        // record would leave the terminated instance still reporting the interface, so once it is
+        // reused two instance records would claim it, and a real one is not the winner by any
+        // rule DescribeInstances applies.
+        detachFromInstance(region, attachment.getInstanceId(), ni.getNetworkInterfaceId());
+        return ni;
+    }
+
+    /**
+     * Looks up a standalone ENI for use as an instance's launch-time primary interface (the
+     * override-default-eni pattern, RunInstances' {@code NetworkInterface.1.NetworkInterfaceId}).
+     * Package-private: called from {@link #runInstances} only.
+     */
+    NetworkInterface takeNetworkInterfaceForLaunch(String region, String networkInterfaceId) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidNetworkInterface.InUse",
+                    "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
+        }
+        return ni;
     }
 
     // ─── Pagination token encoding / decoding ──────────────────────────────────

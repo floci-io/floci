@@ -659,6 +659,7 @@ public interface EmulatorConfig {
         PipesServiceConfig pipes();
         BedrockAgentCoreControlServiceConfig bedrockAgentCoreControl();
         BedrockAgentCoreServiceConfig bedrockAgentCore();
+        ElbServiceConfig elb();
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
@@ -678,6 +679,7 @@ public interface EmulatorConfig {
         PricingServiceConfig pricing();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
+        TranslateServiceConfig translate();
         CostExplorerServiceConfig ce();
         CurServiceConfig cur();
         BcmDataExportsServiceConfig bcmDataExports();
@@ -1131,6 +1133,17 @@ public interface EmulatorConfig {
         @WithDefault("postgres:15-alpine")
         String imageVersion();
         Optional<String> dockerNetwork();
+
+        // Port range the per-cluster auth proxies bind on the Floci host. Disjoint from
+        // every other service's range (RDS uses 7001-7099).
+        @WithDefault("7100")
+        int proxyBasePort();
+        @WithDefault("7199")
+        int proxyMaxPort();
+
+        // Hostname clients use to reach a cluster endpoint. Empty -> resolved from
+        // DockerHostResolver (falls back to "localhost").
+        Optional<String> endpointHost();
     }
 
     interface RdsServiceConfig {
@@ -1595,6 +1608,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface TranslateServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface PricingServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1830,6 +1848,21 @@ public interface EmulatorConfig {
         Optional<String> containerNamePrefix();
 
         /**
+         * Maximum concurrent first-time code-volume populates. Populating streams a large
+         * function's unpacked code into a helper container, so a burst of them can overwhelm
+         * the Docker daemon; this caps how many run at once.
+         *
+         * <p>Unset derives {@code max(2, availableProcessors() / 2)}. That derivation reads the
+         * JVM's view of the cgroup CPU quota, so a CPU-constrained Floci container collapses the
+         * cap to 2 and concurrent cold starts of distinct functions serialize into pairs. Set
+         * this to decouple the cap from the CPU allocation. Values below 1 are ignored with a
+         * warning rather than deadlocking every populate.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY
+         */
+        Optional<Integer> codeVolumePopulateConcurrency();
+
+        /**
          * Extra /etc/hosts entries added to every Lambda container, as "hostname:ip" pairs.
          * The ip may be the literal "host-gateway" to map to the Docker host, mirroring
          * {@code docker run --add-host hostname:host-gateway}.
@@ -2051,6 +2084,16 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean validateRuntimeExists();
+    }
+
+    /** Classic (2012-06-01) Elastic Load Balancing — a separate API from {@link ElbV2ServiceConfig}. */
+    interface ElbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, no health check is ever probed and a registered instance is InService at once. */
+        @WithDefault("false")
+        boolean mock();
     }
 
     interface ElbV2ServiceConfig {

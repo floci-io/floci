@@ -36,6 +36,7 @@ order:
   - AWS::Batch
   - AWS::Cognito
   - AWS::Events
+  - AWS::Scheduler
   - AWS::Pipes
   - AWS::Kinesis
   - AWS::KinesisFirehose
@@ -127,6 +128,7 @@ service_labels:
   AWS::SNS: SNS
   AWS::SQS: SQS
   AWS::SSM: SSM
+  AWS::Scheduler: EventBridge Scheduler
   AWS::SecretsManager: Secrets Manager
   AWS::StepFunctions: Step Functions
   AWS::WAFv2: WAFv2

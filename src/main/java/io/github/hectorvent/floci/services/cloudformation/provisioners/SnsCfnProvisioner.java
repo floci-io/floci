@@ -53,6 +53,9 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         var topic = snsService.createTopic(topicName, attributes, Map.of(), ctx.region());
         // Ref returns the topic ARN, which is why the physical id is the ARN and not the name.
         r.setPhysicalId(topic.getTopicArn());
+        // TopicArn is the attribute aws-sns-topic.json declares read-only. Arn is kept alongside it
+        // because templates written against earlier Floci releases already reference it.
+        r.getAttributes().put("TopicArn", topic.getTopicArn());
         r.getAttributes().put("Arn", topic.getTopicArn());
         r.getAttributes().put("TopicName", topicName);
     }

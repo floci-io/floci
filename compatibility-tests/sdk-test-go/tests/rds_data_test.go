@@ -131,6 +131,7 @@ func TestRdsDataApiGoSdkV1(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), awsV1.Int64Value(insertOut.NumberOfRecordsUpdated))
+	assert.Nil(t, insertOut.Records, "AWS omits records for a statement that returns no result set")
 
 	inTxRead, err := dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
 		ResourceArn:   awsV1.String(resourceArn),
@@ -570,6 +571,7 @@ func TestRdsDataApiGoSdkPostgresV1(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), awsV1.Int64Value(insertOut.NumberOfRecordsUpdated))
+	assert.Nil(t, insertOut.Records, "AWS omits records for a statement that returns no result set")
 
 	inTxRead, err := dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
 		ResourceArn:   awsV1.String(resourceArn),
@@ -989,6 +991,7 @@ func TestRdsDataApiGoSdkV2(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), insertOut.NumberOfRecordsUpdated)
+	assert.Nil(t, insertOut.Records, "AWS omits records for a statement that returns no result set")
 
 	readInTx, err := dataSvc.ExecuteStatement(ctx, &rdsdata.ExecuteStatementInput{
 		ResourceArn:   awsV2.String(resourceArn),
@@ -1242,6 +1245,7 @@ func TestRdsDataApiGoSdkPostgresV2(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), insertOut.NumberOfRecordsUpdated)
+	assert.Nil(t, insertOut.Records, "AWS omits records for a statement that returns no result set")
 
 	readInTx, err := dataSvc.ExecuteStatement(ctx, &rdsdata.ExecuteStatementInput{
 		ResourceArn:   awsV2.String(resourceArn),

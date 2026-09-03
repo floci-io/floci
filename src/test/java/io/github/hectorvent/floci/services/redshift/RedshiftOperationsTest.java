@@ -9,6 +9,10 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Optional;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
@@ -107,10 +111,10 @@ public class RedshiftOperationsTest {
         when(containerManager.start(any(), eq("cluster-src"), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439));
         org.mockito.Mockito.doAnswer(invocation -> {
-            java.nio.file.Path p = invocation.getArgument(3);
-            java.nio.file.Files.writeString(p, "-- dump sql table test_data;");
+            Path p = invocation.getArgument(3);
+            Files.writeString(p, "-- dump sql table test_data;");
             return null;
-        }).when(containerManager).takeSnapshot(any(), eq("cluster-src"), eq("admin"), any(java.nio.file.Path.class));
+        }).when(containerManager).takeSnapshot(any(), eq("cluster-src"), eq("admin"), any(Path.class));
         when(containerManager.start(any(), eq("cluster-restored"), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c2", "cluster-restored", "localhost", 5440));
 
@@ -133,7 +137,7 @@ public class RedshiftOperationsTest {
 
         // 1b. RebootCluster — must preserve data (no Docker volume backs this container)
         when(containerManager.getContainer(any(), eq("cluster-src")))
-                .thenReturn(java.util.Optional.of(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439)));
+                .thenReturn(Optional.of(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439)));
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
@@ -216,8 +220,7 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .contentType("application/xml")
             .body(containsString("<ClusterIdentifier>cluster-restored</ClusterIdentifier>"))
-            .body(containsString("<ClusterStatus>available</ClusterStatus>"))
-            .body(containsString("<Port>5440</Port>"));
+            .body(containsString("<ClusterStatus>available</ClusterStatus>"));
 
         // 6. DeleteClusterSnapshot
         given()

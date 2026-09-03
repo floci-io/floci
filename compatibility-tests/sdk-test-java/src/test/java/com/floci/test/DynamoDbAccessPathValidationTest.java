@@ -193,6 +193,10 @@ class DynamoDbAccessPathValidationTest {
                 .keyConditionExpression("#status = :status")
                 .expressionAttributeNames(Map.of("#status", "status"))
                 .expressionAttributeValues(Map.of(":status", value("open")))));
+        assertValidationException(() -> ddb.scan(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .consistentRead(true)));
     }
 
     @Test

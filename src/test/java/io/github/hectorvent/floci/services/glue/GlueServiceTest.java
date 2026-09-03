@@ -9,7 +9,13 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Crawler;
+import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
+import io.github.hectorvent.floci.services.glue.model.Job;
+import io.github.hectorvent.floci.services.glue.model.JobCommand;
+import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.S3Target;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
@@ -70,6 +76,8 @@ class GlueServiceTest {
                 partitionStore,
                 new InMemoryStorage<String, Map<String, Object>>(),
                 new InMemoryStorage<String, UserDefinedFunction>(),
+                new InMemoryStorage<String, Job>(),
+                new InMemoryStorage<String, Crawler>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null));
         glueService.createDatabase(new Database("db1"));
     }
@@ -1038,5 +1046,196 @@ class GlueServiceTest {
                                                      TypeReference<Map<String, V>> typeReference) {
             return AccountAwareStorageBackend.inMemory("000000000000");
         }
+    }
+
+    private Job createValidJob(String name) {
+        Job job = new Job();
+        job.setName(name);
+        job.setRole("arn:aws:iam::000000000000:role/my-role");
+        job.setCommand(new JobCommand());
+        return job;
+    }
+
+    private Crawler createValidCrawler(String name) {
+        Crawler crawler = new Crawler();
+        crawler.setName(name);
+        crawler.setRole("arn:aws:iam::000000000000:role/my-role");
+        CrawlerTargets targets = new CrawlerTargets();
+        targets.setS3Targets(java.util.List.of(new S3Target()));
+        crawler.setTargets(targets);
+        return crawler;
+    }
+
+    @Test
+    void jobCanBeCreatedFetchedUpdatedAndDeleted() {
+        Job job = createValidJob("my-job");
+        job.setDescription("Original description");
+
+        glueService.createJob(job);
+
+        Job fetched = glueService.getJob("my-job");
+        assertEquals("my-job", fetched.getName());
+        assertEquals("Original description", fetched.getDescription());
+        assertNotNull(fetched.getCreatedOn());
+        assertEquals(fetched.getCreatedOn(), fetched.getLastModifiedOn());
+
+        assertEquals(1, glueService.getJobs().size());
+        assertEquals(1, glueService.getJobs(10, null).items().size());
+
+        JobUpdate update = new JobUpdate();
+        update.setDescription("Updated description");
+        update.setRole("arn:aws:iam::000000000000:role/new-role");
+
+        glueService.updateJob("my-job", update);
+
+        Job updated = glueService.getJob("my-job");
+        assertEquals("Updated description", updated.getDescription());
+        assertEquals("arn:aws:iam::000000000000:role/new-role", updated.getRole());
+        assertTrue(updated.getLastModifiedOn().isAfter(fetched.getCreatedOn()) || updated.getLastModifiedOn().equals(fetched.getCreatedOn()));
+
+        glueService.deleteJob("my-job", REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () -> glueService.getJob("my-job"));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        assertTrue(glueService.getJobs().isEmpty());
+    }
+
+    @Test
+    void crawlerCanBeCreatedFetchedUpdatedAndDeleted() {
+        Crawler crawler = createValidCrawler("my-crawler");
+        crawler.setDescription("Original crawler");
+        crawler.setDatabaseName("db1");
+
+        glueService.createCrawler(crawler);
+
+        Crawler fetched = glueService.getCrawler("my-crawler");
+        assertEquals("my-crawler", fetched.getName());
+        assertEquals("Original crawler", fetched.getDescription());
+        assertEquals("db1", fetched.getDatabaseName());
+        assertNotNull(fetched.getCreationTime());
+        assertEquals(fetched.getCreationTime(), fetched.getLastUpdated());
+
+        assertEquals(1, glueService.getCrawlers().size());
+        assertEquals(1, glueService.getCrawlers(10, null).items().size());
+
+        Crawler update = new Crawler();
+        update.setName("my-crawler");
+        update.setDescription("Updated crawler");
+        update.setDatabaseName("db2");
+
+        glueService.updateCrawler(update);
+
+        Crawler updated = glueService.getCrawler("my-crawler");
+        assertEquals("Updated crawler", updated.getDescription());
+        assertEquals("db2", updated.getDatabaseName());
+        assertTrue(updated.getLastUpdated().isAfter(fetched.getCreationTime()) || updated.getLastUpdated().equals(fetched.getCreationTime()));
+
+        glueService.deleteCrawler("my-crawler", REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () -> glueService.getCrawler("my-crawler"));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        assertTrue(glueService.getCrawlers().isEmpty());
+    }
+
+    @Test
+    void resourceTaggingWorksForJobsAndCrawlers() {
+        Job job = createValidJob("tagged-job");
+        glueService.createJob(job, Map.of("key1", "value1"), REGION);
+
+        String jobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/tagged-job";
+        Map<String, String> tags = glueService.getTags(jobArn, REGION);
+        assertEquals("value1", tags.get("key1"));
+
+        glueService.tagResource(jobArn, Map.of("key2", "value2"), REGION);
+        Map<String, String> updatedTags = glueService.getTags(jobArn, REGION);
+        assertEquals("value1", updatedTags.get("key1"));
+        assertEquals("value2", updatedTags.get("key2"));
+
+        glueService.untagResource(jobArn, List.of("key1"), REGION);
+        Map<String, String> finalTags = glueService.getTags(jobArn, REGION);
+        assertNull(finalTags.get("key1"));
+        assertEquals("value2", finalTags.get("key2"));
+
+        Crawler crawler = createValidCrawler("tagged-crawler");
+        glueService.createCrawler(crawler, Map.of("env", "prod"), REGION);
+
+        String crawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/tagged-crawler";
+        Map<String, String> crawlerTags = glueService.getTags(crawlerArn, REGION);
+        assertEquals("prod", crawlerTags.get("env"));
+    }
+
+    @Test
+    void jobAndCrawlerRejectsDuplicateCreation() {
+        Job job = createValidJob("dup-job");
+        glueService.createJob(job);
+
+        AwsException jobEx = assertThrows(AwsException.class, () -> glueService.createJob(job));
+        assertEquals("AlreadyExistsException", jobEx.getErrorCode());
+
+        Crawler crawler = createValidCrawler("dup-crawler");
+        glueService.createCrawler(crawler);
+
+        AwsException crawlerEx = assertThrows(AwsException.class, () -> glueService.createCrawler(crawler));
+        assertEquals("AlreadyExistsException", crawlerEx.getErrorCode());
+    }
+
+    @Test
+    void getJobsAndCrawlersPagination() {
+        for (int i = 0; i < 5; i++) {
+            Job job = createValidJob("job-" + i);
+            glueService.createJob(job);
+
+            Crawler crawler = createValidCrawler("crawler-" + i);
+            glueService.createCrawler(crawler);
+        }
+
+        GlueService.Page<Job> jobsPage = glueService.getJobs(2, null);
+        assertEquals(2, jobsPage.items().size());
+        assertNotNull(jobsPage.nextToken());
+
+        GlueService.Page<Job> jobsNextPage = glueService.getJobs(10, jobsPage.nextToken());
+        assertEquals(3, jobsNextPage.items().size());
+        assertNull(jobsNextPage.nextToken());
+
+        GlueService.Page<Crawler> crawlersPage = glueService.getCrawlers(3, null);
+        assertEquals(3, crawlersPage.items().size());
+        assertNotNull(crawlersPage.nextToken());
+
+        GlueService.Page<Crawler> crawlersNextPage = glueService.getCrawlers(10, crawlersPage.nextToken());
+        assertEquals(2, crawlersNextPage.items().size());
+        assertNull(crawlersNextPage.nextToken());
+
+        AwsException negativeMaxResultsJobs = assertThrows(AwsException.class, () -> glueService.getJobs(-1, null));
+        assertEquals("InvalidInputException", negativeMaxResultsJobs.getErrorCode());
+
+        AwsException zeroMaxResultsCrawlers = assertThrows(AwsException.class, () -> glueService.getCrawlers(0, null));
+        assertEquals("InvalidInputException", zeroMaxResultsCrawlers.getErrorCode());
+
+        AwsException hugeMaxResultsJobs = assertThrows(AwsException.class, () -> glueService.getJobs(1001, null));
+        assertEquals("InvalidInputException", hugeMaxResultsJobs.getErrorCode());
+    }
+
+    @Test
+    void taggingNonExistentResourceThrows() {
+        String fakeJobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/fake-job";
+        String fakeCrawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/fake-crawler";
+        String fakeDbArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":database/fake-db";
+        String fakeTableArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":table/fake-db/fake-table";
+        String fakeUdfArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":userDefinedFunction/fake-db/fake-udf";
+
+        AwsException jobTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeJobArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", jobTagEx.getErrorCode());
+
+        AwsException crawlerGetTagsEx = assertThrows(AwsException.class, () -> glueService.getTags(fakeCrawlerArn, REGION));
+        assertEquals("EntityNotFoundException", crawlerGetTagsEx.getErrorCode());
+
+        AwsException dbTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeDbArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", dbTagEx.getErrorCode());
+
+        AwsException tableTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeTableArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", tableTagEx.getErrorCode());
+
+        AwsException udfTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeUdfArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", udfTagEx.getErrorCode());
     }
 }

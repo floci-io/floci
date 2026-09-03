@@ -167,6 +167,8 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      proxy-base-port: 7100
+      proxy-max-port: 7199
     rds:
       enabled: true
       mock: false
@@ -271,6 +273,9 @@ floci:
       mock: true
     pipes:
       enabled: true
+    elb:
+      enabled: true
+      mock: true
     elbv2:
       enabled: true
       mock: true
@@ -304,6 +309,8 @@ floci:
     comprehend:
       enabled: true
     rekognition:
+      enabled: true
+    translate:
       enabled: true
     pricing:
       enabled: true

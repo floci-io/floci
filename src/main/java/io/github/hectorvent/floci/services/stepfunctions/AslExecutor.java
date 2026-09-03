@@ -3381,8 +3381,23 @@ public class AslExecutor {
      * Supports: States.StringToJson, States.JsonToString, States.Format,
      *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID.
      * Throws FailStateException("States.Runtime") for unrecognized functions.
+     *
+     * <p>An argument that matches nothing fails the execution, and the cause names the whole
+     * expression. Only this outermost call knows it, so a nested intrinsic evaluated as an
+     * argument runs through {@link #applyIntrinsic} and lets the miss travel up to here.
      */
     private JsonNode evaluateIntrinsic(String expr, JsonNode root, JsonNode context) {
+        try {
+            return applyIntrinsic(expr, root, context);
+        } catch (MissingIntrinsicArgumentException e) {
+            throw new FailStateException("States.Runtime",
+                    "The function '" + expr + "' had the following error: The JsonPath argument "
+                            + "for the field '" + e.path + "' could not be found in the input '"
+                            + e.input + "'");
+        }
+    }
+
+    private JsonNode applyIntrinsic(String expr, JsonNode root, JsonNode context) {
         int parenOpen = expr.indexOf('(');
         int parenClose = expr.lastIndexOf(')');
         if (parenOpen < 0 || parenClose < 0) {
@@ -3519,8 +3534,8 @@ public class AslExecutor {
     }
 
     /**
-     * Resolve a single intrinsic argument: either a $.path reference, a quoted string literal,
-     * or a numeric literal.
+     * Resolve a single intrinsic argument: a $.path reference, a nested {@code States.*} call, a
+     * quoted string literal, or a numeric literal.
      */
     private JsonNode resolveIntrinsicArg(String arg, JsonNode root, JsonNode context) {
         arg = arg.trim();
@@ -3532,13 +3547,16 @@ public class AslExecutor {
         // site already threads context; this fallback (and the noContext_* test pinning it) only
         // exists until context is also threaded into the remaining resolvePath callers.
         if (context != null && arg.startsWith("$$.")) {
-            return resolvePath("$." + arg.substring(3), context);
+            return resolveIntrinsicReference("$." + arg.substring(3), context, null, root);
         }
         if (context != null && "$$".equals(arg)) {
             return context;
         }
-        if (arg.startsWith("$.") || "$".equals(arg)) {
-            return resolvePath(arg, root, context);
+        if (arg.startsWith("$.") || arg.startsWith("$[") || "$".equals(arg)) {
+            return resolveIntrinsicReference(arg, root, context, root);
+        }
+        if (arg.startsWith("States.")) {
+            return applyIntrinsic(arg, root, context);
         }
         if (arg.startsWith("'") && arg.endsWith("'")) {
             return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
@@ -3558,9 +3576,43 @@ public class AslExecutor {
             try {
                 return objectMapper.getNodeFactory().numberNode(Double.parseDouble(arg));
             } catch (NumberFormatException e2) {
-                // fall through: treat as bare path (may itself be a nested States.* intrinsic)
+                // fall through: treat as a bare path
                 return resolvePath(arg, root, context);
             }
+        }
+    }
+
+    /**
+     * Resolves a {@code $.} or {@code $$.} reference used as an intrinsic argument. A reference
+     * that matches nothing fails the execution, as on real AWS, instead of formatting as null.
+     * {@code searchRoot} is what the path is resolved against and {@code input} is what the cause
+     * names, which for a {@code $$.} argument is still the state input rather than the Context
+     * Object it searched.
+     *
+     * <p>An index past the end of an array is a miss here, unlike a plain {@code "field.$"}
+     * reference, which AWS resolves to null. The two forms really do differ.
+     */
+    private JsonNode resolveIntrinsicReference(String path, JsonNode searchRoot, JsonNode context,
+                                               JsonNode input) {
+        var value = resolvePathNode(path, searchRoot, context);
+        if (value.isMissingNode()) {
+            throw new MissingIntrinsicArgumentException(path, input);
+        }
+        return value;
+    }
+
+    /**
+     * An intrinsic argument that matched nothing. It carries the miss out to the outermost
+     * {@link #evaluateIntrinsic} call, the only one that knows the expression the cause names.
+     */
+    private static class MissingIntrinsicArgumentException extends RuntimeException {
+        final String path;
+        final JsonNode input;
+
+        MissingIntrinsicArgumentException(String path, JsonNode input) {
+            super(path);
+            this.path = path;
+            this.input = input;
         }
     }
 

@@ -72,12 +72,13 @@ class S3CfnProvisionerTest {
 
         verify(s3).createBucket("my-bucket", REGION);
         assertEquals("my-bucket", r.getPhysicalId(), "Ref is the bucket name");
-        // aws-s3-bucket.json readOnlyProperties, minus DualStackDomainName (see the PR follow-up),
-        // plus BucketName which the template engine resolves for Fn::GetAtt.
+        // Every readOnlyProperty in aws-s3-bucket.json, plus BucketName which the template engine
+        // resolves for Fn::GetAtt.
         assertEquals(Map.of(
                 "Arn", "arn:aws:s3:::my-bucket",
                 "DomainName", "my-bucket.s3.amazonaws.com",
                 "RegionalDomainName", "my-bucket.s3.us-east-1.amazonaws.com",
+                "DualStackDomainName", "my-bucket.s3.dualstack.us-east-1.amazonaws.com",
                 "WebsiteURL", "http://my-bucket.s3-website.us-east-1.amazonaws.com",
                 "BucketName", "my-bucket"), r.getAttributes());
     }

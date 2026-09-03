@@ -193,6 +193,43 @@ public class SesTenantService {
                 .orElseThrow(() -> tenantNotFound(tenantName));
     }
 
+    // ──────────────────────── Tenant-scoped sending (Phase 4) ────────────────────────
+    // Behavior and messages probe-confirmed against real AWS us-east-1, 2026-08-30.
+
+    /**
+     * Resolves the tenant for a send. The not-found wording differs from the management operations:
+     * no angle brackets, and the account id is included.
+     */
+    public Tenant tenantForSending(String tenantName, String region, String accountId) {
+        // Unreachable through the facade (which treats a null TenantName as a non-tenant send), but
+        // a public helper should fail the AWS way — same guard as runWithTenant.
+        if (tenantName == null || tenantName.isBlank()) {
+            throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
+        }
+        return tenantStore.get(tenantKey(region, tenantName))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Tenant " + tenantName + " for AwsAccountId " + accountId + " not found.", 404));
+    }
+
+    /**
+     * The send gate: every resource a tenant send uses (From identity, configuration set, template)
+     * must be associated with the tenant, or AWS refuses the send with a 403. The bracket list
+     * carries every missing ARN (the plural is AWS's own wording even for a single resource; on the
+     * wire AWS spells the body key "Message" — Floci renders its usual error shape instead).
+     */
+    public void requireResourcesAssociated(Tenant tenant, List<AssociationResource> resources,
+                                           String region) {
+        List<String> missing = resources.stream()
+                .filter(ref -> associationStore
+                        .get(associationKey(region, tenant.tenantId(), ref)).isEmpty())
+                .map(AssociationResource::arn)
+                .toList();
+        if (!missing.isEmpty()) {
+            throw new AwsException("AccessDeniedException",
+                    "Tenant not associated with resources [" + String.join(", ", missing) + "].", 403);
+        }
+    }
+
     /**
      * Parses and format-validates a resource ARN for the association operations. Check order matches
      * the observed AWS precedence: not an ARN at all, then not an SES ARN, then an unsupported SES

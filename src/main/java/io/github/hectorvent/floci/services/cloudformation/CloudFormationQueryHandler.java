@@ -246,6 +246,7 @@ public class CloudFormationQueryHandler {
                     .elem("StackName", cs.getStackName())
                     .elem("Status", cs.getStatus())
                     .elem("ExecutionStatus", cs.getExecutionStatus())
+                    .elem("StatusReason", cs.getStatusReason())
                     .start("Changes");
             for (CloudFormationService.ResourceChange change : changes) {
                 xml.start("member")
@@ -277,7 +278,7 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         String changeSetName = params.getFirst("ChangeSetName");
         try {
-            cfnService.executeChangeSet(stackName, changeSetName, region);
+            cfnService.executeChangeSetForRequest(stackName, changeSetName, region);
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
@@ -442,17 +443,24 @@ public class CloudFormationQueryHandler {
 
     private Response getTemplate(MultivaluedMap<String, String> params, String region) {
         String stackName = params.getFirst("StackName");
+        String templateStage = params.getFirst("TemplateStage");
         try {
-            String template = cfnService.getTemplate(stackName, region);
-            String xml = new XmlBuilder()
+            String template = cfnService.getTemplate(stackName, templateStage, region);
+            var xml = new XmlBuilder()
                     .start("GetTemplateResponse", CF_NS)
                     .start("GetTemplateResult")
-                    .elem("TemplateBody", template)
-                    .end("GetTemplateResult")
-                    .raw(AwsQueryResponse.responseMetadata())
-                    .end("GetTemplateResponse")
-                    .build();
-            return Response.ok(xml).type("text/xml").build();
+                    .elem("TemplateBody", template);
+
+            xml.start("StagesAvailable");
+            for (String stage : cfnService.templateStagesAvailable()) {
+                xml.elem("member", stage);
+            }
+            xml.end("StagesAvailable");
+
+            xml.end("GetTemplateResult")
+               .raw(AwsQueryResponse.responseMetadata())
+               .end("GetTemplateResponse");
+            return Response.ok(xml.build()).type("text/xml").build();
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
