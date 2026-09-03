@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.neptune.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class NeptuneInstance {
@@ -17,6 +19,7 @@ public class NeptuneInstance {
     private boolean iamDatabaseAuthenticationEnabled;
     private String dbInstanceArn;
     private String dbiResourceId;
+    private Map<String, String> tags = new LinkedHashMap<>();
     private Instant createdAt;
 
     public NeptuneInstance() {}
@@ -52,6 +55,11 @@ public class NeptuneInstance {
 
     public String getDbiResourceId() { return dbiResourceId; }
     public void setDbiResourceId(String dbiResourceId) { this.dbiResourceId = dbiResourceId; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>();
+    }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
