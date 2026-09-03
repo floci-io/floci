@@ -604,6 +604,38 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createFunctionRejectsMultipleArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("multiple-create-architectures");
+        request.put("Architectures", List.of("arm64", "x86_64"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '[arm64, x86_64]' at 'architectures' "
+                + "failed to satisfy constraint: Member must have length less than or equal to 1",
+                error.getMessage());
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsEmptyArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("empty-create-architectures");
+        request.put("Architectures", List.of());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '[]' at 'architectures' "
+                + "failed to satisfy constraint: Member must have length greater than or equal to 1",
+                error.getMessage());
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
     void updateFunctionCodeRejectsUnsupportedArchitectureBeforeMutation() {
         service.createFunction(REGION, baseRequest("unsupported-code-architecture"));
 

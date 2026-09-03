@@ -1506,24 +1506,32 @@ public class LambdaService implements ResourceProvider {
     }
 
     private static List<String> validateArchitectures(Object value) {
-        if (!(value instanceof List<?> architectures) || architectures.isEmpty()) {
+        if (!(value instanceof List<?> architectures)) {
             return null;
         }
-
-        List<String> validated = new ArrayList<>(architectures.size());
-        for (int index = 0; index < architectures.size(); index++) {
-            Object architecture = architectures.get(index);
-            if (!FUNCTION_ARCHITECTURES.contains(architecture)) {
-                throw new AwsException("InvalidParameterValueException",
-                        "1 validation error detected: Value '" + architecture
-                                + "' at 'architectures." + (index + 1) + ".member' "
-                                + "failed to satisfy constraint: Member must satisfy enum value set: "
-                                + FUNCTION_ARCHITECTURES,
-                        400);
-            }
-            validated.add((String) architecture);
+        if (architectures.isEmpty()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '[]' at 'architectures' "
+                            + "failed to satisfy constraint: Member must have length greater than or equal to 1",
+                    400);
         }
-        return validated;
+        if (architectures.size() > 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + architectures + "' at 'architectures' "
+                            + "failed to satisfy constraint: Member must have length less than or equal to 1",
+                    400);
+        }
+
+        Object architecture = architectures.getFirst();
+        if (!FUNCTION_ARCHITECTURES.contains(architecture)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + architecture
+                            + "' at 'architectures.1.member' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: "
+                            + FUNCTION_ARCHITECTURES,
+                    400);
+        }
+        return List.of((String) architecture);
     }
 
     private static void validateFileSystemVpcConfig(List<LambdaFileSystemConfig> fileSystemConfigs,
