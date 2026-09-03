@@ -183,6 +183,32 @@ class NeptuneClusterSettingsIntegrationTest {
 
     @Test
     @Order(6)
+    void unsignedRoleActionsRouteToNeptune() {
+        given().contentType(FORM).formParam("Action", "AddRoleToDBCluster")
+            .formParam("DBClusterIdentifier", ID)
+            .formParam("RoleArn", ROLE_ARN)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<AddRoleToDBClusterResponse"));
+
+        given().contentType(FORM).formParam("Action", "DescribeDBClusters")
+            .formParam("DBClusterIdentifier", ID)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<RoleArn>" + ROLE_ARN + "</RoleArn>"));
+
+        given().contentType(FORM).formParam("Action", "RemoveRoleFromDBCluster")
+            .formParam("DBClusterIdentifier", ID)
+            .formParam("RoleArn", ROLE_ARN)
+        .when().post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(7)
     void describeGlobalClustersIsEmptyOnBothScopes() {
         signedAs("neptune", "DescribeGlobalClusters")
         .when().post("/")
@@ -198,7 +224,7 @@ class NeptuneClusterSettingsIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void deleteIsRefusedWhileDeletionProtectionIsOn() {
         rds("DeleteDBCluster")
             .formParam("DBClusterIdentifier", ID)
@@ -210,7 +236,7 @@ class NeptuneClusterSettingsIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void modifyAppliesTheChangedSettingsOnly() {
         rds("ModifyDBCluster")
             .formParam("DBClusterIdentifier", ID)
@@ -233,7 +259,7 @@ class NeptuneClusterSettingsIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void clusterMembersUseTheDbClusterMemberElement() {
         rds("CreateDBInstance")
             .formParam("DBInstanceIdentifier", INSTANCE_ID)
@@ -260,7 +286,7 @@ class NeptuneClusterSettingsIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void deleteSucceedsOnceDeletionProtectionIsOff() {
         rds("DeleteDBCluster")
             .formParam("DBClusterIdentifier", ID)
