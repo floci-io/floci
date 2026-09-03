@@ -1,18 +1,23 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -332,5 +337,49 @@ class DynamoDbJsonHandlerTest {
 
         assertEquals("None", reasons.get(0).get("Code").asText());
         assertNull(reasons.get(0).get("Message"), "non failed item must not have a Message field");
+    }
+
+    @Test
+    void sseSettingsSurvivePersistentStorageReload(@TempDir Path tempDir) throws Exception {
+        Path tableFile = tempDir.resolve("dynamodb-tables.json");
+        TypeReference<Map<String, TableDefinition>> typeReference = new TypeReference<>() {};
+
+        DynamoDbService persistentService = new DynamoDbService(new PersistentStorage<>(tableFile, typeReference));
+        DynamoDbJsonHandler persistentHandler = new DynamoDbJsonHandler(persistentService, null, null, mapper);
+
+        ObjectNode createRequest = mapper.createObjectNode();
+        createRequest.put("TableName", "PersistedSseTable");
+        ObjectNode keySchemaElement = mapper.createObjectNode();
+        keySchemaElement.put("AttributeName", "pk");
+        keySchemaElement.put("KeyType", "HASH");
+        createRequest.putArray("KeySchema").add(keySchemaElement);
+        ObjectNode attrDef = mapper.createObjectNode();
+        attrDef.put("AttributeName", "pk");
+        attrDef.put("AttributeType", "S");
+        createRequest.putArray("AttributeDefinitions").add(attrDef);
+        createRequest.put("BillingMode", "PAY_PER_REQUEST");
+
+        persistentHandler.handle("CreateTable", createRequest, "us-east-1");
+
+        ObjectNode updateRequest = mapper.createObjectNode();
+        updateRequest.put("TableName", "PersistedSseTable");
+        ObjectNode sseSpec = updateRequest.putObject("SSESpecification");
+        sseSpec.put("Enabled", true);
+        sseSpec.put("SSEType", "KMS");
+        sseSpec.put("KMSMasterKeyId", "arn:aws:kms:us-east-1:000000000000:key/reload-test-key");
+
+        persistentHandler.handle("UpdateTable", updateRequest, "us-east-1");
+
+        // Simulate a process restart: a brand new storage backend instance reading the same file,
+        // independent of the in-memory table object mutated above.
+        PersistentStorage<String, TableDefinition> reloadedStorage = new PersistentStorage<>(tableFile, typeReference);
+        reloadedStorage.load();
+        DynamoDbService reloadedService = new DynamoDbService(reloadedStorage);
+
+        TableDefinition reloadedTable = reloadedService.describeTable("PersistedSseTable", "us-east-1");
+        assertTrue(reloadedTable.isSseEnabled(), "SSE must survive a storage reload");
+        assertEquals("KMS", reloadedTable.getSseType());
+        assertEquals("arn:aws:kms:us-east-1:000000000000:key/reload-test-key",
+                reloadedTable.getKmsMasterKeyArn());
     }
 }

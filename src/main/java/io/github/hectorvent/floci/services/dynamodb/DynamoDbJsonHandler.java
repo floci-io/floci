@@ -25,6 +25,7 @@ public class DynamoDbJsonHandler {
 
     private static final String DEFAULT_ACCOUNT_ID = "000000000000";
     private static final String SSE_TYPE_KMS = "KMS";
+    private static final Set<String> VALID_SSE_TYPES = Set.of("AES256", "KMS");
 
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService dynamoDbStreamService;
@@ -161,6 +162,16 @@ public class DynamoDbJsonHandler {
 
         boolean deletionProtection = request.path("DeletionProtectionEnabled").asBoolean(false);
 
+        // Parsed and validated before createTable below: that call and the stream-enable that
+        // follows it both have side effects, so an invalid SSEType must fail before either runs
+        // rather than after, or ValidationException would leave a real table (and stream) behind.
+        JsonNode sseSpec = request.path("SSESpecification");
+        boolean sseEnabled = !sseSpec.isMissingNode() && sseSpec.path("Enabled").asBoolean(false);
+        String sseType = sseEnabled ? sseSpec.path("SSEType").asText(SSE_TYPE_KMS) : null;
+        if (sseEnabled) {
+            validateSseType(sseType);
+        }
+
         TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,
                 readCapacity, writeCapacity, gsis, lsis, region);
 
@@ -206,11 +217,15 @@ public class DynamoDbJsonHandler {
             table.setStreamViewType(viewType);
         }
 
-        JsonNode sseSpec = request.path("SSESpecification");
-        if (!sseSpec.isMissingNode() && sseSpec.path("Enabled").asBoolean(false)) {
+        if (sseEnabled) {
             table.setSseEnabled(true);
-            table.setSseType(SSE_TYPE_KMS);
-            table.setKmsMasterKeyArn(defaultKmsMasterKeyArn(region));
+            table.setSseType(sseType);
+            if (SSE_TYPE_KMS.equals(sseType)) {
+                JsonNode kmsMasterKeyId = sseSpec.path("KMSMasterKeyId");
+                table.setKmsMasterKeyArn(!kmsMasterKeyId.isMissingNode() && !kmsMasterKeyId.isNull()
+                        ? kmsMasterKeyId.asText()
+                        : defaultKmsMasterKeyArn(region));
+            }
         }
 
         // Everything above mutates the table AFTER createTable stored it, and a persistent
@@ -222,6 +237,15 @@ public class DynamoDbJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
+    }
+
+    private void validateSseType(String sseType) {
+        if (!VALID_SSE_TYPES.contains(sseType)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + sseType
+                    + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [AES256, KMS]", 400);
+        }
     }
 
     private Response handleDeleteTable(JsonNode request, String region) {
@@ -1300,6 +1324,18 @@ public class DynamoDbJsonHandler {
                     tableName, addRegions, removeRegions, updateRegions, region);
         }
 
+        // Parsed and validated up front, same as the replica check above: updateTable and the
+        // mutations that follow it have side effects (persisted throughput/GSI changes, stream
+        // enable/disable), so an invalid SSEType must fail before any of them run rather than
+        // after, or ValidationException would leave a partially-applied update behind.
+        JsonNode sseSpec = request.path("SSESpecification");
+        boolean sseSpecified = !sseSpec.isMissingNode();
+        boolean sseEnabled = sseSpecified && sseSpec.path("Enabled").asBoolean(false);
+        String sseType = sseEnabled ? sseSpec.path("SSEType").asText(SSE_TYPE_KMS) : null;
+        if (sseEnabled) {
+            validateSseType(sseType);
+        }
+
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
                 gsiCreates, gsiDeletes, newAttrDefs, region);
 
@@ -1348,15 +1384,36 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        // Same flush as CreateTable: the stream mutations above land after updateTable's write,
-        // so without this a retargeted view type is rebuilt from the stale persisted value on
-        // restart and records resume the old image shape.
+        if (sseSpecified) {
+            if (sseEnabled) {
+                table.setSseEnabled(true);
+                table.setSseType(sseType);
+                if (SSE_TYPE_KMS.equals(sseType)) {
+                    JsonNode kmsMasterKeyId = sseSpec.path("KMSMasterKeyId");
+                    table.setKmsMasterKeyArn(!kmsMasterKeyId.isMissingNode() && !kmsMasterKeyId.isNull()
+                            ? kmsMasterKeyId.asText()
+                            : defaultKmsMasterKeyArn(region));
+                } else {
+                    table.setKmsMasterKeyArn(null);
+                }
+            } else {
+                table.setSseEnabled(false);
+                table.setSseType(null);
+                table.setKmsMasterKeyArn(null);
+            }
+        }
+
+        // Same flush as CreateTable: the stream and SSE mutations above land after updateTable's
+        // write, so without this a retargeted view type or SSE change is rebuilt from the stale
+        // persisted value on restart. Must run before applyReplicaUpdates below, which re-fetches
+        // the table from storage for its own persist -- a persistent backend serializes on write
+        // rather than holding the live object, so without this flush first, that re-fetch would
+        // see neither the stream nor the SSE mutations above.
         dynamoDbService.persistTable(tableName, table, region);
 
         if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
             table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, updateRegions, region);
         }
-
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
@@ -2046,10 +2103,13 @@ public class DynamoDbJsonHandler {
         if (table.isSseEnabled()) {
             ObjectNode sseDescription = objectMapper.createObjectNode();
             sseDescription.put("Status", "ENABLED");
-            sseDescription.put("SSEType", table.getSseType() != null ? table.getSseType() : SSE_TYPE_KMS);
-            sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
-                    ? table.getKmsMasterKeyArn()
-                    : defaultKmsMasterKeyArn(AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
+            String sseType = table.getSseType() != null ? table.getSseType() : SSE_TYPE_KMS;
+            sseDescription.put("SSEType", sseType);
+            if (SSE_TYPE_KMS.equals(sseType)) {
+                sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
+                        ? table.getKmsMasterKeyArn()
+                        : defaultKmsMasterKeyArn(AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
+            }
             node.set("SSEDescription", sseDescription);
         }
 
