@@ -136,6 +136,10 @@ public class EksClusterManager {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "eks", cluster.getName(), labelAccountId, regionResolver.getDefaultRegion()));
 
+        if (config.services().eks().ecrRegistryMirror() && config.services().ecr().enabled()) {
+            specBuilder.withHostDockerInternalOnLinux();
+        }
+
         // Wire a token-authentication webhook so `aws eks get-token` bearer tokens are validated by
         // Floci and mapped to cluster-admin. The k3s API server POSTs a TokenReview to Floci's
         // _floci/eks/clusters/<cluster-name>/token-webhook endpoint. The kubeconfig is copied into
@@ -527,9 +531,9 @@ public class EksClusterManager {
     /**
      * Generates and injects {@code /etc/rancher/k3s/registries.yaml} into the (created,
      * not-yet-started) k3s container so its containerd can pull images pushed to the Floci ECR
-     * registry. Mirrors every repository hostname the emulator can mint — default account across
-     * the full region catalog, plus the path-style {@code localhost:<port>} form — to the registry
-     * container's in-network endpoint. Public registries are never matched. A failure disables the
+     * registry. Mirrors every repository hostname the emulator can mint: the default account across
+     * the full region catalog and the path-style {@code localhost:<port>} form, to Floci's
+     * in-network data plane. Public registries are never matched. A failure disables the
      * mirror for this cluster but does not abort its startup, matching the webhook contract.
      */
     void injectEcrRegistryMirror(String containerId, String clusterName) {
@@ -547,8 +551,8 @@ public class EksClusterManager {
         if (!regions.contains(config.defaultRegion())) {
             regions.add(config.defaultRegion());
         }
-        String content = buildRegistriesYaml(config.defaultAccountId(), regions,
-                ecrRegistryManager.effectivePort(), ecrRegistryManager.internalEndpoint());
+        String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
+        String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint);
         writeRegistriesYaml(clusterName, content);
         try {
             lifecycleManager.getDockerClient()
@@ -556,8 +560,7 @@ public class EksClusterManager {
                     .withTarInputStream(new ByteArrayInputStream(tarSingleFile(REGISTRIES_TAR_ENTRY, content)))
                     .withRemotePath("/etc")
                     .exec();
-            LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}",
-                    ecrRegistryManager.internalEndpoint(), clusterName);
+            LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}", endpoint, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -598,16 +601,16 @@ public class EksClusterManager {
     /**
      * Builds the k3s registries.yaml content. One mirror entry per hostname-style repository URI
      * ({@code <account>.dkr.ecr.<region>.localhost:<port>}) plus one for the path-style form
-     * ({@code localhost:<port>}), all pointing at the registry's in-network endpoint. k3s supports
+     * ({@code localhost:<port>}), all pointing at Floci's in-network data plane. k3s supports
      * no partial wildcards and a {@code "*"} catch-all would also intercept public registries,
      * so the hostnames are enumerated explicitly.
      */
-    static String buildRegistriesYaml(String accountId, List<String> regions, int hostPort, String endpoint) {
+    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort, String endpoint) {
         StringBuilder yaml = new StringBuilder("mirrors:\n");
         for (String region : regions) {
-            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + hostPort, endpoint);
+            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort, endpoint);
         }
-        appendMirror(yaml, "localhost:" + hostPort, endpoint);
+        appendMirror(yaml, "localhost:" + dataPlanePort, endpoint);
         return yaml.toString();
     }
 

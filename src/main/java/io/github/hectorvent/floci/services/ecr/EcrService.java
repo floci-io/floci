@@ -73,25 +73,43 @@ public class EcrService implements ResourceProvider {
     }
 
     /**
-     * Recreates {@link Repository} metadata entries for any internal-namespaced
-     * repos found in the registry catalog that are missing from local storage.
-     * Internal names are of the form {@code <account>/<region>/<repoName>}.
+     * Recreates {@link Repository} metadata entries for registry namespaces found in the catalog.
+     * Namespaces created by Floci are {@code <account>/<region>/<repoName>}; pre-proxy registry
+     * namespaces are recovered for the default account and region without moving image storage.
      */
     void reconcileFromCatalog(List<String> catalog) {
         if (catalog == null || catalog.isEmpty()) {
             return;
         }
         int recreated = 0;
-        for (String internal : catalog) {
-            String[] parts = internal.split("/", 3);
-            if (parts.length < 3) {
+        for (String registryRepositoryName : catalog) {
+            String defaultAccount = regionResolver.getAccountId();
+            String defaultRegion = regionResolver.getDefaultRegion();
+            String legacyKey = key(defaultRegion, defaultAccount, registryRepositoryName);
+            var legacyRepository = repoStore.get(legacyKey);
+            if (legacyRepository.isPresent()) {
+                Repository repo = legacyRepository.get();
+                repo.setRepositoryUri(registryManager.getRepositoryUri(
+                        defaultAccount, defaultRegion, repo.getRepositoryName()));
+                repo.setRegistryRepositoryName(registryRepositoryName);
+                repoStore.put(legacyKey, repo);
                 continue;
             }
-            String account = parts[0];
-            String region = parts[1];
-            String repoName = parts[2];
+            String[] parts = registryRepositoryName.split("/", 3);
+            boolean namespaced = parts.length == 3 && parts[0].matches("[0-9]{12}")
+                    && parts[1].matches("[a-z0-9-]+");
+            String account = namespaced ? parts[0] : defaultAccount;
+            String region = namespaced ? parts[1] : defaultRegion;
+            String repoName = namespaced ? parts[2] : registryRepositoryName;
             String key = key(region, account, repoName);
-            if (repoStore.get(key).isPresent()) {
+            var existing = repoStore.get(key);
+            if (existing.isPresent()) {
+                Repository repo = existing.get();
+                repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repoName));
+                if (!namespaced) {
+                    repo.setRegistryRepositoryName(registryRepositoryName);
+                }
+                repoStore.put(key, repo);
                 continue;
             }
             Repository repo = new Repository();
@@ -99,6 +117,9 @@ public class EcrService implements ResourceProvider {
             repo.setRegistryId(account);
             repo.setRepositoryArn(AwsArnUtils.Arn.of("ecr", region, account, "repository/" + repoName).toString());
             repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repoName));
+            if (!namespaced) {
+                repo.setRegistryRepositoryName(registryRepositoryName);
+            }
             repo.setCreatedAt(Instant.now());
             repoStore.put(key, repo);
             recreated++;
@@ -166,14 +187,16 @@ public class EcrService implements ResourceProvider {
         String prefix = region + "::" + account + "::";
 
         if (repositoryNames == null || repositoryNames.isEmpty()) {
-            return repoStore.scan(k -> k.startsWith(prefix));
+            return repoStore.scan(k -> k.startsWith(prefix)).stream()
+                    .map(repo -> refreshRepositoryUri(repo, region))
+                    .toList();
         }
 
         List<Repository> out = new ArrayList<>();
         for (String name : repositoryNames) {
             String key = key(region, account, name);
             Repository repo = repoStore.get(key).orElseThrow(() -> notFound(name, account));
-            out.add(repo);
+            out.add(refreshRepositoryUri(repo, region));
         }
         return out;
     }
@@ -190,7 +213,7 @@ public class EcrService implements ResourceProvider {
         String key = key(region, account, repositoryName);
         Repository repo = repoStore.get(key).orElseThrow(() -> notFound(repositoryName, account));
 
-        List<String> tags = listTagsBestEffort(account, region, repositoryName);
+        List<String> tags = listTagsBestEffort(repo, region);
         if (!force && !tags.isEmpty()) {
             throw new AwsException("RepositoryNotEmptyException",
                     "The repository with name '" + repositoryName
@@ -199,7 +222,7 @@ public class EcrService implements ResourceProvider {
         }
 
         if (force) {
-            deleteRepositoryStorage(account, region, repositoryName);
+            deleteRepositoryStorage(registryRepositoryName(repo, region));
         }
 
         repoStore.delete(key);
@@ -235,7 +258,7 @@ public class EcrService implements ResourceProvider {
     public List<ImageIdentifier> listImages(String repositoryName, String registryId, String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = registryRepositoryName(repo, region);
         try {
             RegistryHttpClient http = registryManager.httpClient();
             List<String> tags = http.listTags(internal);
@@ -257,7 +280,7 @@ public class EcrService implements ResourceProvider {
                                                 String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = registryRepositoryName(repo, region);
         RegistryHttpClient http = registryManager.httpClient();
 
         List<String> refs = new ArrayList<>();
@@ -332,7 +355,7 @@ public class EcrService implements ResourceProvider {
                                               String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = registryRepositoryName(repo, region);
         RegistryHttpClient http = registryManager.httpClient();
 
         List<Image> images = new ArrayList<>();
@@ -372,7 +395,7 @@ public class EcrService implements ResourceProvider {
                                                     String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = registryRepositoryName(repo, region);
         RegistryHttpClient http = registryManager.httpClient();
 
         List<ImageIdentifier> deleted = new ArrayList<>();
@@ -417,6 +440,23 @@ public class EcrService implements ResourceProvider {
         repo.setImageTagMutability(mutability);
         repoStore.put(key(region, repo.getRegistryId(), repositoryName), repo);
         return repo;
+    }
+
+    /** Returns whether the repository rejects a second manifest write for an existing tag. */
+    public boolean isImageTagImmutable(String repositoryName, String registryId, String region) {
+        String account = effectiveAccount(registryId);
+        return repoStore.get(key(region, account, repositoryName))
+                .map(Repository::getImageTagMutability)
+                .filter("IMMUTABLE"::equals)
+                .isPresent();
+    }
+
+    /** Returns the physical registry namespace selected for an ECR repository. */
+    public String registryRepositoryName(String repositoryName, String registryId, String region) {
+        String account = effectiveAccount(registryId);
+        return repoStore.get(key(region, account, repositoryName))
+                .map(repo -> registryRepositoryName(repo, region))
+                .orElseGet(() -> registryManager.internalRepoName(account, region, repositoryName));
     }
 
     public void tagResource(String repoName, String registryId, Map<String, String> tags, String region) {
@@ -525,7 +565,8 @@ public class EcrService implements ResourceProvider {
 
     private Repository requireRepo(String name, String registryId, String region) {
         String account = effectiveAccount(registryId);
-        return repoStore.get(key(region, account, name)).orElseThrow(() -> notFound(name, account));
+        Repository repo = repoStore.get(key(region, account, name)).orElseThrow(() -> notFound(name, account));
+        return refreshRepositoryUri(repo, region);
     }
 
     private static String imageMetaKey(String region, String account, String repoName, String digest) {
@@ -533,21 +574,35 @@ public class EcrService implements ResourceProvider {
     }
 
 
-    private List<String> listTagsBestEffort(String account, String region, String repoName) {
+    private Repository refreshRepositoryUri(Repository repo, String region) {
+        repo.setRepositoryUri(registryManager.getRepositoryUri(repo.getRegistryId(), region, repo.getRepositoryName()));
+        repoStore.put(key(region, repo.getRegistryId(), repo.getRepositoryName()), repo);
+        return repo;
+    }
+
+    private String registryRepositoryName(Repository repo, String region) {
+        String registryRepositoryName = repo.getRegistryRepositoryName();
+        if (registryRepositoryName != null && !registryRepositoryName.isBlank()) {
+            return registryRepositoryName;
+        }
+        return registryManager.internalRepoName(repo.getRegistryId(), region, repo.getRepositoryName());
+    }
+
+    private List<String> listTagsBestEffort(Repository repo, String region) {
         try {
-            return registryManager.httpClient()
-                    .listTags(registryManager.internalRepoName(account, region, repoName));
+            return registryManager.httpClient().listTags(registryRepositoryName(repo, region));
         } catch (Exception e) {
-            LOG.debugv("Could not list tags for {0} (registry not available): {1}", repoName, e.getMessage());
+            LOG.debugv("Could not list tags for {0} (registry not available): {1}",
+                    repo.getRepositoryName(), e.getMessage());
             return List.of();
         }
     }
 
-    private void deleteRepositoryStorage(String account, String region, String repositoryName) {
+    private void deleteRepositoryStorage(String registryRepositoryName) {
         try {
-            registryManager.deleteRepositoryStorage(account, region, repositoryName);
+            registryManager.deleteRepositoryStorage(registryRepositoryName);
         } catch (Exception e) {
-            throw registryFailure(repositoryName, e);
+            throw registryFailure(registryRepositoryName, e);
         }
     }
 

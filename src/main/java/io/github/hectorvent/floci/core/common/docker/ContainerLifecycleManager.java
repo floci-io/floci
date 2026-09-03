@@ -807,7 +807,10 @@ public class ContainerLifecycleManager {
                     hostPort = portAllocator.allocateAny();
                 }
 
-                ports.bind(ExposedPort.tcp(containerPort), Ports.Binding.bindPort(hostPort));
+                Ports.Binding binding = spec.loopbackPortBindings().contains(containerPort)
+                        ? Ports.Binding.bindIpAndPort("127.0.0.1", hostPort)
+                        : Ports.Binding.bindPort(hostPort);
+                ports.bind(ExposedPort.tcp(containerPort), binding);
                 LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort), String.valueOf(hostPort));
             }
             hostConfig.withPortBindings(ports);

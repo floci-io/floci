@@ -17,6 +17,7 @@ public class Repository {
     private String registryId;
     private String repositoryName;
     private String repositoryUri;
+    private String registryRepositoryName;
     private Instant createdAt;
     private String imageTagMutability = "MUTABLE";
     private boolean scanOnPush;
@@ -39,6 +40,11 @@ public class Repository {
 
     public String getRepositoryUri() { return repositoryUri; }
     public void setRepositoryUri(String repositoryUri) { this.repositoryUri = repositoryUri; }
+
+    public String getRegistryRepositoryName() { return registryRepositoryName; }
+    public void setRegistryRepositoryName(String registryRepositoryName) {
+        this.registryRepositoryName = registryRepositoryName;
+    }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

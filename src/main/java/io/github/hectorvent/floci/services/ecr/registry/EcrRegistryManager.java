@@ -16,6 +16,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerPort;
 import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -116,7 +117,7 @@ public class EcrRegistryManager {
 
     /** Returns the docker-pullable repository URI for the given account/region/name. */
     public String getRepositoryUri(String accountId, String region, String repoName) {
-        int port = effectivePort();
+        int port = config.port();
         String style = config.services().ecr().uriStyle();
         if ("path".equalsIgnoreCase(style)) {
             return "localhost:" + port + "/" + accountId + "/" + region + "/" + repoName;
@@ -127,7 +128,8 @@ public class EcrRegistryManager {
     /** Returns the proxy endpoint a docker daemon should log into for any ECR repo. */
     public String getProxyEndpoint() {
         String scheme = config.services().ecr().tlsEnabled() ? "https" : "http";
-        return scheme + "://localhost:" + effectivePort();
+        return scheme + "://" + regionResolver.getAccountId() + ".dkr.ecr."
+                + regionResolver.getDefaultRegion() + ".localhost:" + config.port();
     }
 
     /** Returns the effective registry port. Stable across calls once {@link #ensureStarted} runs. */
@@ -178,9 +180,13 @@ public class EcrRegistryManager {
         // Check for existing container to adopt
         var existing = lifecycleManager.findByName(name);
         if (existing.isPresent()) {
-            adoptExisting(existing.get());
-            runReconcileOnce();
-            return;
+            if (hasLoopbackBinding(existing.get())) {
+                adoptExisting(existing.get());
+                runReconcileOnce();
+                return;
+            }
+            LOG.infov("Recreating ECR backing registry {0} with a loopback-only port binding", name);
+            lifecycleManager.stopAndRemove(existing.get().getId(), null);
         }
 
         // Allocate port
@@ -194,14 +200,15 @@ public class EcrRegistryManager {
             // Build environment variables
             List<String> env = new ArrayList<>(List.of(
                     "REGISTRY_STORAGE_DELETE_ENABLED=true",
-                    "REGISTRY_HTTP_ADDR=0.0.0.0:" + CONTAINER_INTERNAL_PORT
+                    "REGISTRY_HTTP_ADDR=0.0.0.0:" + CONTAINER_INTERNAL_PORT,
+                    "REGISTRY_HTTP_RELATIVEURLS=true"
             ));
 
             // Build container spec
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                     .withName(name)
                     .withEnv(env)
-                    .withPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
+                    .withLoopbackPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
                     .withDockerNetwork(resolveRegistryDockerNetwork())
                     .withLogRotation()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
@@ -368,11 +375,15 @@ public class EcrRegistryManager {
 
     /** Removes repository manifest storage without removing descendant repository directories. */
     public synchronized void deleteRepositoryStorage(String accountId, String region, String repositoryName) {
+        deleteRepositoryStorage(internalRepoName(accountId, region, repositoryName));
+    }
+
+    /** Removes storage for a registry namespace selected by the ECR control plane. */
+    public synchronized void deleteRepositoryStorage(String repository) {
         ensureStarted();
         if (!started || containerId == null) {
             throw new IllegalStateException("ECR registry is not started");
         }
-        String repository = internalRepoName(accountId, region, repositoryName);
         String path = repositoryStoragePath(repository);
         StringBuilder output = new StringBuilder();
         DockerClient dockerClient = lifecycleManager.getDockerClient();
@@ -466,9 +477,8 @@ public class EcrRegistryManager {
         this.containerId = existing.getId();
         try {
             ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
-            // getRepositoryUri/getProxyEndpoint are consumed by the host-side docker
-            // daemon, so hostPort must be the published binding — adopt's endpoint
-            // resolves to the container-internal port when Floci runs inside Docker.
+            // The control plane reaches the backing registry through this published loopback
+            // binding when Floci runs on the host. In Docker, httpClient() uses container DNS.
             var published = info.publishedHostPort(CONTAINER_INTERNAL_PORT);
             if (published.isPresent()) {
                 this.hostPort = published.getAsInt();
@@ -486,6 +496,23 @@ public class EcrRegistryManager {
             LOG.warnv("Failed to adopt existing ECR registry container: {0}", e.getMessage());
             this.containerId = null;
         }
+    }
+
+    private static boolean hasLoopbackBinding(Container container) {
+        ContainerPort[] ports = container.getPorts();
+        if (ports == null) {
+            return false;
+        }
+        boolean found = false;
+        for (ContainerPort port : ports) {
+            if (port.getPrivatePort() != null && port.getPrivatePort() == CONTAINER_INTERNAL_PORT) {
+                if (port.getPublicPort() == null || !"127.0.0.1".equals(port.getIp())) {
+                    return false;
+                }
+                found = true;
+            }
+        }
+        return found;
     }
 
     private void ensureDataDir() {
