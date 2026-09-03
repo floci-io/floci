@@ -223,6 +223,10 @@ public class SnsService implements Resettable, ResourceProvider {
         return topicStore.scan(k -> k.startsWith(prefix));
     }
 
+    public boolean topicExists(String topicArn, String region) {
+        return topicStore.get(topicKey(region, topicArn)).isPresent();
+    }
+
     public Map<String, String> getTopicAttributes(String topicArn, String region) {
         String key = topicKey(region, topicArn);
         Topic topic = topicStore.get(key)

@@ -665,8 +665,37 @@ resource "aws_ses_active_receipt_rule_set" "compat" {
   rule_set_name = aws_ses_receipt_rule_set.compat.rule_set_name
 }
 
+resource "aws_ses_receipt_rule" "compat" {
+  rule_set_name = aws_ses_receipt_rule_set.compat.rule_set_name
+  name          = "floci-compat-rule"
+  enabled       = true
+  scan_enabled  = true
+  tls_policy    = "Optional"
+  recipients    = ["compat@example.com"]
+
+  add_header_action {
+    header_name  = "X-Floci-Compat"
+    header_value = "true"
+    position     = 1
+  }
+
+  sns_action {
+    topic_arn = aws_sns_topic.events.arn
+    position  = 2
+  }
+
+  stop_action {
+    scope    = "RuleSet"
+    position = 3
+  }
+}
+
 output "ses_rule_set_name" {
   value = aws_ses_receipt_rule_set.compat.rule_set_name
+}
+
+output "ses_receipt_rule_name" {
+  value = aws_ses_receipt_rule.compat.name
 }
 
 # -- IAM managed-policy attachment ---------------------------------------------

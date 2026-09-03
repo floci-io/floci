@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
+import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TopicPreference;
@@ -1293,6 +1294,31 @@ public class SesService {
 
     public ReceiptRuleSet describeActiveReceiptRuleSet(String region) {
         return receiptRuleService.describeActiveReceiptRuleSet(region);
+    }
+
+    // The bounce-sender check needs identity state; the rule domain receives it as a predicate
+    // bound here, keeping SesIdentityService out of its constructor surface.
+
+    public void createReceiptRule(String ruleSetName, ReceiptRule rule, String after, String region) {
+        receiptRuleService.createReceiptRule(ruleSetName, rule, after, region,
+                sender -> identityService.isVerifiedSender(sender, region));
+    }
+
+    public ReceiptRule describeReceiptRule(String ruleSetName, String ruleName, String region) {
+        return receiptRuleService.describeReceiptRule(ruleSetName, ruleName, region);
+    }
+
+    public void updateReceiptRule(String ruleSetName, ReceiptRule rule, String region) {
+        receiptRuleService.updateReceiptRule(ruleSetName, rule, region,
+                sender -> identityService.isVerifiedSender(sender, region));
+    }
+
+    public void deleteReceiptRule(String ruleSetName, String ruleName, String region) {
+        receiptRuleService.deleteReceiptRule(ruleSetName, ruleName, region);
+    }
+
+    public void setReceiptRulePosition(String ruleSetName, String ruleName, String after, String region) {
+        receiptRuleService.setReceiptRulePosition(ruleSetName, ruleName, after, region);
     }
 
     // ──────────────────────── Dedicated IP Pools ────────────────────────

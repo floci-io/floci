@@ -3542,6 +3542,10 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    public boolean bucketExists(String bucketName) {
+        return resolveBucket(bucketName).isPresent();
+    }
+
     /**
      * Resolves a bucket for existence/access. With {@code globalBucketNamespace} enabled, the
      * lookup spans every account's partition (AWS bucket names are globally unique and reachable

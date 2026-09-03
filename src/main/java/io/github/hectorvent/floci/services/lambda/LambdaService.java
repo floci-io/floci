@@ -482,6 +482,20 @@ public class LambdaService implements ResourceProvider {
                         "Function not found: " + functionName, 404));
     }
 
+    public boolean functionExists(String region, String functionName) {
+        try {
+            // The qualifier-aware read resolves an embedded alias/version and enforces the ARN's
+            // region, so a qualified reference to a nonexistent version does not pass just
+            // because the base function exists.
+            getFunction(region, functionName, null);
+            return true;
+        } catch (AwsException e) {
+            // Covers both a plain miss and a name/ARN the resolver rejects; the caller only
+            // needs a yes/no answer, so the specific rejection reason is intentionally dropped.
+            return false;
+        }
+    }
+
     /**
      * Reads a function, honouring a {@code Qualifier} that selects a published version or an alias.
      *

@@ -481,4 +481,14 @@ class SnsServiceTest {
         assertTrue(snsService.matchesFilterPolicy(sub, null, matching));
         assertFalse(snsService.matchesFilterPolicy(sub, null, nonMatching));
     }
+
+    @Test
+    void topicExists_reportsPresenceWithoutThrowing() {
+        Topic topic = snsService.createTopic("exists-topic", null, null, REGION);
+        assertTrue(snsService.topicExists(topic.getTopicArn(), REGION));
+        assertFalse(snsService.topicExists(topic.getTopicArn(), "eu-west-1"));
+        assertFalse(snsService.topicExists(
+                "arn:aws:sns:us-east-1:000000000000:ghost-topic", REGION));
+    }
+
 }

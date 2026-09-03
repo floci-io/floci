@@ -576,7 +576,9 @@ public class AwsQueryController {
             "UpdateConfigurationSetReputationMetricsEnabled",
             "PutConfigurationSetDeliveryOptions",
             "CreateReceiptRuleSet", "DescribeReceiptRuleSet", "ListReceiptRuleSets",
-            "DeleteReceiptRuleSet", "SetActiveReceiptRuleSet", "DescribeActiveReceiptRuleSet"
+            "DeleteReceiptRuleSet", "SetActiveReceiptRuleSet", "DescribeActiveReceiptRuleSet",
+            "CreateReceiptRule", "DescribeReceiptRule", "UpdateReceiptRule",
+            "DeleteReceiptRule", "SetReceiptRulePosition"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(

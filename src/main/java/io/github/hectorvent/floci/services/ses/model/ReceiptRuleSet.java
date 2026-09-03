@@ -5,12 +5,14 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * A SES v1 receipt rule set. Floci stores it inertly: there is no inbound-mail endpoint, so a rule
- * set never holds any receipt rules and performs no mail routing. It exists only so the management
- * API (create / describe / list / delete and set/describe active) round-trips, which is enough to
- * unblock tools like Terraform that declare a rule set during bootstrap.
+ * A SES v1 receipt rule set. Floci stores it inertly: there is no inbound-mail endpoint, so the
+ * receipt rules a set holds route no mail. The management API (rule set and rule CRUD, rule
+ * positioning, set/describe active) round-trips, which is enough to unblock tools like Terraform
+ * that declare receipt rules during bootstrap.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -26,6 +28,9 @@ public class ReceiptRuleSet {
     // the active set separately and does not surface this flag on the rule-set object itself.
     @JsonProperty("Active")
     private boolean active;
+
+    @JsonProperty("Rules")
+    private List<ReceiptRule> rules = new ArrayList<>();
 
     public ReceiptRuleSet() {
     }
@@ -57,5 +62,16 @@ public class ReceiptRuleSet {
 
     public void setActive(boolean active) {
         this.active = active;
+    }
+
+    public List<ReceiptRule> getRules() {
+        if (rules == null) {
+            rules = new ArrayList<>();
+        }
+        return rules;
+    }
+
+    public void setRules(List<ReceiptRule> rules) {
+        this.rules = rules;
     }
 }

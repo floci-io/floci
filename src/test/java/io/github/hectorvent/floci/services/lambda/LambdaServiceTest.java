@@ -1435,4 +1435,26 @@ class LambdaServiceTest {
                 "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:other-region-fn"
         )));
     }
+
+    @Test
+    void functionExists_resolvesQualifiersAndRegions() {
+        service.createFunction(REGION, baseRequest("exists-fn"));
+        service.publishVersion(REGION, "exists-fn", null);
+
+        assertTrue(service.functionExists(REGION, "exists-fn"));
+        assertTrue(service.functionExists(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:exists-fn"));
+        assertTrue(service.functionExists(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:exists-fn:1"));
+
+        assertFalse(service.functionExists(REGION, "ghost-fn"));
+        // A qualified reference to a version that was never published must not pass just
+        // because the base function exists.
+        assertFalse(service.functionExists(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:exists-fn:5"));
+        // An ARN whose region disagrees with the request region does not resolve.
+        assertFalse(service.functionExists(REGION,
+                "arn:aws:lambda:eu-west-1:000000000000:function:exists-fn"));
+    }
+
 }
