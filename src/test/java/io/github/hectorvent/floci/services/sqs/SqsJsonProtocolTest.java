@@ -596,7 +596,7 @@ class SqsJsonProtocolTest {
             .extract().jsonPath().getString("QueueUrl");
 
         try {
-            for (String invalid : new String[]{"-1", "21", "\"abc\""}) {
+            for (String invalid : new String[]{"-1", "21", "1.5", "\"abc\""}) {
                 given()
                     .contentType(CONTENT_TYPE)
                     .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")

@@ -244,7 +244,7 @@ public class SqsJsonHandler {
         if (node.isMissingNode() || node.isNull()) {
             return null;
         }
-        if (!node.canConvertToInt()) {
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
             throw new AwsException("InvalidParameterValue",
                     "Value " + node.asText() + " for parameter " + field + " is invalid. Reason: Must be an integer.", 400);
         }

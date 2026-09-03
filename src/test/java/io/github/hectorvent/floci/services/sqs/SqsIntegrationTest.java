@@ -735,7 +735,7 @@ class SqsIntegrationTest {
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
 
         try {
-            for (String invalid : new String[]{"-1", "21", "abc"}) {
+            for (String invalid : new String[]{"-1", "21", "1.5", "abc"}) {
                 given()
                     .contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "ReceiveMessage")
