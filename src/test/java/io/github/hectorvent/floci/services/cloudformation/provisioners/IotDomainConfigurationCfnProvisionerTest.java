@@ -400,12 +400,16 @@ class IotDomainConfigurationCfnProvisionerTest {
     @Test
     void replacementWhosePriorCannotBeDeletedRemovesTheNewConfigurationAndReEnablesThePrior() {
         String oldArn = "arn:aws:iot:us-east-1:000000000000:domainconfiguration/old-name/aaaaa";
-        // Seen ENABLED when looked up and when deleted, then DISABLED after that delete failed
-        // half way, which is the state the unwind has to reverse.
-        when(service.describeDomainConfiguration("old-name", REGION))
-                .thenReturn(stored("old-name", oldArn, "iot.example.com", "ENABLED"))
-                .thenReturn(stored("old-name", oldArn, "iot.example.com", "ENABLED"))
-                .thenReturn(stored("old-name", oldArn, "iot.example.com", "DISABLED"));
+        // The store hands out its live object, so the disable that precedes the delete changes the
+        // very instance the provisioner captured as the prior. The status it saw at the start is
+        // what the unwind must go back to.
+        IotDomainConfiguration old = stored("old-name", oldArn, "iot.example.com", "ENABLED");
+        when(service.describeDomainConfiguration("old-name", REGION)).thenReturn(old);
+        when(service.updateDomainConfiguration(eq("old-name"), any(), eq(REGION))).thenAnswer(inv -> {
+            JsonNode body = inv.getArgument(1);
+            old.setDomainConfigurationStatus(body.path("domainConfigurationStatus").asText());
+            return old;
+        });
         when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
                 .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
         when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
@@ -423,6 +427,7 @@ class IotDomainConfigurationCfnProvisionerTest {
         order.verify(service).deleteDomainConfiguration(NAME, REGION);
         order.verify(service).updateDomainConfiguration(eq("old-name"),
                 argThat(body -> "ENABLED".equals(body.path("domainConfigurationStatus").asText())), eq(REGION));
+        assertEquals("ENABLED", old.getDomainConfigurationStatus());
         assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
         assertEquals("old-name", r.getPhysicalId());
         assertEquals(oldArn, r.getAttributes().get("Arn"));
@@ -457,6 +462,25 @@ class IotDomainConfigurationCfnProvisionerTest {
         assertTrue(reason.contains(NAME), reason);
         assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
         verify(service, never()).deleteDomainConfiguration(any(), any());
+    }
+
+    @Test
+    void explicitNameReplacementWhoseCreateUnexpectedlySucceedsKeepsTheNewConfiguration() {
+        // Under an explicit name the create normally fails with ResourceAlreadyExistsException. If
+        // the prior vanished in between and the create went through, the configuration just
+        // created must not be removed as if it were the prior.
+        when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "old.example.com", "ENABLED"));
+        when(service.createDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        StackResource r = resource();
+
+        provisioner.provision(r, customDomainProps(NAME), ctx(NAME));
+
+        verify(service, never()).deleteDomainConfiguration(any(), any());
+        verify(service, never()).updateDomainConfiguration(any(), any(), any());
+        assertEquals(NAME, r.getPhysicalId());
+        assertEquals(Map.of("Arn", ARN, "DomainType", "CUSTOMER_MANAGED", "ServerCertificates", SERVER_CERTIFICATES_JSON),
+                r.getAttributes());
     }
 
     @Test

@@ -66,6 +66,9 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
         // there is no generic replacement flow, so a renamed or replaced configuration must not
         // outlive the stack that created it.
         IotDomainConfiguration prior = ctx.isUpdate() ? findExisting(ctx.priorPhysicalId(), region) : null;
+        // The store hands out its live record, and disabling the prior on the way to deleting it
+        // changes that record, so the status a failed replacement has to go back to is kept here.
+        String priorStatus = prior == null ? null : prior.getDomainConfigurationStatus();
         boolean sameConfiguration = prior != null && name.equals(prior.getDomainConfigurationName());
         if (sameConfiguration && sameCreateOnlyProperties(prior, request)) {
             IotDomainConfiguration updated = domainConfigurationService.updateDomainConfiguration(
@@ -93,12 +96,15 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
             if ("DISABLED".equals(status)) {
                 record(r, name, domainConfigurationService.updateDomainConfiguration(name, statusBody("DISABLED"), region));
             }
-            if (prior != null) {
+            // Only a prior under another name is removed. Under the same name the create above
+            // normally fails; if it went through because the prior vanished in between, the
+            // configuration just created is the one to keep.
+            if (prior != null && !name.equals(prior.getDomainConfigurationName())) {
                 delete(r.getResourceType(), prior.getDomainConfigurationName(), region);
             }
         } catch (RuntimeException failure) {
             if (prior != null) {
-                unwindReplacement(r, prior, name, region, failure);
+                unwindReplacement(r, prior, priorStatus, name, region, failure);
             }
             throw failure;
         }
@@ -133,12 +139,12 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
      * failure, so a cleanup failure is attached to it and recorded as a rollback failure, which
      * makes the stack end in UPDATE_ROLLBACK_FAILED rather than claim the prior one is intact.
      */
-    private void unwindReplacement(StackResource r, IotDomainConfiguration prior, String name, String region,
-                                   RuntimeException failure) {
+    private void unwindReplacement(StackResource r, IotDomainConfiguration prior, String priorStatus, String name,
+                                   String region, RuntimeException failure) {
         try {
             delete(r.getResourceType(), name, region);
             IotDomainConfiguration priorNow = findExisting(prior.getDomainConfigurationName(), region);
-            if (priorNow != null && "ENABLED".equals(prior.getDomainConfigurationStatus())
+            if (priorNow != null && "ENABLED".equals(priorStatus)
                     && !"ENABLED".equals(priorNow.getDomainConfigurationStatus())) {
                 domainConfigurationService.updateDomainConfiguration(
                         prior.getDomainConfigurationName(), statusBody("ENABLED"), region);
