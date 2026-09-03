@@ -28,6 +28,7 @@ import org.jboss.logging.Logger;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.PBEParameterSpec;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigInteger;
@@ -54,6 +55,8 @@ public class CertificateGenerator {
     private static final String ISSUER_DN = "CN=Amazon,OU=Server CA 1B,O=Amazon,C=US";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final String PBE_ALGORITHM = "PBEWithHmacSHA256AndAES_256";
+    private static final int PBE_SALT_BYTES = 16;
+    private static final int PBE_ITERATIONS = 4096;
 
     /**
      * Pattern matching IPv4 addresses (e.g. 192.168.1.100) and IPv6 addresses
@@ -261,13 +264,16 @@ public class CertificateGenerator {
             PrivateKey privateKey = parsePrivateKey(privateKeyPem);
 
             // PBES2 with AES-256-CBC, run through the JDK so no JCE provider has to be
-            // registered. The JDK derives the key with PBKDF2 over HMAC-SHA256 and 4096
-            // iterations, where BouncyCastle defaulted to HMAC-SHA1 and 1024. The ASN.1
-            // below only wraps the result, so it needs no provider either.
+            // registered. The algorithm name fixes the PBKDF2 PRF to HMAC-SHA256, and the
+            // salt and iteration count are passed explicitly so the output does not depend
+            // on provider defaults. The ASN.1 below only wraps the result, so it needs no
+            // provider either.
             var secretKey = SecretKeyFactory.getInstance(PBE_ALGORITHM)
                 .generateSecret(new PBEKeySpec(passphrase.toCharArray()));
+            var salt = new byte[PBE_SALT_BYTES];
+            SECURE_RANDOM.nextBytes(salt);
             var cipher = Cipher.getInstance(PBE_ALGORITHM);
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, new PBEParameterSpec(salt, PBE_ITERATIONS));
             var ciphertext = cipher.doFinal(privateKey.getEncoded());
 
             var scheme = new AlgorithmIdentifier(
