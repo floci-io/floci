@@ -748,24 +748,7 @@ public class DynamoDbService implements ResourceProvider {
             }
 
             // Reject any attempt to modify a key attribute
-            String pkName = table.getPartitionKeyName();
-            JsonNode origPk = key.get(pkName);
-            JsonNode newPk = item.get(pkName);
-            if (origPk != null && newPk != null && !origPk.equals(newPk)) {
-                throw new AwsException("ValidationException",
-                        "One or more parameter values were invalid: Cannot update attribute " + pkName
-                        + ". This attribute is part of the key", 400);
-            }
-            String skName = table.getSortKeyName();
-            if (skName != null) {
-                JsonNode origSk = key.get(skName);
-                JsonNode newSk = item.get(skName);
-                if (origSk != null && newSk != null && !origSk.equals(newSk)) {
-                    throw new AwsException("ValidationException",
-                            "One or more parameter values were invalid: Cannot update attribute " + skName
-                            + ". This attribute is part of the key", 400);
-                }
-            }
+            validateKeyNotModified(table, key, item);
 
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
@@ -1067,24 +1050,53 @@ public class DynamoDbService implements ResourceProvider {
     public record BatchWriteResult(Map<String, List<JsonNode>> unprocessedItems) {}
 
     public BatchWriteResult batchWriteItem(Map<String, List<JsonNode>> requestItems, String region) {
-        Set<String> affectedStorageKeys = new LinkedHashSet<>();
+        // Pre-validate all write requests before applying any mutation to memory or streams
         for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
             String tableName = canonicalTableName(region, entry.getKey());
             String storageKey = regionKey(region, tableName);
+            TableDefinition table = tableStore.get(storageKey)
+                    .orElseThrow(() -> resourceNotFoundException(tableName));
             for (JsonNode writeRequest : entry.getValue()) {
                 if (writeRequest.has("PutRequest")) {
                     JsonNode item = writeRequest.get("PutRequest").get("Item");
-                    putItemInternal(tableName, item, null, null, null, region, "NONE", false);
-                    affectedStorageKeys.add(storageKey);
+                    if (item == null) {
+                        throw new AwsException("ValidationException", "Item is required for PutRequest", 400);
+                    }
+                    JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
+                    DynamoDbItemSize.validateSize(normalizedItem);
+                    buildItemKey(table, normalizedItem);
+                    validateIndexKeyTypes(table, normalizedItem, false);
                 } else if (writeRequest.has("DeleteRequest")) {
                     JsonNode key = writeRequest.get("DeleteRequest").get("Key");
-                    deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
-                    affectedStorageKeys.add(storageKey);
+                    if (key == null) {
+                        throw new AwsException("ValidationException", "Key is required for DeleteRequest", 400);
+                    }
+                    buildItemKey(table, key, true);
                 }
             }
         }
-        for (String storageKey : affectedStorageKeys) {
-            persistItems(storageKey);
+
+        Set<String> affectedStorageKeys = new LinkedHashSet<>();
+        try {
+            for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
+                String tableName = canonicalTableName(region, entry.getKey());
+                String storageKey = regionKey(region, tableName);
+                for (JsonNode writeRequest : entry.getValue()) {
+                    if (writeRequest.has("PutRequest")) {
+                        JsonNode item = writeRequest.get("PutRequest").get("Item");
+                        putItemInternal(tableName, item, null, null, null, region, "NONE", false);
+                        affectedStorageKeys.add(storageKey);
+                    } else if (writeRequest.has("DeleteRequest")) {
+                        JsonNode key = writeRequest.get("DeleteRequest").get("Key");
+                        deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
+                        affectedStorageKeys.add(storageKey);
+                    }
+                }
+            }
+        } finally {
+            for (String storageKey : affectedStorageKeys) {
+                persistItems(storageKey);
+            }
         }
         return new BatchWriteResult(Map.of());
     }
@@ -1208,38 +1220,46 @@ public class DynamoDbService implements ResourceProvider {
                 throw new TransactionCanceledException(cancellationReasons);
             }
 
+            // Pre-validation pass: validate all operations before mutating memory or emitting stream effects
+            for (JsonNode transactItem : transactItems) {
+                validateTransactItem(transactItem, region);
+            }
+
             // Second pass: apply all writes. Inner methods re-acquire their own locks,
             // which is a no-op thanks to ReentrantLock.
             Set<String> affectedStorageKeys = new LinkedHashSet<>();
-            for (JsonNode transactItem : transactItems) {
-                if (transactItem.has("Put")) {
-                    JsonNode put = transactItem.get("Put");
-                    String tableName = put.path("TableName").asText();
-                    JsonNode item = put.get("Item");
-                    putItemInternal(tableName, item, null, null, null, region, "NONE", false);
-                    affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
-                } else if (transactItem.has("Delete")) {
-                    JsonNode del = transactItem.get("Delete");
-                    String tableName = del.path("TableName").asText();
-                    JsonNode key = del.get("Key");
-                    deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
-                    affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
-                } else if (transactItem.has("Update")) {
-                    JsonNode upd = transactItem.get("Update");
-                    String tableName = upd.path("TableName").asText();
-                    JsonNode key = upd.get("Key");
-                    String updateExpression = upd.has("UpdateExpression") ? upd.get("UpdateExpression").asText() : null;
-                    JsonNode exprAttrNames = upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null;
-                    JsonNode exprAttrValues = upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null;
-                    //there is no ConditionExpression, so setting returnValuesOnConditionCheckFailure = "NONE"
-                    updateItemInternal(tableName, key, null, updateExpression, exprAttrNames, exprAttrValues,
-                               "NONE", null, region, "NONE", false);
-                    affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
+            try {
+                for (JsonNode transactItem : transactItems) {
+                    if (transactItem.has("Put")) {
+                        JsonNode put = transactItem.get("Put");
+                        String tableName = put.path("TableName").asText();
+                        JsonNode item = put.get("Item");
+                        putItemInternal(tableName, item, null, null, null, region, "NONE", false);
+                        affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
+                    } else if (transactItem.has("Delete")) {
+                        JsonNode del = transactItem.get("Delete");
+                        String tableName = del.path("TableName").asText();
+                        JsonNode key = del.get("Key");
+                        deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
+                        affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
+                    } else if (transactItem.has("Update")) {
+                        JsonNode upd = transactItem.get("Update");
+                        String tableName = upd.path("TableName").asText();
+                        JsonNode key = upd.get("Key");
+                        String updateExpression = upd.has("UpdateExpression") ? upd.get("UpdateExpression").asText() : null;
+                        JsonNode exprAttrNames = upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null;
+                        JsonNode exprAttrValues = upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null;
+                        //there is no ConditionExpression, so setting returnValuesOnConditionCheckFailure = "NONE"
+                        updateItemInternal(tableName, key, null, updateExpression, exprAttrNames, exprAttrValues,
+                                   "NONE", null, region, "NONE", false);
+                        affectedStorageKeys.add(regionKey(region, canonicalTableName(region, tableName)));
+                    }
+                    // ConditionCheck-only items are handled in the first pass only
                 }
-                // ConditionCheck-only items are handled in the first pass only
-            }
-            for (String storageKey : affectedStorageKeys) {
-                persistItems(storageKey);
+            } finally {
+                for (String storageKey : affectedStorageKeys) {
+                    persistItems(storageKey);
+                }
             }
         } finally {
             for (int i = acquired.size() - 1; i >= 0; i--) {
@@ -1326,6 +1346,79 @@ public class DynamoDbService implements ResourceProvider {
             return new TransactionCanceledException.CancellationReason("ConditionalCheckFailed", e.getItem());
         } catch (AwsException e) {
             return new TransactionCanceledException.CancellationReason(e.getMessage(), null);
+        }
+    }
+
+    private void validateKeyNotModified(TableDefinition table, JsonNode key, JsonNode item) {
+        String pkName = table.getPartitionKeyName();
+        JsonNode origPk = key.get(pkName);
+        JsonNode newPk = item.get(pkName);
+        if (origPk != null && newPk != null && !origPk.equals(newPk)) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Cannot update attribute " + pkName
+                    + ". This attribute is part of the key", 400);
+        }
+        String skName = table.getSortKeyName();
+        if (skName != null) {
+            JsonNode origSk = key.get(skName);
+            JsonNode newSk = item.get(skName);
+            if (origSk != null && newSk != null && !origSk.equals(newSk)) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Cannot update attribute " + skName
+                        + ". This attribute is part of the key", 400);
+            }
+        }
+    }
+
+    private void validateTransactItem(JsonNode transactItem, String region) {
+        if (transactItem.has("Put")) {
+            JsonNode put = transactItem.get("Put");
+            String tableName = canonicalTableName(region, put.path("TableName").asText());
+            String storageKey = regionKey(region, tableName);
+            TableDefinition table = tableStore.get(storageKey)
+                    .orElseThrow(() -> resourceNotFoundException(tableName));
+            JsonNode item = put.get("Item");
+            if (item == null) {
+                throw new AwsException("ValidationException", "Item is required for Put", 400);
+            }
+            JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
+            DynamoDbItemSize.validateSize(normalizedItem);
+            buildItemKey(table, normalizedItem);
+            validateIndexKeyTypes(table, normalizedItem, false);
+        } else if (transactItem.has("Delete")) {
+            JsonNode del = transactItem.get("Delete");
+            String tableName = canonicalTableName(region, del.path("TableName").asText());
+            String storageKey = regionKey(region, tableName);
+            TableDefinition table = tableStore.get(storageKey)
+                    .orElseThrow(() -> resourceNotFoundException(tableName));
+            JsonNode key = del.get("Key");
+            if (key == null) {
+                throw new AwsException("ValidationException", "Key is required for Delete", 400);
+            }
+            buildItemKey(table, key, true);
+        } else if (transactItem.has("Update")) {
+            JsonNode upd = transactItem.get("Update");
+            String tableName = canonicalTableName(region, upd.path("TableName").asText());
+            String storageKey = regionKey(region, tableName);
+            TableDefinition table = tableStore.get(storageKey)
+                    .orElseThrow(() -> resourceNotFoundException(tableName));
+            JsonNode key = upd.get("Key");
+            if (key == null) {
+                throw new AwsException("ValidationException", "Key is required for Update", 400);
+            }
+            String itemKey = buildItemKey(table, key, true);
+            var items = itemsByTable.get(scopedItemsKey(storageKey));
+            JsonNode existing = items != null ? items.get(itemKey) : null;
+            ObjectNode item = existing != null ? existing.deepCopy() : key.deepCopy();
+
+            String updateExpression = upd.has("UpdateExpression") ? upd.get("UpdateExpression").asText() : null;
+            JsonNode exprAttrNames = upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null;
+            JsonNode exprAttrValues = upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null;
+            if (updateExpression != null) {
+                applyUpdateExpression(item, updateExpression, exprAttrNames, exprAttrValues);
+            }
+            validateKeyNotModified(table, key, item);
+            validateIndexKeyTypes(table, item, true);
         }
     }
 

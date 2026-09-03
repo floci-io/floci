@@ -3341,4 +3341,86 @@ class DynamoDbServiceTest {
         org.mockito.Mockito.verify(mockItemStore, org.mockito.Mockito.times(1))
                 .put(org.mockito.ArgumentMatchers.eq("us-east-1::Users"), org.mockito.ArgumentMatchers.any());
     }
+
+    @Test
+    void batchWriteItem_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = org.mockito.Mockito.mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item valid
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq1 = mapper.createObjectNode();
+        putReq1.set("Item", item1);
+        ObjectNode req1 = mapper.createObjectNode();
+        req1.set("PutRequest", putReq1);
+
+        // 2nd item invalid (missing partition key "userId")
+        ObjectNode item2 = mapper.createObjectNode();
+        item2.set("otherAttr", attributeValue("S", "val"));
+        ObjectNode putReq2 = mapper.createObjectNode();
+        putReq2.set("Item", item2);
+        ObjectNode req2 = mapper.createObjectNode();
+        req2.set("PutRequest", putReq2);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.batchWriteItem(Map.of("Users", List.of(req1, req2)), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not saved in memory
+        org.mockito.Mockito.verify(mockItemStore, org.mockito.Mockito.never())
+                .put(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    @Test
+    void transactWriteItems_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = org.mockito.Mockito.mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item: valid Put
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "tx-u1"));
+        ObjectNode put = mapper.createObjectNode();
+        put.put("TableName", "Users");
+        put.set("Item", item1);
+        ObjectNode txItem1 = mapper.createObjectNode();
+        txItem1.set("Put", put);
+
+        // 2nd item: invalid Update that attempts to modify key attribute "userId"
+        ObjectNode key2 = mapper.createObjectNode();
+        key2.set("userId", attributeValue("S", "tx-u2"));
+        ObjectNode upd = mapper.createObjectNode();
+        upd.put("TableName", "Users");
+        upd.set("Key", key2);
+        upd.put("UpdateExpression", "SET userId = :newId");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":newId", attributeValue("S", "tx-u2-modified"));
+        upd.set("ExpressionAttributeValues", exprValues);
+        ObjectNode txItem2 = mapper.createObjectNode();
+        txItem2.set("Update", upd);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.transactWriteItems(List.of(txItem1, txItem2), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not retained in memory
+        org.mockito.Mockito.verify(mockItemStore, org.mockito.Mockito.never())
+                .put(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "tx-u1"), "us-east-1"));
+    }
 }
