@@ -166,7 +166,20 @@ class LeafCfnProvisionerTest {
 
             verify(ssm).putParameter("/app/db", "secret", "String", null, true, REGION);
             assertEquals("/app/db", r.getPhysicalId());
-            assertEquals(Map.of("Name", "/app/db", "Type", "String", "Value", "secret"), r.getAttributes());
+            assertEquals(Map.of("Name", "/app/db", "Type", "String", "Value", "secret",
+                    "Arn", "arn:aws:ssm:us-east-1:000000000000:parameter/app/db"), r.getAttributes());
+        }
+
+        @Test
+        void arnOfANameWithoutALeadingSlashStillHasTheParameterPrefix() {
+            // AWS ARNs are always arn:...:parameter/<name>; a name without a leading slash gets the
+            // slash inserted, a name with one is not doubled.
+            StackResource r = resource("Param", "AWS::SSM::Parameter");
+            provisioner.provision(r, props("""
+                    {"Name": "db-host", "Value": "localhost"}
+                    """), ctx);
+
+            assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/db-host", r.getAttributes().get("Arn"));
         }
 
         @Test
