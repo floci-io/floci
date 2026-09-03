@@ -5,6 +5,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.*;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
@@ -676,6 +677,50 @@ class SqsIntegrationTest {
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DeleteQueue")
                 .formParam("QueueUrl", traceQueueUrl)
+            .when().post("/");
+        }
+    }
+
+
+    @Test
+    void receiveMessageWithoutWaitTimeSecondsHonoursQueueReceiveMessageWaitTimeSeconds() {
+        String longPollQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-long-poll-attr-queue")
+            .formParam("Attribute.1.Name", "ReceiveMessageWaitTimeSeconds")
+            .formParam("Attribute.1.Value", "1")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            long start = System.nanoTime();
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", longPollQueueUrl)
+            .when().post("/").then().statusCode(200)
+                .body(not(containsString("<Message>")));
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            assertTrue(elapsedMs >= 900,
+                    "Omitting WaitTimeSeconds must long poll for the queue's ReceiveMessageWaitTimeSeconds, but returned after " + elapsedMs + "ms");
+
+            start = System.nanoTime();
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", longPollQueueUrl)
+                .formParam("WaitTimeSeconds", "0")
+            .when().post("/").then().statusCode(200)
+                .body(not(containsString("<Message>")));
+            elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            assertTrue(elapsedMs < 1000,
+                    "WaitTimeSeconds=0 must override the queue attribute, but returned after " + elapsedMs + "ms");
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", longPollQueueUrl)
             .when().post("/");
         }
     }
