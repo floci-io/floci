@@ -116,7 +116,9 @@ AWS accepts. `DescribeCacheParameters` returns those parameters; a request for `
 A replication group that names a parameter group is refused with `CacheParameterGroupNotFound` when
 no such group exists, and a parameter group still referenced by a replication group cannot be
 deleted: `DeleteCacheParameterGroup` answers `InvalidCacheParameterGroupState` until that
-replication group is gone.
+replication group is gone. The reference counts from the moment `CreateReplicationGroup` accepts
+the name, not from when the group is stored, so a delete that lands while that create is still
+provisioning its container is refused too.
 
 ## Configuration
 
