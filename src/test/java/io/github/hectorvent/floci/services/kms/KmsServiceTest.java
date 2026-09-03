@@ -1286,6 +1286,28 @@ class KmsServiceTest {
     }
 
     @Test
+    void signWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.sign(key.getKeyId(), "sign me".getBytes(StandardCharsets.UTF_8), "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+    }
+
+    @Test
+    void verifyWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        var message = "sign me".getBytes(StandardCharsets.UTF_8);
+        var sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.verify(key.getKeyId(), message, sig, "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+    }
+
+    @Test
     void verifyWithWrongSignatureReturnsFalse() {
         KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
         byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);

@@ -979,6 +979,8 @@ public class KmsService implements ResourceProvider {
             sig.initSign(privateKey);
             sig.update(message);
             return sig.sign();
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             throw new AwsException("InternalFailure", "Failed to sign message: " + e.getMessage(), 500);
         }
@@ -1023,6 +1025,8 @@ public class KmsService implements ResourceProvider {
             sig.initVerify(publicKey);
             sig.update(message);
             return sig.verify(signature);
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             LOG.warnv("Verification failed for key {0}: {1}", keyId, e.getMessage());
             return false;
