@@ -248,16 +248,9 @@ public class KmsService implements ResourceProvider {
     }
 
     private static void validateKeyUsageForSpec(KmsKeyUsage keyUsage, KmsKeySpec spec) {
-        if (isHmac(spec) && KmsKeyUsage.GENERATE_VERIFY_MAC != keyUsage) {
+        if (!spec.allowedKeyUsages().contains(keyUsage)) {
             throw new AwsException("ValidationException",
-                    "KeyUsage " + keyUsage + " is not compatible with KeySpec " + spec
-                            + ". HMAC key specs require KeyUsage GENERATE_VERIFY_MAC.",
-                    400);
-        }
-        if (KmsKeyUsage.GENERATE_VERIFY_MAC == keyUsage && !isHmac(spec)) {
-            throw new AwsException("ValidationException",
-                    "KeyUsage GENERATE_VERIFY_MAC requires an HMAC KeySpec (HMAC_224, HMAC_256, HMAC_384, or HMAC_512).",
-                    400);
+                    "KeyUsage " + keyUsage + " is not compatible with KeySpec " + spec + ".", 400);
         }
     }
 

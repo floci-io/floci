@@ -6,6 +6,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 @RegisterForReflection
 public enum KmsKeySpec {
@@ -79,6 +80,28 @@ public enum KmsKeySpec {
     public String curveName() {
         return curveName;
     }
+
+    /**
+     * The KeyUsage values AWS KMS accepts for this key spec at CreateKey.
+     *
+     * <p>Source: CreateKey API reference, KeyUsage parameter. NIST-standard ECC
+     * pairs allow SIGN_VERIFY or KEY_AGREEMENT; ECC_SECG_P256K1 and Edwards25519
+     * are signing only; RSA allows ENCRYPT_DECRYPT or SIGN_VERIFY; symmetric is
+     * ENCRYPT_DECRYPT only; HMAC is GENERATE_VERIFY_MAC only.
+     */
+    public Set<KmsKeyUsage> allowedKeyUsages() {
+        return switch (keyType) {
+            case SYMMETRIC -> EnumSet.of(KmsKeyUsage.ENCRYPT_DECRYPT);
+            case HMAC -> EnumSet.of(KmsKeyUsage.GENERATE_VERIFY_MAC);
+            case RSA -> EnumSet.of(KmsKeyUsage.ENCRYPT_DECRYPT, KmsKeyUsage.SIGN_VERIFY);
+            case ED25519, ML_DSA -> EnumSet.of(KmsKeyUsage.SIGN_VERIFY);
+            case SM2 -> EnumSet.of(KmsKeyUsage.ENCRYPT_DECRYPT, KmsKeyUsage.SIGN_VERIFY, KmsKeyUsage.KEY_AGREEMENT);
+            case ECC -> this == ECC_SECG_P256K1
+                    ? EnumSet.of(KmsKeyUsage.SIGN_VERIFY)
+                    : EnumSet.of(KmsKeyUsage.SIGN_VERIFY, KmsKeyUsage.KEY_AGREEMENT);
+        };
+    }
+
     public enum KeyType {
         RSA, ECC, ED25519, SYMMETRIC, HMAC, ML_DSA, SM2
     }

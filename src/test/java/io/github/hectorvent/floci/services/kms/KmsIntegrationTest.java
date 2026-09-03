@@ -1042,49 +1042,49 @@ class KmsIntegrationTest {
     @ParameterizedTest
     @CsvSource({
             "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, 200",
-            "SYMMETRIC_DEFAULT, SIGN_VERIFY, 200",
+            "SYMMETRIC_DEFAULT, SIGN_VERIFY, 400",
             "SYMMETRIC_DEFAULT, GENERATE_VERIFY_MAC, 400",
-            "SYMMETRIC_DEFAULT, KEY_AGREEMENT, 200",
+            "SYMMETRIC_DEFAULT, KEY_AGREEMENT, 400",
 
             "RSA_2048, ENCRYPT_DECRYPT, 200",
             "RSA_2048, SIGN_VERIFY, 200",
             "RSA_2048, GENERATE_VERIFY_MAC, 400",
-            "RSA_2048, KEY_AGREEMENT, 200",
+            "RSA_2048, KEY_AGREEMENT, 400",
 
             "RSA_3072, ENCRYPT_DECRYPT, 200",
             "RSA_3072, SIGN_VERIFY, 200",
             "RSA_3072, GENERATE_VERIFY_MAC, 400",
-            "RSA_3072, KEY_AGREEMENT, 200",
+            "RSA_3072, KEY_AGREEMENT, 400",
 
             "RSA_4096, ENCRYPT_DECRYPT, 200",
             "RSA_4096, SIGN_VERIFY, 200",
             "RSA_4096, GENERATE_VERIFY_MAC, 400",
-            "RSA_4096, KEY_AGREEMENT, 200",
+            "RSA_4096, KEY_AGREEMENT, 400",
 
-            "ECC_NIST_P256, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P256, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_P256, SIGN_VERIFY, 200",
             "ECC_NIST_P256, GENERATE_VERIFY_MAC, 400",
             "ECC_NIST_P256, KEY_AGREEMENT, 200",
 
-            "ECC_NIST_P384, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P384, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_P384, SIGN_VERIFY, 200",
             "ECC_NIST_P384, GENERATE_VERIFY_MAC, 400",
             "ECC_NIST_P384, KEY_AGREEMENT, 200",
 
-            "ECC_NIST_P521, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P521, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_P521, SIGN_VERIFY, 200",
             "ECC_NIST_P521, GENERATE_VERIFY_MAC, 400",
             "ECC_NIST_P521, KEY_AGREEMENT, 200",
 
-            "ECC_NIST_EDWARDS25519, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_EDWARDS25519, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_EDWARDS25519, SIGN_VERIFY, 200",
             "ECC_NIST_EDWARDS25519, GENERATE_VERIFY_MAC, 400",
-            "ECC_NIST_EDWARDS25519, KEY_AGREEMENT, 200",
+            "ECC_NIST_EDWARDS25519, KEY_AGREEMENT, 400",
 
-            "ECC_SECG_P256K1, ENCRYPT_DECRYPT, 200",
+            "ECC_SECG_P256K1, ENCRYPT_DECRYPT, 400",
             "ECC_SECG_P256K1, SIGN_VERIFY, 200",
             "ECC_SECG_P256K1, GENERATE_VERIFY_MAC, 400",
-            "ECC_SECG_P256K1, KEY_AGREEMENT, 200",
+            "ECC_SECG_P256K1, KEY_AGREEMENT, 400",
 
             "HMAC_224, ENCRYPT_DECRYPT, 400",
             "HMAC_224, SIGN_VERIFY, 400",
@@ -1141,6 +1141,46 @@ class KmsIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(expectedStatusCode);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "SYMMETRIC_DEFAULT, SIGN_VERIFY",
+            "RSA_2048, KEY_AGREEMENT",
+            "ECC_NIST_P256, ENCRYPT_DECRYPT",
+            "ECC_NIST_EDWARDS25519, ENCRYPT_DECRYPT",
+            "ECC_NIST_EDWARDS25519, KEY_AGREEMENT",
+            "ECC_SECG_P256K1, KEY_AGREEMENT"
+    })
+    void createKeyRejectsIncompatibleKeyUsage(String keySpec, String keyUsage) {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"%s\",\"KeySpec\":\"%s\"}".formatted(keyUsage, keySpec))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(
+                        "KeyUsage " + keyUsage + " is not compatible with KeySpec " + keySpec + "."));
+    }
+
+    /**
+     * AWS accepts KEY_AGREEMENT for NIST-standard ECC key specs at CreateKey, even though
+     * Floci has no DeriveSharedSecret operation yet. Matching AWS at the CreateKey boundary
+     * is deliberate; this guards against an over-broad tightening.
+     */
+    @Test
+    void createKeyAllowsKeyAgreementForNistEccSpecs() {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"KEY_AGREEMENT\",\"KeySpec\":\"ECC_NIST_P256\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.KeyUsage", equalTo("KEY_AGREEMENT"))
+                .body("KeyMetadata.KeySpec", equalTo("ECC_NIST_P256"));
     }
 
     // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
