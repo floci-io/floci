@@ -285,7 +285,7 @@ public final class DynamoDbConditionKeys {
     }
 
     /**
-     * Top-level attribute names a DynamoDB expression references — a FilterExpression,
+     * Top-level attribute names a DynamoDB expression references: a FilterExpression,
      * ConditionExpression or KeyConditionExpression. Walks the parsed tree so a literal name
      * such as {@code ssn} in {@code "ssn = :x"} is captured, not only {@code #alias}es.
      * A malformed expression yields nothing, which only ever denies.
