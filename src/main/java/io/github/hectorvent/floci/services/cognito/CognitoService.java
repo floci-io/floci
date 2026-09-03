@@ -554,11 +554,18 @@ public class CognitoService implements ResourceProvider {
                 .forEach(r -> resourceServerStore.delete(resourceServerKey(id, r.getIdentifier())));
         // Clients are keyed by client id alone, so they are found by their userPoolId field.
         listUserPoolClients(id).forEach(c -> clientStore.delete(c.getClientId()));
-        // Revoked tokens are keyed revoked:{poolId}:{jti}. Keys are collected before deleting so
-        // the backing key set is not modified while it is being iterated.
+        // Revoked tokens are keyed revoked:{poolId}:{jti}, and a jti may itself contain a colon
+        // (global revocations use global:{username}), so the prefix cannot be bounded by the
+        // separator alone. Pool ids are caller-chosen and may also contain a colon, which would
+        // let this prefix match a live pool whose id extends this one and reinstate its revoked
+        // tokens. The record's own userPoolId settles ownership. Keys are collected before
+        // deleting so the backing key set is not modified while it is being iterated.
         String revokedPrefix = "revoked:" + id + ":";
         revokedTokenStore.keys().stream()
                 .filter(k -> k.startsWith(revokedPrefix))
+                .filter(k -> revokedTokenStore.get(k)
+                        .map(t -> id.equals(t.getUserPoolId()))
+                        .orElse(false))
                 .toList()
                 .forEach(revokedTokenStore::delete);
         if (verificationCodeService != null) {

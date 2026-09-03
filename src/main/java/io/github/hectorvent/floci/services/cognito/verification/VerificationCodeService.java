@@ -146,13 +146,16 @@ public final class VerificationCodeService {
     }
 
     /**
-     * Removes every code issued for a pool, for DeleteUserPool. Keys are collected before
-     * deleting so the backing key set is not modified while it is being iterated.
+     * Removes every code issued for a pool, for DeleteUserPool. Pool ids are caller-chosen via
+     * floci:override-id and may contain a colon, so the key prefix alone also matches a distinct
+     * pool whose id extends this one. The stored record's own userPoolId settles the boundary.
+     * Keys are collected before deleting so the backing key set is not modified while iterated.
      */
     public void invalidateForPool(String userPoolId) {
         String prefix = userPoolId + ":";
         store.keys().stream()
             .filter(k -> k.startsWith(prefix))
+            .filter(k -> store.get(k).map(c -> userPoolId.equals(c.getUserPoolId())).orElse(false))
             .toList()
             .forEach(store::delete);
     }
