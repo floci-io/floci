@@ -169,4 +169,19 @@ class GlueViewDdlBuilderTest {
         String ddl = builder.build("x");
         assertEquals("", ddl);
     }
+
+    @Test
+    void testNullOrBlankDatabaseNameIsSkipped() {
+        Database nullNameDb = createDatabase(null);
+        Database blankNameDb = createDatabase("   ");
+        Database validDb = createDatabase("valid_db");
+        when(glueService.getDatabases()).thenReturn(java.util.Arrays.asList(null, nullNameDb, blankNameDb, validDb));
+        when(glueService.getTables("valid_db")).thenReturn(List.of());
+
+        String ddl = builder.build(null);
+        assertTrue(ddl.contains("CREATE SCHEMA IF NOT EXISTS \"valid_db\";\n"));
+        assertFalse(ddl.contains("CREATE SCHEMA IF NOT EXISTS \"\";"));
+        assertFalse(ddl.contains("CREATE SCHEMA IF NOT EXISTS \"null\";"));
+    }
 }
+

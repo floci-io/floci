@@ -28,7 +28,13 @@ public class GlueViewDdlBuilder {
             List<Database> databases = glueService.getDatabases();
             if (databases != null) {
                 for (Database db : databases) {
+                    if (db == null) {
+                        continue;
+                    }
                     String schema = db.getName();
+                    if (schema == null || schema.isBlank()) {
+                        continue;
+                    }
                     sb.append("CREATE SCHEMA IF NOT EXISTS ").append(quote(schema)).append(";\n");
                     try {
                         List<Table> tables = glueService.getTables(schema);
