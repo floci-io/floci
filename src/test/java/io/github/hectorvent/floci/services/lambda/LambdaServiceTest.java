@@ -15,6 +15,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1009,6 +1010,63 @@ class LambdaServiceTest {
             release.countDown();
             holder.join();
             assertNotNull(publishFuture.get(2, java.util.concurrent.TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void updateFunctionCodeWaitsForAConcurrentHolderOfTheFunctionsConcurrencyLock() throws Exception {
+        assertUpdaterWaitsForTheLock("update-code-lock-fn",
+                (service, name) -> service.updateFunctionCode(REGION, name,
+                        new HashMap<>(Map.of("ImageUri", "public.ecr.aws/x/y:1"))));
+    }
+
+    @Test
+    void updateFunctionConfigurationWaitsForAConcurrentHolderOfTheFunctionsConcurrencyLock() throws Exception {
+        assertUpdaterWaitsForTheLock("update-config-lock-fn",
+                (service, name) -> service.updateFunctionConfiguration(REGION, name,
+                        new HashMap<>(Map.of("Timeout", 42))));
+    }
+
+    /**
+     * publishVersion copies roughly thirty fields off the live function inside this lock. Neither
+     * updater used to take it, so nothing was serialised and a snapshot could be part old code and
+     * part new configuration (issue #3007). Proving each updater blocks on the lock closes that
+     * window regardless of the exact interleaving, rather than relying on timing to catch it.
+     */
+    private void assertUpdaterWaitsForTheLock(
+            String functionName,
+            java.util.function.BiFunction<LambdaService, String, LambdaFunction> updater) throws Exception {
+        LambdaFunction fn = service.createFunction(REGION, baseRequest(functionName));
+        Object lock = service.lockForConcurrencyOp(fn.getFunctionArn());
+
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        CountDownLatch acquired = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            synchronized (lock) {
+                acquired.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        try {
+            holder.start();
+            assertTrue(acquired.await(2, java.util.concurrent.TimeUnit.SECONDS));
+
+            Future<LambdaFunction> updateFuture = pool.submit(() -> updater.apply(service, functionName));
+            assertThrows(java.util.concurrent.TimeoutException.class,
+                    () -> updateFuture.get(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+                    "the updater must block while another operation holds this function's lock");
+
+            release.countDown();
+            holder.join();
+            assertNotNull(updateFuture.get(5, java.util.concurrent.TimeUnit.SECONDS));
         } finally {
             release.countDown();
             pool.shutdownNow();
