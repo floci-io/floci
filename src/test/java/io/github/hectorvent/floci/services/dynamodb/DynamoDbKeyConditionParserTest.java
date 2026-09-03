@@ -54,6 +54,22 @@ class DynamoDbKeyConditionParserTest {
     }
 
     @Test
+    void returnsNullForABeginsWithConditionOnThePartitionKey() {
+        // begins_with is a valid sort-key condition but never an equality; treating it as
+        // one would pin the leading key to a prefix and wrongly allow a whole partition range.
+        assertNull(DynamoDbKeyConditionParser.partitionKeyEqualityValue(
+                "begins_with(pk, :v)", null, json("{\":v\":{\"S\":\"USER_\"}}"), "pk"));
+    }
+
+    @Test
+    void returnsNullWhenThePartitionKeyEqualityIsUnderAnOr() {
+        // A top-level OR means the request is not constrained to a single partition value.
+        assertNull(DynamoDbKeyConditionParser.partitionKeyEqualityValue(
+                "pk = :a OR pk = :b", null,
+                json("{\":a\":{\"S\":\"USER_alice\"},\":b\":{\"S\":\"USER_bob\"}}"), "pk"));
+    }
+
+    @Test
     void returnsNullOnUnparseableOrMissingInput() {
         assertNull(DynamoDbKeyConditionParser.partitionKeyEqualityValue(
                 "pk = = :v", null, json("{\":v\":{\"S\":\"x\"}}"), "pk"));

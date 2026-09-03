@@ -56,9 +56,15 @@ public final class DynamoDbConditionKeys {
                         body.get("ExpressionAttributeNames"),
                         body.get("ExpressionAttributeValues"),
                         pkName);
+                if (value == null) {
+                    value = legacyKeyConditionEqualityValue(body.get("KeyConditions"), pkName);
+                }
                 if (value != null) {
                     leadingKeys.add(value);
                 }
+                // Legacy map forms of the same clauses; the expression forms are covered below.
+                addAttributeNames(attributes, body.get("KeyConditions"));
+                addAttributeNames(attributes, body.get("QueryFilter"));
             }
             case "dynamodb:BatchGetItem" -> {
                 for (JsonNode tableRequest : requestItemsFor(body, table)) {
@@ -102,6 +108,14 @@ public final class DynamoDbConditionKeys {
         addUpdateExpressionTargets(attributes, textOrNull(body.get("UpdateExpression")),
                 body.get("ExpressionAttributeNames"));
         addExpressionAttributeNameValues(attributes, body.get("ExpressionAttributeNames"));
+
+        // Names an expression references are attributes the request touches too. Under-reporting
+        // these is the unsafe direction: a Query projecting only allowed attributes but filtering
+        // on a forbidden one would still slip past a ForAllValues:StringEquals on dynamodb:Attributes.
+        JsonNode exprAttrNames = body.get("ExpressionAttributeNames");
+        addExpressionAttributes(attributes, textOrNull(body.get("KeyConditionExpression")), exprAttrNames);
+        addExpressionAttributes(attributes, textOrNull(body.get("FilterExpression")), exprAttrNames);
+        addExpressionAttributes(attributes, textOrNull(body.get("ConditionExpression")), exprAttrNames);
 
         return new Result(List.copyOf(leadingKeys), List.copyOf(attributes),
                 textOrNull(body.get("Select")));
@@ -252,6 +266,92 @@ public final class DynamoDbConditionKeys {
         }
         String segment = path.substring(0, cut).trim();
         return segment.isEmpty() ? null : segment;
+    }
+
+    /** The EQ value a legacy {@code KeyConditions} map pins the partition key to, or {@code null}. */
+    private static String legacyKeyConditionEqualityValue(JsonNode keyConditions, String pkName) {
+        if (keyConditions == null || !keyConditions.isObject() || pkName == null) {
+            return null;
+        }
+        JsonNode condition = keyConditions.get(pkName);
+        if (condition == null || !"EQ".equals(textOrNull(condition.get("ComparisonOperator")))) {
+            return null;
+        }
+        JsonNode list = condition.get("AttributeValueList");
+        if (list == null || !list.isArray() || list.isEmpty()) {
+            return null;
+        }
+        return scalarValue(list.get(0));
+    }
+
+    /**
+     * Top-level attribute names a DynamoDB expression references — a FilterExpression,
+     * ConditionExpression or KeyConditionExpression. Walks the parsed tree so a literal name
+     * such as {@code ssn} in {@code "ssn = :x"} is captured, not only {@code #alias}es.
+     * A malformed expression yields nothing, which only ever denies.
+     */
+    private static void addExpressionAttributes(Set<String> attributes, String expression,
+                                                JsonNode exprAttrNames) {
+        if (expression == null || expression.isBlank()) {
+            return;
+        }
+        ExpressionEvaluator.Expr root;
+        try {
+            root = ExpressionEvaluator.parse(expression);
+        } catch (RuntimeException e) {
+            return;
+        }
+        collectExpressionPaths(root, attributes, exprAttrNames);
+    }
+
+    private static void collectExpressionPaths(ExpressionEvaluator.Expr expr, Set<String> attributes,
+                                               JsonNode exprAttrNames) {
+        if (expr == null) {
+            return;
+        }
+        switch (expr) {
+            case ExpressionEvaluator.AndExpr and ->
+                    and.operands().forEach(o -> collectExpressionPaths(o, attributes, exprAttrNames));
+            case ExpressionEvaluator.OrExpr or ->
+                    or.operands().forEach(o -> collectExpressionPaths(o, attributes, exprAttrNames));
+            case ExpressionEvaluator.NotExpr not ->
+                    collectExpressionPaths(not.operand(), attributes, exprAttrNames);
+            case ExpressionEvaluator.CompareExpr cmp -> {
+                collectOperandPath(cmp.left(), attributes, exprAttrNames);
+                collectOperandPath(cmp.right(), attributes, exprAttrNames);
+            }
+            case ExpressionEvaluator.BetweenExpr between -> {
+                collectOperandPath(between.value(), attributes, exprAttrNames);
+                collectOperandPath(between.low(), attributes, exprAttrNames);
+                collectOperandPath(between.high(), attributes, exprAttrNames);
+            }
+            case ExpressionEvaluator.InExpr in -> {
+                collectOperandPath(in.value(), attributes, exprAttrNames);
+                in.candidates().forEach(c -> collectOperandPath(c, attributes, exprAttrNames));
+            }
+            case ExpressionEvaluator.FunctionCallExpr fn ->
+                    fn.args().forEach(a -> collectOperandPath(a, attributes, exprAttrNames));
+            default -> { }
+        }
+    }
+
+    private static void collectOperandPath(ExpressionEvaluator.Operand operand, Set<String> attributes,
+                                           JsonNode exprAttrNames) {
+        if (operand instanceof ExpressionEvaluator.PathOperand path && !path.segments().isEmpty()) {
+            String name = resolveAlias(path.segments().getFirst(), exprAttrNames);
+            if (name != null && !name.startsWith(":")) {
+                attributes.add(name);
+            }
+        } else if (operand instanceof ExpressionEvaluator.FunctionOperand fn) {
+            fn.args().forEach(a -> collectOperandPath(a, attributes, exprAttrNames));
+        }
+    }
+
+    private static String resolveAlias(String segment, JsonNode exprAttrNames) {
+        if (segment.startsWith("#") && exprAttrNames != null && exprAttrNames.has(segment)) {
+            return exprAttrNames.get(segment).asText();
+        }
+        return segment;
     }
 
     /** Unwraps an AttributeValue to its scalar text. Only S, N and B can be key values. */

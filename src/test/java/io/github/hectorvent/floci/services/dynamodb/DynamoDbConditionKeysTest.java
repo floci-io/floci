@@ -185,6 +185,51 @@ class DynamoDbConditionKeysTest {
     }
 
     @Test
+    void queryCollectsLiteralAttributeNamesFromAFilterExpression() {
+        // A projection of only allowed attributes must not hide a filter on a forbidden one.
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:Query",
+                json("""
+                    {"TableName":"FgacTable",
+                     "KeyConditionExpression":"PK = :v",
+                     "ExpressionAttributeValues":{":v":{"S":"USER_alice"},":x":{"S":"y"}},
+                     "FilterExpression":"ssn = :x",
+                     "ProjectionExpression":"email"}"""),
+                table);
+
+        assertTrue(result.attributes().contains("ssn"), result.attributes().toString());
+        assertTrue(result.attributes().contains("email"), result.attributes().toString());
+        assertTrue(result.attributes().contains("PK"), result.attributes().toString());
+    }
+
+    @Test
+    void putItemCollectsLiteralAttributeNamesFromAConditionExpression() {
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:PutItem",
+                json("""
+                    {"TableName":"FgacTable",
+                     "Item":{"PK":{"S":"USER_alice"},"SK":{"S":"profile"}},
+                     "ConditionExpression":"attribute_not_exists(locked)"}"""),
+                table);
+
+        assertTrue(result.attributes().contains("locked"), result.attributes().toString());
+    }
+
+    @Test
+    void queryResolvesTheLeadingKeyFromALegacyKeyConditionsMap() {
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:Query",
+                json("""
+                    {"TableName":"FgacTable",
+                     "KeyConditions":{"PK":{"ComparisonOperator":"EQ",
+                        "AttributeValueList":[{"S":"USER_alice"}]}}}"""),
+                table);
+
+        assertEquals(List.of("USER_alice"), result.leadingKeys());
+        assertTrue(result.attributes().contains("PK"), result.attributes().toString());
+    }
+
+    @Test
     void attributesToGetAreExposed() {
         DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
                 "dynamodb:GetItem",
