@@ -161,6 +161,25 @@ public interface EmulatorConfig {
          */
         @WithDefault("8.8.8.8,8.8.4.4")
         List<String> containerFallbackServers();
+
+        /**
+         * When {@code true}, the embedded DNS server also answers A queries for
+         * {@code amazonaws.com} and every subdomain (any depth: {@code sts.amazonaws.com},
+         * {@code organizations.us-east-1.amazonaws.com}, virtual-hosted S3 like
+         * {@code bucket.s3.us-east-1.amazonaws.com}) with Floci's container IP —
+         * LocalStack-style transparent endpoint injection. Tools that construct SDK
+         * clients with explicit real-AWS endpoints (overriding {@code AWS_ENDPOINT_URL})
+         * then land on Floci instead of escaping to real AWS.
+         *
+         * <p>Combine with {@code floci.tls.enabled=true} so hardcoded {@code https://}
+         * endpoints are served on port 443 with a certificate covering the AWS wildcards,
+         * and spawned CodeBuild containers trust it automatically.
+         *
+         * <p>Off by default: it hijacks all real-AWS traffic from spawned containers.
+         * Env: {@code FLOCI_DNS_SPOOF_AWS_ENDPOINTS}
+         */
+        @WithDefault("false")
+        boolean spoofAwsEndpoints();
     }
 
     interface SecurityConfig {
@@ -918,6 +937,37 @@ public interface EmulatorConfig {
         boolean enabled();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Substitute for curated {@code aws/codebuild/*} image names that AWS does not
+         * publish to a public registry (the Ubuntu {@code standard} family). The Amazon
+         * Linux curated images map directly to their public.ecr.aws mirrors instead.
+         * Unset means the newest public Amazon Linux standard image for the host
+         * architecture.
+         */
+        Optional<String> curatedImageSubstitute();
+
+        /**
+         * Maximum number of builds allowed to stage a workspace on disk at once. Real
+         * CodeBuild enforces an account-level concurrent-build limit; here every build
+         * stages its whole source workspace on the single emulator container's filesystem,
+         * so a fan-out stage (e.g. LZA bootstrapping ~15 targets at once) can exhaust the
+         * shared disk. Unset falls back to a bounded default
+         * ({@code CodeBuildRunner.DEFAULT_MAX_CONCURRENT_BUILDS}); set a positive value to
+         * override it, or a non-positive value to run unbounded on a well-resourced host.
+         */
+        Optional<Integer> maxConcurrentBuilds();
+
+        /**
+         * Maximum number of builds allowed to stream their source tar into their container at
+         * once. Each build stages a multi-gigabyte tar over the single shared docker socket;
+         * when a fan-out stage launches its first wave simultaneously the daemon drops
+         * connections mid-write ({@code Broken pipe}) and those builds fail. Serialising the
+         * heavy streaming avoids that collision. Unset falls back to a bounded default
+         * ({@code CodeBuildRunner.DEFAULT_MAX_CONCURRENT_SOURCE_COPIES}); set a positive value
+         * to override it, or a non-positive value to stream unbounded on a well-resourced host.
+         */
+        Optional<Integer> maxConcurrentSourceCopies();
     }
 
     interface BatchServiceConfig {
@@ -2338,6 +2388,27 @@ public interface EmulatorConfig {
         /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
         @WithDefault("unix:///var/run/docker.sock")
         String dockerHost();
+
+        /**
+         * Connection pool size for the control-plane DockerClient (create/start/stop/remove/
+         * copyArchive and every other short-lived call). Kept separate from
+         * {@link #streamingMaxConnections()} so long-lived log-follow and exec-output streams
+         * can never starve control-plane calls out of a lease — see
+         * {@code DockerClientProducer} and {@code StreamingDocker}.
+         */
+        @WithDefault("100")
+        int maxConnections();
+
+        /**
+         * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
+         * long-lived streams that occupy a slot for a container's or CodeBuild run's entire
+         * lifetime (container log-follow, {@code execStartCmd} output streams). Total live
+         * containers is unbounded across distinct functions (each {@code WarmPool} caps only
+         * per-function), so this pool is sized generously rather than tied to any single
+         * function's warm-pool cap.
+         */
+        @WithDefault("512")
+        int streamingMaxConnections();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

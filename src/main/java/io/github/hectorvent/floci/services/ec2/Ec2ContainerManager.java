@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
@@ -23,8 +24,6 @@ import com.github.dockerjava.api.model.MountType;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
@@ -748,11 +747,8 @@ public class Ec2ContainerManager {
 
             // Copy authorized_keys via docker cp
             String keyContent = publicKey.trim() + "\n";
-            byte[] tar = buildSingleFileTar("authorized_keys", keyContent.getBytes(StandardCharsets.UTF_8), 0600);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath("/root/.ssh")
-                    .withTarInputStream(new ByteArrayInputStream(tar))
-                    .exec();
+            RetryingTarCopier.copyBytes(dockerClient, containerId, "/root/.ssh",
+                    "authorized_keys", keyContent.getBytes(StandardCharsets.UTF_8), 0600);
 
             execInContainer(containerId, new String[]{"chmod", "600", "/root/.ssh/authorized_keys"}, 5);
             LOG.infov("Injected SSH public key into container {0}", containerId);
@@ -838,11 +834,7 @@ public class Ec2ContainerManager {
             String logGroup, String logStream, String region
     ) throws Exception {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
-        byte[] tar = buildSingleFileTar("user-data.sh", script, 0755);
-        dockerClient.copyArchiveToContainerCmd(containerId)
-                .withRemotePath("/tmp")
-                .withTarInputStream(new ByteArrayInputStream(tar))
-                .exec();
+        RetryingTarCopier.copyBytes(dockerClient, containerId, "/tmp", "user-data.sh", script, 0755);
 
         // Execute the script directly so Docker honors its shebang, matching cloud-init shellscript behavior.
         String execId = dockerClient.execCreateCmd(containerId)
@@ -1292,17 +1284,4 @@ public class Ec2ContainerManager {
                 .findFirst();
     }
 
-    private byte[] buildSingleFileTar(String filename, byte[] content, int mode) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
-            tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-            TarArchiveEntry entry = new TarArchiveEntry(filename);
-            entry.setSize(content.length);
-            entry.setMode(mode);
-            tar.putArchiveEntry(entry);
-            tar.write(content);
-            tar.closeArchiveEntry();
-        }
-        return bos.toByteArray();
-    }
 }

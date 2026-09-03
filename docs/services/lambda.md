@@ -485,6 +485,10 @@ on its container IP. All Lambda containers launched by Floci are configured to
 use it as their DNS resolver. The embedded DNS server:
 
 - Resolves `*.localhost.floci.io` → Floci's Docker network IP
+- With `FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true`, also resolves `amazonaws.com` and
+  every subdomain to Floci's IP, so clients built with explicit real-AWS
+  endpoints land on the emulator — see
+  [Transparent endpoints](../configuration/environment-variables.md#transparent-endpoints)
 - Forwards all other queries to the upstream resolver(s) from `/etc/resolv.conf`,
   falling back to public resolvers so **public hostnames** (e.g.
   `business-api.tiktok.com`) resolve from inside Lambda containers

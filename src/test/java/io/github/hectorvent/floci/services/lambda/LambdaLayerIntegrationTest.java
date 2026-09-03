@@ -498,4 +498,60 @@ class LambdaLayerIntegrationTest {
             .statusCode(200);
         // Layer should no longer appear (all versions deleted)
     }
+
+    // ── Request-shape validation ────────────────────────────────────────────────
+
+    @Test
+    @Order(23)
+    void publishLayerVersion_rejectsUnknownCompatibleRuntime() throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Content": { "ZipFile": "%s" },
+                    "CompatibleRuntimes": ["cobol99"]
+                }
+                """.formatted(layerZipBase64()))
+        .when()
+            .post("/2018-10-31/layers/validation-test-layer/versions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(24)
+    void publishLayerVersion_rejectsUnknownCompatibleArchitecture() throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Content": { "ZipFile": "%s" },
+                    "CompatibleArchitectures": ["mips"]
+                }
+                """.formatted(layerZipBase64()))
+        .when()
+            .post("/2018-10-31/layers/validation-test-layer/versions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(25)
+    void publishLayerVersion_rejectsTooManyCompatibleArchitectures() throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Content": { "ZipFile": "%s" },
+                    "CompatibleArchitectures": ["x86_64", "arm64", "x86_64"]
+                }
+                """.formatted(layerZipBase64()))
+        .when()
+            .post("/2018-10-31/layers/validation-test-layer/versions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
 }

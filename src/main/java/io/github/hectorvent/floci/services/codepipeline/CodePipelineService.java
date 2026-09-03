@@ -891,7 +891,7 @@ public class CodePipelineService {
                                   ActionExecution state) throws InterruptedException {
         String projectName = action.path("configuration").path("ProjectName").asText(null);
         Build build = codeBuildService.startBuild(execution.getRegion(), execution.getAccountId(), projectName,
-                null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null);
         state.setExternalExecutionId(build.getId());
         while (!Boolean.TRUE.equals(build.getBuildComplete())) {
             if (execution.isStopRequested()) {

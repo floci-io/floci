@@ -120,6 +120,18 @@ Floci's embedded DNS server always resolves the following wildcard suffixes to F
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of additional hostname suffixes to resolve to Floci's container IP. Use this for custom domains beyond the built-in ones above (e.g. a private internal suffix). |
+| `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` | `false` | Resolve `amazonaws.com` and every subdomain to Floci's container IP inside spawned containers (transparent endpoint injection). See below. |
+
+### Transparent endpoints
+
+Some tools construct SDK clients with explicit real-AWS endpoints (e.g. `https://sts.us-east-1.amazonaws.com`), which override `AWS_ENDPOINT_URL` — those calls escape the emulator and fail against real AWS. With `FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true`, the embedded DNS server answers A queries for `amazonaws.com` and every subdomain at any depth (`sts.amazonaws.com`, `organizations.us-east-1.amazonaws.com`, virtual-hosted S3 like `my-bucket.s3.us-east-1.amazonaws.com`) with Floci's container IP, matching LocalStack's transparent endpoint injection. All other queries keep the normal forward/fallback behavior.
+
+Combine it with `FLOCI_TLS_ENABLED=true` so hardcoded `https://` endpoints work end to end:
+
+- the TLS proxy already serves HTTPS on port 443, where those clients connect;
+- the generated self-signed certificate additionally covers `*.amazonaws.com` and `*.<default-region>.amazonaws.com` (flipping the flag regenerates the certificate);
+- CodeBuild containers get Floci's certificate staged in and a combined CA bundle — Floci's certificate plus the files referenced by any pre-existing `NODE_EXTRA_CA_CERTS`/`AWS_CA_BUNDLE` — exported through those same variables before any buildspec phase runs, so images that ship their own egress CAs keep working;
+- the `AWS_ENDPOINT_URL` injected into CodeBuild containers switches to `https://` (same host and port), because clients like the CDK toolkit pass a shared `https.Agent` into their SDK options and Node rejects `http:` URLs on an `https.Agent`.
 
 ---
 
@@ -461,6 +473,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_AUTOSCALING_ENABLED` | `true` | Enable the Auto Scaling service |
 | `FLOCI_SERVICES_CODEBUILD_ENABLED` | `true` | Enable the CodeBuild service |
 | `FLOCI_SERVICES_CODEBUILD_DOCKER_NETWORK` | _(none)_ | Docker network for CodeBuild build containers |
+| `FLOCI_SERVICES_CODEBUILD_CURATED_IMAGE_SUBSTITUTE` | _(newest public Amazon Linux standard for the host arch)_ | Image run in place of curated `aws/codebuild/*` names that AWS does not publish publicly (the Ubuntu `standard` family); Amazon Linux curated names map to their public.ecr.aws mirrors directly |
+| `FLOCI_SERVICES_CODEBUILD_MAX_CONCURRENT_BUILDS` | `4` | Maximum number of builds whose workspace may be staged on disk at once; caps the fan-out of a parallel stage on a constrained host. Unset means 4; a non-positive value means unbounded |
 | `FLOCI_SERVICES_CODEDEPLOY_ENABLED` | `true` | Enable the CodeDeploy service |
 | `FLOCI_SERVICES_NETWORKFIREWALL_ENABLED` | `true` | Enable the AWS Network Firewall service |
 | `FLOCI_SERVICES_SERVICEQUOTAS_ENABLED` | `true` | Enable the Service Quotas service |
