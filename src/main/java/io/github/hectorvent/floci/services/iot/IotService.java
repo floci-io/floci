@@ -23,6 +23,10 @@ import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
 import io.github.hectorvent.floci.services.iot.model.IotThingType;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.iot.model.Thing;
+import io.github.hectorvent.floci.services.iot.rules.RuleSql;
+import io.github.hectorvent.floci.services.iot.rules.RuleSqlEvaluator;
+import io.github.hectorvent.floci.services.iot.rules.RuleSqlParseException;
+import io.github.hectorvent.floci.services.iot.rules.RuleSqlParser;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
@@ -96,6 +100,7 @@ public class IotService {
     private final LambdaService lambdaService;
     private final FirehoseService firehoseService;
     private final CloudWatchLogsService cloudWatchLogsService;
+    private final RuleSqlEvaluator ruleSqlEvaluator;
 
     @Inject
     public IotService(StorageFactory storageFactory,
@@ -181,6 +186,7 @@ public class IotService {
         this.lambdaService = lambdaService;
         this.firehoseService = firehoseService;
         this.cloudWatchLogsService = cloudWatchLogsService;
+        this.ruleSqlEvaluator = new RuleSqlEvaluator(objectMapper);
     }
 
     public String describeEndpoint(String endpointType) {
@@ -930,6 +936,7 @@ public class IotService {
         validateAction(errorAction);
         rule.setErrorActionJson(errorAction.isObject() ? errorAction.toString() : null);
         rule.setCreatedAt(createdAt == null ? Instant.now() : createdAt);
+        rule.setCompiledSql(compileSql(ruleName, rule.getSql(), config.services().iot().ruleSqlStrict()));
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
         return rule;
     }
@@ -943,6 +950,26 @@ public class IotService {
         if (!FIREHOSE_SEPARATOR.matcher(separator.asText()).matches()) {
             throw new AwsException("InvalidRequestException",
                     "Invalid firehose separator. Valid values are: '\\n' (newline), '\\t' (tab), '\\r\\n' (Windows newline), ',' (comma)", 400);
+        }
+    }
+
+    /**
+     * Parses a rule's SQL. A statement outside the subset Floci evaluates is not rejected by
+     * default: it is stored as it was sent and keeps the behaviour it had before this parser
+     * existed, firing on every publish matching its topic filter with the whole payload.
+     * Setting {@code floci.services.iot.rule-sql-strict} rejects it the way AWS does.
+     */
+    private RuleSql.Compilation compileSql(String ruleName, String sql, boolean strict) {
+        try {
+            return RuleSql.Compilation.of(RuleSqlParser.parse(sql));
+        } catch (RuleSqlParseException e) {
+            if (strict) {
+                throw new AwsException("SqlParseException",
+                        "Invalid topic rule SQL for " + ruleName + ": " + e.getMessage(), 400);
+            }
+            LOG.warnv("Topic rule {0} is not evaluated: its SQL is outside the subset Floci understands ({1}). "
+                    + "It keeps firing on every matching topic with the whole payload.", ruleName, e.getMessage());
+            return RuleSql.Compilation.PASSTHROUGH;
         }
     }
 
@@ -976,10 +1003,41 @@ public class IotService {
             return;
         }
         for (IotTopicRule rule : rulesForPublish(region)) {
-            if (!rule.isRuleDisabled() && topicMatches(extractTopicPattern(rule.getSql()), topic)) {
-                executeTopicRule(rule, topic, eventPayload);
+            if (!rule.isRuleDisabled()) {
+                matchAndProject(rule, topic, eventPayload)
+                        .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
             }
         }
+    }
+
+    /**
+     * Returns the document the rule's actions should receive, or empty when the rule does not
+     * fire for this message. Rules whose SQL could not be parsed take the pre-parser path: the
+     * topic filter is read straight out of the SQL and the payload is forwarded untouched.
+     */
+    private Optional<byte[]> matchAndProject(IotTopicRule rule, String topic, byte[] payload) {
+        RuleSql query = ruleQuery(rule);
+        if (query == null) {
+            return topicMatches(extractTopicPattern(rule.getSql()), topic) ? Optional.of(payload) : Optional.empty();
+        }
+        if (!topicMatches(query.topicFilter(), topic)) {
+            return Optional.empty();
+        }
+        return ruleSqlEvaluator.evaluate(rule.getRuleName(), query, topic, payload);
+    }
+
+    /**
+     * The rule's parsed statement, or null when its SQL is outside the subset. A rule restored
+     * from storage is parsed here on its first publish; one written through the API already
+     * carries its parse.
+     */
+    private RuleSql ruleQuery(IotTopicRule rule) {
+        RuleSql.Compilation compiled = rule.getCompiledSql();
+        if (compiled == null) {
+            compiled = compileSql(rule.getRuleName(), rule.getSql(), false);
+            rule.setCompiledSql(compiled);
+        }
+        return compiled.query();
     }
 
     private List<IotTopicRule> rulesForPublish(String region) {
@@ -1080,11 +1138,12 @@ public class IotService {
     }
 
     /**
-     * Runs the actions of a matching rule. One failing action never fails the publish or the actions
-     * after it, as on AWS: the failure is logged, and once every action ran the rule's error action,
-     * if it has one, receives the failure document listing every action that failed.
+     * Runs the actions of a matching rule on the document its SQL produced. One failing action never
+     * fails the publish or the actions after it, as on AWS: the failure is logged, and once every
+     * action ran the rule's error action, if it has one, receives the failure document listing every
+     * action that failed, with the original payload as published.
      */
-    private void executeTopicRule(IotTopicRule rule, String topic, byte[] payload) {
+    private void executeTopicRule(IotTopicRule rule, String topic, byte[] originalPayload, byte[] document) {
         String ruleRegion = AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion());
         List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode action : storedJson(rule.getRuleName(), rule.getActionsJson())) {
@@ -1095,7 +1154,7 @@ public class IotService {
             }
             JsonNode config = action.get(type);
             try {
-                runAction(rule, type, config, payload, ruleRegion);
+                runAction(rule, type, config, document, ruleRegion);
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Action {0} of topic rule {1} failed", type, rule.getRuleName());
                 failures.add(failure(type, config, e));
@@ -1111,7 +1170,7 @@ public class IotService {
             return;
         }
         try {
-            runAction(rule, type, errorAction.get(type), failureDocument(rule, topic, payload, failures), ruleRegion);
+            runAction(rule, type, errorAction.get(type), failureDocument(rule, topic, originalPayload, failures), ruleRegion);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Error action {0} of topic rule {1} failed", type, rule.getRuleName());
         }
