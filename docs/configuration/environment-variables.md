@@ -297,6 +297,8 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDFORMATION_ENABLED` | `true` | Enable the CloudFormation service |
+| `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_LAMBDA_CODE` | `false` | Fall back to the built-in stub handler for an `AWS::Lambda::Function` whose S3 code cannot be read. Off matches real CloudFormation, which fails the resource and rolls the stack back |
+| `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES` | `true` | Stub a resource whose type has no provisioner (synthetic physical ID, `arn:aws:stub:::` ARN attribute, `CREATE_COMPLETE`), logged at `WARN` with a resource status reason. Set `false` to fail the resource instead, which rolls the stack back |
 
 ### ACM (Certificate Manager)
 
@@ -361,7 +363,7 @@ These services spawn Docker containers. They require access to the Docker socket
 |---|---|---|
 | `FLOCI_SERVICES_OPENSEARCH_ENABLED` | `true` | Enable the OpenSearch service |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK` | `false` | When `true`, domains are created instantly without a real container (API only) |
-| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` | Docker image for OpenSearch domains |
+| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | *(unset)* | Optional fixed Docker image for every OpenSearch domain; when unset, images resolve per requested `EngineVersion` |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | First port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Last port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Keep OpenSearch containers running when Floci stops |

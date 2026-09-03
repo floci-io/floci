@@ -2866,7 +2866,8 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private AwsException resourceNotFoundException(String tableName) {
-        return new AwsException("ResourceNotFoundException", "Requested resource not found", 400);
+        return new AwsException("ResourceNotFoundException",
+                "Requested resource not found: Table: " + tableName + " not found", 400);
     }
 
     public record UpdateResult(JsonNode newItem, JsonNode oldItem) {}

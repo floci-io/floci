@@ -88,7 +88,7 @@ class S3WellKnownKeyIntegrationTest {
         .then()
             .extract().asString();
 
-        if (body.contains("ResourceNotFoundException") || body.contains("User pool not found")) {
+        if (body.contains("ResourceNotFoundException") || body.contains("User pool ")) {
             throw new AssertionError(
                 "GET /" + BUCKET + "/" + JWKS_KEY
                 + " was routed to Cognito instead of S3. Response: " + body);

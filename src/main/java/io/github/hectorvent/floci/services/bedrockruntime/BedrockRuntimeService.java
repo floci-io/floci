@@ -37,6 +37,10 @@ public class BedrockRuntimeService {
         return backend().invokeModel(modelId, body);
     }
 
+    public byte[] buildConverseStreamResponse(String modelId, ObjectNode bedrockRequest) {
+        return backend().converseStream(modelId, bedrockRequest);
+    }
+
     private BedrockBackend backend() {
         String backend = config.services().bedrockRuntime().backend();
         if ("proxy".equalsIgnoreCase(backend)) {

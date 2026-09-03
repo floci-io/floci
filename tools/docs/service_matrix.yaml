@@ -13,6 +13,10 @@
 #   3. deferred      - genuinely undocumented today, tracked with a reason. A NEW
 #                      descriptor key that is neither an exact match, an alias target,
 #                      nor listed here fails `check_service_matrix.py --strict`.
+#
+# The reverse direction is checked too: every docs/services/*.md page must be linked
+# from a matrix row unless its slug is listed under `facet_pages:` (a page that
+# documents a facet of another service and deliberately has no row of its own).
 
 aliases:
   apigateway: api-gateway               # "API Gateway v1" row title
@@ -37,6 +41,7 @@ aliases:
   appconfigdata: appconfig              # data-plane facet, at appconfig.md#data-plane
   tagging: resource-groups-tagging      # Resource Groups Tagging API's SigV4 signing name
   elasticloadbalancing: elb             # ELB v2's SigV4 signing name
+  elb: elb-classic                      # Classic (2012-06-01) key; the v2 page is elb.md
   application-autoscaling: applicationautoscaling
   elasticbeanstalk: elastic-beanstalk
   ec2messages: ssm                      # SSM Messages facet, documented alongside ssm.md
@@ -60,3 +65,6 @@ deferred:
   - key: bedrock-agentcore-control
     reason: "documented by floci-io/floci#2436 (open at time of writing)"
     by: "2026-09-15"
+
+# docs/services pages that intentionally have no Service Matrix row of their own.
+facet_pages: []

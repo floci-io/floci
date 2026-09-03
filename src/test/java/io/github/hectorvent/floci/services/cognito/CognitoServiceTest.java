@@ -1468,6 +1468,20 @@ class CognitoServiceTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    @Test
+    void confirmSignUpNamesDeletedUserPoolInResourceNotFoundMessage() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "test-client", false, false, List.of(), List.of());
+        service.deleteUserPool(pool.getId());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.confirmSignUp(client.getClientId(), "carol", "123456"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("User pool " + pool.getId() + " does not exist.", ex.getMessage());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
     @ParameterizedTest
     @CsvSource({"email_verified", "phone_number_verified"})
     @SuppressWarnings("unchecked")
@@ -1854,9 +1868,12 @@ class CognitoServiceTest {
 
     @Test
     void adminGetUserRejectsUnknownPoolWithResourceNotFound() {
+        String missingPoolId = "us-east-1_missing";
+
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.adminGetUser("us-east-1_missing", "bob"));
+                () -> service.adminGetUser(missingPoolId, "bob"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("User pool " + missingPoolId + " does not exist.", ex.getMessage());
         assertEquals(400, ex.getHttpStatus());
     }
 

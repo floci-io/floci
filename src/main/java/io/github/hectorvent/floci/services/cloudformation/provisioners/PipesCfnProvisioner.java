@@ -1,12 +1,15 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -29,10 +32,8 @@ public class PipesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "Name");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), PIPE_NAME_MAX_LENGTH, false);
-        }
+        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"),
+                r.getLogicalId(), PIPE_NAME_MAX_LENGTH, false);
 
         String source = ctx.resolveOptional(props, "Source");
         String target = ctx.resolveOptional(props, "Target");
@@ -49,8 +50,30 @@ public class PipesCfnProvisioner implements CfnResourceProvisioner {
 
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, ctx);
 
-        var pipe = pipesService.createPipe(name, source, target, roleArn, description, desiredState,
-                enrichment, sourceParameters, targetParameters, enrichmentParameters, tags, ctx.region());
+        // provision is also the update path. createPipe throws ConflictException on an existing
+        // name, and stablePhysicalName now keeps that name steady across updates, so a second
+        // UpdateStack must reconcile the pipe rather than recreate it. A replacing update derives a
+        // different name and still creates, which is why this asks reusesPriorEntity rather than
+        // isUpdate.
+        Pipe pipe;
+        if (ctx.reusesPriorEntity(name)) {
+            Pipe existing = pipesService.describePipe(name, ctx.region());
+            // Source is a createOnly property. With the name reused there is no replacement to
+            // move to, which is the update CloudFormation refuses for a custom-named resource, so
+            // it is refused here rather than silently kept on the old source.
+            if (source != null && !source.equals(existing.getSource())) {
+                throw new AwsException("ValidationError",
+                        "Updating Source requires resource replacement, which is not supported.", 400);
+            }
+            pipe = pipesService.updatePipe(name, target, roleArn, description, desiredState,
+                    enrichment, sourceParameters, targetParameters, enrichmentParameters,
+                    ctx.region());
+            reconcileTags(pipe, tags, ctx.region());
+        } else {
+            pipe = pipesService.createPipe(name, source, target, roleArn, description, desiredState,
+                    enrichment, sourceParameters, targetParameters, enrichmentParameters, tags,
+                    ctx.region());
+        }
 
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", pipe.getArn());
@@ -66,6 +89,22 @@ public class PipesCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         return ctx.engine().resolveNode(props.get(name));
+    }
+
+    /**
+     * UpdatePipe carries no Tags (only CreatePipe does), so on the update path the template's tags
+     * are driven to their desired state through TagResource and UntagResource, keyed by the pipe's
+     * ARN. A key the template dropped is untagged rather than left over.
+     */
+    private void reconcileTags(Pipe pipe, Map<String, String> desired, String region) {
+        List<String> stale = ProvisionContext.staleTagKeys(
+                pipesService.listTags(region, pipe.getArn()), desired);
+        if (!stale.isEmpty()) {
+            pipesService.untagResource(region, pipe.getArn(), stale);
+        }
+        if (!desired.isEmpty()) {
+            pipesService.tagResource(region, pipe.getArn(), desired);
+        }
     }
 
     /** See {@code KmsCfnProvisioner#parseCfnTags} for why this is copied rather than shared. */

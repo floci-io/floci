@@ -623,6 +623,24 @@ class IamServiceTest {
         assertNull(iamService.resolveCallerPolicies("ASIAIOSFODNN7EXAMPLE"));
     }
 
+    @Test
+    void findSecretKeyRequiresTheTemporaryCredentialSessionToken() {
+        String accessKeyId = "ASIASESSIONTOKENMATCH";
+        iamService.registerSession(
+                accessKeyId,
+                "temporary-secret",
+                "session-token",
+                null,
+                Instant.now().plusSeconds(3600),
+                null
+        );
+
+        assertEquals("temporary-secret", iamService.findSecretKey(accessKeyId, "session-token").orElseThrow());
+        assertTrue(iamService.findSecretKey(accessKeyId).isPresent());
+        assertTrue(iamService.findSecretKey(accessKeyId, "wrong-token").isEmpty());
+        assertTrue(iamService.findSecretKey(accessKeyId, null).isEmpty());
+    }
+
     // =========================================================================
     // Session account routing (SessionAccountLookup)
     // =========================================================================

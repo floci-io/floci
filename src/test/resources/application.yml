@@ -220,6 +220,9 @@ floci:
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false
+      # Pinned to the shipped default so a test sees what a user sees; the strict-mode test
+      # overrides it with its own profile.
+      allow-stub-unsupported-resource-types: true
     acm:
       enabled: true
       validation-wait-seconds: 0

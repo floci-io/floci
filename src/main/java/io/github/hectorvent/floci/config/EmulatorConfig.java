@@ -1420,6 +1420,20 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean allowStubLambdaCode();
+
+        /**
+         * Whether a resource whose type Floci has no provisioner for may be stubbed: a synthetic
+         * physical id, an {@code arn:aws:stub:::} ARN attribute and {@code CREATE_COMPLETE}.
+         *
+         * <p>Defaults to {@code true}, because Floci implements a fraction of the CloudFormation
+         * registry and failing every other type would reject templates that are valid to AWS. The
+         * stub is reported at warn and carries a resource status reason saying nothing was created,
+         * so a {@code CREATE_COMPLETE} stack can still be read as one where some resources exist
+         * only on paper. Set to {@code false} to fail such a resource instead, which rolls the
+         * stack back, for a pipeline that must not pass over a resource it never got.
+         */
+        @WithDefault("true")
+        boolean allowStubUnsupportedResourceTypes();
     }
 
     interface AcmServiceConfig {

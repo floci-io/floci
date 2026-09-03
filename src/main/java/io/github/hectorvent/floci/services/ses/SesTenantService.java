@@ -23,6 +23,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
 /**
@@ -173,6 +174,64 @@ public class SesTenantService {
      * existence through the facade without duplicating the key derivation. */
     public Optional<Tenant> find(String tenantName, String region) {
         return tenantStore.get(tenantKey(region, tenantName));
+    }
+
+    /**
+     * Resolves a tenant by its TenantId, for the ARN-dispatched tag operations: AWS resolves a
+     * tenant tag ARN by the id segment alone; the name segment is not matched (probe-confirmed).
+     */
+    public Optional<Tenant> findByTenantId(String tenantId, String region) {
+        String prefix = tenantKeyPrefix(region);
+        return tenantStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(t -> tenantId != null && tenantId.equals(t.tenantId()))
+                .findFirst();
+    }
+
+    /**
+     * The name/id decomposition of a tenant tag ARN's resource remainder ({@code <name>/<tenantId>}
+     * after the generic dispatch split off the {@code tenant/} type segment). AWS parses a remainder
+     * without a slash as a null name with the whole segment as the id, and resolves by the id alone
+     * (probe-confirmed): tenant-domain knowledge, so it lives here, not in the tag dispatch.
+     */
+    record TenantTagArn(String name, String tenantId) {
+        static TenantTagArn parse(String resourceRemainder) {
+            int slash = resourceRemainder.indexOf('/');
+            return new TenantTagArn(slash < 0 ? null : resourceRemainder.substring(0, slash),
+                    slash < 0 ? resourceRemainder : resourceRemainder.substring(slash + 1));
+        }
+    }
+
+    /** Resolves a tenant from a tag ARN's resource remainder, for the facade's tag listing. */
+    public Tenant tenantForTagArn(String resourceRemainder, String region) {
+        TenantTagArn arn = TenantTagArn.parse(resourceRemainder);
+        return findByTenantId(arn.tenantId(), region)
+                .orElseThrow(() -> tagArnTenantNotFound(arn));
+    }
+
+    /**
+     * Applies a tag mutation for the facade's ARN-dispatched tagging. The tenant is re-resolved by
+     * TenantId and mutated INSIDE the shared lock, so concurrent tag calls can't lose each other's
+     * merges, a concurrent suppression-attribute update isn't overwritten by a stale copy, and a
+     * delete/recreate between the caller's lookup and this write can't resurrect the old record.
+     */
+    public void mutateTags(String resourceRemainder, String region, UnaryOperator<List<Tag>> mutation) {
+        TenantTagArn arn = TenantTagArn.parse(resourceRemainder);
+        synchronized (tenantMutationLock) {
+            Tenant current = findByTenantId(arn.tenantId(), region)
+                    .orElseThrow(() -> tagArnTenantNotFound(arn));
+            // The record's list may be a mutable one (Jackson-built); hand the callback an immutable
+            // copy so an in-place mutation can't reach the stored record, and store an immutable copy
+            // so the persisted list can't be aliased either.
+            List<Tag> tags = current.tags() == null ? List.of() : List.copyOf(current.tags());
+            tenantStore.put(tenantKey(region, current.tenantName()),
+                    current.withTags(List.copyOf(mutation.apply(tags))));
+        }
+    }
+
+    /** The tag-dispatch not-found error: the missing space before "with" is AWS's own. */
+    private static AwsException tagArnTenantNotFound(TenantTagArn arn) {
+        return new AwsException("NotFoundException",
+                "No Tenant present with name: " + arn.name() + "with tenantId: " + arn.tenantId(), 404);
     }
 
     // ──────────────────────── Resource associations (Phase 2) ────────────────────────
