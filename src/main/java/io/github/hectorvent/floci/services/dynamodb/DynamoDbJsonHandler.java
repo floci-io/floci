@@ -328,10 +328,10 @@ public class DynamoDbJsonHandler {
                     + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
         }
 
-        if (exprAttrValues != null && conditionExpression == null) {
-            throw new AwsException("ValidationException",
-                    "ExpressionAttributeValues can only be specified when using expressions: ConditionExpression is null", 400);
-        }
+        // EAN/EAV with no expression to reference them: AWS reports "can only be specified
+        // when using expressions", not the "unused in expressions" wording (#2893).
+        rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
+                conditionExpression != null, "ConditionExpression is null");
 
         ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
@@ -442,6 +442,11 @@ public class DynamoDbJsonHandler {
                     n + " validation error" + (n > 1 ? "s" : "") + " detected: "
                     + String.join("; ", delValidationErrors), 400);
         }
+
+        // EAN/EAV with no expression to reference them: AWS reports "can only be specified
+        // when using expressions", not the "unused in expressions" wording (#2893).
+        rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
+                conditionExpression != null, "ConditionExpression is null");
 
         ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
@@ -1863,6 +1868,29 @@ public class DynamoDbJsonHandler {
         Set<String> tokens = new LinkedHashSet<>();
         for (String expr : expressions) extractPrefixedTokens(expr, ':', tokens);
         return tokens;
+    }
+
+    /**
+     * Rejects ExpressionAttributeNames/Values supplied when the request carries no expression to
+     * reference them. AWS answers this sub-case with "&lt;param&gt; can only be specified when using
+     * expressions: &lt;nullExpressionParams&gt;" rather than the "unused in expressions" wording used
+     * once an alias is merely unreferenced (#2893). {@code nullExpressionParams} must spell the absent
+     * expression parameter(s) exactly as AWS reports them for the operation, e.g. "ConditionExpression is null".
+     * EAV is checked before EAN to match the pre-existing PutItem guard.
+     */
+    private static void rejectExprAttrsWithoutExpression(JsonNode exprAttrNames, JsonNode exprAttrValues,
+            boolean hasAnyExpression, String nullExpressionParams) {
+        if (hasAnyExpression) {
+            return;
+        }
+        if (exprAttrValues != null) {
+            throw new AwsException("ValidationException",
+                    "ExpressionAttributeValues can only be specified when using expressions: " + nullExpressionParams, 400);
+        }
+        if (exprAttrNames != null) {
+            throw new AwsException("ValidationException",
+                    "ExpressionAttributeNames can only be specified when using expressions: " + nullExpressionParams, 400);
+        }
     }
 
     private static void checkUnusedEan(JsonNode exprAttrNames, Set<String> usedHashTokens) {

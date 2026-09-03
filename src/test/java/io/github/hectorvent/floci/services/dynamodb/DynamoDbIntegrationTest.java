@@ -3773,6 +3773,84 @@ given()
             .body("message", equalTo("Value provided in ExpressionAttributeNames "
                     + "unused in expressions: keys: {#a, #b}"));
 
+        // No expression parameter at all: AWS reports the alias map "can only be specified
+        // when using expressions", distinct from the "unused in expressions" wording above.
+        // PutItem and DeleteItem only accept ConditionExpression, so it is the named param.
+
+        // PutItem: ExpressionAttributeNames without ConditionExpression
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeNames can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
+        // PutItem: ExpressionAttributeValues without ConditionExpression (pre-existing guard)
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeValues can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
+        // DeleteItem: ExpressionAttributeNames without ConditionExpression
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeNames can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
+        // DeleteItem: ExpressionAttributeValues without ConditionExpression; with both maps
+        // present the values message wins, matching the pre-existing PutItem guard order.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ExpressionAttributeNames": {"#st": "status"},
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeValues can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
         // Control: fully-referenced expression attributes are still accepted.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
