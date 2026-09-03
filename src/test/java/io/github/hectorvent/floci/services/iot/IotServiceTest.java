@@ -281,4 +281,22 @@ class IotServiceTest {
         assertEquals(QUEUE_URL, item.at("/failures/L/0/M/failedResource/S").asText());
         assertTrue(item.at("/failures/L/0/M/errorMessage/S").asText().contains("does not exist"));
     }
+
+    @Test
+    void anActionWithoutATypeOrOfAnUnsupportedTypeIsSkippedAndTheOthersStillRun() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [
+               {"comment": "not an action"},
+               {"kafka": {"destinationArn": "arn:aws:iot:us-east-1:000000000000:ruledestination/kafka/x", "topic": "t"}},
+               {"lambda": {"functionArn": "%s"}}
+             ],
+             "errorAction": {"note": "no type either"}}
+            """.formatted(FUNCTION_ARN));
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+        verify(lambda, never()).invoke(eq(REGION), eq(ERROR_FUNCTION_ARN), any(), any());
+    }
 }

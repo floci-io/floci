@@ -1129,7 +1129,7 @@ public class IotController {
             try {
                 response.set("errorAction", objectMapper.readTree(rule.getErrorActionJson()));
             } catch (JsonProcessingException e) {
-                LOG.warnv("Stored error action of topic rule {0} is not JSON: {1}", rule.getRuleName(), e.getMessage());
+                LOG.warnv(e, "Stored error action of topic rule {0} is not JSON", rule.getRuleName());
             }
         }
         return response;

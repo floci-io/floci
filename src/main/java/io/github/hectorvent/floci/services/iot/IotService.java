@@ -1019,11 +1019,16 @@ public class IotService {
         List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode action : storedJson(rule.getRuleName(), rule.getActionsJson())) {
             String type = actionType(action);
+            if (type == null) {
+                LOG.warnv("Topic rule {0} has an action without a type, skipping it: {1}", rule.getRuleName(), action);
+                continue;
+            }
+            JsonNode config = action.get(type);
             try {
-                runAction(type, action.path(type), payload, ruleRegion);
+                runAction(type, config, payload, ruleRegion);
             } catch (RuntimeException e) {
-                LOG.warnv("Action {0} of topic rule {1} failed: {2}", type, rule.getRuleName(), e.getMessage());
-                failures.add(failure(type, action.path(type), e));
+                LOG.warnv(e, "Action {0} of topic rule {1} failed", type, rule.getRuleName());
+                failures.add(failure(type, config, e));
             }
         }
         if (failures.isEmpty() || rule.getErrorActionJson() == null) {
@@ -1031,10 +1036,14 @@ public class IotService {
         }
         JsonNode errorAction = storedJson(rule.getRuleName(), rule.getErrorActionJson());
         String type = actionType(errorAction);
+        if (type == null) {
+            LOG.warnv("Topic rule {0} has an error action without a type, skipping it", rule.getRuleName());
+            return;
+        }
         try {
-            runAction(type, errorAction.path(type), failureDocument(rule, topic, payload, failures), ruleRegion);
+            runAction(type, errorAction.get(type), failureDocument(rule, topic, payload, failures), ruleRegion);
         } catch (RuntimeException e) {
-            LOG.warnv("Error action {0} of topic rule {1} failed: {2}", type, rule.getRuleName(), e.getMessage());
+            LOG.warnv(e, "Error action {0} of topic rule {1} failed", type, rule.getRuleName());
         }
     }
 
@@ -1042,7 +1051,7 @@ public class IotService {
         try {
             return objectMapper.readTree(json);
         } catch (JsonProcessingException e) {
-            LOG.warnv("Stored actions of topic rule {0} are not JSON and were skipped: {1}", ruleName, e.getMessage());
+            LOG.warnv(e, "Stored actions of topic rule {0} are not JSON and were skipped", ruleName);
             return objectMapper.createArrayNode();
         }
     }
@@ -1063,9 +1072,6 @@ public class IotService {
     }
 
     private void runAction(String type, JsonNode action, byte[] payload, String region) {
-        if (type == null) {
-            return;
-        }
         switch (type) {
             case "republish" -> {
                 String targetTopic = action.path("topic").asText(null);
