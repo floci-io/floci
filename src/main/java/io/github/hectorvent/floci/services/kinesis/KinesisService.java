@@ -48,8 +48,9 @@ public class KinesisService implements ResourceProvider {
     private final StorageBackend<String, KinesisConsumer> consumerStore;
     private final RegionResolver regionResolver;
     private final AtomicLong sequenceGenerator = new AtomicLong(System.currentTimeMillis());
-    // One monitor per stream key. Serializes sequence allocation + shard append + persist so the
-    // in-memory log, the assigned sequence order, and the WAL write order all agree.
+    // One monitor per stream key, handed out by lockFor. Serializes sequence allocation + shard
+    // append + persist so the in-memory log, the assigned sequence order and the WAL write order
+    // all agree, and serializes every other read-modify-write on a stream against deleteStream.
     private final ConcurrentHashMap<String, Object> streamAppendLocks = new ConcurrentHashMap<>();
     // Package-private test seam, run inside the append critical section after the sequence is
     // allocated and before the record is appended. Default no-op in production.
@@ -130,20 +131,23 @@ public class KinesisService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException",
                     "StreamMode must be PROVISIONED or ON_DEMAND, got: " + streamMode, 400);
         }
-        KinesisStream stream = resolveStream(streamName, region);
-        if (!"ACTIVE".equals(stream.getStreamStatus())) {
-            throw new AwsException("ResourceInUseException",
-                    "Stream " + streamName + " is not ACTIVE (current state: " + stream.getStreamStatus() + ")", 400);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            if (!"ACTIVE".equals(stream.getStreamStatus())) {
+                throw new AwsException("ResourceInUseException",
+                        "Stream " + streamName + " is not ACTIVE (current state: " + stream.getStreamStatus() + ")", 400);
+            }
+            // Same-mode is a no-op. Mirrors the same-value behaviour in
+            // increase/decreaseStreamRetentionPeriod (see #342). Avoids breaking
+            // terraform-provider-aws which calls UpdateStreamMode on every refresh.
+            if (streamMode.equals(stream.getStreamMode())) {
+                return;
+            }
+            stream.setStreamMode(streamMode);
+            store.put(key, stream);
+            LOG.infov("Updated stream mode for {0} to {1}", streamName, streamMode);
         }
-        // Same-mode is a no-op. Mirrors the same-value behaviour in
-        // increase/decreaseStreamRetentionPeriod (see #342). Avoids breaking
-        // terraform-provider-aws which calls UpdateStreamMode on every refresh.
-        if (streamMode.equals(stream.getStreamMode())) {
-            return;
-        }
-        stream.setStreamMode(streamMode);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Updated stream mode for {0} to {1}", streamName, streamMode);
     }
 
     public List<String> listStreams(String region) {
@@ -205,28 +209,31 @@ public class KinesisService implements ResourceProvider {
 
     public void deleteStream(String streamName, String region) {
         String storageKey = regionKey(region, streamName);
-        // Delete under the same per-stream monitor that appends and topology ops use, so a delete
-        // is serialized with any in-flight append/split/merge on this stream. The monitor is left
-        // in the map on purpose (a single stable monitor per key, a bounded leak): removing it here
-        // would let a producer that already resolved the stream re-create a fresh monitor and
-        // append+persist a stale, deleted instance under it — resurrecting the stream.
-        Object lock = streamAppendLocks.computeIfAbsent(storageKey, k -> new Object());
-        synchronized (lock) {
+        // Delete under the per-stream monitor every writer takes, so the delete is serialized with
+        // any in-flight append, split, merge or metadata write on this stream. See lockFor for why
+        // the monitor is deliberately left in the map.
+        synchronized (lockFor(storageKey)) {
             store.delete(storageKey);
         }
         LOG.infov("Deleted Kinesis stream: {0}", streamName);
     }
 
     public void addTagsToStream(String streamName, Map<String, String> tags, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        stream.getTags().putAll(tags);
-        store.put(regionKey(region, streamName), stream);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            stream.getTags().putAll(tags);
+            store.put(key, stream);
+        }
     }
 
     public void removeTagsFromStream(String streamName, List<String> tagKeys, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        tagKeys.forEach(stream.getTags()::remove);
-        store.put(regionKey(region, streamName), stream);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            tagKeys.forEach(stream.getTags()::remove);
+            store.put(key, stream);
+        }
     }
 
     public Map<String, String> listTagsForStream(String streamName, String region) {
@@ -234,75 +241,90 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void startStreamEncryption(String streamName, String encryptionType, String keyId, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        stream.setEncryptionType(encryptionType);
-        stream.setKeyId(keyId);
-        store.put(regionKey(region, streamName), stream);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            stream.setEncryptionType(encryptionType);
+            stream.setKeyId(keyId);
+            store.put(key, stream);
+        }
     }
 
     public void increaseStreamRetentionPeriod(String streamName, int retentionPeriodHours, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        if (retentionPeriodHours > 8760) {
-            throw new AwsException("InvalidArgumentException",
-                    "Retention period must not exceed 8760 hours (365 days)", 400);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            if (retentionPeriodHours > 8760) {
+                throw new AwsException("InvalidArgumentException",
+                        "Retention period must not exceed 8760 hours (365 days)", 400);
+            }
+            if (retentionPeriodHours < stream.getRetentionPeriodHours()) {
+                throw new AwsException("InvalidArgumentException",
+                        "Requested retention period (" + retentionPeriodHours +
+                        " hours) must not be less than current retention period (" +
+                        stream.getRetentionPeriodHours() + " hours)", 400);
+            }
+            // Same value is a no-op on real AWS despite the API doc wording ("must be more than
+            // current"). Proof: terraform-provider-aws calls IncreaseStreamRetentionPeriod on
+            // stream creation unconditionally when retention_period is set (stream.go Create path),
+            // so every default-retention TF stream would fail if AWS rejected same-value. See #342.
+            if (retentionPeriodHours == stream.getRetentionPeriodHours()) {
+                return;
+            }
+            stream.setRetentionPeriodHours(retentionPeriodHours);
+            store.put(key, stream);
+            LOG.infov("Increased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
         }
-        if (retentionPeriodHours < stream.getRetentionPeriodHours()) {
-            throw new AwsException("InvalidArgumentException",
-                    "Requested retention period (" + retentionPeriodHours +
-                    " hours) must not be less than current retention period (" +
-                    stream.getRetentionPeriodHours() + " hours)", 400);
-        }
-        // Same value is a no-op on real AWS despite the API doc wording ("must be more than
-        // current"). Proof: terraform-provider-aws calls IncreaseStreamRetentionPeriod on
-        // stream creation unconditionally when retention_period is set (stream.go Create path),
-        // so every default-retention TF stream would fail if AWS rejected same-value. See #342.
-        if (retentionPeriodHours == stream.getRetentionPeriodHours()) {
-            return;
-        }
-        stream.setRetentionPeriodHours(retentionPeriodHours);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Increased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
     }
 
     public void decreaseStreamRetentionPeriod(String streamName, int retentionPeriodHours, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        if (retentionPeriodHours < 24) {
-            throw new AwsException("InvalidArgumentException",
-                    "Retention period must not be less than 24 hours", 400);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            if (retentionPeriodHours < 24) {
+                throw new AwsException("InvalidArgumentException",
+                        "Retention period must not be less than 24 hours", 400);
+            }
+            if (retentionPeriodHours > stream.getRetentionPeriodHours()) {
+                throw new AwsException("InvalidArgumentException",
+                        "Requested retention period (" + retentionPeriodHours +
+                        " hours) must not be greater than current retention period (" +
+                        stream.getRetentionPeriodHours() + " hours)", 400);
+            }
+            // Same value is a no-op on real AWS (mirrors IncreaseStreamRetentionPeriod). See #342.
+            if (retentionPeriodHours == stream.getRetentionPeriodHours()) {
+                return;
+            }
+            stream.setRetentionPeriodHours(retentionPeriodHours);
+            store.put(key, stream);
+            LOG.infov("Decreased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
         }
-        if (retentionPeriodHours > stream.getRetentionPeriodHours()) {
-            throw new AwsException("InvalidArgumentException",
-                    "Requested retention period (" + retentionPeriodHours +
-                    " hours) must not be greater than current retention period (" +
-                    stream.getRetentionPeriodHours() + " hours)", 400);
-        }
-        // Same value is a no-op on real AWS (mirrors IncreaseStreamRetentionPeriod). See #342.
-        if (retentionPeriodHours == stream.getRetentionPeriodHours()) {
-            return;
-        }
-        stream.setRetentionPeriodHours(retentionPeriodHours);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Decreased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
     }
 
     public Set<String> enableEnhancedMonitoring(String streamName, List<String> metrics, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        Set<String> current = new HashSet<>(stream.getEnhancedMonitoringMetrics());
-        Set<String> desired = resolveMetrics(metrics);
-        stream.getEnhancedMonitoringMetrics().addAll(desired);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Enabled enhanced monitoring for stream {0}: {1}", streamName, desired);
-        return current;
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            Set<String> current = new HashSet<>(stream.getEnhancedMonitoringMetrics());
+            Set<String> desired = resolveMetrics(metrics);
+            stream.getEnhancedMonitoringMetrics().addAll(desired);
+            store.put(key, stream);
+            LOG.infov("Enabled enhanced monitoring for stream {0}: {1}", streamName, desired);
+            return current;
+        }
     }
 
     public Set<String> disableEnhancedMonitoring(String streamName, List<String> metrics, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        Set<String> current = new HashSet<>(stream.getEnhancedMonitoringMetrics());
-        Set<String> toRemove = resolveMetrics(metrics);
-        stream.getEnhancedMonitoringMetrics().removeAll(toRemove);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Disabled enhanced monitoring for stream {0}: {1}", streamName, toRemove);
-        return current;
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            Set<String> current = new HashSet<>(stream.getEnhancedMonitoringMetrics());
+            Set<String> toRemove = resolveMetrics(metrics);
+            stream.getEnhancedMonitoringMetrics().removeAll(toRemove);
+            store.put(key, stream);
+            LOG.infov("Disabled enhanced monitoring for stream {0}: {1}", streamName, toRemove);
+            return current;
+        }
     }
 
     private Set<String> resolveMetrics(List<String> metrics) {
@@ -326,18 +348,20 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void stopStreamEncryption(String streamName, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        stream.setEncryptionType("NONE");
-        stream.setKeyId(null);
-        store.put(regionKey(region, streamName), stream);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            stream.setEncryptionType("NONE");
+            stream.setKeyId(null);
+            store.put(key, stream);
+        }
     }
 
     public void splitShard(String streamName, String shardId, String newStartingHashKey, String region) {
         String key = regionKey(region, streamName);
         // Share the producer critical section so a split can't race an append: selectShard runs
         // under the same lock, so a producer never appends to a parent a completed split has closed.
-        Object lock = streamAppendLocks.computeIfAbsent(key, k -> new Object());
-        synchronized (lock) {
+        synchronized (lockFor(key)) {
             // Resolve under the lock so a concurrent deleteStream (same monitor) cannot leave us
             // mutating and re-persisting a stale, deleted instance.
             KinesisStream stream = resolveStream(streamName, region);
@@ -379,8 +403,7 @@ public class KinesisService implements ResourceProvider {
 
     public void mergeShards(String streamName, String shardId, String adjacentShardId, String region) {
         String key = regionKey(region, streamName);
-        Object lock = streamAppendLocks.computeIfAbsent(key, k -> new Object());
-        synchronized (lock) {
+        synchronized (lockFor(key)) {
             // Resolve under the lock so a concurrent deleteStream (same monitor) cannot leave us
             // mutating and re-persisting a stale, deleted instance.
             KinesisStream stream = resolveStream(streamName, region);
@@ -492,21 +515,24 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void updateMaxRecordSize(String streamName, int maxRecordSizeInKiB, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        validateMaxRecordSize(maxRecordSizeInKiB, "ValidationException");
-        if ("ON_DEMAND".equals(stream.getStreamMode())) {
-            throw new AwsException("ValidationException",
-                    "UpdateMaxRecordSize is only supported for data streams with the provisioned capacity mode.",
-                    400);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            validateMaxRecordSize(maxRecordSizeInKiB, "ValidationException");
+            if ("ON_DEMAND".equals(stream.getStreamMode())) {
+                throw new AwsException("ValidationException",
+                        "UpdateMaxRecordSize is only supported for data streams with the provisioned capacity mode.",
+                        400);
+            }
+            if (!"ACTIVE".equals(stream.getStreamStatus())) {
+                throw new AwsException("ResourceInUseException",
+                        "Stream " + streamName + " is not ACTIVE (current state: "
+                                + stream.getStreamStatus() + ")", 400);
+            }
+            stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
+            store.put(key, stream);
+            LOG.infov("Updated max record size for {0} to {1} KiB", streamName, maxRecordSizeInKiB);
         }
-        if (!"ACTIVE".equals(stream.getStreamStatus())) {
-            throw new AwsException("ResourceInUseException",
-                    "Stream " + streamName + " is not ACTIVE (current state: "
-                            + stream.getStreamStatus() + ")", 400);
-        }
-        stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Updated max record size for {0} to {1} KiB", streamName, maxRecordSizeInKiB);
     }
 
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey, String region) {
@@ -518,8 +544,7 @@ public class KinesisService implements ResourceProvider {
         // Serialize shard selection, sequence allocation, append and persistence per stream so
         // concurrent producers can neither lose an append (plain ArrayList) nor store records
         // out of sequence order (which would break AT_/AFTER_SEQUENCE_NUMBER scans and WAL replay).
-        Object lock = streamAppendLocks.computeIfAbsent(key, k -> new Object());
-        synchronized (lock) {
+        synchronized (lockFor(key)) {
             // Re-resolve under the lock. deleteStream holds this same monitor, so a stream deleted
             // between the resolve above and here is now absent from the store. Appending to and
             // persisting the stale pre-delete instance would resurrect a deleted stream, so bind to
@@ -836,6 +861,23 @@ public class KinesisService implements ResourceProvider {
 
     private String regionKey(String region, String name) {
         return region + "::" + name;
+    }
+
+    /**
+     * The monitor guarding a stream key. Every path that mutates a stored stream takes it: record
+     * appends, split and merge, the metadata writes, and {@link #deleteStream}.
+     *
+     * <p>Holding it is only half the contract: a writer must also resolve the stream inside the
+     * monitor. A stream resolved before the monitor was acquired may already have been deleted, and
+     * persisting that stale instance would resurrect it or clobber a stream since recreated under
+     * the same name.
+     *
+     * <p>Monitors are never removed. One stable monitor per key is a bounded leak, whereas dropping
+     * one on delete would let a writer that already resolved the stream create a fresh monitor and
+     * persist the deleted instance under it, defeating the serialization.
+     */
+    private Object lockFor(String storageKey) {
+        return streamAppendLocks.computeIfAbsent(storageKey, k -> new Object());
     }
 
     // ─── Resource Explorer 2 ───────────────────────────────────────────────────

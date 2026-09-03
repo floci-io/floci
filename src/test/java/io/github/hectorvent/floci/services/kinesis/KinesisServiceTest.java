@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.kinesis;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisConsumer;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
@@ -10,6 +11,9 @@ import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -19,6 +23,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -28,6 +33,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -879,5 +887,202 @@ class KinesisServiceTest {
 
         assertTrue(kinesisService.listStreams(REGION).isEmpty(),
                 "the deleted stream must not be resurrected by the failed append");
+    }
+
+    private static final String META_STREAM = "meta";
+
+    /**
+     * A store that parks the first {@code get} after {@link #arm()} until released.
+     *
+     * <p>Every metadata write resolves its stream through exactly one {@code store.get}, and does
+     * so while holding the stream monitor, so parking there wedges the writer inside its critical
+     * section without needing a production test seam.
+     */
+    private static final class ParkOnResolveStore implements StorageBackend<String, KinesisStream> {
+        private final StorageBackend<String, KinesisStream> delegate = new InMemoryStorage<>();
+        private final AtomicBoolean armed = new AtomicBoolean();
+        final CountDownLatch parked = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+
+        void arm() {
+            armed.set(true);
+        }
+
+        @Override
+        public Optional<KinesisStream> get(String key) {
+            if (armed.compareAndSet(true, false)) {
+                parked.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return delegate.get(key);
+        }
+
+        @Override
+        public void put(String key, KinesisStream value) {
+            delegate.put(key, value);
+        }
+
+        @Override
+        public void delete(String key) {
+            delegate.delete(key);
+        }
+
+        @Override
+        public List<KinesisStream> scan(Predicate<String> keyFilter) {
+            return delegate.scan(keyFilter);
+        }
+
+        @Override
+        public Set<String> keys() {
+            return delegate.keys();
+        }
+
+        @Override
+        public void flush() {
+            delegate.flush();
+        }
+
+        @Override
+        public void load() {
+            delegate.load();
+        }
+
+        @Override
+        public void clear() {
+            delegate.clear();
+        }
+    }
+
+    private static Arguments metadataWrite(String label, Consumer<KinesisService> setUp,
+                                           Consumer<KinesisService> apply) {
+        return Arguments.of(label, setUp, apply);
+    }
+
+    /**
+     * Every KinesisService action that reads a stored stream, mutates it and persists it again.
+     * {@code setUp} establishes any precondition the action needs to reach its persist rather than
+     * short-circuit as a no-op, and runs before the store is armed.
+     */
+    static Stream<Arguments> metadataWrites() {
+        return Stream.of(
+                metadataWrite("updateStreamMode", s -> {},
+                        s -> s.updateStreamMode(META_STREAM, "ON_DEMAND", REGION)),
+                metadataWrite("addTagsToStream", s -> {},
+                        s -> s.addTagsToStream(META_STREAM, Map.of("env", "test"), REGION)),
+                metadataWrite("removeTagsFromStream",
+                        s -> s.addTagsToStream(META_STREAM, Map.of("env", "test"), REGION),
+                        s -> s.removeTagsFromStream(META_STREAM, List.of("env"), REGION)),
+                metadataWrite("startStreamEncryption", s -> {},
+                        s -> s.startStreamEncryption(META_STREAM, "KMS", "alias/aws/kinesis", REGION)),
+                metadataWrite("stopStreamEncryption",
+                        s -> s.startStreamEncryption(META_STREAM, "KMS", "alias/aws/kinesis", REGION),
+                        s -> s.stopStreamEncryption(META_STREAM, REGION)),
+                metadataWrite("increaseStreamRetentionPeriod", s -> {},
+                        s -> s.increaseStreamRetentionPeriod(META_STREAM, 48, REGION)),
+                metadataWrite("decreaseStreamRetentionPeriod",
+                        s -> s.increaseStreamRetentionPeriod(META_STREAM, 48, REGION),
+                        s -> s.decreaseStreamRetentionPeriod(META_STREAM, 24, REGION)),
+                metadataWrite("enableEnhancedMonitoring", s -> {},
+                        s -> s.enableEnhancedMonitoring(META_STREAM, List.of("IncomingBytes"), REGION)),
+                metadataWrite("disableEnhancedMonitoring",
+                        s -> s.enableEnhancedMonitoring(META_STREAM, List.of("IncomingBytes"), REGION),
+                        s -> s.disableEnhancedMonitoring(META_STREAM, List.of("IncomingBytes"), REGION)),
+                metadataWrite("updateMaxRecordSize", s -> {},
+                        s -> s.updateMaxRecordSize(META_STREAM, 2048, REGION)));
+    }
+
+    /** Spins until {@code thread} is BLOCKED entering a monitor, or {@code task} completes. */
+    private static boolean awaitBlockedOnMonitor(AtomicReference<Thread> thread, Future<?> task)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadline) {
+            Thread t = thread.get();
+            if (t != null && t.getState() == Thread.State.BLOCKED) {
+                return true;
+            }
+            if (task.isDone()) {
+                return false;
+            }
+            Thread.sleep(5);
+        }
+        return false;
+    }
+
+    /**
+     * A metadata write that overlaps a deleteStream must not resurrect the stream.
+     *
+     * <p>The writer is wedged inside its own stream resolve, which it performs after taking the
+     * per-stream monitor. A concurrent deleteStream shares that monitor, so it must block: the
+     * delete therefore lands strictly after the writer's persist and the stream stays gone.
+     *
+     * <p>This fails on either half of the fix being absent. If a metadata path did not take the
+     * monitor, or resolved the stream before taking it, the deleter would not block here, and the
+     * writer's trailing {@code store.put} would re-insert the instance the delete had just removed.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("metadataWrites")
+    void metadataWrite_cannotResurrectAConcurrentlyDeletedStream(
+            String label, Consumer<KinesisService> setUp, Consumer<KinesisService> apply) throws Exception {
+        ParkOnResolveStore store = new ParkOnResolveStore();
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+        service.createStream(META_STREAM, 1, REGION);
+        setUp.accept(service);
+        store.arm();
+
+        CountDownLatch deleterStarted = new CountDownLatch(1);
+        AtomicReference<Thread> deleterThread = new AtomicReference<>();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> writer = pool.submit(() -> {
+                apply.accept(service);
+                return null;
+            });
+            assertTrue(store.parked.await(2, TimeUnit.SECONDS),
+                    () -> label + " must park inside the stream resolve it performs under the monitor");
+
+            // The deleter publishes its thread and signals immediately before the call, so a
+            // never-scheduled deleter cannot make the blocking assertions below pass vacuously.
+            Future<?> deleter = pool.submit(() -> {
+                deleterThread.set(Thread.currentThread());
+                deleterStarted.countDown();
+                service.deleteStream(META_STREAM, REGION);
+                return null;
+            });
+            assertTrue(deleterStarted.await(2, TimeUnit.SECONDS),
+                    "the deleter must be scheduled and reach the deleteStream call");
+            assertTrue(awaitBlockedOnMonitor(deleterThread, deleter),
+                    () -> "deleteStream must block on the stream monitor while " + label
+                            + " holds it, which is what proves the resolve happens inside the lock");
+            assertThrows(TimeoutException.class, () -> deleter.get(500, TimeUnit.MILLISECONDS),
+                    () -> "deleteStream must not complete while " + label + " holds the stream monitor");
+
+            store.release.countDown();
+            // Neither may fail: the writer resolved a live stream, and the delete then removes it.
+            writer.get(2, TimeUnit.SECONDS);
+            deleter.get(2, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertTrue(service.listStreams(REGION).isEmpty(),
+                () -> label + " must not resurrect a concurrently deleted stream");
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.describeStream(META_STREAM, REGION),
+                () -> "a stream resurrected by " + label + " would still be describable");
+        assertEquals("ResourceNotFoundException", notFound.getErrorCode());
+
+        // A stream recreated under the same name carries none of the deleted instance's metadata,
+        // so nothing leaked across the lifecycle.
+        KinesisStream recreated = service.createStream(META_STREAM, 1, REGION);
+        assertTrue(recreated.getTags().isEmpty(), "a recreated stream must start untagged");
+        assertEquals("PROVISIONED", recreated.getStreamMode(),
+                "a recreated stream must start in the default stream mode");
+        assertEquals(24, recreated.getRetentionPeriodHours(),
+                "a recreated stream must start at the default retention period");
     }
 }
