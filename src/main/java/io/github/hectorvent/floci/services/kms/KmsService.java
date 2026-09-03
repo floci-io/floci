@@ -1324,7 +1324,7 @@ public class KmsService implements ResourceProvider {
      */
     private static byte[] signRsaPssDigest(PrivateKey privateKey, byte[] digest, String algorithm) throws Exception {
         var signer = rawPssSigner(algorithm);
-        signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKey.getEncoded()), new SecureRandom()));
+        signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKey.getEncoded()), SECURE_RANDOM));
         signer.update(digest, 0, digest.length);
         return signer.generateSignature();
     }
