@@ -10,8 +10,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -85,6 +87,73 @@ class LakeFormationResourceRaceTest {
             assertTrue(stored.isPresent(), "the registration was lost (attempt " + attempt + ")");
             assertTrue(Set.of(REGISTER_ROLE, UPDATE_ROLE).contains(stored.get().getRoleArn()),
                     "unexpected role " + stored.get().getRoleArn() + " (attempt " + attempt + ")");
+        }
+    }
+
+    @Test
+    void aConcurrentDescribeNeverObservesAPartialUpdate() throws Exception {
+        String initialRole = "arn:aws:iam::000000000000:role/Initial";
+        String updatedRole = "arn:aws:iam::000000000000:role/Updated";
+
+        for (int attempt = 0; attempt < 50; attempt++) {
+            MemoryLakeFormationStorage storage = newStorage();
+            storage.registerResource(REGION, RESOURCE_ARN, initialRole, false, true);
+
+            final int attemptNo = attempt;
+            CountDownLatch start = new CountDownLatch(1);
+            AtomicReference<Throwable> unexpected = new AtomicReference<>();
+            AtomicInteger observations = new AtomicInteger(0);
+
+            Thread updater = new Thread(() -> {
+                await(start);
+                try {
+                    storage.updateResource(REGION, RESOURCE_ARN, updatedRole, null, null, false);
+                } catch (Throwable t) {
+                    unexpected.set(t);
+                }
+            });
+
+            Thread reader = new Thread(() -> {
+                await(start);
+                try {
+                    for (int i = 0; i < 200; i++) {
+                        Optional<ResourceInfo> info = storage.describeResource(REGION, RESOURCE_ARN);
+                        if (info.isPresent()) {
+                            ResourceInfo r = info.get();
+                            // Every observation must be a fully consistent snapshot:
+                            // either (initialRole, federation=true) or (updatedRole, federation=false).
+                            // A mixed state (e.g. updatedRole with federation=true) means the
+                            // reader observed a partially-mutated object.
+                            boolean isInitialState = updatedRole.equals(r.getRoleArn()) == false
+                                    && Boolean.TRUE.equals(r.getWithFederation());
+                            boolean isUpdatedState = updatedRole.equals(r.getRoleArn())
+                                    && Boolean.FALSE.equals(r.getWithFederation());
+                            assertTrue(isInitialState || isUpdatedState,
+                                    "partial update observed: role=" + r.getRoleArn()
+                                            + ", withFederation=" + r.getWithFederation()
+                                            + " (attempt " + attemptNo + ")");
+                            observations.incrementAndGet();
+                        }
+                    }
+                } catch (Throwable t) {
+                    unexpected.set(t);
+                }
+            });
+
+            updater.start();
+            reader.start();
+            start.countDown();
+            updater.join(TimeUnit.SECONDS.toMillis(10));
+            reader.join(TimeUnit.SECONDS.toMillis(10));
+            assertFalse(updater.isAlive() || reader.isAlive(), "a thread never finished");
+            assertNull(unexpected.get(), () -> "unexpected failure: " + unexpected.get());
+            assertTrue(observations.get() > 0, "reader never observed the resource");
+
+            // After the update completes, the final state must be fully consistent.
+            Optional<ResourceInfo> stored = storage.describeResource(REGION, RESOURCE_ARN);
+            assertTrue(stored.isPresent());
+            assertEquals(updatedRole, stored.get().getRoleArn());
+            assertEquals(false, stored.get().getWithFederation());
         }
     }
 
