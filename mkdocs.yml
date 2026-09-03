@@ -153,7 +153,6 @@ nav:
     - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
     - AWS Config: services/config.md
-    - CloudTrail: services/cloudtrail.md
     - EMR: services/emr.md
     - EMR Serverless: services/emr-serverless.md
     - WAF v2: services/wafv2.md

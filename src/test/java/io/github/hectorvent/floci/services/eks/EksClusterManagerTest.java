@@ -43,8 +43,13 @@ import static org.mockito.Mockito.when;
 class EksClusterManagerTest {
 
     @Test
+    void webhookPathBindsAuthenticationToOneCluster() {
+        assertEquals("/_floci/eks/clusters/demo/token-webhook", EksClusterManager.webhookPath("demo"));
+    }
+
+    @Test
     void webhookKubeconfigEmbedsServerUrl() {
-        String url = "http://host.docker.internal:4566/_floci/eks/token-webhook";
+        String url = "http://host.docker.internal:4566/_floci/eks/clusters/demo/token-webhook";
         String yaml = EksClusterManager.buildWebhookKubeconfig(url);
 
         assertTrue(yaml.contains("kind: Config"), "should be a kubeconfig");
@@ -55,7 +60,7 @@ class EksClusterManagerTest {
 
     @Test
     void webhookKubeconfigUsesContainerNetworkAddress() {
-        String url = "http://172.18.0.5:4566/_floci/eks/token-webhook";
+        String url = "http://172.18.0.5:4566/_floci/eks/clusters/demo/token-webhook";
         String yaml = EksClusterManager.buildWebhookKubeconfig(url);
         assertTrue(yaml.contains("server: " + url));
     }

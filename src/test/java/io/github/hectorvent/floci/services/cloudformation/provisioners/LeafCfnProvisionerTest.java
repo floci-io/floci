@@ -25,6 +25,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -229,18 +230,35 @@ class LeafCfnProvisionerTest {
         }
 
         @Test
-        void anExistingRepositoryIsAdoptedRatherThanFailing() {
+        void aCollidingRepositoryNameFailsTheCreate() {
             when(ecr.createRepository(anyString(), any(), any(), any(), any(), any(), any(), anyString()))
                     .thenThrow(new AwsException("RepositoryAlreadyExistsException", "exists", 400));
-            when(ecr.describeRepositories(List.of("app"), null, REGION))
-                    .thenReturn(List.of(repo("arn:existing", "uri:existing")));
 
+            // A first create has no prior physical id, so the existing repository is not this
+            // stack's: CloudFormation fails the create rather than adopting it.
+            StackResource r = resource("Repo", "AWS::ECR::Repository");
+            AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                    {"RepositoryName": "app"}
+                    """), ctx));
+
+            assertEquals("RepositoryAlreadyExistsException", failure.getErrorCode());
+            verify(ecr, never()).describeRepositories(any(), any(), anyString());
+        }
+
+        @Test
+        void theStacksOwnRepositoryIsReconciledOnUpdateRatherThanRecreated() {
+            when(ecr.putImageTagMutability("app", null, "MUTABLE", REGION))
+                    .thenReturn(repo("arn:existing", "uri:existing"));
+
+            // The prior physical id is the same name, which is what a CDK bootstrap re-run of the
+            // CDKToolkit stack looks like: reconcile in place, no create.
             StackResource r = resource("Repo", "AWS::ECR::Repository");
             provisioner.provision(r, props("""
                     {"RepositoryName": "app"}
-                    """), ctx);
+                    """), new ProvisionContext(engine, REGION, "000000000000", "my-stack", "app"));
 
             assertEquals("arn:existing", r.getAttributes().get("Arn"));
+            verify(ecr, never()).createRepository(anyString(), any(), any(), any(), any(), any(), any(), anyString());
         }
 
         @Test

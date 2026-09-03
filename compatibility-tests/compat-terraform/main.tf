@@ -1,4 +1,7 @@
-# NOTE: Keep resource definitions in sync with ../compat-opentofu/main.tf
+# NOTE: Keep resource definitions in sync with ../compat-opentofu/main.tf.
+# Enforced by .github/ci/compat-opentofu-drift-check.py -- a resource added
+# here and not there (or vice versa) fails CI unless listed in
+# .github/ci/compat-opentofu-allowlist-tf-only.txt as a deliberate gap.
 
 # -- S3 Bucket ------------------------------------------------------------------
 resource "aws_s3_bucket" "app" {

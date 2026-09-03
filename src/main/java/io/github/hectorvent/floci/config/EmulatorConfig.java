@@ -51,12 +51,6 @@ public interface EmulatorConfig {
     @WithDefault("000000000000")
     String defaultAccountId();
 
-    @WithDefault("2048")
-    int maxRequestSize();
-
-    @WithDefault("public.ecr.aws")
-    String ecrBaseUri();
-
     /**
      * Path to a shared mock-response configuration file used by the fixed-stub AI services
      * (Textract, Comprehend, Rekognition) to return a caller-configured response instead of
@@ -86,6 +80,17 @@ public interface EmulatorConfig {
     ProtocolsConfig protocols();
 
     interface ProtocolsConfig {
+        /**
+         * Maximum HTTP request body size, in megabytes. Feeds
+         * {@code quarkus.http.limits.max-body-size} in {@code application.yml}.
+         *
+         * <p>Moved here from the {@code floci} root in 2.x. The former flat key
+         * {@code floci.max-request-size} (env {@code FLOCI_MAX_REQUEST_SIZE}) still works
+         * (see {@link FlociConfigRelocationsInterceptor}), but is deprecated.
+         */
+        @WithDefault("2048")
+        int maxRequestSize();
+
         /**
          * When enabled, requests carrying an RPC protocol signal that no
          * supported wire protocol claims are rejected per the Smithy
@@ -584,7 +589,7 @@ public interface EmulatorConfig {
         @WithDefault("5000")
         long flushIntervalMs();
     }
-  
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -812,7 +817,7 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
     }
-  
+
     interface EfsServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1791,6 +1796,18 @@ public interface EmulatorConfig {
     interface LambdaServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Registry host (optionally with a path prefix) that Lambda runtime images are pulled
+         * from, e.g. {@code public.ecr.aws} produces {@code public.ecr.aws/lambda/python:3.12}.
+         * Point it at a private mirror to avoid depending on ECR Public.
+         *
+         * <p>Moved here from the {@code floci} root in 2.x. The former flat key
+         * {@code floci.ecr-base-uri} (env {@code FLOCI_ECR_BASE_URI}) still works
+         * (see {@link FlociConfigRelocationsInterceptor}), but is deprecated.
+         */
+        @WithDefault("public.ecr.aws")
+        String ecrBaseUri();
 
         @WithDefault("128")
         int defaultMemoryMb();

@@ -3,12 +3,9 @@ quarkus:
     port: 0
     test-port: 0
     limits:
-      max-body-size: ${floci.max-request-size}M
+      max-body-size: ${floci.protocols.max-request-size}M
   datasource:
     active: false
-  kubernetes-client:
-    devservices:
-      enabled: false
   # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
   # Loaded parent-first they live in the shared system classloader, so they cannot pin a
   # per-profile application classloader across the many app restarts of a test run.

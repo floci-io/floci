@@ -165,21 +165,21 @@ Floci emulates ECR with a real OCI registry behind it, so the stock `docker` cli
 
 ```bash
 # Create the repository (lazy-starts the backing registry container)
-aws ecr create-repository --repository-name floci-it/app --endpoint-url $AWS_ENDPOINT
+aws ecr create-repository --repository-name floci-it/app --endpoint-url $AWS_ENDPOINT_URL
 
 # Authenticate
-aws ecr get-login-password --endpoint-url $AWS_ENDPOINT \
+aws ecr get-login-password --endpoint-url $AWS_ENDPOINT_URL \
   | docker login --username AWS --password-stdin \
-        000000000000.dkr.ecr.us-east-1.localhost:5000
+        000000000000.dkr.ecr.us-east-1.localhost:5100
 
 # Push
 docker pull alpine:3.19
-docker tag  alpine:3.19 000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
-docker push             000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+docker tag  alpine:3.19 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+docker push             000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
 
 # Pull from a clean local image store
-docker rmi  000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
-docker pull 000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+docker rmi  000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+docker pull 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
 ```
 
 See the [ECR service docs](../services/ecr.md) for the full action surface, image-backed Lambda integration, and CDK `DockerImageFunction` support.
@@ -198,7 +198,7 @@ If you want to scope it tighter to just the Lambda Runtime API and the ECR regis
 
 ```bash
 sudo ufw allow in on docker0 to any port 12000:12499 proto tcp comment 'floci lambda runtime api'
-sudo ufw allow in on docker0 to any port 5000:5099 proto tcp comment 'floci ecr registry'
+sudo ufw allow in on docker0 to any port 5100:5199 proto tcp comment 'floci ecr registry'
 ```
 
 **Docker Desktop** (macOS / Windows / Linux) does not need this — it routes container → host through the Docker VM, which Floci's `DockerHostResolver` detects automatically.

@@ -147,12 +147,6 @@
             <artifactId>snappy-java</artifactId>
         </dependency>
 
-        <!-- Kubernetes client for the Lambda kubernetes executor -->
-        <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-kubernetes-client</artifactId>
-        </dependency>
-
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>
             <groupId>com.github.docker-java</groupId>
@@ -308,6 +302,15 @@
         <dependency>
             <groupId>io.fabric8</groupId>
             <artifactId>kubernetes-server-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- kubernetes-server-mock declares this as optional, so it must be pulled in
+             explicitly for the kubernetes Lambda executor's tests, which use it as a fake
+             API server (never shipped: KubernetesApiClient is a plain HTTP client, not a
+             Kubernetes SDK, see issue #2914). -->
+        <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-client</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

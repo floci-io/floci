@@ -11,6 +11,9 @@ on:
       - 'docker/localstack-parity.sh'
       - 'compatibility-tests/**'
       - '.github/ci/compat-timing-report.py'
+      - '.github/ci/compat-opentofu-drift-check.py'
+      - '.github/ci/compat-opentofu-allowlist-tf-only.txt'
+      - '.github/ci/compat-opentofu-allowlist-otf-only.txt'
       - '.github/workflows/compatibility.yml'
 
 permissions:
@@ -85,10 +88,35 @@ jobs:
           echo "$out" | grep -q "other.example.com" \
             || { echo "::error::post-subcommand --endpoint-url flag was not honored over AWS_ENDPOINT_URL"; exit 1; }
 
-  build-native:
-    name: Build native floci image
+  compat-opentofu-drift-check:
+    name: compat / opentofu resource parity
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          sparse-checkout: |
+            compatibility-tests
+            .github/ci
+
+      - name: Compare compat-terraform and compat-opentofu resource lists
+        run: python3 .github/ci/compat-opentofu-drift-check.py
+
+  build-native:
+    name: Build native floci image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # Both published architectures. The native image is the only place an
+    # arch-specific resource can go missing (snappy-java's JNI library is
+    # registered per platform), and one arch cannot prove the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -108,7 +136,7 @@ jobs:
       # reads the ~/.m2 that ci.yml's shard 1 saves on every push to main. ci.yml
       # stays the single owner of the save; a second writer would just race it.
       # Two known partial-hit caveats, both cheap: `runner.os` is Linux for both
-      # but ci.yml runs x64 while this runs arm64 (Maven artifacts are
+      # but ci.yml runs x64 while the arm64 leg here does not (Maven artifacts are
       # arch-neutral, so only classifier-based natives re-download), and
       # `-Dnative` pulls native-image plugins that ci.yml's `mvn test` never
       # fetches. Expect most of the ~66s of cold resolution back, not all of it.
@@ -123,10 +151,10 @@ jobs:
 
       - name: Stage native binary for packaging
         run: |
-          mkdir -p native/arm64
-          cp target/*-runner native/arm64/application
+          mkdir -p native/${{ matrix.arch }}
+          cp target/*-runner native/${{ matrix.arch }}/application
           # include any sidecar .so the runtime image may need (matches nightly artifact set)
-          cp target/*.so native/arm64/ 2>/dev/null || true
+          cp target/*.so native/${{ matrix.arch }}/ 2>/dev/null || true
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -152,18 +180,21 @@ jobs:
       - name: Upload native floci image
         uses: actions/upload-artifact@v7
         with:
-          name: floci-native-image
+          name: floci-native-image-${{ matrix.arch }}
           path: /tmp/floci-native-image.tar.gz
           retention-days: 1
 
   native-compat-test:
-    name: native / ${{ matrix.test }}
+    name: native ${{ matrix.arch }} / ${{ matrix.test }}
     needs: build-native
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        arch:
+          - arm64
+          - amd64
         test:
           - sdk-test-node
           - sdk-test-python
@@ -173,12 +204,17 @@ jobs:
           - compat-cdk
           - compat-terraform
           - compat-opentofu
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
 
     steps:
       - name: Download native floci image
         uses: actions/download-artifact@v8
         with:
-          name: floci-native-image
+          name: floci-native-image-${{ matrix.arch }}
           path: /tmp
 
       - name: Load native floci image

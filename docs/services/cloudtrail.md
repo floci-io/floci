@@ -27,8 +27,9 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
 | `GetTrailStatus` | Returns the logging status of a trail |
 | `LookupEvents` | - |
 | `ListTrails` | - |
-| `AddTags` | - |
-| `ListTags` | - |
+| `AddTags` | Adds or overwrites tags on a trail, identified by ARN |
+| `RemoveTags` | Removes the given tag keys from a trail, identified by ARN |
+| `ListTags` | Returns the tags for one or more trails, identified by ARN |
 <!-- floci:actions:end -->
 
 Selector matching honors `ReadWriteType` (`All`, `ReadOnly`, `WriteOnly`)

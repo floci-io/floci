@@ -1,11 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
-import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
-import io.fabric8.kubernetes.api.model.ContainerStatus;
-import io.fabric8.kubernetes.api.model.Pod;
-import io.fabric8.kubernetes.client.KubernetesClient;
-import io.fabric8.kubernetes.client.KubernetesClientException;
-import io.fabric8.kubernetes.client.dsl.NonDeletingOperation;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -82,7 +78,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             "ImagePullBackOff", "InvalidImageName", "CrashLoopBackOff",
             "CreateContainerError", "CreateContainerConfigError", "RunContainerError");
 
-    private final KubernetesClient client;
+    private final KubernetesApiClient client;
     private final EmulatorConfig config;
     private final RuntimeApiServerFactory runtimeApiServerFactory;
     private final ImageResolver imageResolver;
@@ -101,7 +97,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     private final AtomicBoolean awsConfigPathWarned = new AtomicBoolean(false);
 
     @Inject
-    public KubernetesPodLauncher(KubernetesClient client,
+    public KubernetesPodLauncher(KubernetesApiClient client,
                                  EmulatorConfig config,
                                  RuntimeApiServerFactory runtimeApiServerFactory,
                                  ImageResolver imageResolver,
@@ -124,13 +120,12 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     /**
-     * Forces the lazy client bean (and its underlying Vert.x HTTP client) to be
-     * built on the caller's thread. Called from the startup observer so the HTTP
-     * client is not born on a request's Vert.x context, whose close at shutdown
-     * would leave every later Kubernetes API call failing with "Client is closed".
+     * Resolves the API client's connection (in-cluster or kubeconfig) on the caller's
+     * thread. Called from the startup observer so a misconfigured cluster connection
+     * fails startup instead of the first cold start.
      */
     public void initializeClient() {
-        client.getConfiguration();
+        client.initialize();
         // Resolve the address pods use to reach Floci now, so the most common
         // misconfiguration (running outside the cluster without a floci-address)
         // fails startup instead of every later cold start.
@@ -218,7 +213,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                     imagePackage ? null : fn.getHandler(), imageConfig, fn.getMemorySize(), caConfigMap);
 
             ownPodNames.add(podName);
-            client.pods().inNamespace(namespace).resource(pod).create();
+            client.createPod(namespace, pod);
             LOG.infov("Created pod {0} for function {1}", podName, fn.getFunctionName());
 
             awaitRunning(namespace, podName, fn.getFunctionName());
@@ -310,13 +305,12 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     @Override
     public boolean isAlive(ContainerHandle handle) {
         try {
-            var pod = client.pods().inNamespace(namespace()).withName(handle.getContainerId()).get();
+            var pod = client.getPod(namespace(), handle.getContainerId()).orElse(null);
             return pod != null
-                    && pod.getStatus() != null
-                    && "Running".equals(pod.getStatus().getPhase())
-                    && pod.getMetadata().getDeletionTimestamp() == null;
+                    && "Running".equals(pod.path("status").path("phase").asText(null))
+                    && isAbsent(pod.path("metadata").path("deletionTimestamp"));
         } catch (Exception e) {
-            // A missing pod comes back as null above; reaching here means the API server
+            // A missing pod comes back as empty above; reaching here means the API server
             // itself was unreachable. Unlike docker's local socket the API server is remote,
             // so a transient blip must not read as "dead" — that would cull the whole warm
             // pool at once. Assume alive; a genuinely dead pod fails the next invocation.
@@ -350,24 +344,19 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                 return;
             }
             try {
-                var orphans = client.pods().inNamespace(namespace)
-                        .withLabels(LambdaPodSpecFactory.managedPodSelector())
-                        .list().getItems().stream()
-                        .filter(pod -> !ownPodNames.contains(pod.getMetadata().getName()))
+                var orphans = client.listPods(namespace, LambdaPodSpecFactory.managedPodSelector()).stream()
+                        .filter(pod -> !ownPodNames.contains(pod.path("metadata").path("name").asText()))
                         .toList();
                 if (!orphans.isEmpty()) {
                     LOG.infov("Deleting {0} orphaned Lambda pod(s) from a previous run in namespace {1}",
                             orphans.size(), namespace);
                     for (var orphan : orphans) {
-                        client.pods().inNamespace(namespace)
-                                .withName(orphan.getMetadata().getName())
-                                .withGracePeriod(0)
-                                .delete();
+                        client.deletePod(namespace, orphan.path("metadata").path("name").asText());
                     }
                 }
                 orphansSwept = true;
-            } catch (KubernetesClientException e) {
-                if (e.getCode() == 401 || e.getCode() == 403) {
+            } catch (KubernetesApiException e) {
+                if (e.getStatusCode() == 401 || e.getStatusCode() == 403) {
                     // A permission gap never heals within this process, so stop retrying
                     // it on every cold start; the ServiceAccount simply cannot sweep.
                     LOG.warnv("Orphaned Lambda pod sweep is not permitted in namespace {0} "
@@ -445,14 +434,12 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
 
     private void awaitRunning(String namespace, String podName, String functionName) {
         var timeoutSeconds = POD_STARTUP_TIMEOUT_SECONDS;
-        Pod pod;
+        JsonNode pod;
         try {
-            // A null pod (deleted out-of-band) is terminal too, otherwise the wait
+            // A missing pod (deleted out-of-band) is terminal too, otherwise the wait
             // would block the invocation for the full timeout.
-            pod = client.pods().inNamespace(namespace).withName(podName)
-                    .waitUntilCondition(p -> p == null
-                                    || (p.getStatus() != null && (isRunning(p) || hasTerminalFailure(p))),
-                            timeoutSeconds, TimeUnit.SECONDS);
+            pod = client.waitForPod(namespace, podName,
+                    p -> p == null || isRunning(p) || hasTerminalFailure(p), timeoutSeconds);
         } catch (Exception e) {
             throw new RuntimeException("Pod " + podName + " for function '" + functionName
                     + "' did not reach Running within " + timeoutSeconds + "s: " + e.getMessage(), e);
@@ -463,12 +450,12 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         }
     }
 
-    private static boolean isRunning(Pod pod) {
-        return "Running".equals(pod.getStatus().getPhase());
+    private static boolean isRunning(JsonNode pod) {
+        return "Running".equals(pod.path("status").path("phase").asText(null));
     }
 
-    private static boolean hasTerminalFailure(Pod pod) {
-        var phase = pod.getStatus().getPhase();
+    private static boolean hasTerminalFailure(JsonNode pod) {
+        var phase = pod.path("status").path("phase").asText(null);
         // Succeeded means the runtime exited before serving — terminal for a server pod.
         if ("Failed".equals(phase) || "Succeeded".equals(phase)) {
             return true;
@@ -476,61 +463,54 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         return unschedulableReason(pod) != null || describeTerminalReason(pod) != null;
     }
 
-    private static String unschedulableReason(Pod pod) {
-        if (pod.getStatus().getConditions() == null) {
-            return null;
-        }
-        for (var condition : pod.getStatus().getConditions()) {
+    private static String unschedulableReason(JsonNode pod) {
+        for (var condition : pod.path("status").path("conditions")) {
             // A pod the scheduler cannot place — e.g. a memory request above every node's
             // capacity — stays Pending with no container statuses; fail the cold start
             // instead of blocking the invoker for the full startup timeout.
-            if ("PodScheduled".equals(condition.getType()) && "False".equals(condition.getStatus())
-                    && "Unschedulable".equals(condition.getReason())) {
-                return "Unschedulable: " + condition.getMessage();
+            if ("PodScheduled".equals(condition.path("type").asText(null))
+                    && "False".equals(condition.path("status").asText(null))
+                    && "Unschedulable".equals(condition.path("reason").asText(null))) {
+                return "Unschedulable: " + condition.path("message").asText("");
             }
         }
         return null;
     }
 
-    private static String describeTerminalReason(Pod pod) {
-        var statuses = new ArrayList<ContainerStatus>();
-        if (pod.getStatus().getInitContainerStatuses() != null) {
-            statuses.addAll(pod.getStatus().getInitContainerStatuses());
-        }
-        if (pod.getStatus().getContainerStatuses() != null) {
-            statuses.addAll(pod.getStatus().getContainerStatuses());
-        }
-        for (var status : statuses) {
-            if (status.getState() == null) {
-                continue;
-            }
-            var waiting = status.getState().getWaiting();
-            // getReason() is null while a reason is absent; Set.of(...).contains(null)
-            // throws, which would abort an otherwise healthy cold start.
-            if (waiting != null && waiting.getReason() != null
-                    && TERMINAL_WAITING_REASONS.contains(waiting.getReason())) {
-                return status.getName() + ": " + waiting.getReason()
-                        + " (" + waiting.getMessage() + ")";
-            }
-            if (status.getState().getTerminated() != null
-                    && status.getState().getTerminated().getExitCode() != null
-                    && status.getState().getTerminated().getExitCode() != 0) {
-                return status.getName() + ": exited with code "
-                        + status.getState().getTerminated().getExitCode();
+    private static String describeTerminalReason(JsonNode pod) {
+        for (var statuses : List.of(pod.path("status").path("initContainerStatuses"),
+                pod.path("status").path("containerStatuses"))) {
+            for (var status : statuses) {
+                var waiting = status.path("state").path("waiting");
+                var waitingReason = waiting.path("reason").asText(null);
+                // A missing reason must never match; Set.of(...).contains(null) throws,
+                // which would abort an otherwise healthy cold start.
+                if (waitingReason != null && TERMINAL_WAITING_REASONS.contains(waitingReason)) {
+                    return status.path("name").asText() + ": " + waitingReason
+                            + " (" + waiting.path("message").asText("") + ")";
+                }
+                var exitCode = status.path("state").path("terminated").path("exitCode");
+                if (!exitCode.isMissingNode() && exitCode.asInt() != 0) {
+                    return status.path("name").asText() + ": exited with code " + exitCode.asInt();
+                }
             }
         }
         return null;
     }
 
-    private static String describeFailure(Pod pod) {
-        if (pod == null || pod.getStatus() == null) {
+    private static String describeFailure(JsonNode pod) {
+        if (pod == null || pod.path("status").isMissingNode()) {
             return "pod no longer exists";
         }
         var reason = describeTerminalReason(pod);
         if (reason == null) {
             reason = unschedulableReason(pod);
         }
-        return reason != null ? reason : "phase=" + pod.getStatus().getPhase();
+        return reason != null ? reason : "phase=" + pod.path("status").path("phase").asText("unknown");
+    }
+
+    private static boolean isAbsent(JsonNode node) {
+        return node.isMissingNode() || node.isNull();
     }
 
     /**
@@ -543,15 +523,15 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         }
         try {
             var pem = Files.readString(caCertPath);
-            var configMap = new ConfigMapBuilder()
-                    .withNewMetadata()
-                    .withName(CA_CONFIG_MAP_NAME)
-                    .withLabels(LambdaPodSpecFactory.managedPodSelector())
-                    .endMetadata()
-                    .addToData(CA_CONFIG_MAP_KEY, pem)
-                    .build();
-            client.configMaps().inNamespace(namespace).resource(configMap)
-                    .createOr(NonDeletingOperation::update);
+            var nodes = JsonNodeFactory.instance;
+            var labels = nodes.objectNode();
+            LambdaPodSpecFactory.managedPodSelector().forEach(labels::put);
+            var metadata = nodes.objectNode().put("name", CA_CONFIG_MAP_NAME);
+            metadata.set("labels", labels);
+            var configMap = nodes.objectNode().put("apiVersion", "v1").put("kind", "ConfigMap");
+            configMap.set("metadata", metadata);
+            configMap.set("data", nodes.objectNode().put(CA_CONFIG_MAP_KEY, pem));
+            client.createOrUpdateConfigMap(namespace, configMap);
             caConfigMapApplied.set(true);
             return CA_CONFIG_MAP_NAME;
         } catch (Exception e) {
@@ -572,9 +552,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         // abandoned either way, and a retried orphan sweep may still collect it.
         ownPodNames.remove(podName);
         try {
-            client.pods().inNamespace(namespace).withName(podName).withGracePeriod(0).delete();
-            client.pods().inNamespace(namespace).withName(podName)
-                    .waitUntilCondition(p -> p == null, POD_DELETE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            client.deletePod(namespace, podName);
+            client.waitForPod(namespace, podName, pod -> pod == null, POD_DELETE_TIMEOUT_SECONDS);
             return true;
         } catch (Exception e) {
             LOG.warnv("Pod {0} was not confirmed deleted within {1}s: {2}",

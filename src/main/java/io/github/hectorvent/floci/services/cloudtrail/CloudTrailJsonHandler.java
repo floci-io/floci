@@ -43,8 +43,9 @@ public class CloudTrailJsonHandler {
             case "GetTrailStatus" -> getTrailStatus(request, region);
             case "LookupEvents" -> lookupEvents(request, region);
             case "ListTrails" -> listTrails(request, region);
-            case "AddTags" -> addTags(request, region);
-            case "ListTags" -> listTags(request, region);
+            case "AddTags" -> addTags(request);
+            case "RemoveTags" -> removeTags(request);
+            case "ListTags" -> listTags(request);
             default -> throw new AwsException(
                     "InvalidAction", "Could not find operation " + action, 400);
         };
@@ -183,39 +184,6 @@ public class CloudTrailJsonHandler {
         return Response.ok(resp).build();
     }
 
-    private static final int MAX_TAGS_PER_REQUEST = 200;
-
-    private Response addTags(JsonNode req, String region) {
-        String resourceId = req.path("ResourceId").asText(null);
-        JsonNode tagsList = req.path("TagsList");
-        if (tagsList.size() > MAX_TAGS_PER_REQUEST) {
-            throw new AwsException("TagsLimitExceededException",
-                    "TagsList cannot contain more than " + MAX_TAGS_PER_REQUEST + " tags", 400);
-        }
-        Map<String, String> tags = new LinkedHashMap<>();
-        tagsList.forEach(tag ->
-                tags.put(tag.path("Key").asText(null), tag.path("Value").asText(null)));
-        service.addTags(region, resourceId, tags);
-        return Response.ok(mapper.createObjectNode()).build();
-    }
-
-    private Response listTags(JsonNode req, String region) {
-        ArrayNode resourceTagList = mapper.createArrayNode();
-        req.path("ResourceIdList").forEach(idNode -> {
-            String resourceId = idNode.asText();
-            Map<String, String> tags = service.listTags(region, resourceId);
-            ObjectNode entry = mapper.createObjectNode();
-            entry.put("ResourceId", resourceId);
-            ArrayNode tagsList = mapper.createArrayNode();
-            tags.forEach((k, v) -> tagsList.add(mapper.createObjectNode().put("Key", k).put("Value", v)));
-            entry.set("TagsList", tagsList);
-            resourceTagList.add(entry);
-        });
-        ObjectNode resp = mapper.createObjectNode();
-        resp.set("ResourceTagList", resourceTagList);
-        return Response.ok(resp).build();
-    }
-
     private Response startLogging(JsonNode req, String region) {
         String trailName = req.path("Name").asText(null);
         service.startLogging(region, trailName);
@@ -250,7 +218,49 @@ public class CloudTrailJsonHandler {
         return Response.ok(resp).build();
     }
 
+    private Response addTags(JsonNode req) {
+        String resourceId = req.path("ResourceId").asText(null);
+        service.addTags(resourceId, parseTagsList(req.path("TagsList")));
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    private Response removeTags(JsonNode req) {
+        String resourceId = req.path("ResourceId").asText(null);
+        List<String> keys = new ArrayList<>(parseTagsList(req.path("TagsList")).keySet());
+        service.removeTags(resourceId, keys);
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    private Response listTags(JsonNode req) {
+        List<String> resourceIdList = extractStringList(req, "ResourceIdList");
+        ObjectNode resp = mapper.createObjectNode();
+        ArrayNode resourceTagList = resp.putArray("ResourceTagList");
+        for (String resourceId : resourceIdList) {
+            Map<String, String> tags = service.listTags(resourceId);
+            ObjectNode entry = resourceTagList.addObject();
+            entry.put("ResourceId", resourceId);
+            ArrayNode tagsList = entry.putArray("TagsList");
+            tags.forEach((k, v) -> {
+                ObjectNode tag = tagsList.addObject().put("Key", k);
+                if (v != null) {
+                    tag.put("Value", v);
+                }
+            });
+        }
+        return Response.ok(resp).build();
+    }
+
     // --- Helpers ---
+
+    private Map<String, String> parseTagsList(JsonNode tagsNode) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (tagsNode != null && tagsNode.isArray()) {
+            tagsNode.forEach(t -> {
+                tags.put(t.path("Key").asText(), t.path("Value").asText(null));
+            });
+        }
+        return tags;
+    }
 
     private List<EventSelector> parseEventSelectors(JsonNode selectorsNode) {
         List<EventSelector> result = new ArrayList<>();

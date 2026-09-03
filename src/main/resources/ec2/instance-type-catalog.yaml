@@ -5,6 +5,7 @@ instanceTypes:
     supportedArchitectures:
       - x86_64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: t3.micro
     vcpu: 2
@@ -12,6 +13,7 @@ instanceTypes:
     supportedArchitectures:
       - x86_64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: t3.small
     vcpu: 2
@@ -19,6 +21,7 @@ instanceTypes:
     supportedArchitectures:
       - x86_64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: t3.medium
     vcpu: 2
@@ -26,6 +29,7 @@ instanceTypes:
     supportedArchitectures:
       - x86_64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m5.large
     vcpu: 2
@@ -33,6 +37,7 @@ instanceTypes:
     supportedArchitectures:
       - x86_64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: t4g.micro
     vcpu: 2
@@ -40,6 +45,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: t4g.small
     vcpu: 2
@@ -47,6 +53,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: t4g.medium
     vcpu: 2
@@ -54,6 +61,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m6gd.large
     vcpu: 2
@@ -62,6 +70,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m6gd.2xlarge
     vcpu: 8
@@ -70,6 +79,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m7gd.large
     vcpu: 2
@@ -78,6 +88,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m7gd.2xlarge
     vcpu: 8
@@ -86,6 +97,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m8gd.medium
     vcpu: 1
@@ -94,6 +106,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m8gd.large
     vcpu: 2
@@ -102,6 +115,7 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false
 
   - instanceType: m8gd.2xlarge
     vcpu: 8
@@ -110,3 +124,4 @@ instanceTypes:
     supportedArchitectures:
       - arm64
     currentGeneration: true
+    encryptionInTransitSupported: false

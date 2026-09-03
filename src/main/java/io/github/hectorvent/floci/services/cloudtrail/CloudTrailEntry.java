@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -21,6 +23,12 @@ public record CloudTrailEntry(
         Long startLoggingTime,
         Long stopLoggingTime,
         Map<String, String> tags) {
+
+    // Not Map.copyOf: AWS allows a tag with a null value (AddTags omitting "Value"),
+    // and Map.copyOf/Map.of reject null values.
+    public CloudTrailEntry {
+        tags = tags == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(tags));
+    }
 
     public CloudTrailEntry withTrail(Trail updated) {
         return new CloudTrailEntry(updated, selectors, advancedSelectors, logging,
@@ -62,5 +70,10 @@ public record CloudTrailEntry(
                 trail.snsTopicArn(), trail.includeGlobalServiceEvents(), trail.isMultiRegionTrail(),
                 trail.homeRegion(), trail.logFileValidationEnabled(), hasCustomSelectors,
                 trail.hasInsightSelectors(), trail.isOrganizationTrail());
+    }
+
+    /** Returns a mutable copy suitable for merging in new tags. */
+    public Map<String, String> mutableTags() {
+        return new LinkedHashMap<>(tags);
     }
 }

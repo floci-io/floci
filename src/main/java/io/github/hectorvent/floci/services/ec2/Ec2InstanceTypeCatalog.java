@@ -93,6 +93,10 @@ public class Ec2InstanceTypeCatalog {
             if (instanceType.supportedArchitectures == null || instanceType.supportedArchitectures.isEmpty()) {
                 throw new IllegalStateException("EC2 instance type catalog entry is missing supportedArchitectures: " + name);
             }
+            if (instanceType.encryptionInTransitSupported == null) {
+                throw new IllegalStateException(
+                        "EC2 instance type catalog entry is missing encryptionInTransitSupported: " + name);
+            }
             CatalogInstanceType previous = index.putIfAbsent(name, instanceType);
             if (previous != null) {
                 throw new IllegalStateException("Duplicate EC2 instance type catalog entry: " + name);
@@ -123,6 +127,7 @@ public class Ec2InstanceTypeCatalog {
         public int localStorageGiB;
         public List<String> supportedArchitectures = List.of();
         public Boolean currentGeneration;
+        public Boolean encryptionInTransitSupported;
 
         public Map<String, Object> toResponseMap() {
             Map<String, Object> type = new LinkedHashMap<>();
@@ -133,6 +138,9 @@ public class Ec2InstanceTypeCatalog {
             type.put("localStorageGiB", localStorageGiB);
             type.put("supportedArchitectures", List.copyOf(supportedArchitectures));
             type.put("currentGeneration", currentGeneration == null || currentGeneration);
+            Map<String, Object> networkInfo = new LinkedHashMap<>();
+            networkInfo.put("encryptionInTransitSupported", encryptionInTransitSupported);
+            type.put("networkInfo", networkInfo);
             return type;
         }
     }

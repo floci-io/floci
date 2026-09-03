@@ -83,7 +83,8 @@ public class LambdaExecutionRoleCredentials {
                 random(SECRET_CHARACTERS, 40),
                 random(SECRET_CHARACTERS, 200));
         iamService.registerLambdaExecutionRoleSession(
-                functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(), roleArn);
+                functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(),
+                credentials.sessionToken(), roleArn);
         return Optional.of(credentials);
     }
 
