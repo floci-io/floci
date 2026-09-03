@@ -117,6 +117,7 @@ public class ContainerBuilder {
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
+        private String networkIpv4Address;
         private final List<Mount> mounts = new ArrayList<>();
         private final List<Bind> binds = new ArrayList<>();
         private final List<String> extraHosts = new ArrayList<>();
@@ -241,6 +242,16 @@ public class ContainerBuilder {
          */
         public Builder withNetworkMode(String networkMode) {
             this.networkMode = networkMode;
+            return this;
+        }
+
+        /**
+         * Requests this container's static IPv4 address on its resolved Docker network.
+         * The lifecycle manager attaches port-bound containers before start so Docker preserves
+         * host-port publishing on Docker Desktop.
+         */
+        public Builder withNetworkIpv4Address(String networkIpv4Address) {
+            this.networkIpv4Address = networkIpv4Address;
             return this;
         }
 
@@ -442,6 +453,7 @@ public class ContainerBuilder {
                     Map.copyOf(portBindings),
                     List.copyOf(exposedPorts),
                     networkMode,
+                    networkIpv4Address,
                     List.copyOf(mounts),
                     List.copyOf(binds),
                     List.copyOf(extraHosts),

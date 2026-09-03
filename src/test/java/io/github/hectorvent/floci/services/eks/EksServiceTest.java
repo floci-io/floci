@@ -24,6 +24,8 @@ import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.EksClusterRuntimeConfig;
+import io.github.hectorvent.floci.services.eks.model.KubernetesNetworkConfig;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
@@ -430,15 +432,36 @@ class EksServiceTest {
 
     @SuppressWarnings("unchecked")
     private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {
+        AccountAwareStorageBackend<EksClusterRuntimeConfig> runtimeConfigs =
+                AccountAwareStorageBackend.inMemory("000000000000");
         return new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
+                if ("eks-runtime-configs.json".equals(fileName)) {
+                    return (AccountAwareStorageBackend<V>) runtimeConfigs;
+                }
                 if (backend instanceof AccountAwareStorageBackend<?> aware) {
                     return (AccountAwareStorageBackend<V>) aware;
                 }
                 return new AccountAwareStorageBackend<>(
                         (StorageBackend<String, V>) backend, null, "000000000000");
+            }
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private StorageFactory eksStorageFactory(AccountAwareStorageBackend<Cluster> clusters,
+            AccountAwareStorageBackend<EksClusterRuntimeConfig> runtimeConfigs) {
+        return new StorageFactory(null, null) {
+            @Override
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return switch (fileName) {
+                    case "eks-clusters.json" -> (AccountAwareStorageBackend<V>) clusters;
+                    case "eks-runtime-configs.json" -> (AccountAwareStorageBackend<V>) runtimeConfigs;
+                    default -> AccountAwareStorageBackend.inMemory("000000000000");
+                };
             }
         };
     }
@@ -478,6 +501,88 @@ class EksServiceTest {
         createTestCluster("Valid-Name_123");
 
         assertTrue(eksService.listClusters().contains("Valid-Name_123"));
+    }
+
+    @Test
+    void createClusterConsumesRuntimeTagsWithoutExposingThemAsAwsTags() {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("runtime-cluster");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setTags(Map.of(
+                "team", "platform",
+                "floci:eks-image", "registry.example.test/k3s:v1.34.0",
+                "floci:eks-node-ipv4-address", "172.20.0.20",
+                "floci:eks-pod-ipv4-cidr", "10.244.0.0/16"));
+        KubernetesNetworkConfig networkConfig = new KubernetesNetworkConfig();
+        networkConfig.setIpFamily("ipv4");
+        networkConfig.setServiceIpv4Cidr("10.100.0.0/16");
+        request.setKubernetesNetworkConfig(networkConfig);
+
+        Cluster cluster = eksService.createCluster(request);
+
+        assertEquals(Map.of("team", "platform"), cluster.getTags());
+        assertEquals("registry.example.test/k3s:v1.34.0", cluster.getRuntimeConfig().getImage());
+        assertEquals("172.20.0.20", cluster.getRuntimeConfig().getNodeIpv4Address());
+        assertEquals("10.244.0.0/16", cluster.getRuntimeConfig().getPodIpv4Cidr());
+        AwsException exception = assertThrows(AwsException.class,
+                () -> eksService.tagResource(cluster.getArn(), Map.of("floci:eks-image", "too-late")));
+        assertEquals("ValidationException", exception.getErrorCode());
+    }
+
+    @Test
+    void createClusterRejectsOverlappingRuntimeNetworks() {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("overlapping-runtime-cluster");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setTags(Map.of("floci:eks-pod-ipv4-cidr", "10.100.1.0/24"));
+        KubernetesNetworkConfig networkConfig = new KubernetesNetworkConfig();
+        networkConfig.setIpFamily("ipv4");
+        networkConfig.setServiceIpv4Cidr("10.100.0.0/16");
+        request.setKubernetesNetworkConfig(networkConfig);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> eksService.createCluster(request));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(eksService.listClusters().isEmpty());
+    }
+
+    @Test
+    void initRestoresRuntimeConfigFromItsCompanionStore() {
+        AccountAwareStorageBackend<Cluster> clusters = AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<EksClusterRuntimeConfig> runtimeConfigs =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        StorageFactory storageFactory = eksStorageFactory(clusters, runtimeConfigs);
+        EksOidcService oidcService = new EksOidcService(storageFactory, new ObjectMapper());
+        EksService created = new EksService(storageFactory, testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService);
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("restored-runtime-cluster");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setTags(Map.of(
+                "floci:eks-image", "registry.example.test/k3s:v1.34.0",
+                "floci:eks-node-ipv4-address", "172.20.0.20",
+                "floci:eks-pod-ipv4-cidr", "10.244.0.0/16"));
+
+        created.createCluster(request);
+        Cluster persisted = clusters.get("restored-runtime-cluster").orElseThrow();
+        persisted.setRuntimeConfig(null);
+        clusters.put("restored-runtime-cluster", persisted);
+
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService restarted = new EksService(storageFactory, testConfig(false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null, oidcService);
+        try {
+            restarted.init();
+
+            verify(clusterManager).restoreCluster(persisted);
+            assertEquals("registry.example.test/k3s:v1.34.0", persisted.getRuntimeConfig().getImage());
+            assertEquals("172.20.0.20", persisted.getRuntimeConfig().getNodeIpv4Address());
+            assertEquals("10.244.0.0/16", persisted.getRuntimeConfig().getPodIpv4Cidr());
+        } finally {
+            created.shutdown();
+            restarted.shutdown();
+        }
     }
 
     @Test

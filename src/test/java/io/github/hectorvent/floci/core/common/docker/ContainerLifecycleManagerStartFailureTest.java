@@ -1,25 +1,31 @@
 package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -120,5 +126,28 @@ class ContainerLifecycleManagerStartFailureTest {
                 () -> manager.startCreated("container-id", spec));
 
         assertSame(portConflict, thrown, "unrelated Docker errors must propagate unchanged");
+    }
+
+    @Test
+    void startCreatedAssignsTheStaticAddressBeforeStartingTheContainer() {
+        ContainerSpec staticNetworkSpec = new ContainerSpec(
+                "busybox:latest", null, List.of(), null, null, null, Map.of(), List.of(),
+                "test-network", "172.20.0.20", List.of(), List.of(), List.of(), Map.of(),
+                null, false, null, List.of(), null, null, List.of());
+        ConnectToNetworkCmd connectCmd = mock(ConnectToNetworkCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        StartContainerCmd startCmd = mock(StartContainerCmd.class);
+        when(dockerClient.connectToNetworkCmd()).thenReturn(connectCmd);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(startCmd);
+
+        manager.startCreated("container-id", staticNetworkSpec);
+
+        ArgumentCaptor<ContainerNetwork> network = ArgumentCaptor.forClass(ContainerNetwork.class);
+        verify(connectCmd).withContainerId("container-id");
+        verify(connectCmd).withNetworkId("test-network");
+        verify(connectCmd).withContainerNetwork(network.capture());
+        assertEquals("172.20.0.20", network.getValue().getIpamConfig().getIpv4Address());
+        var order = inOrder(connectCmd, startCmd);
+        order.verify(connectCmd).exec();
+        order.verify(startCmd).exec();
     }
 }

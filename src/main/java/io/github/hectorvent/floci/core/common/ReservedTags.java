@@ -13,6 +13,9 @@ public final class ReservedTags {
     public static final String OVERRIDE_ID_KEY = RESERVED_PREFIX + "override-id";
     public static final String OVERRIDE_COGNITO_CLIENT_ID_KEY = RESERVED_PREFIX + "override-cognito-client-id";
     public static final String OVERRIDE_COGNITO_CLIENT_SECRET_KEY = RESERVED_PREFIX + "override-cognito-client-secret";
+    public static final String EKS_IMAGE_KEY = RESERVED_PREFIX + "eks-image";
+    public static final String EKS_NODE_IPV4_ADDRESS_KEY = RESERVED_PREFIX + "eks-node-ipv4-address";
+    public static final String EKS_POD_IPV4_CIDR_KEY = RESERVED_PREFIX + "eks-pod-ipv4-cidr";
 
     /**
      * API Gateway accepted a custom id through this key before {@link #OVERRIDE_ID_KEY} existed. It is

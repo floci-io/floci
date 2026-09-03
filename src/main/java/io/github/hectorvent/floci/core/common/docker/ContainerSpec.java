@@ -20,6 +20,7 @@ import java.util.Map;
  * @param portBindings Map of container port to host port (0 = dynamic allocation)
  * @param exposedPorts Ports to expose (required for port bindings)
  * @param networkMode Docker network name or mode (null = default bridge)
+ * @param networkIpv4Address Static IPv4 address on networkMode (null = Docker-assigned)
  * @param mounts Volume mounts (named volumes, bind mounts, tmpfs)
  * @param binds Legacy bind mounts (prefer mounts for new code)
  * @param extraHosts Extra /etc/hosts entries as "hostname:ip" strings
@@ -42,6 +43,7 @@ public record ContainerSpec(
         Map<Integer, Integer> portBindings,
         List<Integer> exposedPorts,
         String networkMode,
+        String networkIpv4Address,
         List<Mount> mounts,
         List<Bind> binds,
         List<String> extraHosts,
@@ -59,7 +61,7 @@ public record ContainerSpec(
      * All other fields will be null or empty lists.
      */
     public ContainerSpec(String image) {
-        this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
+        this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
     }
 
     /**
@@ -67,6 +69,11 @@ public record ContainerSpec(
      */
     public boolean hasPortBindings() {
         return portBindings != null && !portBindings.isEmpty();
+    }
+
+    /** Returns true if the container must receive a static IPv4 address on its Docker network. */
+    public boolean hasNetworkIpv4Address() {
+        return networkIpv4Address != null && !networkIpv4Address.isBlank();
     }
 
     /**

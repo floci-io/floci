@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
+import io.github.hectorvent.floci.services.eks.model.EksClusterRuntimeConfig;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.KubernetesNetworkConfig;
@@ -55,8 +57,10 @@ public class EksService implements TagHandler, ResourceProvider {
     /** The AWS charset for EKS cluster names. It admits no dot, which the Docker-name account
      *  qualifier relies on — see EksClusterManager#accountQualifiedName. */
     static final String CLUSTER_NAME_REGEX = "[0-9A-Za-z][A-Za-z0-9\\-_]*";
+    static final String DEFAULT_SERVICE_IPV4_CIDR = "10.100.0.0/16";
 
     private final StorageBackend<String, Cluster> storage;
+    private final StorageBackend<String, EksClusterRuntimeConfig> runtimeConfigStorage;
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final StorageBackend<String, FargateProfile> fargateProfileStorage;
     private final EmulatorConfig config;
@@ -72,6 +76,9 @@ public class EksService implements TagHandler, ResourceProvider {
             EksOidcService oidcService) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
+                });
+        this.runtimeConfigStorage = storageFactory.create("eks", "eks-runtime-configs.json",
+                new TypeReference<Map<String, EksClusterRuntimeConfig>>() {
                 });
         this.nodeGroupStorage = storageFactory.create("eks", "eks-nodegroups.json",
                 new TypeReference<Map<String, Nodegroup>>() {
@@ -119,6 +126,7 @@ public class EksService implements TagHandler, ResourceProvider {
             if (cluster.getAccountId() == null) {
                 cluster.setAccountId(entry.accountId());
             }
+            cluster.setRuntimeConfig(runtimeConfigForAccount(entry.accountId(), cluster.getName()));
             // A persisted name that predates create-time validation may violate the AWS charset —
             // in particular contain a dot, which could spell out another account's qualified
             // Docker name and cross-bind its container. Such a record is never restored; the
@@ -154,6 +162,13 @@ public class EksService implements TagHandler, ResourceProvider {
                         cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getAccountId(),
                         cluster.getName(), cluster))
                 .toList();
+    }
+
+    private EksClusterRuntimeConfig runtimeConfigForAccount(String accountId, String clusterName) {
+        if (runtimeConfigStorage instanceof AccountAwareStorageBackend<EksClusterRuntimeConfig> aware) {
+            return aware.getForAccount(accountId, clusterName).orElseGet(EksClusterRuntimeConfig::new);
+        }
+        return runtimeConfigStorage.get(clusterName).orElseGet(EksClusterRuntimeConfig::new);
     }
 
     /**
@@ -242,7 +257,10 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setResourcesVpcConfig(buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId));
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
-        cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
+        EksClusterRuntimeConfig runtimeConfig = EksRuntimeConfig.fromCreateTags(request.getTags());
+        EksRuntimeConfig.validate(runtimeConfig, cluster.getKubernetesNetworkConfig());
+        cluster.setRuntimeConfig(runtimeConfig);
+        cluster.setTags(ReservedTags.stripReservedTags(request.getTags()));
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
@@ -263,6 +281,7 @@ public class EksService implements TagHandler, ResourceProvider {
         }
 
         storage.put(name, cluster);
+        runtimeConfigStorage.put(name, runtimeConfig);
         return cluster;
     }
 
@@ -288,6 +307,7 @@ public class EksService implements TagHandler, ResourceProvider {
             clusterManager.stopCluster(cluster);
         }
         storage.delete(name);
+        runtimeConfigStorage.delete(name);
         oidcService.deleteKey(name);
         return cluster;
     }
@@ -459,6 +479,7 @@ public class EksService implements TagHandler, ResourceProvider {
 
     @Override
     public void tagResource(String region, String resourceArn, Map<String, String> tags) {
+        ReservedTags.rejectReservedTagsOnUpdate(tags);
         String clusterName = extractClusterName(resourceArn);
         Cluster cluster = storage.get(clusterName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -572,10 +593,12 @@ public class EksService implements TagHandler, ResourceProvider {
     private KubernetesNetworkConfig buildNetworkConfig(KubernetesNetworkConfig request) {
         KubernetesNetworkConfig config = new KubernetesNetworkConfig();
         if (request != null) {
-            config.setServiceIpv4Cidr(request.getServiceIpv4Cidr() != null ? request.getServiceIpv4Cidr() : "10.100.0.0/16");
+            config.setServiceIpv4Cidr(request.getServiceIpv4Cidr() != null
+                    ? request.getServiceIpv4Cidr()
+                    : DEFAULT_SERVICE_IPV4_CIDR);
             config.setIpFamily(request.getIpFamily() != null ? request.getIpFamily() : "ipv4");
         } else {
-            config.setServiceIpv4Cidr("10.100.0.0/16");
+            config.setServiceIpv4Cidr(DEFAULT_SERVICE_IPV4_CIDR);
             config.setIpFamily("ipv4");
         }
         return config;

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -14,6 +15,7 @@ import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.EksClusterRuntimeConfig;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.model.Frame;
@@ -88,7 +90,12 @@ public class EksClusterManager {
      * {@link #isReady(Cluster)} returns true and {@link #finalizeCluster(Cluster)} is called.
      */
     public void startCluster(Cluster cluster) {
-        String image = config.services().eks().defaultImage();
+        EksClusterRuntimeConfig runtimeConfig = cluster.getRuntimeConfig() != null
+                ? cluster.getRuntimeConfig()
+                : new EksClusterRuntimeConfig();
+        String image = runtimeConfig.getImage() != null
+                ? runtimeConfig.getImage()
+                : config.services().eks().defaultImage();
         if (cluster.getDockerName() == null) {
             cluster.setDockerName(accountQualifiedName(cluster));
         }
@@ -118,7 +125,12 @@ public class EksClusterManager {
         // filesystem, so chmod works correctly and data persists across container restarts.
         String volumeName = cluster.getDockerName();
 
-        List<String> serverArgs = buildServerArgs(config.services().eks().disableCni());
+        String serviceIpv4Cidr = cluster.getKubernetesNetworkConfig() != null
+                && cluster.getKubernetesNetworkConfig().getServiceIpv4Cidr() != null
+                ? cluster.getKubernetesNetworkConfig().getServiceIpv4Cidr()
+                : EksService.DEFAULT_SERVICE_IPV4_CIDR;
+        List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), runtimeConfig,
+                serviceIpv4Cidr);
 
         // The account label comes from the cluster record when set (restore runs with no request
         // context); regionResolver is the fallback for the create path.
@@ -135,6 +147,9 @@ public class EksClusterManager {
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "eks", cluster.getName(), labelAccountId, regionResolver.getDefaultRegion()));
+        if (runtimeConfig.getNodeIpv4Address() != null) {
+            specBuilder.withNetworkIpv4Address(runtimeConfig.getNodeIpv4Address());
+        }
 
         // Wire a token-authentication webhook so `aws eks get-token` bearer tokens are validated by
         // Floci and mapped to cluster-admin. The k3s API server POSTs a TokenReview to Floci's
@@ -168,17 +183,26 @@ public class EksClusterManager {
             specBuilder.withCmd(serverArgs);
         }
         ContainerSpec spec = specBuilder.build();
+        if (runtimeConfig.getNodeIpv4Address() != null && !supportsStaticAddress(spec.networkMode())) {
+            throw new IllegalStateException(ReservedTags.EKS_NODE_IPV4_ADDRESS_KEY
+                    + " requires a user-defined Docker network");
+        }
 
         // create -> inject webhook kubeconfig -> start, so the file exists before the API server boots.
         String containerId = lifecycleManager.create(spec);
         cluster.setContainerId(containerId);
-        if (webhookLocalFile != null) {
-            copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
-        }
-        injectEcrRegistryMirror(containerId, cluster.getName());
-        ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
+        try {
+            if (webhookLocalFile != null) {
+                copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
+            }
+            injectEcrRegistryMirror(containerId, cluster.getName());
+            ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
-        applyEndpoints(cluster, containerName, hostPort, info);
+            applyEndpoints(cluster, containerName, hostPort, info);
+        } catch (RuntimeException e) {
+            lifecycleManager.removeIfExists(containerId);
+            throw e;
+        }
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
                 containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -446,6 +470,24 @@ public class EksClusterManager {
             serverArgs.add("--disable-kube-proxy");
         }
         return serverArgs;
+    }
+
+    static List<String> buildServerArgs(boolean disableCni, EksClusterRuntimeConfig runtimeConfig,
+                                        String serviceIpv4Cidr) {
+        List<String> serverArgs = buildServerArgs(disableCni);
+        serverArgs.add("--service-cidr=" + serviceIpv4Cidr);
+        serverArgs.add("--cluster-cidr=" + EksRuntimeConfig.podIpv4Cidr(runtimeConfig));
+        if (runtimeConfig.getNodeIpv4Address() != null) {
+            serverArgs.add("--node-ip=" + runtimeConfig.getNodeIpv4Address());
+        }
+        return serverArgs;
+    }
+
+    private static boolean supportsStaticAddress(String networkMode) {
+        return networkMode != null && !networkMode.isBlank()
+                && !"bridge".equals(networkMode)
+                && !"host".equals(networkMode)
+                && !"none".equals(networkMode);
     }
 
     /**

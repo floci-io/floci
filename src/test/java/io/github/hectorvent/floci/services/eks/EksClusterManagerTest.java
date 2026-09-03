@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.EksClusterRuntimeConfig;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -141,6 +142,18 @@ class EksClusterManagerTest {
     }
 
     @Test
+    void serverArgsApplyThePerClusterRuntimeNetwork() {
+        EksClusterRuntimeConfig runtime = new EksClusterRuntimeConfig(
+                "registry.example.test/k3s:v1.34.0", "172.20.0.20", "10.244.0.0/16");
+
+        List<String> args = EksClusterManager.buildServerArgs(false, runtime, "10.100.0.0/16");
+
+        assertTrue(args.contains("--service-cidr=10.100.0.0/16"));
+        assertTrue(args.contains("--cluster-cidr=10.244.0.0/16"));
+        assertTrue(args.contains("--node-ip=172.20.0.20"));
+    }
+
+    @Test
     void rshareEntrypointIsPosixShCompatible() {
         String script = EksClusterManager.RSHARE_ENTRYPOINT.get(2);
 
@@ -171,7 +184,7 @@ class EksClusterManagerTest {
     }
 
     @Test
-    void startClusterLabelsContainerWithResourceIdentity() {
+    void startClusterAppliesRuntimeConfigAndResourceIdentityLabels() {
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.EksServiceConfig eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
@@ -193,7 +206,9 @@ class EksClusterManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        ContainerSpec spec = Mockito.mock(ContainerSpec.class);
+        when(spec.networkMode()).thenReturn("test-network");
+        when(builder.build()).thenReturn(spec);
 
         RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -206,9 +221,13 @@ class EksClusterManagerTest {
 
         Cluster cluster = new Cluster();
         cluster.setName("my-cluster");
+        cluster.setRuntimeConfig(new EksClusterRuntimeConfig(
+                "registry.example.test/k3s:v1.34.0", "172.20.0.20", "10.244.0.0/16"));
 
         manager.startCluster(cluster);
 
+        verify(containerBuilder).newContainer("registry.example.test/k3s:v1.34.0");
+        verify(builder).withNetworkIpv4Address("172.20.0.20");
         verify(builder).withLabels(Map.of(
                 "io.floci", "aws",
                 "io.floci.service", "eks",

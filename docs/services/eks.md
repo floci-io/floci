@@ -77,6 +77,40 @@ services:
 !!! note "No port mapping needed for k3s ports"
     k3s containers bind their API server port (6500–6599) directly on the host via Docker — no `ports:` entry is required in `docker-compose.yml`. See [Ports Reference](../configuration/ports.md#ports-65006599-eks-real-mode) for the full explanation.
 
+#### Per-cluster k3s runtime
+
+`CreateCluster` recognizes the following `floci:` keys in its standard `tags` map as local
+emulator configuration. They are creation-only runtime inputs: Floci removes them from returned
+EKS tags and rejects them from `TagResource`, so `DescribeCluster` and `ListTagsForResource`
+remain AWS-shaped.
+
+| Tag | Runtime setting | Default |
+|---|---|---|
+| `floci:eks-image` | k3s container image | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` |
+| `floci:eks-node-ipv4-address` | Static IPv4 address on the configured user-defined Docker network | Docker-assigned address |
+| `floci:eks-pod-ipv4-cidr` | k3s Pod CIDR | `10.42.0.0/16` |
+
+The standard `kubernetesNetworkConfig.serviceIpv4Cidr` remains the Service CIDR and defaults to
+`10.100.0.0/16`. Floci starts k3s with `--node-ip`, `--cluster-cidr`, and `--service-cidr` from
+these values. The Pod and Service CIDRs must be canonical IPv4 networks that do not overlap, and
+a static node address must be outside both networks. A static address requires a user-defined
+Docker network with matching IPAM configuration; Docker's `bridge`, `host`, and `none` modes do
+not support it.
+
+```bash
+aws eks create-cluster \
+  --name example \
+  --role-arn arn:aws:iam::000000000000:role/eks-role \
+  --resources-vpc-config subnetIds=subnet-0123456789abcdef0 \
+  --kubernetes-network-config serviceIpv4Cidr=10.100.0.0/16 \
+  --tags floci:eks-image=rancher/k3s:v1.34.0-k3s1,floci:eks-node-ipv4-address=172.20.0.20,floci:eks-pod-ipv4-cidr=10.244.0.0/16
+```
+```
+
+Floci persists the resolved runtime settings in `eks-runtime-configs.json`, separate from the
+AWS-shaped cluster record. When a missing k3s container is recreated after restart, it receives
+the same image and network settings.
+
 #### Clusters survive a restart
 
 With a persistent [storage mode](../configuration/storage.md) (the default), clusters recorded in

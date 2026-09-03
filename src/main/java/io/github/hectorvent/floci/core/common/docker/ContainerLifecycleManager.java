@@ -151,24 +151,43 @@ public class ContainerLifecycleManager {
      * @return information about the running container including resolved endpoints
      */
     public ContainerInfo startCreated(String containerId, ContainerSpec spec) {
+        if (spec.hasNetworkIpv4Address()) {
+            connectToNetwork(containerId, spec, true);
+        }
         startContainer(containerId);
         LOG.infov("Started container {0}", containerId);
 
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
-            try {
-                dockerClient.connectToNetworkCmd()
-                        .withContainerId(containerId)
-                        .withNetworkId(spec.networkMode())
-                        .exec();
-                LOG.debugv("Connected container {0} to network {1}", containerId, spec.networkMode());
-            } catch (Exception e) {
-                LOG.warnv("Could not connect container {0} to network {1}: {2}",
-                        containerId, spec.networkMode(), e.getMessage());
-            }
+        if (!spec.hasNetworkIpv4Address() && spec.networkMode() != null && !spec.networkMode().isBlank()
+                && spec.hasPortBindings()) {
+            connectToNetwork(containerId, spec, false);
         }
 
         Map<Integer, EndpointInfo> endpoints = resolveEndpoints(containerId, spec);
         return new ContainerInfo(containerId, endpoints);
+    }
+
+    private void connectToNetwork(String containerId, ContainerSpec spec, boolean required) {
+        if (spec.networkMode() == null || spec.networkMode().isBlank()) {
+            throw new IllegalArgumentException("A static network IPv4 address requires a Docker network");
+        }
+        try {
+            var command = dockerClient.connectToNetworkCmd()
+                    .withContainerId(containerId)
+                    .withNetworkId(spec.networkMode());
+            if (spec.hasNetworkIpv4Address()) {
+                command.withContainerNetwork(new ContainerNetwork().withIpamConfig(
+                        new ContainerNetwork.Ipam().withIpv4Address(spec.networkIpv4Address())));
+            }
+            command.exec();
+            LOG.debugv("Connected container {0} to network {1}", containerId, spec.networkMode());
+        } catch (Exception e) {
+            if (required) {
+                throw new IllegalStateException("Could not assign static IPv4 address "
+                        + spec.networkIpv4Address() + " on Docker network " + spec.networkMode(), e);
+            }
+            LOG.warnv("Could not connect container {0} to network {1}: {2}",
+                    containerId, spec.networkMode(), e.getMessage());
+        }
     }
 
     /**
@@ -817,7 +836,8 @@ public class ContainerLifecycleManager {
         // withNetworkMode() + port bindings suppresses port publishing on macOS Docker Desktop,
         // so containers with port bindings (e.g. ECR registry) connect to the network
         // after start via connectToNetworkCmd() instead.
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.hasPortBindings()) {
+        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.hasPortBindings()
+                && !spec.hasNetworkIpv4Address()) {
             hostConfig.withNetworkMode(spec.networkMode());
         }
 
