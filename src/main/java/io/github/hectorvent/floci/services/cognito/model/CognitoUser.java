@@ -24,6 +24,7 @@ public class CognitoUser {
     private List<String> groupNames = new ArrayList<>();
     private String srpSalt;
     private String srpVerifier;
+    private EmailMfaSettings emailMfaSettings;
 
     public CognitoUser() {
         long now = System.currentTimeMillis() / 1000L;
@@ -73,4 +74,11 @@ public class CognitoUser {
 
     public String getSrpVerifier() { return srpVerifier; }
     public void setSrpVerifier(String srpVerifier) { this.srpVerifier = srpVerifier; }
+    public EmailMfaSettings getEmailMfaSettings() {
+        return emailMfaSettings;
+    }
+
+    public void setEmailMfaSettings(EmailMfaSettings emailMfaSettings) {
+        this.emailMfaSettings = emailMfaSettings;
+    }
 }

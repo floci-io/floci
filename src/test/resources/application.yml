@@ -3,12 +3,9 @@ quarkus:
     port: 0
     test-port: 0
     limits:
-      max-body-size: ${floci.max-request-size}M
+      max-body-size: ${floci.protocols.max-request-size}M
   datasource:
     active: false
-  kubernetes-client:
-    devservices:
-      enabled: false
   # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
   # Loaded parent-first they live in the shared system classloader, so they cannot pin a
   # per-profile application classloader across the many app restarts of a test run.
@@ -223,6 +220,9 @@ floci:
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false
+      # Pinned to the shipped default so a test sees what a user sees; the strict-mode test
+      # overrides it with its own profile.
+      allow-stub-unsupported-resource-types: true
     acm:
       enabled: true
       validation-wait-seconds: 0

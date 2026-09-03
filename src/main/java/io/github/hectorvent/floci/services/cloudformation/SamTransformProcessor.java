@@ -127,7 +127,10 @@ class SamTransformProcessor {
                         // copyResourceLevelAttributes runs inside expandServerlessStateMachine
                         // itself (its one caller already owning the source resDef).
                         expandServerlessStateMachine(logicalId, resDef, expandedResources);
-                default -> LOG.debugv("Unsupported SAM resource type: {0} ({1})", type, logicalId);
+                // Warn: the type stays in the template and the provisioner stubs it, so at debug
+                // this is the first of two silences on one path and the stack still reports green.
+                default -> LOG.warnv("Unsupported SAM resource type {0} ({1}): left in the "
+                        + "template for the CloudFormation provisioner.", type, logicalId);
             }
         }
 

@@ -792,6 +792,8 @@ class Ec2IntegrationTest {
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceType", equalTo("m6gd.2xlarge"))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageSupported", equalTo("true"))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB", equalTo("474"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.encryptionInTransitSupported",
+                    equalTo("false"))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     equalTo("arm64"));
     }
@@ -821,6 +823,8 @@ class Ec2IntegrationTest {
                     everyItem(equalTo("true")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB",
                     everyItem(equalTo("118")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.encryptionInTransitSupported",
+                    everyItem(equalTo("false")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     everyItem(equalTo("arm64")));
     }

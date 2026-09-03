@@ -65,6 +65,9 @@ public class Domain {
     @JsonProperty("ContainerId")
     private String containerId;
 
+    @JsonProperty("HostPort")
+    private Integer hostPort;
+
     @JsonIgnore
     private String accountId;
 
@@ -211,6 +214,14 @@ public class Domain {
 
     public void setContainerId(String containerId) {
         this.containerId = containerId;
+    }
+
+    public Integer getHostPort() {
+        return hostPort;
+    }
+
+    public void setHostPort(Integer hostPort) {
+        this.hostPort = hostPort;
     }
 
     public String getVolumeId() {

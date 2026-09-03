@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.List;
+
 /**
  * Dummy response builder for Bedrock Runtime. Stateless.
  * No real model inference: returns a fixed assistant turn plus token usage metadata.
@@ -73,5 +75,35 @@ public class StubBackend implements BedrockBackend {
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize InvokeModel response", e);
         }
+    }
+
+    @Override
+    public byte[] converseStream(String modelId, ObjectNode bedrockRequest) {
+        ObjectNode messageStart = objectMapper.createObjectNode();
+        messageStart.put("role", "assistant");
+
+        ObjectNode contentBlockDelta = objectMapper.createObjectNode();
+        contentBlockDelta.put("contentBlockIndex", 0);
+        contentBlockDelta.putObject("delta").put("text", "Floci stub response for model=" + modelId);
+
+        ObjectNode contentBlockStop = objectMapper.createObjectNode();
+        contentBlockStop.put("contentBlockIndex", 0);
+
+        ObjectNode messageStop = objectMapper.createObjectNode();
+        messageStop.put("stopReason", "end_turn");
+
+        ObjectNode metadata = objectMapper.createObjectNode();
+        metadata.putObject("usage")
+                .put("inputTokens", 10)
+                .put("outputTokens", 12)
+                .put("totalTokens", 22);
+        metadata.putObject("metrics").put("latencyMs", 1);
+
+        return BedrockStreamEncoder.encode(objectMapper, List.of(
+                new BedrockStreamEncoder.Event("messageStart", messageStart),
+                new BedrockStreamEncoder.Event("contentBlockDelta", contentBlockDelta),
+                new BedrockStreamEncoder.Event("contentBlockStop", contentBlockStop),
+                new BedrockStreamEncoder.Event("messageStop", messageStop),
+                new BedrockStreamEncoder.Event("metadata", metadata)));
     }
 }

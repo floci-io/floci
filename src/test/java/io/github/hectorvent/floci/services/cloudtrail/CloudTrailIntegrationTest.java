@@ -14,7 +14,9 @@ import java.util.zip.GZIPInputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -290,6 +292,120 @@ class CloudTrailIntegrationTest {
                 String.format("{\"trailNameList\":[\"%s\"]}", trailName))
             .then().statusCode(200)
                 .body(containsString(newBucket));
+    }
+
+    @Test
+    void tagLifecycleAddsListsAndRemovesTags() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "tag-" + suffix;
+        String destBucket = "tag-logs-" + suffix;
+
+        createBucket(destBucket);
+        String trailArn = invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, destBucket))
+            .then().statusCode(200)
+            .extract().path("TrailARN");
+
+        // A trail with no tags yet returns an entry with an empty TagsList, not an
+        // omitted entry.
+        invokeCloudTrail("ListTags", String.format("""
+                {"ResourceIdList":["%s"]}
+                """, trailArn))
+            .then().statusCode(200)
+                .body("ResourceTagList[0].ResourceId", equalTo(trailArn))
+                .body("ResourceTagList[0].TagsList", hasSize(0));
+
+        invokeCloudTrail("AddTags", String.format("""
+                {"ResourceId":"%s","TagsList":[{"Key":"env","Value":"prod"},{"Key":"team","Value":"sec"}]}
+                """, trailArn))
+            .then().statusCode(200);
+
+        invokeCloudTrail("ListTags", String.format("""
+                {"ResourceIdList":["%s"]}
+                """, trailArn))
+            .then().statusCode(200)
+                .body("ResourceTagList[0].TagsList", hasSize(2));
+
+        // AddTags overwrites an existing key's value rather than duplicating it.
+        invokeCloudTrail("AddTags", String.format("""
+                {"ResourceId":"%s","TagsList":[{"Key":"env","Value":"staging"}]}
+                """, trailArn))
+            .then().statusCode(200);
+
+        invokeCloudTrail("ListTags", String.format("""
+                {"ResourceIdList":["%s"]}
+                """, trailArn))
+            .then().statusCode(200)
+                .body("ResourceTagList[0].TagsList", hasSize(2))
+                .body("ResourceTagList[0].TagsList.find { it.Key == 'env' }.Value", equalTo("staging"));
+
+        invokeCloudTrail("RemoveTags", String.format("""
+                {"ResourceId":"%s","TagsList":[{"Key":"env"}]}
+                """, trailArn))
+            .then().statusCode(200);
+
+        invokeCloudTrail("ListTags", String.format("""
+                {"ResourceIdList":["%s"]}
+                """, trailArn))
+            .then().statusCode(200)
+                .body("ResourceTagList[0].TagsList", hasSize(1))
+                .body("ResourceTagList[0].TagsList[0].Key", equalTo("team"));
+    }
+
+    @Test
+    void listTagsOmitsValueForTagWithNoValue() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "novalue-" + suffix;
+        String destBucket = "novalue-logs-" + suffix;
+
+        createBucket(destBucket);
+        String trailArn = invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, destBucket))
+            .then().statusCode(200)
+            .extract().path("TrailARN");
+
+        invokeCloudTrail("AddTags", String.format("""
+                {"ResourceId":"%s","TagsList":[{"Key":"novalue"}]}
+                """, trailArn))
+            .then().statusCode(200);
+
+        // AWS omits absent optionals: a valueless tag must come back as
+        // {"Key":"novalue"} with no "Value" member at all, not "Value":null.
+        invokeCloudTrail("ListTags", String.format("""
+                {"ResourceIdList":["%s"]}
+                """, trailArn))
+            .then().statusCode(200)
+                .body(containsString("{\"Key\":\"novalue\"}"))
+                .body(not(containsString("\"Value\":null")));
+    }
+
+    @Test
+    void listTagsForUnknownTrailArnReturnsResourceNotFound() {
+        invokeCloudTrail("ListTags", """
+                {"ResourceIdList":["arn:aws:cloudtrail:us-east-1:000000000000:trail/does-not-exist"]}
+                """)
+            .then().statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void addTagsWithMalformedArnReturnsCloudTrailArnInvalid() {
+        invokeCloudTrail("AddTags", """
+                {"ResourceId":"not-an-arn","TagsList":[{"Key":"env","Value":"prod"}]}
+                """)
+            .then().statusCode(400)
+                .body(containsString("CloudTrailARNInvalidException"));
+    }
+
+    @Test
+    void addTagsWithNonTrailArnReturnsCloudTrailArnInvalid() {
+        invokeCloudTrail("AddTags", """
+                {"ResourceId":"arn:aws:s3:::some-bucket","TagsList":[{"Key":"env","Value":"prod"}]}
+                """)
+            .then().statusCode(400)
+                .body(containsString("CloudTrailARNInvalidException"));
     }
 
     // --- Helpers ---

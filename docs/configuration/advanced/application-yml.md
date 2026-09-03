@@ -36,7 +36,6 @@ The block below mirrors `src/main/resources/application.yml`, it's the effective
 
 ```yaml
 floci:
-  max-request-size: 2048             # Max HTTP request body size in MB
   base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl, SNS endpoints, etc.)
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
   default-region: us-east-1
@@ -98,6 +97,9 @@ floci:
     # key-path: ""                           # FLOCI_TLS_KEY_PATH — PEM private key file path
     self-signed: true                        # FLOCI_TLS_SELF_SIGNED — auto-generate cert when no paths provided
 
+  protocols:
+    max-request-size: 2048                   # FLOCI_PROTOCOLS_MAX_REQUEST_SIZE — max HTTP request body size in MB (legacy: floci.max-request-size / FLOCI_MAX_REQUEST_SIZE)
+
   docker:
     log-max-size: "10m"                      # Max size per container log file before rotation
     log-max-file: "3"                        # Number of rotated log files to retain
@@ -129,6 +131,7 @@ floci:
     lambda:
       enabled: true
       ephemeral: false                        # true = remove container after each invocation
+      ecr-base-uri: public.ecr.aws            # Registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
       default-memory-mb: 128
       default-timeout-seconds: 3
       runtime-api-base-port: 12000            # Port range for Lambda Runtime API
@@ -283,11 +286,11 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 
 | Variable                                           | Default          | Description                                                   |
 |----------------------------------------------------|------------------|---------------------------------------------------------------|
-| `FLOCI_MAX_REQUEST_SIZE`                           | `512`            | Max HTTP request body size in MB                              |
+| `FLOCI_PROTOCOLS_MAX_REQUEST_SIZE`                 | `2048`           | Max HTTP request body size in MB (legacy: `FLOCI_MAX_REQUEST_SIZE`) |
 | `FLOCI_DEFAULT_REGION`                             | `us-east-1`      | Default AWS region used in ARNs and response URLs             |
 | `FLOCI_DEFAULT_AVAILABILITY_ZONE`                  | `us-east-1a`     | Default AZ reported by EC2, RDS, and other AZ-aware services  |
 | `FLOCI_DEFAULT_ACCOUNT_ID`                         | `000000000000`   | Default AWS account ID used in ARNs                           |
-| `FLOCI_ECR_BASE_URI`                               | `public.ecr.aws` | Base URI used when pulling container images (e.g. Lambda)     |
+| `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI`               | `public.ecr.aws` | Registry used when pulling Lambda runtime images (legacy: `FLOCI_ECR_BASE_URI`) |
 | `FLOCI_DNS_EXTRA_SUFFIXES`                         | *(unset)*        | Comma-separated extra hostname suffixes the embedded DNS server resolves to Floci's container IP. E.g. `localhost.localstack.cloud,localhost.example.internal` |
 | `FLOCI_SERVICES_SSM_MAX_PARAMETER_HISTORY`         | `5`              | Max parameter versions kept                                   |
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT`    | `30`             | Default visibility timeout (seconds)                          |
@@ -314,7 +317,9 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 
 Per-queue SQS redrive policy (`maxReceiveCount`) is configured at queue creation time via `SetQueueAttributes` / `CreateQueue`, not as a global default.
 
-`FLOCI_DEFAULT_AVAILABILITY_ZONE` and `FLOCI_ECR_BASE_URI` are declared in `EmulatorConfig` but not in the shipped `application.yml`, so they fall through to the `@WithDefault` values above when unset.
+`FLOCI_DEFAULT_AVAILABILITY_ZONE` is declared in `EmulatorConfig` but not in the shipped `application.yml`, so it falls through to the `@WithDefault` value above when unset.
+
+The flat keys `floci.max-request-size` / `FLOCI_MAX_REQUEST_SIZE` and `floci.ecr-base-uri` / `FLOCI_ECR_BASE_URI` moved into sub-structures in 2.x (`floci.protocols.max-request-size` and `floci.services.lambda.ecr-base-uri`). The old names still resolve — a `FlociConfigRelocationsInterceptor` maps them onto the new keys — so existing configs and env vars keep working.
 
 ## Disabling Services
 

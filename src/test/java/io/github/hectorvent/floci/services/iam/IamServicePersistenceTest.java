@@ -16,12 +16,16 @@ import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * IAM state is persisted through StorageFactory, so it must survive a restart. This builds an
@@ -82,6 +86,26 @@ class IamServicePersistenceTest {
 
         assertEquals("alice", restarted.getUser("alice").getUserName());
         assertEquals("LambdaExec", restarted.getRole("LambdaExec").getRoleName());
+    }
+
+    @Test
+    void legacySessionWithoutStoredTokenCannotAuthenticate(@TempDir Path dir) throws IOException {
+        String accessKeyId = "ASIALEGACYPERSISTED";
+        String secretAccessKey = "legacy-persisted-secret";
+        Files.writeString(dir.resolve("iam-sessions.json"), """
+                {
+                  "%s": {
+                    "accessKeyId": "%s",
+                    "secretAccessKey": "%s",
+                    "expiration": "%s"
+                  }
+                }
+                """.formatted(
+                accessKeyId, accessKeyId, secretAccessKey, Instant.now().plusSeconds(60)));
+
+        IamService restarted = newService(dir);
+
+        assertTrue(restarted.findSecretKey(accessKeyId, "legacy-session-token").isEmpty());
     }
 
     private IamService newService(Path dir) {

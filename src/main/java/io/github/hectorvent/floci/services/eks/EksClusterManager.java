@@ -138,9 +138,10 @@ public class EksClusterManager {
 
         // Wire a token-authentication webhook so `aws eks get-token` bearer tokens are validated by
         // Floci and mapped to cluster-admin. The k3s API server POSTs a TokenReview to Floci's
-        // _floci/eks/token-webhook endpoint. The kubeconfig is copied into the container via the
-        // Docker API after create and before start (below) — not bind-mounted — so it works the same
-        // natively and in Docker-in-Docker, with no host-path / host-persistent-path requirement.
+        // _floci/eks/clusters/<cluster-name>/token-webhook endpoint. The kubeconfig is copied into
+        // the container via the Docker API after create and before start (below), not bind-mounted,
+        // so it works the same natively and in Docker-in-Docker, with no host-path /
+        // host-persistent-path requirement.
         String webhookLocalFile = null;
         if (config.services().eks().iamAuthWebhook()) {
             webhookLocalFile = writeWebhookKubeconfig(cluster.getName());
@@ -495,7 +496,7 @@ public class EksClusterManager {
                 .toAbsolutePath().normalize();
         try {
             Files.createDirectories(localFile.getParent());
-            Files.writeString(localFile, buildWebhookKubeconfig(webhookUrl()));
+            Files.writeString(localFile, buildWebhookKubeconfig(webhookUrl(clusterName)));
         } catch (IOException e) {
             LOG.warnv("EKS token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
                     clusterName, e.getMessage());
@@ -617,8 +618,12 @@ public class EksClusterManager {
     }
 
     /** The Floci token-webhook URL as reachable from inside the k3s container. */
-    String webhookUrl() {
-        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + "/_floci/eks/token-webhook";
+    String webhookUrl(String clusterName) {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + webhookPath(clusterName);
+    }
+
+    static String webhookPath(String clusterName) {
+        return "/_floci/eks/clusters/" + clusterName + "/token-webhook";
     }
 
     /**

@@ -765,6 +765,53 @@ class KinesisIntegrationTest {
             .body("Records.size()", equalTo(0));
     }
 
+    @Test
+    @Order(43)
+    void putRecordAcceptsPartitionKeyWithMinimumHashCode() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "minimum-hash-partition-key-test", "ShardCount": 3}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "minimum-hash-partition-key-test", "Data": "dGVzdA==", "PartitionKey": "polygenelubricants"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(44)
+    void putRecordPreservesShardForNegativeHashCode() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "negative-hash-partition-key-test", "ShardCount": 3}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "negative-hash-partition-key-test", "Data": "dGVzdA==", "PartitionKey": "negative-hash"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ShardId", equalTo("shardId-000000000002"));
+    }
+
     // --- AT_TIMESTAMP iterator coverage ---
 
     private String atTimestampCreateStream(String name) {

@@ -766,7 +766,7 @@ public class KinesisService implements ResourceProvider {
 
     private KinesisShard selectShard(KinesisStream stream, String partitionKey) {
         // Simple hash-based shard selection among ALL shards, then resolve to open one
-        int index = Math.abs(partitionKey.hashCode()) % stream.getShards().size();
+        int index = (int) (Math.abs((long) partitionKey.hashCode()) % stream.getShards().size());
         KinesisShard shard = stream.getShards().get(index);
         
         // If closed, find the first open child (simplified)

@@ -1,4 +1,11 @@
-# NOTE: Keep resource definitions in sync with ../compat-terraform/main.tf
+# NOTE: Keep resource definitions in sync with ../compat-terraform/main.tf.
+# Enforced by .github/ci/compat-opentofu-drift-check.py -- a resource added
+# here and not there (or vice versa) fails CI unless listed in
+# .github/ci/compat-opentofu-allowlist-tf-only.txt (or -otf-only.txt for the
+# reverse direction) as a deliberate gap. Currently allowlisted: Application
+# Auto Scaling, RDS, the CloudWatch alarm, the IAM managed-policy-attach
+# path, IAM tag coverage, and the GuardDuty org feature -- see the allowlist
+# files and https://github.com/floci-io/floci/issues/2263 for status.
 
 # ── S3 Bucket ──────────────────────────────────────────────────────────────
 resource "aws_s3_bucket" "app" {

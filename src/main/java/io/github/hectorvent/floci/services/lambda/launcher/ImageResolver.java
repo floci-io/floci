@@ -47,7 +47,7 @@ public class ImageResolver {
     private final String baseUri;
 
     public ImageResolver(EmulatorConfig config) {
-        this.baseUri = config.ecrBaseUri();
+        this.baseUri = config.services().lambda().ecrBaseUri();
     }
 
     public String resolve(String runtime) {

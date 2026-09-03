@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.security.SecureRandom;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -137,6 +138,65 @@ class SesTenantServiceTest {
                 assertThrows(AwsException.class, () -> service.getTenant(null, REGION)).getMessage());
         assertEquals("TenantName cannot be empty",
                 assertThrows(AwsException.class, () -> service.deleteTenant(null, REGION)).getMessage());
+    }
+
+    @Test
+    void findByTenantId_matchesIdOnly_perRegion() {
+        Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        assertEquals("acme", service.findByTenantId(tenant.tenantId(), REGION).orElseThrow().tenantName());
+        assertTrue(service.findByTenantId("tn-000000000000000000000000000000", REGION).isEmpty());
+        assertTrue(service.findByTenantId(tenant.tenantId(), "eu-west-1").isEmpty());
+    }
+
+    @Test
+    void tenantForTagArn_resolvesByIdAlone_notFoundMessagesMatchAws() {
+        Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        // The name segment is never matched; only the id resolves.
+        assertEquals("acme",
+                service.tenantForTagArn("wrong-name/" + tenant.tenantId(), REGION).tenantName());
+        // The missing space before "with" is AWS's own wording.
+        assertEquals("No Tenant present with name: acmewith tenantId: tn-0000",
+                assertThrows(AwsException.class,
+                        () -> service.tenantForTagArn("acme/tn-0000", REGION)).getMessage());
+        // A remainder without a slash parses as a null name with the segment as the id.
+        assertEquals("No Tenant present with name: nullwith tenantId: acme",
+                assertThrows(AwsException.class,
+                        () -> service.tenantForTagArn("acme", REGION)).getMessage());
+    }
+
+    @Test
+    void mutateTags_appliesToCurrentRecordUnderLock() {
+        Tenant tenant = service.createTenant("acme", List.of(new Tag("team", "floci")), ACCOUNT, REGION);
+        service.mutateTags("acme/" + tenant.tenantId(), REGION, tags -> List.of(new Tag("env", "dev")));
+        List<Tag> tags = service.getTenant("acme", REGION).tags();
+        assertEquals(1, tags.size());
+        assertEquals("env", tags.get(0).key());
+
+        // A stale TenantId (delete/recreate happened since the caller's lookup) must not resurrect
+        // the old record: the mutation re-resolves by id under the lock and 404s.
+        service.deleteTenant("acme", REGION);
+        service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        AwsException e = assertThrows(AwsException.class, () -> service.mutateTags(
+                "acme/" + tenant.tenantId(), REGION, current -> current));
+        assertEquals("No Tenant present with name: acmewith tenantId: " + tenant.tenantId(),
+                e.getMessage());
+        assertEquals(0, service.getTenant("acme", REGION).tags().size());
+    }
+
+    @Test
+    void mutateTags_shieldsTheStoredRecordFromCallbackMutation() {
+        Tenant tenant = service.createTenant("acme",
+                new ArrayList<>(List.of(new Tag("team", "floci"))), ACCOUNT, REGION);
+        // The callback gets an immutable copy: an in-place mutation fails fast instead of
+        // silently aliasing the stored record's list.
+        assertThrows(UnsupportedOperationException.class, () -> service.mutateTags(
+                "acme/" + tenant.tenantId(), REGION, tags -> {
+                    tags.add(new Tag("env", "dev"));
+                    return tags;
+                }));
+        List<Tag> tags = service.getTenant("acme", REGION).tags();
+        assertEquals(1, tags.size());
+        assertEquals("team", tags.get(0).key());
     }
 
     // ──────────────────────── Resource associations (Phase 2) ────────────────────────

@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
@@ -220,8 +221,8 @@ class BedrockRuntimeIntegrationTest {
     }
 
     @Test
-    void converseStream_returns501() {
-        given()
+    void converseStream_happyPath() {
+        String body = given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
             .body("""
@@ -230,8 +231,32 @@ class BedrockRuntimeIntegrationTest {
         .when()
             .post("/model/anthropic.claude-3-haiku-20240307-v1:0/converse-stream")
         .then()
-            .statusCode(501)
-            .body("__type", equalTo("UnsupportedOperationException"));
+            .statusCode(200)
+            .header("Content-Type", containsString("application/vnd.amazon.eventstream"))
+            .extract().body().asString();
+
+        // The response is binary event-stream framing, not JSON; the event names and JSON
+        // payload text still appear as recognizable UTF-8 substrings around the framing bytes.
+        assertThat(body, containsString("messageStart"));
+        assertThat(body, containsString("contentBlockDelta"));
+        assertThat(body, containsString("anthropic.claude-3-haiku-20240307-v1:0"));
+        assertThat(body, containsString("contentBlockStop"));
+        assertThat(body, containsString("messageStop"));
+        assertThat(body, containsString("end_turn"));
+        assertThat(body, containsString("metadata"));
+    }
+
+    @Test
+    void converseStream_missingMessages_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/model/anthropic.claude-3-haiku-20240307-v1:0/converse-stream")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test

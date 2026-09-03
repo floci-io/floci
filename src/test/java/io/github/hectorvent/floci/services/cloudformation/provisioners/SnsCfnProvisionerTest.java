@@ -110,6 +110,28 @@ class SnsCfnProvisionerTest {
         assertTrue(name.getValue().startsWith("my-stack-Topic-"), name.getValue());
     }
 
+    /**
+     * The topic's physical id is its ARN, so the prior name is read back from the TopicName
+     * attribute. Without that an unnamed topic would be recreated under a new name on every update,
+     * orphaning the old topic and every subscription attached to it.
+     */
+    @Test
+    void anUnnamedTopicKeepsItsNameAcrossUpdates() {
+        ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
+        when(sns.createTopic(name.capture(), anyMap(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+
+        StackResource r = new StackResource();
+        r.setLogicalId("Topic");
+        r.setResourceType("AWS::SNS::Topic");
+        r.setAttributes(new HashMap<>(Map.of("TopicName", "my-stack-Topic-abc123def456")));
+        r.setPhysicalId(TOPIC_ARN);
+        provisioner.provision(r, props("{}"),
+                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", TOPIC_ARN));
+
+        assertEquals("my-stack-Topic-abc123def456", name.getValue(),
+                "the prior name must come from the attribute, not from the ARN physical id");
+    }
+
     @Test
     void contentBasedDeduplicationIsForwardedOnlyWhenSet() {
         ArgumentCaptor<Map<String, String>> attrs = ArgumentCaptor.forClass(Map.class);

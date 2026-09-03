@@ -191,6 +191,147 @@ class TestCognitoAuth:
             cognito_client.delete_user_pool(UserPoolId=pool_id)
 
 
+class TestCognitoLogDeliveryConfiguration:
+    """Test Cognito log delivery configuration operations.
+
+    ``LogConfigurations`` is always present on the response, as ``[]`` when nothing
+    is configured, and ``SetLogDeliveryConfiguration`` replaces the list rather than
+    merging into it.
+    """
+
+    LOG_GROUP_ARN = "arn:aws:logs:us-east-1:000000000000:log-group:pytest-cognito-logs"
+
+    @pytest.fixture
+    def pool_id(self, cognito_client, unique_name):
+        response = cognito_client.create_user_pool(PoolName=f"pytest-log-pool-{unique_name}")
+        pool_id = response["UserPool"]["Id"]
+        yield pool_id
+        cognito_client.delete_user_pool(UserPoolId=pool_id)
+
+    def test_get_returns_an_empty_list_before_anything_is_configured(
+        self, cognito_client, pool_id
+    ):
+        """An unconfigured pool still returns the LogConfigurations member."""
+        config = cognito_client.get_log_delivery_configuration(UserPoolId=pool_id)[
+            "LogDeliveryConfiguration"
+        ]
+
+        assert config["UserPoolId"] == pool_id
+        assert config["LogConfigurations"] == []
+
+    def test_set_round_trips_and_replaces(self, cognito_client, pool_id):
+        """Set stores the configuration, and a second Set replaces rather than merges."""
+        cognito_client.set_log_delivery_configuration(
+            UserPoolId=pool_id,
+            LogConfigurations=[
+                {
+                    "LogLevel": "ERROR",
+                    "EventSource": "userNotification",
+                    "CloudWatchLogsConfiguration": {"LogGroupArn": self.LOG_GROUP_ARN},
+                }
+            ],
+        )
+
+        config = cognito_client.get_log_delivery_configuration(UserPoolId=pool_id)[
+            "LogDeliveryConfiguration"
+        ]
+        assert len(config["LogConfigurations"]) == 1
+        assert config["LogConfigurations"][0]["EventSource"] == "userNotification"
+        assert (
+            config["LogConfigurations"][0]["CloudWatchLogsConfiguration"]["LogGroupArn"]
+            == self.LOG_GROUP_ARN
+        )
+
+        cognito_client.set_log_delivery_configuration(
+            UserPoolId=pool_id,
+            LogConfigurations=[
+                {
+                    "LogLevel": "INFO",
+                    "EventSource": "userAuthEvents",
+                    "CloudWatchLogsConfiguration": {"LogGroupArn": self.LOG_GROUP_ARN},
+                }
+            ],
+        )
+        replaced = cognito_client.get_log_delivery_configuration(UserPoolId=pool_id)[
+            "LogDeliveryConfiguration"
+        ]
+        assert len(replaced["LogConfigurations"]) == 1
+        assert replaced["LogConfigurations"][0]["EventSource"] == "userAuthEvents"
+
+    def test_empty_list_clears_the_configuration(self, cognito_client, pool_id):
+        """An empty LogConfigurations clears what was stored."""
+        cognito_client.set_log_delivery_configuration(
+            UserPoolId=pool_id,
+            LogConfigurations=[
+                {
+                    "LogLevel": "ERROR",
+                    "EventSource": "userNotification",
+                    "CloudWatchLogsConfiguration": {"LogGroupArn": self.LOG_GROUP_ARN},
+                }
+            ],
+        )
+
+        cognito_client.set_log_delivery_configuration(UserPoolId=pool_id, LogConfigurations=[])
+
+        config = cognito_client.get_log_delivery_configuration(UserPoolId=pool_id)[
+            "LogDeliveryConfiguration"
+        ]
+        assert config["LogConfigurations"] == []
+
+    def test_set_rejects_a_configuration_with_no_destination(self, cognito_client, pool_id):
+        """Every event source in the request must name a destination."""
+        with pytest.raises(cognito_client.exceptions.InvalidParameterException):
+            cognito_client.set_log_delivery_configuration(
+                UserPoolId=pool_id,
+                LogConfigurations=[{"LogLevel": "ERROR", "EventSource": "userNotification"}],
+            )
+
+    def test_set_rejects_more_than_two_configurations(self, cognito_client, pool_id):
+        """LogConfigurations is bounded at 2 entries."""
+        config = {
+            "LogLevel": "ERROR",
+            "EventSource": "userNotification",
+            "CloudWatchLogsConfiguration": {"LogGroupArn": self.LOG_GROUP_ARN},
+        }
+        with pytest.raises(cognito_client.exceptions.InvalidParameterException) as excinfo:
+            cognito_client.set_log_delivery_configuration(
+                UserPoolId=pool_id, LogConfigurations=[config, config, config]
+            )
+
+        assert "Member must have length less than or equal to 2" in str(excinfo.value)
+
+    def test_set_rejects_a_repeated_event_source(self, cognito_client, pool_id):
+        """An event source may appear at most once across the configurations."""
+        config = {
+            "LogLevel": "ERROR",
+            "EventSource": "userNotification",
+            "CloudWatchLogsConfiguration": {"LogGroupArn": self.LOG_GROUP_ARN},
+        }
+        with pytest.raises(cognito_client.exceptions.InvalidParameterException) as excinfo:
+            cognito_client.set_log_delivery_configuration(
+                UserPoolId=pool_id, LogConfigurations=[config, config]
+            )
+
+        assert "appear more then once in a request" in str(excinfo.value)
+
+    def test_a_rejected_request_leaves_the_configuration_alone(self, cognito_client, pool_id):
+        """An oversized request must not be stored."""
+        config = {
+            "LogLevel": "ERROR",
+            "EventSource": "userNotification",
+            "CloudWatchLogsConfiguration": {"LogGroupArn": self.LOG_GROUP_ARN},
+        }
+        with pytest.raises(cognito_client.exceptions.InvalidParameterException):
+            cognito_client.set_log_delivery_configuration(
+                UserPoolId=pool_id, LogConfigurations=[config, config, config]
+            )
+
+        stored = cognito_client.get_log_delivery_configuration(UserPoolId=pool_id)[
+            "LogDeliveryConfiguration"
+        ]
+        assert stored["LogConfigurations"] == []
+
+
 class TestCognitoDescribeUserPoolStandardAttributes:
     """DescribeUserPool must return all 20 standard OIDC attributes."""
 
@@ -219,3 +360,132 @@ class TestCognitoDescribeUserPoolStandardAttributes:
             assert sub["Mutable"] is False
         finally:
             cognito_client.delete_user_pool(UserPoolId=pool_id)
+
+
+class TestCognitoIdentityProvider:
+    """Test Cognito identity provider configuration operations.
+
+    The response shapes asserted here were measured against the live Cognito API.
+    ``IdpIdentifiers`` is echoed by CreateIdentityProvider only when the request
+    supplied it, while DescribeIdentityProvider always returns it.
+    """
+
+    OIDC_DETAILS = {
+        "client_id": "pytest-client",
+        "client_secret": "pytest-secret",
+        "attributes_request_method": "GET",
+        "oidc_issuer": "https://issuer.example.com",
+        "authorize_scopes": "openid",
+    }
+
+    @pytest.fixture
+    def pool_id(self, cognito_client, unique_name):
+        response = cognito_client.create_user_pool(PoolName=f"pytest-idp-pool-{unique_name}")
+        pool_id = response["UserPool"]["Id"]
+        yield pool_id
+        cognito_client.delete_user_pool(UserPoolId=pool_id)
+
+    def test_create_defaults_attribute_mapping_and_omits_idp_identifiers(
+        self, cognito_client, pool_id
+    ):
+        """Create defaults AttributeMapping and omits IdpIdentifiers when not supplied."""
+        provider = cognito_client.create_identity_provider(
+            UserPoolId=pool_id,
+            ProviderName="PytestOidc",
+            ProviderType="OIDC",
+            ProviderDetails=dict(self.OIDC_DETAILS),
+        )["IdentityProvider"]
+
+        assert provider["ProviderType"] == "OIDC"
+        assert provider["AttributeMapping"] == {"username": "sub"}
+        assert "IdpIdentifiers" not in provider
+
+    def test_describe_always_returns_idp_identifiers(self, cognito_client, pool_id):
+        """Describe returns IdpIdentifiers even when the stored list is empty."""
+        cognito_client.create_identity_provider(
+            UserPoolId=pool_id,
+            ProviderName="PytestOidc",
+            ProviderType="OIDC",
+            ProviderDetails=dict(self.OIDC_DETAILS),
+        )
+
+        provider = cognito_client.describe_identity_provider(
+            UserPoolId=pool_id, ProviderName="PytestOidc"
+        )["IdentityProvider"]
+
+        assert provider["IdpIdentifiers"] == []
+        assert provider["ProviderDetails"]["client_id"] == "pytest-client"
+
+    def test_update_preserves_members_the_request_omits(self, cognito_client, pool_id):
+        """Omitting AttributeMapping/IdpIdentifiers on update leaves them unchanged."""
+        cognito_client.create_identity_provider(
+            UserPoolId=pool_id,
+            ProviderName="PytestOidc",
+            ProviderType="OIDC",
+            ProviderDetails=dict(self.OIDC_DETAILS),
+            AttributeMapping={"email": "email", "username": "sub"},
+            IdpIdentifiers=["pytest-alias"],
+        )
+
+        cognito_client.update_identity_provider(
+            UserPoolId=pool_id,
+            ProviderName="PytestOidc",
+            ProviderDetails=dict(self.OIDC_DETAILS),
+        )
+
+        provider = cognito_client.describe_identity_provider(
+            UserPoolId=pool_id, ProviderName="PytestOidc"
+        )["IdentityProvider"]
+
+        assert provider["IdpIdentifiers"] == ["pytest-alias"]
+        assert provider["AttributeMapping"] == {"email": "email", "username": "sub"}
+
+    def test_list_returns_summaries_without_provider_details(self, cognito_client, pool_id):
+        """ListIdentityProviders returns summaries, never provider credentials."""
+        cognito_client.create_identity_provider(
+            UserPoolId=pool_id,
+            ProviderName="PytestOidc",
+            ProviderType="OIDC",
+            ProviderDetails=dict(self.OIDC_DETAILS),
+        )
+
+        providers = cognito_client.list_identity_providers(UserPoolId=pool_id)["Providers"]
+
+        assert len(providers) == 1
+        assert providers[0]["ProviderName"] == "PytestOidc"
+        assert providers[0]["ProviderType"] == "OIDC"
+        assert "ProviderDetails" not in providers[0]
+
+    def test_create_rejects_duplicate_provider_name(self, cognito_client, pool_id):
+        """A second provider with the same name raises DuplicateProviderException."""
+        cognito_client.create_identity_provider(
+            UserPoolId=pool_id,
+            ProviderName="PytestOidc",
+            ProviderType="OIDC",
+            ProviderDetails=dict(self.OIDC_DETAILS),
+        )
+
+        with pytest.raises(cognito_client.exceptions.DuplicateProviderException):
+            cognito_client.create_identity_provider(
+                UserPoolId=pool_id,
+                ProviderName="PytestOidc",
+                ProviderType="OIDC",
+                ProviderDetails=dict(self.OIDC_DETAILS),
+            )
+
+    def test_delete_removes_the_provider(self, cognito_client, pool_id):
+        """Delete removes the provider and a second delete raises."""
+        cognito_client.create_identity_provider(
+            UserPoolId=pool_id,
+            ProviderName="PytestOidc",
+            ProviderType="OIDC",
+            ProviderDetails=dict(self.OIDC_DETAILS),
+        )
+
+        cognito_client.delete_identity_provider(UserPoolId=pool_id, ProviderName="PytestOidc")
+
+        assert cognito_client.list_identity_providers(UserPoolId=pool_id)["Providers"] == []
+        with pytest.raises(cognito_client.exceptions.ResourceNotFoundException):
+            cognito_client.delete_identity_provider(
+                UserPoolId=pool_id, ProviderName="PytestOidc"
+            )

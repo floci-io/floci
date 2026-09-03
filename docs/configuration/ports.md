@@ -7,8 +7,11 @@
 | `4566` | HTTP | All AWS API calls (every service) | Yes |
 | `5100–5199` | HTTP | ECR Registry sidecar — bound directly by the `registry:2` container | **No** (see note) |
 | `6379–6399` | TCP | ElastiCache Redis proxy (inside Floci) | Yes |
+| `6400–6419` | TCP | MemoryDB proxy (inside Floci) | Yes |
 | `6500–6599` | HTTPS | EKS k3s API server — bound directly by each k3s container | **No** |
 | `7001–7099` | TCP | RDS proxy (inside Floci) | Yes |
+| `8182–8282` | TCP | Neptune Gremlin proxy (inside Floci) | Yes |
+| `8700–8799` | HTTP | MWAA Airflow webserver proxy (inside Floci) | Yes |
 | `9400–9499` | HTTP | OpenSearch data-plane — bound directly by each OpenSearch container | **No** |
 | `12000–12499` | HTTP | Lambda Runtime API (internal, Docker-network only) | **No** |
 
@@ -16,9 +19,9 @@
 
 There are two distinct patterns Floci uses to expose container ports:
 
-### Proxy-in-Floci (ElastiCache, RDS)
+### Proxy-in-Floci (ElastiCache, MemoryDB, RDS, Neptune, MWAA)
 
-Floci runs a **TCP proxy process inside its own container**. The proxy listens on the host port and forwards traffic to the backend container.
+Floci runs a **proxy process inside its own container**. The proxy listens on the host port and forwards traffic to the backend container.
 
 ```
 host:6379  →  [docker-compose ports mapping]  →  Floci container:6379  →  Redis container:6379
@@ -147,7 +150,7 @@ host:5100  ←──  floci-ecr-registry (registry:2 container, started by Floci
 
 ## Exposing Ports in Docker Compose
 
-Only the proxy-based services (ElastiCache and RDS) need port mappings in `docker-compose.yml`. Direct-binding services (ECR, EKS, OpenSearch) bind their ports on the host automatically via Docker:
+Only the proxy-based services (ElastiCache, MemoryDB, RDS, Neptune, MWAA) need port mappings in `docker-compose.yml`. Direct-binding services (ECR, EKS, OpenSearch) bind their ports on the host automatically via Docker:
 
 ```yaml
 services:
@@ -156,7 +159,10 @@ services:
     ports:
       - "4566:4566"           # All AWS API calls
       - "6379-6399:6379-6399" # ElastiCache / Redis proxy (proxy in Floci)
+      - "6400-6419:6400-6419" # MemoryDB proxy (proxy in Floci)
       - "7001-7099:7001-7099" # RDS proxy (proxy in Floci)
+      - "8182-8282:8182-8282" # Neptune Gremlin proxy (proxy in Floci)
+      - "8700-8799:8700-8799" # MWAA webserver proxy (proxy in Floci)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 ```

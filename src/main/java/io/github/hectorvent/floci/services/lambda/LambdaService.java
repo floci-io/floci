@@ -476,6 +476,50 @@ public class LambdaService implements ResourceProvider {
     }
 
     /**
+     * Reads a function, honouring a {@code Qualifier} that selects a published version or an alias.
+     *
+     * <p>The read paths used to ignore the qualifier entirely and answer with {@code $LATEST} for
+     * everything, including versions that were never published (issue #2821). That defeats the
+     * point of publishing: a caller pinning version 1 silently got whatever {@code $LATEST} held at
+     * the time of the call, and a typo or a stale alias read back as a live function instead of
+     * failing. Resolution is delegated to the same target resolver the invoke path uses, so a
+     * qualifier means the same thing whether you read it or run it.
+     *
+     * <p>A qualifier may also be carried on the name itself, as {@code fn:1} or a qualified ARN. An
+     * explicit {@code Qualifier} and one embedded in the name must agree; AWS rejects the
+     * combination when they do not.
+     */
+    public LambdaFunction getFunction(String region, String functionName, String qualifier) {
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
+        enforceRegion(region, ref);
+        String effective = resolveQualifier(ref.qualifier(), qualifier);
+        if (effective == null) {
+            return getFunction(region, functionName);
+        }
+        if (functionName.startsWith("arn:")) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
+            return resolveReadTargetForAccount(arn.accountId(), region, ref.name(), effective);
+        }
+        return resolveReadTarget(region, ref.name(), effective);
+    }
+
+    /**
+     * Reconciles a qualifier carried on the function name with an explicit {@code Qualifier}
+     * parameter. Either alone wins; both must agree.
+     */
+    private static String resolveQualifier(String onName, String explicit) {
+        if (explicit == null || explicit.isBlank()) {
+            return onName;
+        }
+        if (onName != null && !onName.equals(explicit)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Cannot provide both a qualified function name and a Qualifier: "
+                            + onName + " and " + explicit, 400);
+        }
+        return explicit;
+    }
+
+    /**
      * Resolves a {@code FunctionName} path parameter (bare name, partial ARN,
      * or full ARN, with optional {@code :qualifier}) to its canonical short
      * name, enforcing a region match when the input is a full ARN.
@@ -895,6 +939,22 @@ public class LambdaService implements ResourceProvider {
     }
 
     private LambdaFunction resolveInvokeTarget(String region, String name, String qualifier) {
+        return resolveTarget(region, name, qualifier, this::pickAliasVersion);
+    }
+
+    /**
+     * Resolves a qualifier for a <em>read</em>. Identical to the invoke path except for aliases:
+     * an alias with {@code AdditionalVersionWeights} shifts traffic, so {@link #pickAliasVersion}
+     * chooses randomly among the weighted versions, which is right for running the function and
+     * wrong for describing it. Two reads of one alias must not disagree, so a read follows the
+     * alias's primary {@code FunctionVersion}, which is what AWS reports.
+     */
+    private LambdaFunction resolveReadTarget(String region, String name, String qualifier) {
+        return resolveTarget(region, name, qualifier, LambdaAlias::getFunctionVersion);
+    }
+
+    private LambdaFunction resolveTarget(String region, String name, String qualifier,
+                                         java.util.function.Function<LambdaAlias, String> aliasVersion) {
         if (qualifier == null || qualifier.equals("$LATEST")) {
             return functionStore.get(region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
@@ -906,7 +966,7 @@ public class LambdaService implements ResourceProvider {
         }
         // qualifier is an alias name
         LambdaAlias alias = getAlias(region, name, qualifier);
-        String version = pickAliasVersion(alias);
+        String version = aliasVersion.apply(alias);
         if (version == null || version.equals("$LATEST")) {
             return functionStore.get(region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
@@ -918,6 +978,18 @@ public class LambdaService implements ResourceProvider {
 
     private LambdaFunction resolveInvokeTargetForAccount(
             String accountId, String region, String name, String qualifier) {
+        return resolveTargetForAccount(accountId, region, name, qualifier, this::pickAliasVersion);
+    }
+
+    /** The read counterpart of {@link #resolveInvokeTargetForAccount}; see {@link #resolveReadTarget}. */
+    private LambdaFunction resolveReadTargetForAccount(
+            String accountId, String region, String name, String qualifier) {
+        return resolveTargetForAccount(accountId, region, name, qualifier, LambdaAlias::getFunctionVersion);
+    }
+
+    private LambdaFunction resolveTargetForAccount(
+            String accountId, String region, String name, String qualifier,
+            java.util.function.Function<LambdaAlias, String> aliasVersion) {
         if (qualifier == null || qualifier.equals("$LATEST")) {
             return functionStore.getForAccount(accountId, region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -936,7 +1008,7 @@ public class LambdaService implements ResourceProvider {
         if (alias == null) {
             throw new AwsException("ResourceNotFoundException", "Alias not found: " + qualifier, 404);
         }
-        String version = pickAliasVersion(alias);
+        String version = aliasVersion.apply(alias);
         if (version == null || version.equals("$LATEST")) {
             return functionStore.getForAccount(accountId, region, name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -1311,6 +1383,18 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaFunction publishVersion(String region, String functionName, String description) {
+        return publishVersion(region, functionName, description, null);
+    }
+
+    /**
+     * Publishes a version of {@code $LATEST}.
+     *
+     * <p>{@code CodeSha256} is a precondition: "only publish a version if the hash value matches the
+     * value that's specified". It was never parsed out of the request, so a caller that raced
+     * someone else's deploy published code it had not authorised, silently (issue #2822).
+     */
+    public LambdaFunction publishVersion(String region, String functionName, String description,
+                                         String expectedCodeSha256) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
         // Shares the per-function lock deleteFunction and extractZipCodeBytes take around their
@@ -1319,6 +1403,20 @@ public class LambdaService implements ResourceProvider {
         // delete, persisting a snapshot.codeLocalPath (below) that names a directory about to
         // be removed as unreferenced.
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            // Inside the lock UpdateFunctionCode takes, so the hash cannot be checked against one
+            // version of $LATEST and the snapshot then taken from another. Checking it outside
+            // would let an overlapping deploy publish code the caller never authorised.
+            // No isBlank() exclusion here. A present but empty value was previously treated as
+            // absent, so it skipped the comparison entirely and published without checking
+            // anything, which is the failure this precondition exists to prevent. It is simply
+            // compared like any other value and fails as a mismatch, which avoids inventing an
+            // error shape for the empty case that has not been measured against the live service.
+            if (expectedCodeSha256 != null && !expectedCodeSha256.equals(fn.getCodeSha256())) {
+                throw new AwsException("InvalidParameterValueException",
+                        "CodeSHA256 (" + expectedCodeSha256 + ") is different from current CodeSHA256 in $LATEST",
+                        400);
+            }
+
             int version = nextVersionNumber(versionCounterKey(region, fn),
                     legacyVersionCounterKey(region, functionName));
             LambdaFunction snapshot = new LambdaFunction();
@@ -1974,12 +2072,24 @@ public class LambdaService implements ResourceProvider {
         Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
-            fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
-            fn.setCodeSizeBytes(zipBytes.length);
+            // Publish the new code identity under the same per-function lock publishVersion holds.
+            // PublishVersion's CodeSha256 precondition is a check-then-act: it compares the hash and
+            // then snapshots the code. Mutating these fields without the lock lets an overlapping
+            // deploy move $LATEST between those two steps, so a version would carry code whose hash
+            // the caller never authorised even though the check passed. Extraction to disk stays
+            // outside the lock; only the fields that decide what a snapshot copies are inside it.
+            String newSha256 = null;
             try {
                 byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(zipBytes);
-                fn.setCodeSha256(Base64.getEncoder().encodeToString(digest));
+                newSha256 = Base64.getEncoder().encodeToString(digest);
             } catch (java.security.NoSuchAlgorithmException ignored) {}
+            synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+                fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
+                fn.setCodeSizeBytes(zipBytes.length);
+                if (newSha256 != null) {
+                    fn.setCodeSha256(newSha256);
+                }
+            }
 
             // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
             if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {

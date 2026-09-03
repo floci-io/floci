@@ -765,6 +765,11 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {KeyConditions} Expression parameters: {KeyConditionExpression}", 400);
         }
+        if (keyConditionExpr != null && queryFilter != null) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {QueryFilter} Expression parameters: {KeyConditionExpression}", 400);
+        }
         if (filterExpr != null && queryFilter != null) {
             throw new AwsException("ValidationException",
                     "Can not use both expression and non-expression parameters in the same request: "
