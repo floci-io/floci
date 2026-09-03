@@ -144,6 +144,19 @@ class S3IntelligentTieringConfigurationTest {
     }
 
     @Test
+    void rejectsDaysThatOverflowIntegerRange() {
+        // A value above Integer.MAX_VALUE matches the \\d+ regex but overflows parseInt.
+        // AWS answers MalformedXML, not InternalError.
+        String overflowDays = "<Tiering><AccessTier>ARCHIVE_ACCESS</AccessTier>"
+                + "<Days>99999999999999999999</Days></Tiering>";
+        AwsException e = assertThrows(AwsException.class,
+                () -> S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + overflowDays)));
+        assertEquals("MalformedXML", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
     void rejectsFiltersThatAreNotExactlyOnePredicate() {
         String suffix = "<Status>Enabled</Status>" + tiering("ARCHIVE_ACCESS", 90);
         String bothPrefixAndTag = "<Id>a</Id><Filter><Prefix>logs/</Prefix>"

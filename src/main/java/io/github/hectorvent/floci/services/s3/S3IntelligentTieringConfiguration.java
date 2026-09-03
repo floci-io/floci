@@ -140,7 +140,15 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
         if (accessTier == null || !ACCESS_TIERS.contains(accessTier)) {
             throw malformed();
         }
-        if (days == null || !days.matches("\\d+") || Integer.parseInt(days) < 1) {
+        if (days == null || !days.matches("\\d+")) {
+            throw malformed();
+        }
+        try {
+            if (Integer.parseInt(days) < 1) {
+                throw malformed();
+            }
+        } catch (NumberFormatException e) {
+            // Values above Integer.MAX_VALUE match the regex but overflow parseInt.
             throw malformed();
         }
         return new XmlBuilder()

@@ -284,6 +284,17 @@ class S3IntelligentTieringConfigurationIntegrationTest {
 
     @Test
     @Order(12)
+    void aPutWithoutABodyIsMalformedXml() {
+        given()
+        .when()
+            .put("/" + BUCKET + "?intelligent-tiering&id=Filtered")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+    }
+
+    @Test
+    @Order(13)
     void unqualifiedDeleteStillRemovesBucket() {
         given()
         .when()
@@ -299,7 +310,7 @@ class S3IntelligentTieringConfigurationIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void aRecreatedBucketDoesNotInheritTheOldConfigurations() {
         given()
         .when()

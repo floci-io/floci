@@ -336,6 +336,9 @@ public class S3Controller {
             // Same fall-through hazard as metrics: an intelligent-tiering PUT must not become a
             // CreateBucket.
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+                s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 return handlePutBucketIntelligentTieringConfiguration(bucket, uriInfo, body);
             }
 
@@ -380,7 +383,8 @@ public class S3Controller {
     @DELETE
     @Path("/{bucket}")
     public Response deleteBucket(@PathParam("bucket") String bucket,
-                                  @Context UriInfo uriInfo) {
+                                  @Context UriInfo uriInfo,
+                                  @Context HttpHeaders httpHeaders) {
         try {
             validateRawUri();
             if (hasQueryParam(uriInfo, "tagging")) {
@@ -426,6 +430,9 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
                 // Likewise this must not fall through to deleting the bucket.
+                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+                s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 s3Service.deleteBucketIntelligentTieringConfiguration(bucket,
                         requireIntelligentTieringId(uriInfo));
                 return Response.noContent().build();
@@ -1859,8 +1866,9 @@ public class S3Controller {
     private Response handlePutBucketIntelligentTieringConfiguration(String bucket, UriInfo uriInfo,
                                                                     byte[] body) {
         String id = requireIntelligentTieringId(uriInfo);
+        String xml = body == null ? null : new String(body, StandardCharsets.UTF_8);
         S3IntelligentTieringConfiguration configuration =
-                S3IntelligentTieringConfiguration.parse(new String(body, StandardCharsets.UTF_8));
+                S3IntelligentTieringConfiguration.parse(xml);
         // AWS rejects a body whose Id disagrees with the id in the query string.
         if (!id.equals(configuration.id())) {
             throw new AwsException("MalformedXML",
