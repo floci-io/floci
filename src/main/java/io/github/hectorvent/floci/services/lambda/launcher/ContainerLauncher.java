@@ -515,16 +515,18 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
     }
 
-    private static String dockerPlatform(LambdaFunction fn) {
+    private static Optional<String> dockerPlatform(LambdaFunction fn) {
         List<String> architectures = fn.getArchitectures();
-        String architecture = architectures == null || architectures.isEmpty()
-                ? "x86_64"
-                : architectures.getFirst();
-        return switch (architecture) {
-            case "arm64" -> "linux/arm64";
-            case "x86_64" -> "linux/amd64";
-            default -> throw new IllegalArgumentException(
-                    "Unsupported Lambda architecture: " + architecture);
+        if (architectures == null) {
+            return Optional.of("linux/amd64");
+        }
+        if (architectures.size() != 1) {
+            return Optional.empty();
+        }
+        return switch (architectures.getFirst()) {
+            case "arm64" -> Optional.of("linux/arm64");
+            case "x86_64" -> Optional.of("linux/amd64");
+            default -> Optional.empty();
         };
     }
 
@@ -532,7 +534,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         if (!config.services().lambda().honourArchitectures()) {
             return lifecycleManager.create(spec);
         }
-        return lifecycleManager.create(spec, dockerPlatform(fn));
+        Optional<String> platform = dockerPlatform(fn);
+        if (platform.isEmpty()) {
+            LOG.warnv("Ignoring invalid persisted architectures {0} for function {1}; "
+                            + "using Docker daemon default platform",
+                    fn.getArchitectures(), fn.getFunctionName());
+            return lifecycleManager.create(spec);
+        }
+        return lifecycleManager.create(spec, platform.get());
     }
 
     public void stop(ContainerHandle handle) {

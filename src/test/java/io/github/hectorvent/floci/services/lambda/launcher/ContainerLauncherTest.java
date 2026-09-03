@@ -33,6 +33,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -50,11 +52,13 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -291,6 +295,35 @@ class ContainerLauncherTest {
 
         captureRealContainerSpec();
         verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidPersistedArchitectures")
+    void launchFunction_keepsDaemonDefaultPlatformForInvalidPersistedArchitectures(
+            List<String> architectures) throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("legacy-invalid-architecture-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("legacy-invalid-architecture-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(architectures);
+
+        launcher.launch(fn);
+
+        captureRealContainerSpec();
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
+        assertSame(architectures, fn.getArchitectures());
+    }
+
+    private static Stream<List<String>> invalidPersistedArchitectures() {
+        return Stream.of(
+                List.of(),
+                List.of("riscv64"),
+                List.of("arm64", "x86_64"));
     }
 
     @Test
