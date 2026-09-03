@@ -270,10 +270,7 @@ public class CloudFormationTemplateEngine {
             return out;
         }
         if (node.isArray()) {
-            for (JsonNode item : node) {
-                out.add(resolve(item));
-            }
-            return out;
+            return resolveStringList(node);
         }
         if (node.isObject()) {
             if (node.has("Fn::GetAZs")) {
