@@ -592,6 +592,47 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createFunctionRejectsUnsupportedArchitectureWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("unsupported-create-architecture");
+        request.put("Architectures", List.of("sparc"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertUnsupportedArchitecture(error);
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void updateFunctionCodeRejectsUnsupportedArchitectureBeforeMutation() {
+        service.createFunction(REGION, baseRequest("unsupported-code-architecture"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "unsupported-code-architecture",
+                        Map.of("ImageUri", "example.invalid/changed:latest",
+                                "Architectures", List.of("sparc"))));
+
+        assertUnsupportedArchitecture(error);
+        LambdaFunction unchanged = service.getFunction(REGION, "unsupported-code-architecture");
+        assertNull(unchanged.getImageUri());
+        assertNull(unchanged.getArchitectures());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsUnsupportedArchitectureBeforeMutation() {
+        service.createFunction(REGION, baseRequest("unsupported-config-architecture"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "unsupported-config-architecture",
+                        Map.of("Description", "changed", "Architectures", List.of("sparc"))));
+
+        assertUnsupportedArchitecture(error);
+        LambdaFunction unchanged = service.getFunction(REGION, "unsupported-config-architecture");
+        assertNull(unchanged.getDescription());
+        assertNull(unchanged.getArchitectures());
+    }
+
+    @Test
     void updateFunctionCodeWithoutArchitecturesKeepsExisting() {
         Map<String, Object> req = baseRequest("arch-keep-fn");
         req.put("Architectures", List.of("arm64"));
@@ -599,6 +640,14 @@ class LambdaServiceTest {
 
         LambdaFunction updated = service.updateFunctionCode(REGION, "arch-keep-fn", Map.of());
         assertEquals(List.of("arm64"), updated.getArchitectures());
+    }
+
+    private static void assertUnsupportedArchitecture(AwsException error) {
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value 'sparc' at 'architectures.1.member' "
+                + "failed to satisfy constraint: Member must satisfy enum value set: [x86_64, arm64]",
+                error.getMessage());
     }
 
     @Test

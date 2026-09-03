@@ -75,6 +75,7 @@ public class LambdaService implements ResourceProvider {
             "arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+");
     private static final Pattern HANDLER_PATTERN = Pattern.compile("\\S+");
     private static final int MAX_HANDLER_LENGTH = 128;
+    private static final List<String> FUNCTION_ARCHITECTURES = List.of("x86_64", "arm64");
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -338,6 +339,7 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("ResourceConflictException",
                     "Function already exist: " + functionName, 409);
         }
+        List<String> architectures = validateArchitectures(request.get("Architectures"));
 
         LambdaFunction fn = new LambdaFunction();
         fn.setAccountId(regionResolver.getAccountId());
@@ -368,10 +370,6 @@ public class LambdaService implements ResourceProvider {
         Map<String, String> tags = (Map<String, String>) request.get("Tags");
         if (tags != null) fn.setTags(tags);
 
-        // Architectures
-        @SuppressWarnings("unchecked")
-        List<String> architectures = request.get("Architectures") instanceof List
-                ? (List<String>) request.get("Architectures") : null;
         if (architectures != null && !architectures.isEmpty()) {
             fn.setArchitectures(new ArrayList<>(architectures));
         }
@@ -555,6 +553,7 @@ public class LambdaService implements ResourceProvider {
     public LambdaFunction updateFunctionCode(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
+        List<String> architectures = validateArchitectures(request.get("Architectures"));
 
         String zipFileBase64 = (String) request.get("ZipFile");
         String imageUri = (String) request.get("ImageUri");
@@ -577,13 +576,8 @@ public class LambdaService implements ResourceProvider {
             }
         }
 
-        if (request.containsKey("Architectures")) {
-            @SuppressWarnings("unchecked")
-            List<String> archs = request.get("Architectures") instanceof List
-                    ? (List<String>) request.get("Architectures") : null;
-            if (archs != null && !archs.isEmpty()) {
-                fn.setArchitectures(new ArrayList<>(archs));
-            }
+        if (architectures != null) {
+            fn.setArchitectures(new ArrayList<>(architectures));
         }
 
         fn.setLastModified(System.currentTimeMillis());
@@ -602,6 +596,7 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
+        List<String> architectures = validateArchitectures(request.get("Architectures"));
 
         // Validated before any field mutation below, not inline where Layers is applied further
         // down - fn is the live object backing this store entry (InMemoryStorage#get returns the
@@ -680,13 +675,8 @@ public class LambdaService implements ResourceProvider {
             }
         }
 
-        if (request.containsKey("Architectures")) {
-            @SuppressWarnings("unchecked")
-            List<String> archs = request.get("Architectures") instanceof List
-                    ? (List<String>) request.get("Architectures") : null;
-            if (archs != null && !archs.isEmpty()) {
-                fn.setArchitectures(new ArrayList<>(archs));
-            }
+        if (architectures != null) {
+            fn.setArchitectures(new ArrayList<>(architectures));
         }
 
         if (request.containsKey("EphemeralStorage")) {
@@ -1513,6 +1503,27 @@ public class LambdaService implements ResourceProvider {
             parsed.add(new LambdaFileSystemConfig(arn, localMountPath));
         }
         return parsed;
+    }
+
+    private static List<String> validateArchitectures(Object value) {
+        if (!(value instanceof List<?> architectures) || architectures.isEmpty()) {
+            return null;
+        }
+
+        List<String> validated = new ArrayList<>(architectures.size());
+        for (int index = 0; index < architectures.size(); index++) {
+            Object architecture = architectures.get(index);
+            if (!FUNCTION_ARCHITECTURES.contains(architecture)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "1 validation error detected: Value '" + architecture
+                                + "' at 'architectures." + (index + 1) + ".member' "
+                                + "failed to satisfy constraint: Member must satisfy enum value set: "
+                                + FUNCTION_ARCHITECTURES,
+                        400);
+            }
+            validated.add((String) architecture);
+        }
+        return validated;
     }
 
     private static void validateFileSystemVpcConfig(List<LambdaFileSystemConfig> fileSystemConfigs,
