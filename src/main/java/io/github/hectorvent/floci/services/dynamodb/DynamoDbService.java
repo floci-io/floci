@@ -41,6 +41,7 @@ import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -388,6 +389,19 @@ public class DynamoDbService implements ResourceProvider {
             table.setItemCount(items.size());
         }
         return table;
+    }
+
+    /**
+     * The stored table definition without the {@link #describeTable} item-count refresh,
+     * which is {@code O(items)} on the item map. For callers that only need static metadata
+     * such as the key schema — notably IAM condition-key resolution, which runs on the
+     * request hot path before the request is even authorized.
+     *
+     * @return the definition, or empty when no such table exists in the region
+     */
+    public Optional<TableDefinition> findTable(String tableName, String region) {
+        String storageKey = regionKey(region, canonicalTableName(region, tableName));
+        return tableStore.get(storageKey);
     }
 
     public void persistTable(String tableName, TableDefinition table, String region) {

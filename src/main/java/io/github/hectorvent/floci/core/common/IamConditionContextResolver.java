@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
@@ -11,7 +10,6 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
-import org.jboss.logging.Logger;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,23 +22,18 @@ import java.util.Map;
 @ApplicationScoped
 public class IamConditionContextResolver {
 
-    private static final Logger LOG = Logger.getLogger(IamConditionContextResolver.class);
-
     /** Set by {@code ResourceArnBuilder.readJsonBody}, which runs earlier in the same filter pass. */
     private static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
 
     private final Instance<DynamoDbService> dynamoDbService;
-    private final ObjectMapper objectMapper;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
 
     @Inject
     public IamConditionContextResolver(Instance<DynamoDbService> dynamoDbService,
-                                       ObjectMapper objectMapper,
                                        RequestContext requestContext,
                                        EmulatorConfig config) {
         this.dynamoDbService = dynamoDbService;
-        this.objectMapper = objectMapper;
         this.requestContext = requestContext;
         this.config = config;
     }
@@ -118,7 +111,9 @@ public class IamConditionContextResolver {
 
     /**
      * Looks up the table whose key schema names the partition key. Resolved lazily through
-     * Instance so core.common keeps no hard dependency on the DynamoDB service.
+     * Instance so core.common keeps no hard dependency on the DynamoDB service, and via
+     * {@code findTable} rather than {@code describeTable} so the O(items) item-count refresh
+     * never runs on the enforcement hot path.
      */
     private TableDefinition describeTargetTable(JsonNode body) {
         String tableName = targetTableName(body);
@@ -127,13 +122,7 @@ public class IamConditionContextResolver {
         }
         String region = requestContext.getRegion() == null
                 ? config.defaultRegion() : requestContext.getRegion();
-        try {
-            return dynamoDbService.get().describeTable(tableName, region);
-        } catch (RuntimeException e) {
-            LOG.debugv("DynamoDB condition keys: table {0} not resolvable in {1}: {2}",
-                    tableName, region, e.getMessage());
-            return null;
-        }
+        return dynamoDbService.get().findTable(tableName, region).orElse(null);
     }
 
     /**

@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -17,6 +16,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,7 +47,7 @@ class IamConditionContextResolverTest {
         config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
         resolver = new IamConditionContextResolver(
-                dynamoDbServiceInstance, mapper, requestContext, config);
+                dynamoDbServiceInstance, requestContext, config);
     }
 
     private TableDefinition fgacTable() {
@@ -103,7 +103,7 @@ class IamConditionContextResolverTest {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
                 {"TableName":"FgacTable","Key":{"PK":{"S":"USER_alice"}}}"""));
-        when(dynamoDbService.describeTable("FgacTable", "us-east-1")).thenReturn(fgacTable());
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
 
         Map<String, List<String>> conditions =
                 resolver.resolve("dynamodb", "dynamodb:GetItem", containerRequest);
@@ -118,9 +118,8 @@ class IamConditionContextResolverTest {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
                 {"TableName":"MissingTable","Key":{"PK":{"S":"USER_alice"}}}"""));
-        when(dynamoDbService.describeTable(eq("MissingTable"), anyString()))
-                .thenThrow(new AwsException("ResourceNotFoundException",
-                        "Requested resource not found: Table: MissingTable not found", 400));
+        when(dynamoDbService.findTable(eq("MissingTable"), anyString()))
+                .thenReturn(Optional.empty());
 
         Map<String, List<String>> conditions =
                 resolver.resolve("dynamodb", "dynamodb:GetItem", containerRequest);
@@ -138,7 +137,7 @@ class IamConditionContextResolverTest {
                  "KeyConditionExpression":"PK = :v",
                  "ExpressionAttributeValues":{":v":{"S":"USER_alice"}},
                  "Select":"COUNT"}"""));
-        when(dynamoDbService.describeTable("FgacTable", "us-east-1")).thenReturn(fgacTable());
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
 
         Map<String, List<String>> conditions =
                 resolver.resolve("dynamodb", "dynamodb:Query", containerRequest);
@@ -161,11 +160,27 @@ class IamConditionContextResolverTest {
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
                 {"RequestItems":{"FgacTable":{"Keys":[
                    {"PK":{"S":"USER_alice"}},{"PK":{"S":"USER_bob"}}]}}}"""));
-        when(dynamoDbService.describeTable("FgacTable", "us-east-1")).thenReturn(fgacTable());
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
 
         Map<String, List<String>> conditions =
                 resolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest);
 
         assertEquals(List.of("USER_alice", "USER_bob"), conditions.get("dynamodb:LeadingKeys"));
+    }
+
+    @Test
+    void omitsLeadingKeysForAMultiTableBatch() {
+        // A batch spanning two tables has no single key schema: applying table A's partition
+        // key name to table B's items would be wrong, so no leading keys are produced.
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"RequestItems":{
+                   "FgacTable":{"Keys":[{"PK":{"S":"USER_alice"}}]},
+                   "OtherTable":{"Keys":[{"PK":{"S":"USER_bob"}}]}}}"""));
+
+        Map<String, List<String>> conditions =
+                resolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest);
+
+        assertFalse(conditions.containsKey("dynamodb:LeadingKeys"));
     }
 }
