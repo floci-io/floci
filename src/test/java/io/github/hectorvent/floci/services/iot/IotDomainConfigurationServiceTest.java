@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -24,6 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class IotDomainConfigurationServiceTest {
 
@@ -35,7 +38,13 @@ class IotDomainConfigurationServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final IotDomainConfigurationService service = new IotDomainConfigurationService(
-            new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+            new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), endpointConfig());
+
+    private static EmulatorConfig endpointConfig() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        return config;
+    }
 
     private ObjectNode customDomainRequest() {
         ObjectNode request = mapper.createObjectNode().put("domainName", "iot.example.com");
@@ -162,6 +171,49 @@ class IotDomainConfigurationServiceTest {
                 mapper.createObjectNode().put("authorizerConfig", "not-an-object"), REGION));
         assertEquals(new IotDomainConfiguration.AuthorizerConfig("first", null),
                 service.describeDomainConfiguration("iot-domain", REGION).getAuthorizerConfig());
+    }
+
+    @Test
+    void awsManagedConfigurationsExistInEveryRegionWithoutBeingCreated() {
+        IotDomainConfiguration dataAts = service.describeDomainConfiguration("iot:Data-ATS", REGION);
+
+        assertTrue(dataAts.getDomainConfigurationArn().matches(
+                "arn:aws:iot:us-east-1:000000000000:domainconfiguration/iot:Data-ATS/[a-z0-9]{5}"),
+                dataAts.getDomainConfigurationArn());
+        assertEquals("localhost:4566", dataAts.getDomainName());
+        assertEquals("DATA", dataAts.getServiceType());
+        assertEquals("AWS_MANAGED", dataAts.getDomainType());
+        assertEquals("ENABLED", dataAts.getDomainConfigurationStatus());
+        assertTrue(dataAts.getServerCertificates().isEmpty());
+        assertEquals(new IotDomainConfiguration.TlsConfig("IoTSecurityPolicy_TLS13_1_2_2022_10"), dataAts.getTlsConfig());
+        assertEquals(new IotDomainConfiguration.ServerCertificateConfig(false, null, null), dataAts.getServerCertificateConfig());
+        assertNotNull(dataAts.getLastStatusChangeDate());
+        assertEquals(dataAts.getDomainConfigurationArn(),
+                service.describeDomainConfiguration("iot:Data-ATS", REGION).getDomainConfigurationArn(),
+                "seeded once, so the ARN is stable");
+
+        assertEquals("DATA", service.describeDomainConfiguration("iot:Data", REGION).getServiceType());
+        assertEquals("CREDENTIAL_PROVIDER",
+                service.describeDomainConfiguration("iot:CredentialProvider", REGION).getServiceType());
+        assertEquals("JOBS", service.describeDomainConfiguration("iot:Jobs", REGION).getServiceType());
+        assertTrue(service.describeDomainConfiguration("iot:Jobs", "eu-west-1").getDomainConfigurationArn()
+                .startsWith("arn:aws:iot:eu-west-1:"));
+    }
+
+    @Test
+    void awsManagedConfigurationsCanBeUpdatedAndTaggedButNotDeleted() {
+        IotDomainConfiguration legacy = service.updateDomainConfiguration("iot:Data",
+                mapper.createObjectNode().put("domainConfigurationStatus", "DISABLED"), REGION);
+        assertEquals("DISABLED", legacy.getDomainConfigurationStatus());
+        assertEquals("DISABLED", service.describeDomainConfiguration("iot:Data", REGION).getDomainConfigurationStatus());
+
+        assertAwsError("InvalidRequestException", 400, () -> service.deleteDomainConfiguration("iot:Data", REGION));
+        assertAwsError("InvalidRequestException", 400, () -> service.deleteDomainConfiguration("iot:Data-ATS", REGION));
+        assertEquals("AWS_MANAGED", service.describeDomainConfiguration("iot:Data", REGION).getDomainType());
+
+        String jobsArn = service.describeDomainConfiguration("iot:Jobs", REGION).getDomainConfigurationArn();
+        service.tagResource(jobsArn, Map.of("team", "devices"));
+        assertEquals(Map.of("team", "devices"), service.listTagsForResource(jobsArn));
     }
 
     @Test
@@ -383,12 +435,12 @@ class IotDomainConfigurationServiceTest {
         service.createDomainConfiguration("mike", customDomainRequest(), "eu-west-1");
 
         IotService.Page<IotDomainConfiguration> all = service.listDomainConfigurations(REGION, null, null, null);
-        assertEquals(List.of("alpha", "zulu"),
+        assertEquals(List.of("alpha", "iot:CredentialProvider", "iot:Data", "iot:Data-ATS", "iot:Jobs", "zulu"),
                 all.items().stream().map(IotDomainConfiguration::getDomainConfigurationName).toList());
         assertNull(all.nextToken());
 
         IotService.Page<IotDomainConfiguration> jobs = service.listDomainConfigurations(REGION, "JOBS", null, null);
-        assertEquals(List.of("alpha"),
+        assertEquals(List.of("alpha", "iot:Jobs"),
                 jobs.items().stream().map(IotDomainConfiguration::getDomainConfigurationName).toList());
     }
 
@@ -398,16 +450,22 @@ class IotDomainConfigurationServiceTest {
             service.createDomainConfiguration(name, customDomainRequest(), REGION);
         }
 
-        IotService.Page<IotDomainConfiguration> first = service.listDomainConfigurations(REGION, null, null, 2);
-        assertEquals(List.of("a", "b"),
+        IotService.Page<IotDomainConfiguration> first = service.listDomainConfigurations(REGION, null, null, 3);
+        assertEquals(List.of("a", "b", "c"),
                 first.items().stream().map(IotDomainConfiguration::getDomainConfigurationName).toList());
         assertNotNull(first.nextToken());
 
         IotService.Page<IotDomainConfiguration> second =
-                service.listDomainConfigurations(REGION, null, first.nextToken(), 2);
-        assertEquals(List.of("c"),
+                service.listDomainConfigurations(REGION, null, first.nextToken(), 3);
+        assertEquals(List.of("iot:CredentialProvider", "iot:Data", "iot:Data-ATS"),
                 second.items().stream().map(IotDomainConfiguration::getDomainConfigurationName).toList());
-        assertNull(second.nextToken());
+        assertNotNull(second.nextToken());
+
+        IotService.Page<IotDomainConfiguration> third =
+                service.listDomainConfigurations(REGION, null, second.nextToken(), 3);
+        assertEquals(List.of("iot:Jobs"),
+                third.items().stream().map(IotDomainConfiguration::getDomainConfigurationName).toList());
+        assertNull(third.nextToken());
     }
 
     @Test

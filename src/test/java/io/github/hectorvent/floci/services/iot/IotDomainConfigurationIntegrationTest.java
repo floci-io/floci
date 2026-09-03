@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -201,6 +202,72 @@ class IotDomainConfigurationIntegrationTest {
         given()
         .when()
             .delete("/domainConfigurations/" + NAME + "-jobs")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void awsManagedConfigurationsExistWithoutBeingCreated() {
+        given()
+        .when()
+            .get("/domainConfigurations/iot:Data-ATS")
+        .then()
+            .statusCode(200)
+            .body("domainConfigurationName", equalTo("iot:Data-ATS"))
+            .body("domainConfigurationArn",
+                    startsWith("arn:aws:iot:us-east-1:000000000000:domainconfiguration/iot:Data-ATS/"))
+            .body("domainName", equalTo("localhost:4566"))
+            .body("domainType", equalTo("AWS_MANAGED"))
+            .body("serviceType", equalTo("DATA"))
+            .body("domainConfigurationStatus", equalTo("ENABLED"))
+            .body("serverCertificates.size()", equalTo(0))
+            .body("tlsConfig.securityPolicy", equalTo("IoTSecurityPolicy_TLS13_1_2_2022_10"));
+
+        given()
+        .when()
+            .get("/domainConfigurations")
+        .then()
+            .statusCode(200)
+            .body("domainConfigurations.domainConfigurationName",
+                    hasItems("iot:Data-ATS", "iot:Data", "iot:CredentialProvider", "iot:Jobs"));
+
+        given()
+            .queryParam("serviceType", "CREDENTIAL_PROVIDER")
+        .when()
+            .get("/domainConfigurations")
+        .then()
+            .statusCode(200)
+            .body("domainConfigurations.domainConfigurationName", hasItem("iot:CredentialProvider"))
+            .body("domainConfigurations.domainConfigurationName", not(hasItem("iot:Jobs")));
+
+        given()
+            .contentType("application/json")
+            .body("{\"domainConfigurationStatus\": \"DISABLED\"}")
+        .when()
+            .put("/domainConfigurations/iot:Data")
+        .then()
+            .statusCode(200)
+            .body("domainConfigurationName", equalTo("iot:Data"));
+
+        given()
+        .when()
+            .get("/domainConfigurations/iot:Data")
+        .then()
+            .statusCode(200)
+            .body("domainConfigurationStatus", equalTo("DISABLED"));
+
+        given()
+        .when()
+            .delete("/domainConfigurations/iot:Data")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .contentType("application/json")
+            .body("{\"domainConfigurationStatus\": \"ENABLED\"}")
+        .when()
+            .put("/domainConfigurations/iot:Data")
         .then()
             .statusCode(200);
     }

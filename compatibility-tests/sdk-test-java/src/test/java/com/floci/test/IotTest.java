@@ -141,6 +141,13 @@ class IotTest {
                 .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
 
+        var managed = iot.describeDomainConfiguration(DescribeDomainConfigurationRequest.builder()
+                .domainConfigurationName("iot:Data-ATS")
+                .build());
+        assertThat(managed.domainType()).isEqualTo(DomainType.AWS_MANAGED);
+        assertThat(managed.domainConfigurationStatus()).isEqualTo(DomainConfigurationStatus.ENABLED);
+        assertThat(managed.domainName()).isNotBlank();
+
         var created = iot.createDomainConfiguration(CreateDomainConfigurationRequest.builder()
                 .domainConfigurationName(name)
                 .domainName("iot.java.example.com")

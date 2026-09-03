@@ -60,11 +60,11 @@ Status: control plane only.
 - `ListDomainConfigurations` filters by `serviceType` and pages with `marker` and `pageSize`.
 - Tags work through `TagResource`, `UntagResource` and `ListTagsForResource` on the configuration ARN.
 - CloudFormation provisions `AWS::IoT::DomainConfiguration` through the same operations; see the CloudFormation service page for the attribute list.
+- The four AWS-managed configurations every account has (`iot:Data-ATS`, `iot:Data`, `iot:CredentialProvider`, `iot:Jobs`) exist in every region without being created: `AWS_MANAGED`, `ENABLED`, no server certificate, and the address `DescribeEndpoint` returns as their domain name. They can be updated and tagged but not deleted, as on AWS.
 
 Current limitations:
 
 - A custom domain does not change where the broker listens. `DescribeEndpoint` keeps returning Floci's own address, and pointing DNS at the emulator is outside its scope.
-- The AWS-managed configurations (`iot:Data-ATS`, `iot:Data`, `iot:CredentialProvider`, `iot:Jobs`) are not listed or described.
 - Server certificate ARNs are stored as given and reported `VALID`; they are not checked against ACM.
 
 ## MQTT Broker

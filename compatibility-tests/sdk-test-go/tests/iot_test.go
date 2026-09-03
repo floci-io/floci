@@ -53,6 +53,12 @@ func TestIoT(t *testing.T) {
 		var notFound *iottypes.ResourceNotFoundException
 		require.ErrorAs(t, err, &notFound)
 
+		managed, err := svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String("iot:Data-ATS")})
+		require.NoError(t, err)
+		assert.Equal(t, iottypes.DomainTypeAwsManaged, managed.DomainType)
+		assert.Equal(t, iottypes.DomainConfigurationStatusEnabled, managed.DomainConfigurationStatus)
+		assert.NotEmpty(t, aws.ToString(managed.DomainName))
+
 		created, err := svc.CreateDomainConfiguration(ctx, &iot.CreateDomainConfigurationInput{
 			DomainConfigurationName: aws.String(name),
 			DomainName:              aws.String("iot.go.example.com"),

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iot;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.iot.model.IotDomainConfiguration.TlsC
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -30,7 +32,8 @@ import java.util.regex.Pattern;
 /**
  * AWS IoT Core domain configurations: the control-plane records behind a custom domain. A new
  * configuration is ENABLED and CUSTOMER_MANAGED, exactly as AWS creates it; nothing here changes
- * where the emulator's broker listens.
+ * where the emulator's broker listens. The four configurations AWS gives every account for its
+ * default endpoints exist here as well, seeded on first use in a region.
  */
 @ApplicationScoped
 public class IotDomainConfigurationService {
@@ -43,21 +46,31 @@ public class IotDomainConfigurationService {
     private static final Set<String> AUTHENTICATION_TYPES =
             Set.of("CUSTOM_AUTH_X509", "CUSTOM_AUTH", "AWS_X509", "AWS_SIGV4", "DEFAULT");
     private static final Set<String> APPLICATION_PROTOCOLS = Set.of("SECURE_MQTT", "MQTT_WSS", "HTTPS", "DEFAULT");
+    /** The AWS-managed configurations every account has, with their service types. */
+    private static final Map<String, String> AWS_MANAGED = Map.of(
+            "iot:Data-ATS", "DATA",
+            "iot:Data", "DATA",
+            "iot:CredentialProvider", "CREDENTIAL_PROVIDER",
+            "iot:Jobs", "JOBS");
 
     private final StorageBackend<String, IotDomainConfiguration> store;
     private final RegionResolver regionResolver;
+    private final EmulatorConfig config;
     /** Makes the duplicate check and the store of a new configuration one step, so a name is taken once. */
     private final Object createLock = new Object();
 
     @Inject
-    public IotDomainConfigurationService(StorageFactory storageFactory, RegionResolver regionResolver) {
+    public IotDomainConfigurationService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                         EmulatorConfig config) {
         this(storageFactory.create("iot", "iot-domain-configurations.json",
-                new TypeReference<Map<String, IotDomainConfiguration>>() {}), regionResolver);
+                new TypeReference<Map<String, IotDomainConfiguration>>() {}), regionResolver, config);
     }
 
-    IotDomainConfigurationService(StorageBackend<String, IotDomainConfiguration> store, RegionResolver regionResolver) {
+    IotDomainConfigurationService(StorageBackend<String, IotDomainConfiguration> store, RegionResolver regionResolver,
+                                  EmulatorConfig config) {
         this.store = store;
         this.regionResolver = regionResolver;
+        this.config = config;
     }
 
     public IotDomainConfiguration createDomainConfiguration(String name, JsonNode request, String region) {
@@ -77,8 +90,7 @@ public class IotDomainConfigurationService {
 
         IotDomainConfiguration configuration = new IotDomainConfiguration();
         configuration.setDomainConfigurationName(name);
-        configuration.setDomainConfigurationArn(regionResolver.buildArn("iot", region,
-                "domainconfiguration/" + name + "/" + UUID.randomUUID().toString().replace("-", "").substring(0, 5)));
+        configuration.setDomainConfigurationArn(arn(name, region));
         configuration.setDomainName(domainName);
         configuration.setServiceType(enumValue(body, "serviceType", SERVICE_TYPES, "DATA"));
         configuration.setDomainConfigurationStatus("ENABLED");
@@ -107,6 +119,7 @@ public class IotDomainConfigurationService {
     }
 
     public IotDomainConfiguration describeDomainConfiguration(String name, String region) {
+        seedAwsManaged(region);
         return store.get(key(region, name)).orElseThrow(() -> new AwsException("ResourceNotFoundException",
                 "Domain configuration not found: " + name, 404));
     }
@@ -154,9 +167,12 @@ public class IotDomainConfigurationService {
         return configuration;
     }
 
-    /** AWS refuses to delete an ENABLED configuration; callers disable it first. */
+    /** AWS refuses to delete an ENABLED configuration, and never deletes an AWS-managed one. */
     public void deleteDomainConfiguration(String name, String region) {
         IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
+        if ("AWS_MANAGED".equals(configuration.getDomainType())) {
+            throw invalid("Domain configuration " + name + " is managed by AWS and cannot be deleted");
+        }
         if ("ENABLED".equals(configuration.getDomainConfigurationStatus())) {
             throw invalid("Domain configuration " + name + " must be DISABLED before it can be deleted");
         }
@@ -171,6 +187,7 @@ public class IotDomainConfigurationService {
         if (pageSize != null && (pageSize < 1 || pageSize > 250)) {
             throw invalid("pageSize must be between 1 and 250");
         }
+        seedAwsManaged(region);
         String prefix = key(region, "");
         List<IotDomainConfiguration> items = store.scan(storeKey -> storeKey.startsWith(prefix)).stream()
                 .filter(configuration -> serviceType == null || serviceType.equals(configuration.getServiceType()))
@@ -237,6 +254,42 @@ public class IotDomainConfigurationService {
         } catch (NumberFormatException e) {
             throw invalid("Invalid marker: " + marker);
         }
+    }
+
+    /**
+     * The default-endpoint configurations AWS creates for every account: AWS_MANAGED, ENABLED, no
+     * server certificate, and the address DescribeEndpoint returns as their domain name. They can
+     * be updated and tagged like any other, but not deleted.
+     */
+    private void seedAwsManaged(String region) {
+        synchronized (createLock) {
+            AWS_MANAGED.forEach((name, serviceType) -> {
+                String key = key(region, name);
+                if (store.get(key).isEmpty()) {
+                    store.put(key, awsManaged(name, serviceType, region));
+                }
+            });
+        }
+    }
+
+    private IotDomainConfiguration awsManaged(String name, String serviceType, String region) {
+        IotDomainConfiguration configuration = new IotDomainConfiguration();
+        configuration.setDomainConfigurationName(name);
+        configuration.setDomainConfigurationArn(arn(name, region));
+        configuration.setDomainName(URI.create(config.effectiveBaseUrl()).getAuthority());
+        configuration.setServiceType(serviceType);
+        configuration.setDomainConfigurationStatus("ENABLED");
+        configuration.setDomainType("AWS_MANAGED");
+        configuration.setTlsConfig(new TlsConfig(DEFAULT_SECURITY_POLICY));
+        configuration.setServerCertificateConfig(new ServerCertificateConfig(false, null, null));
+        configuration.setLastStatusChangeDate(Instant.now());
+        return configuration;
+    }
+
+    /** AWS appends a short random id to every domain configuration ARN. */
+    private String arn(String name, String region) {
+        return regionResolver.buildArn("iot", region,
+                "domainconfiguration/" + name + "/" + UUID.randomUUID().toString().replace("-", "").substring(0, 5));
     }
 
     private static AuthorizerConfig parseAuthorizerConfig(JsonNode node) {
