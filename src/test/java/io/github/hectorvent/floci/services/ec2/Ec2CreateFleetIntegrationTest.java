@@ -24,6 +24,7 @@ class Ec2CreateFleetIntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+    private static final String CONTRACT_IMAGE_ID = "ami-create-fleet-contract";
     private static String launchTemplateId;
 
     @Test
@@ -38,7 +39,7 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", launchTemplateId)
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
-                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", CONTRACT_IMAGE_ID)
                 .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
                 .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
                 .header("Authorization", AUTH_HEADER)
@@ -50,6 +51,8 @@ class Ec2CreateFleetIntegrationTest {
 
         given()
                 .formParam("Action", "DescribeInstances")
+                .formParam("Filter.1.Name", "image-id")
+                .formParam("Filter.1.Value.1", CONTRACT_IMAGE_ID)
                 .header("Authorization", AUTH_HEADER)
                 .when()
                 .post("/")
@@ -67,7 +70,7 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", launchTemplateId)
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
-                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", CONTRACT_IMAGE_ID)
                 .formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", "subnet-default-us-east-1-a")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.AvailabilityZone", "us-east-1b")
                 .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
@@ -129,7 +132,7 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", launchTemplateId)
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
-                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", CONTRACT_IMAGE_ID)
                 .formParam("LaunchTemplateConfig.1.Overrides.1.AvailabilityZone", "us-east-1b")
                 .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
                 .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
@@ -146,7 +149,7 @@ class Ec2CreateFleetIntegrationTest {
                 .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.launchTemplateSpecification.launchTemplateId",
                         equalTo(launchTemplateId))
                 .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.overrides.imageId",
-                        equalTo("ami-amazonlinux2023"))
+                        equalTo(CONTRACT_IMAGE_ID))
                 .extract()
                 .path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
     }
@@ -155,7 +158,7 @@ class Ec2CreateFleetIntegrationTest {
         return given()
                 .formParam("Action", "CreateLaunchTemplate")
                 .formParam("LaunchTemplateName", "create-fleet-contract")
-                .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateData.ImageId", CONTRACT_IMAGE_ID)
                 .formParam("LaunchTemplateData.InstanceType", "t3.micro")
                 .header("Authorization", AUTH_HEADER)
                 .when()
