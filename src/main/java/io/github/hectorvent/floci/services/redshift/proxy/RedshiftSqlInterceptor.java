@@ -54,16 +54,17 @@ public final class RedshiftSqlInterceptor {
     private static final Pattern SORTKEY_PAREN_PATTERN = Pattern.compile("(?i)\\b(?:COMPOUND|INTERLEAVED)?\\s*SORTKEY\\s*\\([^)]*\\)");
     /** Table-level {@code DISTKEY col} / {@code SORTKEY col}: only after the column list closes. */
     private static final Pattern TABLE_LEVEL_KEY_IDENT_PATTERN = Pattern.compile(
-            "(?i)(?<=\\))\\s*(?:COMPOUND\\s+|INTERLEAVED\\s+)?(?:DISTKEY|SORTKEY)\\s+\"?\\w+\"?");
+            "(?i)(?<=\\))\\s*(?:COMPOUND\\s+|INTERLEAVED\\s+)?(?:DISTKEY|SORTKEY)\\s+\"?[a-zA-Z_]\\w*\"?(?=\\s*(?:[;]|\\b(?:DISTSTYLE|DISTKEY|SORTKEY|ENCODE)\\b|$))");
     /**
-     * Bare {@code DISTKEY} / {@code SORTKEY} as a column-level constraint: it sits
+     * Bare {@code DISTKEY} / {@code SORTKEY} as a column-level attribute: it sits
      * right after the column type and is followed by a comma, the closing paren of
-     * the column list, or another column attribute ({@code ENCODE ...}). The trailing
+     * the column list, another column attribute ({@code ENCODE ...}), or a column
+     * constraint ({@code NOT NULL}, {@code PRIMARY KEY}, etc.). The trailing
      * lookahead is what stops this from matching a column literally <em>named</em>
      * {@code distkey} (which would be followed by its type).
      */
     private static final Pattern KEY_COLUMN_CONSTRAINT_PATTERN = Pattern.compile(
-            "(?i)\\s+(?:COMPOUND\\s+|INTERLEAVED\\s+)?(?:DISTKEY|SORTKEY)\\s*(?=[,)]|\\s+ENCODE\\b)");
+            "(?i)\\s+(?:COMPOUND\\s+|INTERLEAVED\\s+)?(?:DISTKEY|SORTKEY)\\s*(?=[,)]|\\s+(?:ENCODE|DISTKEY|SORTKEY|NOT\\s+NULL|NULL|UNIQUE|PRIMARY\\s+KEY|REFERENCES|DEFAULT|COLLATE|CHECK|CONSTRAINT|IDENTITY|GENERATED)\\b)");
     /** {@code ENCODE <codec>} where {@code <codec>} is an actual Redshift column encoding or {@code AUTO}. */
     private static final Pattern ENCODE_PATTERN = Pattern.compile(
             "(?i)\\bENCODE\\s+(RAW|AZ64|BYTEDICT|DELTA32K|DELTA|LZO|MOSTLY8|MOSTLY16|MOSTLY32|RUNLENGTH|TEXT255|TEXT32K|ZSTD|AUTO)\\b");
@@ -109,8 +110,8 @@ public final class RedshiftSqlInterceptor {
         String s = DISTSTYLE_PATTERN.matcher(maskedDdl).replaceAll("");
         s = DISTKEY_PAREN_PATTERN.matcher(s).replaceAll("");
         s = SORTKEY_PAREN_PATTERN.matcher(s).replaceAll("");
-        s = TABLE_LEVEL_KEY_IDENT_PATTERN.matcher(s).replaceAll("");
         s = KEY_COLUMN_CONSTRAINT_PATTERN.matcher(s).replaceAll("");
+        s = TABLE_LEVEL_KEY_IDENT_PATTERN.matcher(s).replaceAll("");
         s = ENCODE_PATTERN.matcher(s).replaceAll("");
         s = DOUBLE_COMMA_PATTERN.matcher(s).replaceAll(",");
         s = COMMA_CLOSE_PAREN_PATTERN.matcher(s).replaceAll(")");

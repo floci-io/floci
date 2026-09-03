@@ -50,6 +50,17 @@ class RedshiftSqlInterceptorTest {
         String sql4 = "CREATE TABLE t (id INT DISTKEY, name VARCHAR(50));";
         String rewritten4 = RedshiftSqlInterceptor.rewrite(sql4);
         assertTrue(!rewritten4.contains("DISTKEY"), "Should remove column-level DISTKEY: " + rewritten4);
+
+        String sql5 = "CREATE TABLE t (id INT DISTKEY NOT NULL, name VARCHAR(50));";
+        String rewritten5 = RedshiftSqlInterceptor.rewrite(sql5);
+        assertTrue(!rewritten5.contains("DISTKEY"), "Should remove column-level DISTKEY followed by NOT NULL: " + rewritten5);
+        assertTrue(rewritten5.contains("id INT NOT NULL"), "Should preserve 'id INT NOT NULL': " + rewritten5);
+
+        String sql6 = "CREATE TABLE t (id INT DISTKEY PRIMARY KEY, code VARCHAR(10) DISTKEY UNIQUE);";
+        String rewritten6 = RedshiftSqlInterceptor.rewrite(sql6);
+        assertTrue(!rewritten6.contains("DISTKEY"), "Should remove column-level DISTKEY before PRIMARY KEY/UNIQUE: " + rewritten6);
+        assertTrue(rewritten6.contains("id INT PRIMARY KEY"), "Should preserve PRIMARY KEY: " + rewritten6);
+        assertTrue(rewritten6.contains("code VARCHAR(10) UNIQUE"), "Should preserve UNIQUE: " + rewritten6);
     }
 
     @Test
@@ -75,6 +86,17 @@ class RedshiftSqlInterceptorTest {
         String sql5 = "CREATE TABLE t (id INT SORTKEY, name VARCHAR(50));";
         String rewritten5 = RedshiftSqlInterceptor.rewrite(sql5);
         assertTrue(!rewritten5.contains("SORTKEY"), "Should remove column-level SORTKEY: " + rewritten5);
+
+        String sql6 = "CREATE TABLE t (id INT SORTKEY NOT NULL, name VARCHAR(50));";
+        String rewritten6 = RedshiftSqlInterceptor.rewrite(sql6);
+        assertTrue(!rewritten6.contains("SORTKEY"), "Should remove column-level SORTKEY followed by NOT NULL: " + rewritten6);
+        assertTrue(rewritten6.contains("id INT NOT NULL"), "Should preserve 'id INT NOT NULL': " + rewritten6);
+
+        String sql7 = "CREATE TABLE t (id INT DISTKEY SORTKEY NOT NULL, name VARCHAR(50));";
+        String rewritten7 = RedshiftSqlInterceptor.rewrite(sql7);
+        assertTrue(!rewritten7.contains("DISTKEY") && !rewritten7.contains("SORTKEY"),
+                "Should remove both DISTKEY and SORTKEY: " + rewritten7);
+        assertTrue(rewritten7.contains("id INT NOT NULL"), "Should preserve 'id INT NOT NULL': " + rewritten7);
     }
 
     @ParameterizedTest
@@ -139,6 +161,11 @@ class RedshiftSqlInterceptorTest {
         assertTrue(rewritten.contains("distkey INT"), "column 'distkey' must survive: " + rewritten);
         assertTrue(!rewritten.contains("DISTKEY (") && !rewritten.contains("SORTKEY ("),
                 "table-level key clauses must be gone: " + rewritten);
+
+        String sqlWithConstraints = "CREATE TABLE t (distkey INT NOT NULL, sortkey VARCHAR(20) NOT NULL);";
+        String rewrittenWithConstraints = RedshiftSqlInterceptor.rewrite(sqlWithConstraints);
+        assertTrue(rewrittenWithConstraints.contains("distkey INT NOT NULL"), "column 'distkey INT NOT NULL' must survive: " + rewrittenWithConstraints);
+        assertTrue(rewrittenWithConstraints.contains("sortkey VARCHAR(20) NOT NULL"), "column 'sortkey VARCHAR(20) NOT NULL' must survive: " + rewrittenWithConstraints);
     }
 
     @Test
