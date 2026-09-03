@@ -40,6 +40,7 @@ class TlsConfigSourceCertificateReuseTest {
         System.clearProperty("floci.tls.enabled");
         System.clearProperty("floci.tls.self-signed");
         System.clearProperty("floci.storage.persistent-path");
+        System.clearProperty("floci.dns.spoof-aws-endpoints");
     }
 
     /**
@@ -219,6 +220,47 @@ class TlsConfigSourceCertificateReuseTest {
             "Certificate should be reused (same timestamp) even when BouncyCastle was not pre-registered");
         assertEquals(initialCert, Files.readString(certFile),
             "Certificate content should be unchanged (reused, not regenerated)");
+    }
+
+    /**
+     * Test that certificate is regenerated when the spoof-aws-endpoints flag flips
+     */
+    @Test
+    void testCertificateRegeneratedWhenSpoofAwsEndpointsFlagFlips() throws Exception {
+        // Arrange: Generate initial certificate without AWS endpoint spoofing
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", tempDir.toString());
+
+        // Act: Create TlsConfigSource - this generates the initial certificate
+        new TlsConfigSource();
+
+        Path tlsDir = tempDir.resolve("tls");
+        Path certFile = tlsDir.resolve("floci-selfsigned.crt");
+        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+
+        assertTrue(Files.exists(certFile), "Initial certificate should be generated");
+        assertTrue(Files.exists(metadataFile), "Initial metadata should be generated");
+        assertFalse(Files.readString(metadataFile).contains("*.amazonaws.com"),
+            "Initial metadata should not contain the AWS wildcard");
+
+        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
+
+        // Wait a bit to ensure timestamp difference
+        Thread.sleep(100);
+
+        // Enable AWS endpoint spoofing
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        // Act: Create new TlsConfigSource - should regenerate certificate
+        new TlsConfigSource();
+
+        // Assert: Certificate and metadata should be regenerated with the AWS wildcards
+        long newModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
+        assertTrue(newModifiedTime > initialModifiedTime,
+            "Certificate should be regenerated when the spoof flag flips (newer timestamp)");
+        assertTrue(Files.readString(metadataFile).contains("*.amazonaws.com"),
+            "New metadata should contain the AWS wildcard");
     }
 
     /**

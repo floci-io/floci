@@ -104,7 +104,7 @@ class CodeBuildServicePersistenceTest {
                 null, null, null, null, null, null, null);
 
         Build startResponse = service.startBuild(REGION, ACCOUNT, "p1", null,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null);
         assertEquals("IN_PROGRESS", startResponse.getBuildStatus());
         assertEquals(false, startResponse.getBuildComplete());
         assertEquals("SUBMITTED", startResponse.getCurrentPhase());
@@ -116,6 +116,96 @@ class CodeBuildServicePersistenceTest {
         assertEquals("SUBMITTED", retryResponse.getCurrentPhase());
         assertTrue(retryResponse.getBuildNumber() > startResponse.getBuildNumber());
         assertEquals("FAILED", service.getBuild(REGION, retryResponse.getId()).getBuildStatus());
+    }
+
+    @Test
+    void retryBuildReplaysTheOriginalBuildsEnvironmentNotTheCurrentProjects() {
+        CodeBuildRunner runner = mock(CodeBuildRunner.class);
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory(), runner);
+        ProjectEnvironment original = new ProjectEnvironment();
+        original.setImage("aws/codebuild/standard:6.0");
+        original.setComputeType("BUILD_GENERAL1_SMALL");
+        original.setEnvironmentVariables(List.of(Map.of("name", "STAGE", "value", "original-build")));
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                original, "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+        Build started = service.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null, null, null, null, null);
+
+        // The project changes after the build ran (a common reason to retry against an older
+        // definition rather than whatever the project looks like now).
+        ProjectEnvironment updated = new ProjectEnvironment();
+        updated.setImage("aws/codebuild/standard:7.0");
+        updated.setComputeType("BUILD_GENERAL1_LARGE");
+        updated.setEnvironmentVariables(List.of(Map.of("name", "STAGE", "value", "current-project")));
+        service.updateProject(REGION, "p1", null, null, null, null, null, null, updated,
+                null, null, null, null, null, null, null, null);
+
+        Build retried = service.retryBuild(REGION, ACCOUNT, started.getId());
+
+        assertEquals("aws/codebuild/standard:6.0", retried.getEnvironment().getImage());
+        assertEquals("BUILD_GENERAL1_SMALL", retried.getEnvironment().getComputeType());
+        assertEquals(List.of(Map.of("name", "STAGE", "value", "original-build")),
+                retried.getEnvironment().getEnvironmentVariables());
+    }
+
+    @Test
+    void startBuildWithSparseEnvironmentTypeOverrideRetainsProjectImageAndComputeType() {
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory());
+        ProjectEnvironment environment = new ProjectEnvironment();
+        environment.setType("LINUX_CONTAINER");
+        environment.setImage("aws/codebuild/standard:7.0");
+        environment.setComputeType("BUILD_GENERAL1_SMALL");
+        environment.setPrivilegedMode(true);
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                environment, "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+
+        // Only environmentTypeOverride is present on the request: CodeBuildJsonHandler.buildEnvOverride
+        // builds a sparse ProjectEnvironment carrying just the type, leaving image/computeType/
+        // privilegedMode null. The merge must still fall back to the project's own environment for
+        // those, not to this sparse override object.
+        ProjectEnvironment sparseOverride = new ProjectEnvironment();
+        sparseOverride.setType("LINUX_CONTAINER");
+        Build response = service.startBuild(REGION, ACCOUNT, "p1", null,
+                sparseOverride, null, null, null, null, null, null, null, null, null);
+
+        Build stored = service.getBuild(REGION, response.getId());
+        assertEquals("aws/codebuild/standard:7.0", stored.getEnvironment().getImage());
+        assertEquals("BUILD_GENERAL1_SMALL", stored.getEnvironment().getComputeType());
+        assertEquals(Boolean.TRUE, stored.getEnvironment().getPrivilegedMode());
+    }
+
+    @Test
+    void startBuildMergesEnvironmentVariableAndSecondarySourceOverrides() {
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory());
+        ProjectEnvironment environment = new ProjectEnvironment();
+        environment.setEnvironmentVariables(List.of(Map.of("name", "STAGE", "value", "project")));
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                environment, "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+
+        ProjectSource secondary = source("S3");
+        secondary.setLocation("bucket/codepipeline/exec-1/Config.zip");
+        secondary.setSourceIdentifier("Config");
+        Build response = service.startBuild(REGION, ACCOUNT, "p1", null,
+                null, List.of(Map.of("name", "STAGE", "value", "override", "type", "PLAINTEXT")),
+                null, null, null, null, List.of(secondary), null, null, null);
+
+        Build stored = service.getBuild(REGION, response.getId());
+        assertEquals(List.of(
+                Map.of("name", "STAGE", "value", "project"),
+                Map.of("name", "STAGE", "value", "override", "type", "PLAINTEXT")),
+                stored.getEnvironment().getEnvironmentVariables());
+        assertEquals(1, stored.getSecondarySources().size());
+        assertEquals("S3", stored.getSecondarySources().getFirst().getType());
+        assertEquals("bucket/codepipeline/exec-1/Config.zip",
+                stored.getSecondarySources().getFirst().getLocation());
+        assertEquals("Config", stored.getSecondarySources().getFirst().getSourceIdentifier());
+        assertEquals("Config", response.getSecondarySources().getFirst().getSourceIdentifier());
     }
 
     private static ProjectSource source(String type) {

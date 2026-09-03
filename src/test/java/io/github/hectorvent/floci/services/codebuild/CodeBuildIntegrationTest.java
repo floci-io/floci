@@ -279,6 +279,57 @@ class CodeBuildIntegrationTest {
             .body("arn", equalTo(arn));
     }
 
+    /**
+     * StartBuild's override members are enum-typed in the model and every one of them is copied
+     * onto the Build that is stored and read back by BatchGetBuilds, so an unmodeled value
+     * becomes a build record AWS could never have produced. {@code secondarySourcesOverride} is
+     * additionally a list with {@code max: 12}.
+     */
+    @Test
+    @Order(11)
+    void startBuildRejectsOverridesOutsideTheModeledShapes() {
+        String[] bodies = {
+            """
+            {"projectName": "my-build-project", "sourceTypeOverride": "SUBVERSION"}""",
+            """
+            {"projectName": "my-build-project", "environmentTypeOverride": "PLAN9_CONTAINER"}""",
+            """
+            {"projectName": "my-build-project", "computeTypeOverride": "BUILD_GENERAL1_TINY"}""",
+            """
+            {"projectName": "my-build-project",
+             "environmentVariablesOverride": [{"name": "A", "value": "b", "type": "VAULT"}]}""",
+            """
+            {"projectName": "my-build-project",
+             "secondarySourcesOverride": [{"type": "SUBVERSION", "location": "x", "sourceIdentifier": "s"}]}""",
+            """
+            {"projectName": "my-build-project", "secondarySourcesOverride": [
+             {"type":"S3","location":"a","sourceIdentifier":"s1"},
+             {"type":"S3","location":"a","sourceIdentifier":"s2"},
+             {"type":"S3","location":"a","sourceIdentifier":"s3"},
+             {"type":"S3","location":"a","sourceIdentifier":"s4"},
+             {"type":"S3","location":"a","sourceIdentifier":"s5"},
+             {"type":"S3","location":"a","sourceIdentifier":"s6"},
+             {"type":"S3","location":"a","sourceIdentifier":"s7"},
+             {"type":"S3","location":"a","sourceIdentifier":"s8"},
+             {"type":"S3","location":"a","sourceIdentifier":"s9"},
+             {"type":"S3","location":"a","sourceIdentifier":"s10"},
+             {"type":"S3","location":"a","sourceIdentifier":"s11"},
+             {"type":"S3","location":"a","sourceIdentifier":"s12"},
+             {"type":"S3","location":"a","sourceIdentifier":"s13"}]}""",
+        };
+        for (String body : bodies) {
+            given()
+                .header("X-Amz-Target", "CodeBuild_20161006.StartBuild")
+                .contentType(CONTENT_TYPE)
+                .body(body)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidInputException"));
+        }
+    }
+
     @Test
     @Order(12)
     void deleteProject() {

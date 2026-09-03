@@ -204,6 +204,13 @@ floci:
       - 8.8.8.8
       - 8.8.4.4
 
+    # Transparent endpoint injection: answer amazonaws.com (and every subdomain) A queries
+    # with Floci's container IP inside spawned containers, so SDK clients constructed with
+    # explicit real-AWS endpoints — which override AWS_ENDPOINT_URL — land on the emulator.
+    # Combine with tls.enabled so clients that hardcode https:// are served on port 443
+    # with a certificate covering *.amazonaws.com and *.<default-region>.amazonaws.com.
+    spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
+
   auth:
     validate-signatures: false
     presign-secret: local-emulator-secret
@@ -518,6 +525,8 @@ floci:
       mock: false
     codebuild:
       enabled: true
+      # curated-image-substitute: public.ecr.aws/codebuild/amazonlinux-x86_64-standard:6.0
+      # max-concurrent-builds: 4
       # docker-network: floci-network
     batch:
       enabled: true

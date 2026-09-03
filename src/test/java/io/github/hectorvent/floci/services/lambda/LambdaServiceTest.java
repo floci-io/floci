@@ -1014,4 +1014,184 @@ class LambdaServiceTest {
             pool.shutdownNow();
         }
     }
+
+    // ──────────────────────────── Request-shape validation ────────────────────────────
+
+    @Test
+    void createFunctionRejectsUnknownRuntime() {
+        Map<String, Object> request = baseRequest("bad-runtime-fn");
+        request.put("Runtime", "cobol99");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsUnknownRuntime() {
+        service.createFunction(REGION, baseRequest("update-bad-runtime-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-bad-runtime-fn",
+                        Map.of("Runtime", "cobol99")));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMalformedRoleArn() {
+        Map<String, Object> request = baseRequest("bad-role-fn");
+        request.put("Role", "not-an-arn");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsHandlerWithWhitespace() {
+        Map<String, Object> request = baseRequest("bad-handler-fn");
+        request.put("Handler", "index handler");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsDescriptionOverMaxLength() {
+        Map<String, Object> request = baseRequest("bad-description-fn");
+        request.put("Description", "x".repeat(257));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMalformedKmsKeyArn() {
+        Map<String, Object> request = baseRequest("bad-kms-fn");
+        request.put("KMSKeyArn", "not-an-arn");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMalformedLayerArn() {
+        Map<String, Object> request = baseRequest("bad-layer-fn");
+        request.put("Layers", List.of("not-a-layer-arn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMoreThanFiveLayers() {
+        Map<String, Object> request = baseRequest("too-many-layers-fn");
+        List<String> layers = new java.util.ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            layers.add("arn:aws:lambda:us-east-1:000000000000:layer:l" + i + ":1");
+        }
+        request.put("Layers", layers);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsMalformedLayerArn() {
+        service.createFunction(REGION, baseRequest("update-bad-layer-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-bad-layer-fn",
+                        Map.of("Layers", List.of("not-a-layer-arn"))));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsUnknownArchitecture() {
+        Map<String, Object> request = baseRequest("bad-arch-fn");
+        request.put("Architectures", List.of("mips"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMoreThanOneArchitecture() {
+        Map<String, Object> request = baseRequest("too-many-arch-fn");
+        request.put("Architectures", List.of("x86_64", "arm64"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionCodeAppliesValidArchitecture() {
+        service.createFunction(REGION, baseRequest("update-code-arch-fn"));
+
+        LambdaFunction updated = service.updateFunctionCode(REGION, "update-code-arch-fn",
+                Map.of("Architectures", List.of("arm64")));
+
+        assertEquals(List.of("arm64"), updated.getArchitectures());
+    }
+
+    @Test
+    void updateFunctionCodeRejectsUnknownArchitecture() {
+        service.createFunction(REGION, baseRequest("update-code-bad-arch-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "update-code-bad-arch-fn",
+                        Map.of("Architectures", List.of("mips"))));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void deleteAliasRejectsMalformedName() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.deleteAlias(REGION, "some-fn", "123"));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionUrlConfigRejectsUnknownAuthType() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunctionUrlConfig(REGION, "any-fn", null,
+                        Map.of("AuthType", "BOGUS")));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionUrlConfigRejectsUnknownInvokeMode() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunctionUrlConfig(REGION, "any-fn", null,
+                        Map.of("InvokeMode", "BOGUS")));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionUrlConfigRejectsAllNumericQualifier() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunctionUrlConfig(REGION, "any-fn", "123", Map.of()));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void listEventSourceMappingsRejectsMalformedFunctionName() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.listEventSourceMappings("not a valid name!"));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void listEventSourceMappingsRejectsMalformedEventSourceArn() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.listEventSourceMappings(null, "not-an-arn"));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
 }

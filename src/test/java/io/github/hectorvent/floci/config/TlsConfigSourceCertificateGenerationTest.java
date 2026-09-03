@@ -45,6 +45,8 @@ class TlsConfigSourceCertificateGenerationTest {
         System.clearProperty("floci.storage.persistent-path");
         System.clearProperty("floci.hostname");
         System.clearProperty("floci.base-url");
+        System.clearProperty("floci.dns.spoof-aws-endpoints");
+        System.clearProperty("floci.default-region");
     }
 
     /**
@@ -215,6 +217,86 @@ class TlsConfigSourceCertificateGenerationTest {
             "Metadata should include 'myhost' hostname");
         assertTrue(json.contains("localhost"), 
             "Metadata should include default 'localhost' hostname");
+    }
+
+    /**
+     * Test that the AWS endpoint wildcards are included when spoof-aws-endpoints is enabled
+     */
+    @Test
+    void testCertificateIncludesAwsWildcardsWhenSpoofEnabled() throws Exception {
+        // Arrange
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        // Act
+        new TlsConfigSource();
+
+        // Assert
+        Path certFile = tempDir.resolve("tls/floci-selfsigned.crt");
+        assertTrue(Files.exists(certFile), "Certificate file should exist");
+
+        List<String> sans = extractSansFromCertificate(certFile);
+        assertTrue(sans.contains("*.amazonaws.com"),
+            "Certificate SANs should include '*.amazonaws.com' when spoofing is enabled");
+        assertTrue(sans.contains("*.us-east-1.amazonaws.com"),
+            "Certificate SANs should include the default region wildcard '*.us-east-1.amazonaws.com'");
+        assertTrue(sans.contains("localhost"),
+            "Certificate SANs should still include default 'localhost'");
+    }
+
+    /**
+     * A TLS wildcard matches exactly one label (RFC 6125 6.4.3), so the broad
+     * *.amazonaws.com wildcards do not cover virtual-hosted S3 addressing, where the
+     * bucket contributes an extra label. The DNS spoof does route those hostnames to
+     * Floci, so without dedicated SANs the request dies at the handshake.
+     */
+    @Test
+    void testCertificateCoversVirtualHostedS3WhenSpoofEnabled() throws Exception {
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        new TlsConfigSource();
+
+        Path certFile = tempDir.resolve("tls/floci-selfsigned.crt");
+        List<String> sans = extractSansFromCertificate(certFile);
+        assertTrue(sans.contains("*.s3.amazonaws.com"),
+            "Certificate SANs should cover global virtual-hosted S3");
+        assertTrue(sans.contains("*.s3.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover regional virtual-hosted S3");
+    }
+
+    /**
+     * Test that the regional AWS wildcard follows the configured default region
+     */
+    @Test
+    void testAwsRegionalWildcardFollowsConfiguredDefaultRegion() throws Exception {
+        // Arrange
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+        System.setProperty("floci.default-region", "eu-west-1");
+
+        // Act
+        new TlsConfigSource();
+
+        // Assert
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-selfsigned.crt"));
+        assertTrue(sans.contains("*.eu-west-1.amazonaws.com"),
+            "Certificate SANs should include '*.eu-west-1.amazonaws.com' for the configured region");
+        assertFalse(sans.contains("*.us-east-1.amazonaws.com"),
+            "Certificate SANs should not include the wildcard of a region that is not configured");
+    }
+
+    /**
+     * Test that no AWS wildcards are included when spoof-aws-endpoints is disabled
+     */
+    @Test
+    void testCertificateExcludesAwsWildcardsWhenSpoofDisabled() throws Exception {
+        // Act
+        new TlsConfigSource();
+
+        // Assert
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-selfsigned.crt"));
+        assertFalse(sans.contains("*.amazonaws.com"),
+            "Certificate SANs should not include '*.amazonaws.com' when spoofing is disabled");
+        assertFalse(sans.contains("*.us-east-1.amazonaws.com"),
+            "Certificate SANs should not include '*.us-east-1.amazonaws.com' when spoofing is disabled");
     }
 
     // ==================== Helper Methods ====================

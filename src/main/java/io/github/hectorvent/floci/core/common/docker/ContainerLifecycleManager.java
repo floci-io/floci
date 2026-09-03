@@ -10,6 +10,7 @@ import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
@@ -172,14 +173,29 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Starts a container, translating crun/runc's kernel-keyring-quota error into a message that
-     * names the actual cause and a fix, instead of the misleading "Disk quota exceeded" the OCI
-     * runtime reports. Package-private so tests can verify a given call site routes through this
-     * translation rather than a raw {@code dockerClient.startContainerCmd(...)} call.
+     * Starts {@code containerId}, treating "already running" as success and translating
+     * crun/runc's kernel-keyring-quota error into a message that names the actual cause and a fix,
+     * instead of the misleading "Disk quota exceeded" the OCI runtime reports. Transient socket
+     * blips are retried below this call, at the transport seam
+     * ({@link RetryingDockerHttpClient}); no retry may live here, where it would compound backoff
+     * on the transport's already-exhausted budget.
+     *
+     * <p>The 304 handling is what makes the transport's replay safe: when the daemon honoured a
+     * start whose response was lost to a broken pipe, the replayed start meets HTTP 304 — a
+     * successful response at transport level, which docker-java converts to
+     * {@link NotModifiedException} above it. That reports the outcome we wanted and is swallowed.
+     * Letting it escape would turn a recovered blip into a hard launch failure — the exact bug
+     * the retry exists to remove.
+     *
+     * <p>Package-private so tests can verify a given call site routes through this translation
+     * rather than a raw {@code dockerClient.startContainerCmd(...)} call.
      */
     void startContainer(String containerId) {
         try {
             dockerClient.startContainerCmd(containerId).exec();
+        } catch (NotModifiedException alreadyRunning) {
+            LOG.debugv("Container {0} was already running (304) — treating start as done",
+                    containerId);
         } catch (DockerException e) {
             String message = e.getMessage();
             if (message != null && KEYRING_QUOTA_PATTERN.matcher(message).find()) {
@@ -308,6 +324,13 @@ public class ContainerLifecycleManager {
      * {@code floci_emulator=floci-aws} (plus {@code floci_namespace} when configured) so both
      * {@code docker volume prune --filter label=floci=true} (all emulators) and
      * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
+     *
+     * <p>Transient socket blips on both daemon calls here — the existence check and the create —
+     * are retried at the transport seam ({@link RetryingDockerHttpClient}). The existence guard
+     * is what keeps the transport's replay safe: {@code POST /volumes/create} with the same name
+     * is itself idempotent, and when the daemon created the volume but the response was lost to
+     * a broken pipe, the replayed create finds it already there while later calls see it exists
+     * and do nothing — the volume analogue of start treating an HTTP 304 as success.
      */
     public void ensureVolume(String volumeName) {
         if (!volumeExists(volumeName)) {

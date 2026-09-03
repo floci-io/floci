@@ -18,6 +18,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class CodeBuildJsonHandler {
@@ -194,33 +196,96 @@ public class CodeBuildJsonHandler {
     private Response startBuild(JsonNode req, String region, String account) throws Exception {
         String projectName = req.path("projectName").asText(null);
         String buildspecOverride = req.has("buildspecOverride") ? req.path("buildspecOverride").asText(null) : null;
-        ProjectEnvironment envOverride = req.has("environmentVariablesOverride")
+        ProjectEnvironment envOverride = req.has("privilegedModeOverride") || req.has("environmentTypeOverride")
                 ? buildEnvOverride(req) : null;
+        List<Map<String, String>> environmentVariablesOverride = parseEnvironmentVariablesOverride(req);
         ProjectArtifacts artifactsOverride = req.has("artifactsOverride")
                 ? mapper.treeToValue(req.get("artifactsOverride"), ProjectArtifacts.class) : null;
         String sourceVersion = req.has("sourceVersion") ? req.path("sourceVersion").asText(null) : null;
+        String sourceTypeOverride = req.has("sourceTypeOverride") ? req.path("sourceTypeOverride").asText(null) : null;
+        String sourceLocationOverride = req.has("sourceLocationOverride") ? req.path("sourceLocationOverride").asText(null) : null;
+        List<ProjectSource> secondarySourcesOverride = parseList(req, "secondarySourcesOverride", ProjectSource.class);
         Integer timeout = req.has("timeoutInMinutes") ? req.path("timeoutInMinutes").asInt() : null;
         String imageOverride = req.has("imageOverride") ? req.path("imageOverride").asText(null) : null;
         String computeTypeOverride = req.has("computeTypeOverride") ? req.path("computeTypeOverride").asText(null) : null;
 
+        // Every override below is copied onto the stored Build and read back by BatchGetBuilds,
+        // so the enum shapes are checked here rather than accepted verbatim.
+        requireEnum(sourceTypeOverride, SOURCE_TYPES, "sourceTypeOverride");
+        requireEnum(computeTypeOverride, COMPUTE_TYPES, "computeTypeOverride");
+        requireEnum(envOverride == null ? null : envOverride.getType(),
+                ENVIRONMENT_TYPES, "environmentTypeOverride");
+        if (environmentVariablesOverride != null) {
+            for (Map<String, String> variable : environmentVariablesOverride) {
+                requireEnum(variable.get("type"), ENVIRONMENT_VARIABLE_TYPES,
+                        "environmentVariablesOverride.type");
+            }
+        }
+        if (secondarySourcesOverride != null) {
+            if (secondarySourcesOverride.size() > MAX_SECONDARY_SOURCES) {
+                throw new AwsException("InvalidInputException",
+                        "secondarySourcesOverride accepts at most " + MAX_SECONDARY_SOURCES + " sources", 400);
+            }
+            for (ProjectSource source : secondarySourcesOverride) {
+                requireEnum(source == null ? null : source.getType(), SOURCE_TYPES,
+                        "secondarySourcesOverride.type");
+            }
+        }
+
         Build build = service.startBuild(region, account, projectName, buildspecOverride,
-                envOverride, artifactsOverride, sourceVersion, timeout, imageOverride, computeTypeOverride);
+                envOverride, environmentVariablesOverride, artifactsOverride, sourceVersion,
+                sourceTypeOverride, sourceLocationOverride, secondarySourcesOverride,
+                timeout, imageOverride, computeTypeOverride);
         return Response.ok(Map.of("build", build)).build();
     }
 
-    private ProjectEnvironment buildEnvOverride(JsonNode req) throws Exception {
-        ProjectEnvironment env = new ProjectEnvironment();
-        if (req.has("environmentVariablesOverride")) {
-            List<Map<String, String>> vars = new ArrayList<>();
-            for (JsonNode v : req.get("environmentVariablesOverride")) {
-                Map<String, String> m = new HashMap<>();
-                m.put("name", v.path("name").asText());
-                m.put("value", v.path("value").asText());
-                m.put("type", v.path("type").asText("PLAINTEXT"));
-                vars.add(m);
-            }
-            env.setEnvironmentVariables(vars);
+    // Enum shapes from the CodeBuild model (codebuild/2016-10-06/service-2.json).
+    private static final Set<String> SOURCE_TYPES = Set.of(
+            "CODECOMMIT", "CODEPIPELINE", "GITHUB", "GITLAB", "GITLAB_SELF_MANAGED",
+            "S3", "BITBUCKET", "GITHUB_ENTERPRISE", "NO_SOURCE");
+    private static final Set<String> COMPUTE_TYPES = Set.of(
+            "BUILD_GENERAL1_SMALL", "BUILD_GENERAL1_MEDIUM", "BUILD_GENERAL1_LARGE",
+            "BUILD_GENERAL1_XLARGE", "BUILD_GENERAL1_2XLARGE", "BUILD_LAMBDA_1GB",
+            "BUILD_LAMBDA_2GB", "BUILD_LAMBDA_4GB", "BUILD_LAMBDA_8GB", "BUILD_LAMBDA_10GB",
+            "ATTRIBUTE_BASED_COMPUTE", "CUSTOM_INSTANCE_TYPE");
+    private static final Set<String> ENVIRONMENT_TYPES = Set.of(
+            "WINDOWS_CONTAINER", "LINUX_CONTAINER", "LINUX_GPU_CONTAINER", "ARM_CONTAINER",
+            "WINDOWS_SERVER_2019_CONTAINER", "WINDOWS_SERVER_2022_CONTAINER",
+            "LINUX_LAMBDA_CONTAINER", "ARM_LAMBDA_CONTAINER", "LINUX_EC2", "ARM_EC2",
+            "WINDOWS_EC2", "MAC_ARM");
+    private static final Set<String> ENVIRONMENT_VARIABLE_TYPES =
+            Set.of("PLAINTEXT", "PARAMETER_STORE", "SECRETS_MANAGER");
+    /** {@code ProjectSources} is {@code max: 12}. */
+    private static final int MAX_SECONDARY_SOURCES = 12;
+
+    /** Rejects a present value outside the shape's enum; a null value is left alone. */
+    private static void requireEnum(String value, Set<String> allowed, String memberName) {
+        if (value == null || allowed.contains(value)) {
+            return;
         }
+        throw new AwsException("InvalidInputException",
+                "Value '" + value + "' at '" + memberName + "' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: ["
+                        + allowed.stream().sorted().collect(Collectors.joining(", ")) + "]", 400);
+    }
+
+    private List<Map<String, String>> parseEnvironmentVariablesOverride(JsonNode req) {
+        if (!req.has("environmentVariablesOverride") || req.get("environmentVariablesOverride").isNull()) {
+            return null;
+        }
+        List<Map<String, String>> vars = new ArrayList<>();
+        for (JsonNode v : req.get("environmentVariablesOverride")) {
+            Map<String, String> m = new HashMap<>();
+            m.put("name", v.path("name").asText());
+            m.put("value", v.path("value").asText());
+            m.put("type", v.path("type").asText("PLAINTEXT"));
+            vars.add(m);
+        }
+        return vars;
+    }
+
+    private ProjectEnvironment buildEnvOverride(JsonNode req) {
+        ProjectEnvironment env = new ProjectEnvironment();
         if (req.has("imageOverride")) {
             env.setImage(req.path("imageOverride").asText(null));
         }
