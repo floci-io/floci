@@ -24,28 +24,24 @@ public class GlueViewDdlBuilder {
 
     public String build(String contextDatabase) {
         StringBuilder sb = new StringBuilder();
-        try {
-            List<Database> databases = glueService.getDatabases();
-            if (databases != null) {
-                for (Database db : databases) {
-                    if (db == null) {
-                        continue;
-                    }
-                    String schema = db.getName();
-                    if (schema == null || schema.isBlank()) {
-                        continue;
-                    }
-                    sb.append("CREATE SCHEMA IF NOT EXISTS ").append(quote(schema)).append(";\n");
-                    try {
-                        List<Table> tables = glueService.getTables(schema);
-                        appendViews(sb, schema, tables, true);
-                    } catch (Exception e) {
-                        LOG.debugv("Could not fetch tables for Glue database {0}: {1}", schema, e.getMessage());
-                    }
+        List<Database> databases = glueService.getDatabases();
+        if (databases != null) {
+            for (Database db : databases) {
+                if (db == null) {
+                    continue;
+                }
+                String schema = db.getName();
+                if (schema == null || schema.isBlank()) {
+                    continue;
+                }
+                sb.append("CREATE SCHEMA IF NOT EXISTS ").append(quote(schema)).append(";\n");
+                try {
+                    List<Table> tables = glueService.getTables(schema);
+                    appendViews(sb, schema, tables, true);
+                } catch (Exception e) {
+                    LOG.debugv("Could not fetch tables for Glue database {0}: {1}", schema, e.getMessage());
                 }
             }
-        } catch (Exception e) {
-            LOG.debugv("Could not fetch Glue databases: {0}", e.getMessage());
         }
 
         if (contextDatabase != null && !contextDatabase.isBlank()) {
@@ -67,6 +63,9 @@ public class GlueViewDdlBuilder {
         for (Table t : tables) {
             try {
                 if (t == null) {
+                    continue;
+                }
+                if (t.getName() == null || t.getName().isBlank()) {
                     continue;
                 }
                 if (t.getStorageDescriptor() == null
@@ -112,7 +111,8 @@ public class GlueViewDdlBuilder {
     }
 
     static String readExpression(String readFn, String normalizedLocation) {
-        String glob = normalizedLocation + "/**";
+        String escapedLocation = normalizedLocation.replace("'", "''");
+        String glob = escapedLocation + "/**";
         if ("read_parquet".equals(readFn)) {
             return "read_parquet('" + glob + "', union_by_name = true)";
         }

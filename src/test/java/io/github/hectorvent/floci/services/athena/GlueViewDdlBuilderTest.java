@@ -183,5 +183,47 @@ class GlueViewDdlBuilderTest {
         assertFalse(ddl.contains("CREATE SCHEMA IF NOT EXISTS \"\";"));
         assertFalse(ddl.contains("CREATE SCHEMA IF NOT EXISTS \"null\";"));
     }
+
+    @Test
+    void testGetDatabasesExceptionPropagates() {
+        when(glueService.getDatabases()).thenThrow(new RuntimeException("Glue failure"));
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class, () -> builder.build(null));
+    }
+
+    @Test
+    void testTableWithNullOrBlankNameIsSkipped() {
+        Database shopDb = createDatabase("shop");
+        when(glueService.getDatabases()).thenReturn(List.of(shopDb));
+
+        Table nullNameTable = createTable(null, "s3://bucket/null_name", null, null);
+        Table emptyNameTable = createTable("", "s3://bucket/empty_name", null, null);
+        Table blankNameTable = createTable("   ", "s3://bucket/blank_name", null, null);
+        Table validTable = createTable("valid_tbl", "s3://bucket/valid", null, null);
+
+        when(glueService.getTables("shop")).thenReturn(List.of(nullNameTable, emptyNameTable, blankNameTable, validTable));
+
+        String ddl = builder.build("shop");
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"shop\".\"valid_tbl\" AS SELECT * FROM read_csv_auto('s3://bucket/valid/**');\n"));
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"valid_tbl\" AS SELECT * FROM read_csv_auto('s3://bucket/valid/**');\n"));
+        assertFalse(ddl.contains("null_name"));
+        assertFalse(ddl.contains("empty_name"));
+        assertFalse(ddl.contains("blank_name"));
+        assertFalse(ddl.contains("CREATE OR REPLACE VIEW \"shop\".\"\""));
+        assertFalse(ddl.contains("CREATE OR REPLACE VIEW \"\""));
+    }
+
+    @Test
+    void testSingleQuotesInLocationAreEscaped() {
+        Database db = createDatabase("db");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+
+        Table singleQuoteTable = createTable("user_events", "s3://bucket/it's-a-dir/data", null, null);
+        Table parquetSingleQuote = createTable("parquet_events", "s3://bucket/user's-store/parquet", "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe", null);
+        when(glueService.getTables("db")).thenReturn(List.of(singleQuoteTable, parquetSingleQuote));
+
+        String ddl = builder.build(null);
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"db\".\"user_events\" AS SELECT * FROM read_csv_auto('s3://bucket/it''s-a-dir/data/**');\n"));
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"db\".\"parquet_events\" AS SELECT * FROM read_parquet('s3://bucket/user''s-store/parquet/**', union_by_name = true);\n"));
+    }
 }
 
