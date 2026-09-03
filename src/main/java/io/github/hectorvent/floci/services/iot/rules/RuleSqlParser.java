@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.iot.rules.RuleSql.Path;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Projection;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.SelectAll;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -204,7 +205,7 @@ public final class RuleSqlParser {
         try {
             return token.text().indexOf('.') < 0
                     ? RuleSql.number(Long.parseLong(token.text()))
-                    : RuleSql.decimal(Double.parseDouble(token.text()));
+                    : RuleSql.decimal(new BigDecimal(token.text()));
         } catch (NumberFormatException e) {
             throw fail("Number is out of range", token);
         }

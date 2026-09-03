@@ -2,11 +2,12 @@ package io.github.hectorvent.floci.services.iot.rules;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.BooleanNode;
-import com.fasterxml.jackson.databind.node.DoubleNode;
+import com.fasterxml.jackson.databind.node.DecimalNode;
 import com.fasterxml.jackson.databind.node.LongNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -99,8 +100,9 @@ public record RuleSql(List<Projection> projections, String topicFilter, Expr whe
         return new Literal(LongNode.valueOf(value));
     }
 
-    public static Literal decimal(double value) {
-        return new Literal(DoubleNode.valueOf(value));
+    /** Kept as a {@code BigDecimal} so a literal a double cannot hold exactly still compares exactly. */
+    public static Literal decimal(BigDecimal value) {
+        return new Literal(DecimalNode.valueOf(value));
     }
 
     public static Literal bool(boolean value) {

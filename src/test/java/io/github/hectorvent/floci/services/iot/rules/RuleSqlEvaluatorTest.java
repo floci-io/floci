@@ -162,6 +162,14 @@ class RuleSqlEvaluatorTest {
     }
 
     @Test
+    void keepsADecimalLiteralExactInsteadOfRoundingItToADouble() {
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level = 9007199254740993.0", "a/b",
+                "{\"level\":9007199254740992}").isPresent());
+        assertTrue(evaluate("SELECT * FROM 'a/b' WHERE level = 9007199254740993.0", "a/b",
+                "{\"level\":9007199254740993}").isPresent());
+    }
+
+    @Test
     void skipsANonJsonPayloadWhenTheStatementNeedsFields() {
         assertFalse(evaluate("SELECT *, topic() as topic FROM 'a/b'", "a/b", "plain text").isPresent());
         assertFalse(evaluate("SELECT * FROM 'a/b' WHERE endswith(clientToken, 'x')", "a/b", "plain text").isPresent());
