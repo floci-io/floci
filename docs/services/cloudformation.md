@@ -86,6 +86,7 @@ cross-resource references.
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
+| IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string) |
 | CloudFront | `Distribution` |
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |

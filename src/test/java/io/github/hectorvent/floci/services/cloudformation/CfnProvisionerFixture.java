@@ -36,6 +36,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.EcrCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.FirehoseCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.IotDomainConfigurationCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KinesisCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaAddressingCfnProvisioner;
@@ -63,6 +64,7 @@ import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iot.IotDomainConfigurationService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -144,6 +146,7 @@ final class CfnProvisionerFixture {
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
+        private IotDomainConfigurationService iotDomainConfigurationService;
         private LambdaMicrovmsService lambdaMicrovmsService;
         private AwsConfigService awsConfigService;
         private OrganizationsService organizationsService;
@@ -239,6 +242,9 @@ final class CfnProvisionerFixture {
             }
             if (flowLogService != null) {
                 discovered.add(new Ec2FlowLogCfnProvisioner(flowLogService));
+            }
+            if (iotDomainConfigurationService != null) {
+                discovered.add(new IotDomainConfigurationCfnProvisioner(iotDomainConfigurationService));
             }
             if (lambdaMicrovmsService != null) {
                 discovered.add(new LambdaMicrovmsCfnProvisioner(lambdaMicrovmsService));
@@ -449,6 +455,11 @@ final class CfnProvisionerFixture {
 
         public Builder flowLog(FlowLogService v) {
             this.flowLogService = v;
+            return this;
+        }
+
+        public Builder iotDomainConfiguration(IotDomainConfigurationService v) {
+            this.iotDomainConfigurationService = v;
             return this;
         }
 
