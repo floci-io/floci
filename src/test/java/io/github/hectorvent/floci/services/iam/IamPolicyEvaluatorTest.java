@@ -120,4 +120,117 @@ class IamPolicyEvaluatorTest {
                 List.of(policy), "s3:GetObject", "arn:aws:s3:::bucket/key",
                 Map.of("aws:PrincipalArn", List.of("arn:aws:iam::111122223333:user/bob"))));
     }
+
+    private static final String LEADING_KEYS_FOR_ALL = """
+        {"Version":"2012-10-17","Statement":[
+          {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+           "Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+        ]}""";
+
+    @Test
+    void forAllValuesRequiresEveryContextValueToMatch() {
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_FOR_ALL), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_FOR_ALL), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_bob"))));
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_FOR_ALL), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice", "USER_alice_2"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_FOR_ALL), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice", "USER_bob"))));
+    }
+
+    @Test
+    void forAnyValueRequiresAtLeastOneContextValueToMatch() {
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"ForAnyValue:StringEquals":{"dynamodb:LeadingKeys":["USER_alice"]}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_bob", "USER_alice"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_bob", "USER_carol"))));
+    }
+
+    @Test
+    void emptySetMatchesForAllValuesAndNotForAnyValue() {
+        // AWS: ForAllValues over an empty set is vacuously true; ForAnyValue is false.
+        String anyValue = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"ForAnyValue:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_FOR_ALL), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.<String>of())));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(anyValue), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.<String>of())));
+    }
+
+    @Test
+    void setOperatorWithoutIfExistsFailsClosedWhenTheKeyIsAbsent() {
+        // The key is absent from the context entirely — not an empty set. A request that
+        // cannot be proven in scope is treated as out of scope.
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(LEADING_KEYS_FOR_ALL), "dynamodb:GetItem", "*", Map.of()));
+    }
+
+    @Test
+    void setOperatorComposesWithIfExists() {
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"ForAnyValue:StringEqualsIfExists":{"dynamodb:LeadingKeys":["USER_alice"]}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*", Map.of()));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_bob"))));
+    }
+
+    @Test
+    void nullGuardBlocksTheVacuousForAllValuesAllowWhenTheKeyIsAbsent() {
+        // The idiomatic AWS pairing: ForAllValues plus Null:false so the vacuous
+        // empty-set truth cannot grant access when the key was never populated.
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{
+                 "ForAllValues:StringLikeIfExists":{"dynamodb:LeadingKeys":["USER_alice*"]},
+                 "Null":{"dynamodb:LeadingKeys":"false"}}}
+            ]}""";
+
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*", Map.of()));
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+    }
+
+    @Test
+    void setOperatorPrefixIsMatchedCaseSensitively() {
+        // AWS spells these exactly "ForAllValues:" / "ForAnyValue:". A different spelling is
+        // an unknown operator and must not silently behave like the real thing.
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"forallvalues:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+            ]}""";
+
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+    }
 }
+

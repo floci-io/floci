@@ -313,11 +313,52 @@ public class IamPolicyEvaluator {
         return true;
     }
 
+    /**
+     * AWS set-operator quantifier. {@code ForAllValues:} requires every value the request
+     * carries for the key to match the policy; {@code ForAnyValue:} requires at least one.
+     */
+    private enum SetQuantifier { NONE, FOR_ALL_VALUES, FOR_ANY_VALUE }
+
+    private record ParsedOperator(SetQuantifier quantifier, String baseOp, boolean ifExists) {}
+
+    /**
+     * Splits a condition operator into its set quantifier, base operator and IfExists flag.
+     * The prefix match is case-sensitive on exactly AWS's own spelling, so a mis-cased
+     * "forallvalues:" stays an unknown operator instead of silently behaving like the
+     * real quantifier. The IfExists strip runs on what is left, so
+     * "ForAnyValue:StringEqualsIfExists" composes correctly.
+     */
+    private static ParsedOperator parseOperator(String operator) {
+        SetQuantifier quantifier = SetQuantifier.NONE;
+        String rest = operator;
+        if (rest.startsWith("ForAllValues:")) {
+            quantifier = SetQuantifier.FOR_ALL_VALUES;
+            rest = rest.substring("ForAllValues:".length());
+        } else if (rest.startsWith("ForAnyValue:")) {
+            quantifier = SetQuantifier.FOR_ANY_VALUE;
+            rest = rest.substring("ForAnyValue:".length());
+        }
+        boolean ifExists = rest.endsWith("IfExists");
+        String baseOp = ifExists ? rest.substring(0, rest.length() - "IfExists".length()) : rest;
+        return new ParsedOperator(quantifier, baseOp, ifExists);
+    }
+
+    /** OR across the policy's condition values for one request value. */
+    private boolean matchesAnyCondValue(String baseOp, String ctxValue, List<String> condValues) {
+        for (String condValue : condValues) {
+            if (evaluateSingleCondition(baseOp, ctxValue, condValue)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean evaluateConditionBlock(String operator,
                                             Map<String, List<String>> keyValueMap,
                                             Map<String, List<String>> ctx) {
-        boolean ifExists = operator.endsWith("IfExists");
-        String baseOp = ifExists ? operator.substring(0, operator.length() - "IfExists".length()) : operator;
+        ParsedOperator parsed = parseOperator(operator);
+        String baseOp = parsed.baseOp();
+        boolean ifExists = parsed.ifExists();
 
         for (Map.Entry<String, List<String>> entry : keyValueMap.entrySet()) {
             String condKey = entry.getKey().toLowerCase();
@@ -348,28 +389,27 @@ public class IamPolicyEvaluator {
                 continue;
             }
 
-            // A bare operator against a multi-valued key is a policy authoring error in AWS;
-            // mirror that by comparing only the first value, which is behaviour-preserving for
-            // every key that is single-valued today.
-            if (ctxValues.isEmpty()) {
-                return false;
-            }
-            String ctxValue = ctxValues.getFirst();
-
-            // OR across condValues for this key
-            boolean keyMatch = false;
-            for (String condValue : condValues) {
-                if (evaluateSingleCondition(baseOp, ctxValue, condValue)) {
-                    keyMatch = true;
-                    break;
-                }
-            }
+            boolean keyMatch = switch (parsed.quantifier()) {
+                // Every request value must match at least one policy value. An empty set
+                // matches vacuously, which is why real policies pair ForAllValues with a
+                // Null:{key:"false"} guard.
+                case FOR_ALL_VALUES -> ctxValues.stream()
+                        .allMatch(ctxValue -> matchesAnyCondValue(baseOp, ctxValue, condValues));
+                // At least one request value must match. An empty set never matches.
+                case FOR_ANY_VALUE -> ctxValues.stream()
+                        .anyMatch(ctxValue -> matchesAnyCondValue(baseOp, ctxValue, condValues));
+                // A bare operator against a multi-valued key is a policy authoring error in
+                // AWS; mirror that by comparing only the first value.
+                case NONE -> !ctxValues.isEmpty()
+                        && matchesAnyCondValue(baseOp, ctxValues.getFirst(), condValues);
+            };
             if (!keyMatch) {
                 return false;
             }
         }
         return true;
     }
+
 
     private boolean evaluateSingleCondition(String operator, String ctxValue, String condValue) {
         return switch (operator) {
