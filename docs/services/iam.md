@@ -395,7 +395,12 @@ account key carries no identity policies of its own.
   own spelling (the prefix match is case-sensitive). They compose with `IfExists`
   (`ForAnyValue:StringEqualsIfExists`). `ForAllValues:` over an empty set matches vacuously
   and `ForAnyValue:` over an empty set does not match, so pair `ForAllValues:` with
-  `"Null":{"<key>":"false"}` as you would on AWS.
+  `"Null":{"<key>":"false"}` as you would on AWS — `Null` treats a present-but-empty set as
+  absent, so the guard fires either way.
+- When a condition lists several values, a positive operator matches if the request value
+  equals **any** of them; a negated operator (`StringNotEquals`, `ArnNotLike`, `NotIpAddress`,
+  …) matches only if the request value differs from **all** of them. This is what makes
+  `ForAllValues:StringNotEquals` on `dynamodb:Attributes` a usable deny-list.
 
 #### Condition keys floci populates
 
@@ -412,10 +417,15 @@ floci populates:
   body, for `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchGetItem` and
   `BatchWriteItem` (`dynamodb:Select` for `Query` and `Scan`). `LeadingKeys` holds the
   partition-key values the request names — from `Key`, `Item`, the `KeyConditionExpression`
-  equality, or each `RequestItems` entry. `Attributes` holds the attribute names the request
-  touches. Each key is **omitted** when it cannot be determined (unknown table, a `Key` that
-  omits the partition attribute, an unparseable `KeyConditionExpression`, a multi-table batch),
-  so a policy scoping access through it denies the request rather than allowing an unproven one.
+  equality, the legacy `KeyConditions` `EQ` entry, or each `RequestItems` entry. `Attributes`
+  holds the attribute names the request *names* — item and key fields, `AttributesToGet`,
+  projection / update / filter / condition / key-condition expressions, and
+  `ExpressionAttributeNames`; a request with no projection returns every attribute while
+  reporting only the names it mentions, exactly as on AWS, which is why AWS pairs `Attributes`
+  with `dynamodb:Select`. Each key is **omitted** when it cannot be determined (unknown table,
+  a `Key` that omits the partition attribute, an unparseable `KeyConditionExpression`, a
+  multi-table batch), so a policy scoping access through it denies the request rather than
+  allowing an unproven one.
 
   **Consequence:** with enforcement on and access scoped purely through `dynamodb:LeadingKeys`,
   a malformed request — a `GetItem` whose `Key` omits the partition attribute — is answered with
