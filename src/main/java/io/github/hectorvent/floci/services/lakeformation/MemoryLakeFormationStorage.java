@@ -42,7 +42,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void registerResource(String region, String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation) {
+    public synchronized void registerResource(String region, String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation) {
         ResourceInfo info = new ResourceInfo();
         info.setResourceArn(resourceArn);
         info.setRoleArn(roleArn);
