@@ -148,7 +148,7 @@ Supported rule behavior:
 - `sqs` action sends the original payload to an SQS queue through Floci's SQS service boundary.
 - `sns` action publishes the original payload to an SNS topic through Floci's SNS service boundary.
 - `s3` action writes the original payload to the configured bucket/key through Floci's S3 service boundary.
-- `dynamoDBv2` action writes JSON object payload fields as DynamoDB attribute values through Floci's DynamoDB service boundary.
+- `dynamoDBv2` action writes JSON object payload fields as DynamoDB attribute values through Floci's DynamoDB service boundary; nested objects and arrays become maps and lists.
 - `kinesis` action puts the original payload into a Kinesis stream through Floci's Kinesis service boundary.
 - `lambda` action invokes the configured function ARN through Floci's Lambda service boundary.
 - One failing action never fails the publish or the other actions of the rule. The failure is logged, and once every action ran the rule's `errorAction` receives the AWS failure document: `ruleName`, `topic`, `base64OriginalPayload` and `failures` with `failedAction`, `failedResource` and `errorMessage` per failed action.

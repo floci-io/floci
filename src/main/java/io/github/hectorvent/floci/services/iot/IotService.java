@@ -1167,6 +1167,7 @@ public class IotService {
         }
     }
 
+    /** A JSON value as a DynamoDB attribute value; objects and arrays become maps and lists, as on AWS. */
     private ObjectNode toDynamoDbAttribute(JsonNode value) {
         ObjectNode attribute = objectMapper.createObjectNode();
         if (value == null || value.isNull()) {
@@ -1175,6 +1176,12 @@ public class IotService {
             attribute.put("BOOL", value.asBoolean());
         } else if (value.isNumber()) {
             attribute.put("N", value.asText());
+        } else if (value.isObject()) {
+            ObjectNode map = attribute.putObject("M");
+            value.fields().forEachRemaining(entry -> map.set(entry.getKey(), toDynamoDbAttribute(entry.getValue())));
+        } else if (value.isArray()) {
+            ArrayNode list = attribute.putArray("L");
+            value.forEach(element -> list.add(toDynamoDbAttribute(element)));
         } else {
             attribute.put("S", value.asText());
         }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -52,6 +53,7 @@ class IotServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final SqsService sqs = mock(SqsService.class);
     private final LambdaService lambda = mock(LambdaService.class);
+    private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
     private IotService service;
 
     @BeforeEach
@@ -81,7 +83,7 @@ class IotServiceTest {
                 mock(SnsService.class),
                 mock(S3Service.class),
                 mock(KinesisService.class),
-                mock(DynamoDbService.class),
+                dynamoDb,
                 lambda);
     }
 
@@ -236,5 +238,47 @@ class IotServiceTest {
         IotTopicRule rule = service.getTopicRule("versionedRule", REGION);
         assertNull(rule.getAwsIotSqlVersion());
         assertNull(rule.getErrorActionJson());
+    }
+
+    private JsonNode capturedDynamoDbItem(String tableName) {
+        ArgumentCaptor<ObjectNode> item = ArgumentCaptor.forClass(ObjectNode.class);
+        verify(dynamoDb).putItem(eq(tableName), item.capture(), eq(REGION));
+        return item.getValue();
+    }
+
+    @Test
+    void dynamoDBv2ActionMapsNestedValuesToDynamoDbMapsAndLists() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"dynamoDBv2": {"putItem": {"tableName": "metrics"}, "roleArn": "arn:aws:iam::000000000000:role/rule"}}]}
+            """);
+
+        publish("{\"device\": {\"id\": \"d1\", \"ok\": true}, \"readings\": [1.5, \"x\", null]}");
+
+        JsonNode item = capturedDynamoDbItem("metrics");
+        assertEquals("d1", item.at("/device/M/id/S").asText());
+        assertTrue(item.at("/device/M/ok/BOOL").asBoolean());
+        assertEquals("1.5", item.at("/readings/L/0/N").asText());
+        assertEquals("x", item.at("/readings/L/1/S").asText());
+        assertTrue(item.at("/readings/L/2/NULL").asBoolean());
+    }
+
+    @Test
+    void aDynamoDbErrorActionKeepsEveryFailureInTheItem() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"sqs": {"queueUrl": "%s", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": {"dynamoDBv2": {"putItem": {"tableName": "rule-errors"}, "roleArn": "arn:aws:iam::000000000000:role/rule"}}}
+            """.formatted(QUEUE_URL));
+        queueIsMissing();
+
+        publish("{\"v\":1}");
+
+        JsonNode item = capturedDynamoDbItem("rule-errors");
+        assertEquals("metricsRule", item.at("/ruleName/S").asText());
+        assertEquals(TOPIC, item.at("/topic/S").asText());
+        assertEquals("SqsAction", item.at("/failures/L/0/M/failedAction/S").asText());
+        assertEquals(QUEUE_URL, item.at("/failures/L/0/M/failedResource/S").asText());
+        assertTrue(item.at("/failures/L/0/M/errorMessage/S").asText().contains("does not exist"));
     }
 }
