@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectImageCmd;
 import com.github.dockerjava.api.command.InspectImageResponse;
+import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.PullImageCmd;
 import com.github.dockerjava.api.command.PullImageResultCallback;
 import com.github.dockerjava.api.exception.DockerClientException;
@@ -10,6 +11,7 @@ import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.exception.UnauthorizedException;
+import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,7 +42,11 @@ class ImageCacheServiceTest {
         PullImageCmd pullImage = mock(PullImageCmd.class);
         PullImageResultCallback callback = mock(PullImageResultCallback.class);
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
-        when(inspectImage.exec()).thenThrow(new NotFoundException("image not found"));
+        when(inspectImage.exec()).thenThrow(new NotFoundException("image not found"))
+                .thenReturn(new InspectImageResponse()
+                        .withId("sha256:native")
+                        .withOs("linux")
+                        .withArch("amd64"));
         when(dockerClient.pullImageCmd(IMAGE)).thenReturn(pullImage);
         when(pullImage.withAuthConfig(any())).thenReturn(pullImage);
         when(pullImage.exec(any(PullImageResultCallback.class))).thenReturn(callback);
@@ -132,6 +139,71 @@ class ImageCacheServiceTest {
         assertEquals("sha256:amd64", amdImage);
         verify(pullImage).withPlatform("linux/arm64");
         verify(pullImage).withPlatform("linux/amd64");
+    }
+
+    @Test
+    void restoresDaemonDefaultImageAfterPlatformSpecificPull() throws Exception {
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectImageCmd inspectImage = mock(InspectImageCmd.class);
+        PullImageCmd pullImage = mock(PullImageCmd.class);
+        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
+        when(inspectImage.exec()).thenThrow(new NotFoundException("image not found"))
+                .thenReturn(new InspectImageResponse()
+                        .withId("sha256:arm64")
+                        .withOs("linux")
+                        .withArch("arm64"),
+                        new InspectImageResponse()
+                                .withId("sha256:arm64")
+                                .withOs("linux")
+                                .withArch("arm64"),
+                        new InspectImageResponse()
+                                .withId("sha256:amd64")
+                                .withOs("linux")
+                                .withArch("amd64"));
+        when(dockerClient.pullImageCmd(IMAGE)).thenReturn(pullImage);
+        when(pullImage.withAuthConfig(any())).thenReturn(pullImage);
+        when(pullImage.withPlatform("linux/arm64")).thenReturn(pullImage);
+        when(pullImage.exec(any(PullImageResultCallback.class))).thenReturn(callback);
+
+        ImageCacheService service = newService(dockerClient);
+        service.ensureImageExists(IMAGE, "linux/arm64");
+        service.ensureImageExists(IMAGE);
+
+        verify(pullImage, times(2)).exec(any(PullImageResultCallback.class));
+        verify(pullImage).withPlatform("linux/arm64");
+    }
+
+    @Test
+    void repullsPlatformImageWhenCachedImageWasRemoved() throws Exception {
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectImageCmd inspectImage = mock(InspectImageCmd.class);
+        InspectImageCmd inspectCachedImage = mock(InspectImageCmd.class);
+        PullImageCmd pullImage = mock(PullImageCmd.class);
+        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
+        when(dockerClient.inspectImageCmd("sha256:arm64-old")).thenReturn(inspectCachedImage);
+        when(inspectImage.exec()).thenReturn(
+                new InspectImageResponse()
+                        .withId("sha256:arm64-old")
+                        .withOs("linux")
+                        .withArch("arm64"),
+                new InspectImageResponse().withOs("linux").withArch("amd64"),
+                new InspectImageResponse()
+                        .withId("sha256:arm64-new")
+                        .withOs("linux")
+                        .withArch("arm64"));
+        when(inspectCachedImage.exec()).thenThrow(new NotFoundException("image was removed"));
+        when(dockerClient.pullImageCmd(IMAGE)).thenReturn(pullImage);
+        when(pullImage.withAuthConfig(any())).thenReturn(pullImage);
+        when(pullImage.withPlatform("linux/arm64")).thenReturn(pullImage);
+        when(pullImage.exec(any(PullImageResultCallback.class))).thenReturn(callback);
+
+        ImageCacheService service = newService(dockerClient);
+        assertEquals("sha256:arm64-old", service.ensureImageExists(IMAGE, "linux/arm64"));
+
+        assertEquals("sha256:arm64-new", service.ensureImageExists(IMAGE, "linux/arm64"));
+        verify(pullImage).exec(any(PullImageResultCallback.class));
     }
 
     @Test
@@ -234,6 +306,9 @@ class ImageCacheServiceTest {
     }
 
     private static ImageCacheService newService(DockerClient dockerClient) {
+        InfoCmd infoCmd = mock(InfoCmd.class);
+        when(dockerClient.infoCmd()).thenReturn(infoCmd);
+        when(infoCmd.exec()).thenReturn(new Info().withOsType("linux").withArchitecture("amd64"));
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig dockerConfig = mock(EmulatorConfig.DockerConfig.class);
         when(config.docker()).thenReturn(dockerConfig);

@@ -102,8 +102,8 @@ public class ContainerLifecycleManager {
      * @return the container ID
      */
     public String create(ContainerSpec spec) {
-        imageCacheService.ensureImageExists(spec.image());
-        return create(spec, spec.image(), null);
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image());
+        return create(spec, resolvedImage, null);
     }
 
     /**

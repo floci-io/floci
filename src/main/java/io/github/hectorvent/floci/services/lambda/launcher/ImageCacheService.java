@@ -7,12 +7,14 @@ import com.github.dockerjava.api.command.PullImageResultCallback;
 import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.model.AuthConfig;
+import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +35,7 @@ public class ImageCacheService {
     private final List<EmulatorConfig.DockerConfig.RegistryCredential> registryCredentials;
     private final Map<ImageKey, String> resolvedImages = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    private volatile String daemonPlatform;
 
     @Inject
     public ImageCacheService(DockerClient dockerClient, EmulatorConfig config) {
@@ -40,20 +43,21 @@ public class ImageCacheService {
         this.registryCredentials = config.docker().registryCredentials();
     }
 
-    public void ensureImageExists(String imageUri) {
-        ensureImageExists(imageUri, null);
+    public String ensureImageExists(String imageUri) {
+        return ensureImageExists(imageUri, null);
     }
 
     public String ensureImageExists(String imageUri, String platform) {
-        String requestedPlatform = platform == null || platform.isBlank() ? null : platform.trim();
+        boolean explicitPlatform = platform != null && !platform.isBlank();
+        String requestedPlatform = explicitPlatform ? platform.trim() : daemonPlatform();
         ImageKey imageKey = new ImageKey(imageUri, requestedPlatform);
-        String resolvedImage = resolvedImages.get(imageKey);
+        String resolvedImage = validResolvedImage(imageKey);
         if (resolvedImage != null) {
             return resolvedImage;
         }
         Object lock = locks.computeIfAbsent(imageUri, k -> new Object());
         synchronized (lock) {
-            resolvedImage = resolvedImages.get(imageKey);
+            resolvedImage = validResolvedImage(imageKey);
             if (resolvedImage != null) {
                 return resolvedImage;
             }
@@ -69,16 +73,14 @@ public class ImageCacheService {
                 runWithRetry(imageUri, MAX_PULL_ATTEMPTS, INITIAL_BACKOFF_MS, () -> {
                     PullImageCmd pullImage = dockerClient.pullImageCmd(imageUri)
                             .withAuthConfig(resolveAuth(imageUri));
-                    if (requestedPlatform != null) {
+                    if (explicitPlatform) {
                         pullImage.withPlatform(requestedPlatform);
                     }
                     pullImage.exec(new PullImageResultCallback())
                             .awaitCompletion(5, TimeUnit.MINUTES);
                 });
-                resolvedImage = requestedPlatform == null
-                        ? imageUri
-                        : resolvedImageReference(imageUri, requestedPlatform,
-                                inspectLocalImage(imageUri));
+                resolvedImage = resolvedImageReference(imageUri, requestedPlatform,
+                        inspectLocalImage(imageUri));
                 resolvedImages.put(imageKey, resolvedImage);
                 LOG.infov("Image pulled successfully: {0}", imageUri);
                 return resolvedImage;
@@ -147,6 +149,42 @@ public class ImageCacheService {
         }
     }
 
+    private String validResolvedImage(ImageKey imageKey) {
+        String resolvedImage = resolvedImages.get(imageKey);
+        if (resolvedImage == null) {
+            return null;
+        }
+        if (inspectLocalImage(resolvedImage) != null) {
+            return resolvedImage;
+        }
+        resolvedImages.remove(imageKey, resolvedImage);
+        return null;
+    }
+
+    private String daemonPlatform() {
+        String resolvedPlatform = daemonPlatform;
+        if (resolvedPlatform != null) {
+            return resolvedPlatform;
+        }
+        Info info = dockerClient.infoCmd().exec();
+        String architecture = info.getArchitecture();
+        if (architecture == null || architecture.isBlank()) {
+            throw new DockerClientException("Docker did not report its architecture");
+        }
+        String os = info.getOsType();
+        if (os == null || os.isBlank()) {
+            os = "linux";
+        }
+        String normalizedArchitecture = switch (architecture.toLowerCase(Locale.ROOT)) {
+            case "aarch64" -> "arm64";
+            case "x86_64" -> "amd64";
+            default -> architecture.toLowerCase(Locale.ROOT);
+        };
+        resolvedPlatform = os.toLowerCase(Locale.ROOT) + "/" + normalizedArchitecture;
+        daemonPlatform = resolvedPlatform;
+        return resolvedPlatform;
+    }
+
     private static boolean matchesPlatform(InspectImageResponse image, String platform) {
         if (image == null) {
             return false;
@@ -165,9 +203,6 @@ public class ImageCacheService {
         if (!matchesPlatform(image, platform)) {
             throw new DockerClientException(
                     "Docker image does not match requested platform " + platform + ": " + imageUri);
-        }
-        if (platform == null) {
-            return imageUri;
         }
         String imageId = image.getId();
         if (imageId == null || imageId.isBlank()) {

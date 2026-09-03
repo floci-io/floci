@@ -31,6 +31,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -66,6 +67,8 @@ class ContainerLifecycleManagerLabelsTest {
     void setUp() {
         lenient().when(config.docker()).thenReturn(dockerConfig);
         lenient().when(dockerConfig.resourceNamespace()).thenReturn(Optional.empty());
+        lenient().when(imageCacheService.ensureImageExists(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     @Test
@@ -115,6 +118,18 @@ class ContainerLifecycleManagerLabelsTest {
         verify(imageCacheService).ensureImageExists("busybox:stable", "linux/arm64");
         verify(dockerClient).createContainerCmd("sha256:arm64");
         verify(createCmd).withPlatform("linux/arm64");
+    }
+
+    @Test
+    void createUsesResolvedImageForDaemonDefaultPlatform() {
+        when(imageCacheService.ensureImageExists("busybox:stable"))
+                .thenReturn("sha256:native");
+        CreateContainerCmd createCmd = stubCreateContainer("sha256:native");
+
+        manager().create(new ContainerSpec("busybox:stable"));
+
+        verify(dockerClient).createContainerCmd("sha256:native");
+        verify(createCmd, never()).withPlatform(any());
     }
 
     @Test

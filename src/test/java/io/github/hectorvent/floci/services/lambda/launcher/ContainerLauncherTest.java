@@ -260,6 +260,23 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_usesAmd64DockerPlatformWhenArchitectureIsOmitted() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("default-architecture-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("default-architecture-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        assertEquals("linux/amd64", captureRealContainerPlatform());
+    }
+
+    @Test
     void launchFunction_keepsDaemonDefaultPlatformWhenArchitectureHonouringIsDisabled() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("native-platform-code"));
 
