@@ -80,18 +80,20 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
         return engine.resolve(props.get(name));
     }
 
-    /** Resolves an array property to its non-blank elements, or an empty list when absent. */
+    /**
+     * Resolves a list property to its non-blank elements, or an empty list when absent.
+     *
+     * <p>Routes through {@code engine.resolveStringList} so a list-valued intrinsic
+     * ({@code Fn::Split} / {@code Fn::GetAZs} / {@code Fn::Cidr}, including one selected by an
+     * {@code Fn::If}) expands to its real values instead of collapsing to a single comma-joined
+     * string — the shape CDK emits for cross-stack references (issue #2937). Kept in lockstep
+     * with the monolith helper the per-service provisioners were split from.
+     */
     public List<String> resolveStringList(JsonNode props, String name) {
-        List<String> values = new ArrayList<>();
-        if (props != null && props.has(name) && props.get(name).isArray()) {
-            for (JsonNode element : props.get(name)) {
-                String resolved = engine.resolve(element);
-                if (resolved != null && !resolved.isBlank()) {
-                    values.add(resolved);
-                }
-            }
+        if (props == null || !props.has(name)) {
+            return new ArrayList<>();
         }
-        return values;
+        return new ArrayList<>(engine.resolveStringList(props.get(name)));
     }
 
     /**
