@@ -60,6 +60,18 @@ import software.amazon.awssdk.services.iot.model.UpdateCertificateRequest;
 import software.amazon.awssdk.services.iot.model.UpdateThingRequest;
 import software.amazon.awssdk.services.iot.model.UpdateThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.VersionConflictException;
+import software.amazon.awssdk.services.iot.model.AuthorizerConfig;
+import software.amazon.awssdk.services.iot.model.CreateDomainConfigurationRequest;
+import software.amazon.awssdk.services.iot.model.DeleteDomainConfigurationRequest;
+import software.amazon.awssdk.services.iot.model.DescribeDomainConfigurationRequest;
+import software.amazon.awssdk.services.iot.model.DomainConfigurationStatus;
+import software.amazon.awssdk.services.iot.model.DomainConfigurationSummary;
+import software.amazon.awssdk.services.iot.model.DomainType;
+import software.amazon.awssdk.services.iot.model.InvalidRequestException;
+import software.amazon.awssdk.services.iot.model.ListDomainConfigurationsRequest;
+import software.amazon.awssdk.services.iot.model.ServerCertificateStatus;
+import software.amazon.awssdk.services.iot.model.ServiceType;
+import software.amazon.awssdk.services.iot.model.UpdateDomainConfigurationRequest;
 import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
 import software.amazon.awssdk.services.iotdataplane.model.DeleteConnectionRequest;
 import software.amazon.awssdk.services.iotdataplane.model.DeleteThingShadowRequest;
@@ -107,6 +119,96 @@ class IotTest {
                 .build());
 
         assertThat(response.endpointAddress()).isNotBlank();
+    }
+
+    @Test
+    void domainConfigurationLifecycle() {
+        String name = "java-iot-domain";
+        String certificateArn = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-1111-1111-1111-111111111111";
+        try {
+            iot.updateDomainConfiguration(UpdateDomainConfigurationRequest.builder()
+                    .domainConfigurationName(name)
+                    .domainConfigurationStatus(DomainConfigurationStatus.DISABLED)
+                    .build());
+            iot.deleteDomainConfiguration(DeleteDomainConfigurationRequest.builder().domainConfigurationName(name).build());
+        } catch (Exception ignored) {
+        }
+
+        assertThatThrownBy(() -> iot.describeDomainConfiguration(DescribeDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .build()))
+                .isInstanceOf(ResourceNotFoundException.class);
+
+        var created = iot.createDomainConfiguration(CreateDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .domainName("iot.java.example.com")
+                .serverCertificateArns(certificateArn)
+                .serviceType(ServiceType.DATA)
+                .authorizerConfig(AuthorizerConfig.builder()
+                        .defaultAuthorizerName("java-authorizer")
+                        .allowAuthorizerOverride(true)
+                        .build())
+                .tags(Tag.builder().key("env").value("java").build())
+                .build());
+        assertThat(created.domainConfigurationName()).isEqualTo(name);
+        assertThat(created.domainConfigurationArn())
+                .startsWith("arn:aws:iot:us-east-1:000000000000:domainconfiguration/" + name + "/");
+
+        assertThatThrownBy(() -> iot.createDomainConfiguration(CreateDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .domainName("iot.java.example.com")
+                .serverCertificateArns(certificateArn)
+                .build()))
+                .isInstanceOf(ResourceAlreadyExistsException.class);
+
+        var described = iot.describeDomainConfiguration(DescribeDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .build());
+        assertThat(described.domainConfigurationArn()).isEqualTo(created.domainConfigurationArn());
+        assertThat(described.domainName()).isEqualTo("iot.java.example.com");
+        assertThat(described.domainConfigurationStatus()).isEqualTo(DomainConfigurationStatus.ENABLED);
+        assertThat(described.serviceType()).isEqualTo(ServiceType.DATA);
+        assertThat(described.domainType()).isEqualTo(DomainType.CUSTOMER_MANAGED);
+        assertThat(described.serverCertificates()).hasSize(1);
+        assertThat(described.serverCertificates().get(0).serverCertificateArn()).isEqualTo(certificateArn);
+        assertThat(described.serverCertificates().get(0).serverCertificateStatus()).isEqualTo(ServerCertificateStatus.VALID);
+        assertThat(described.authorizerConfig().defaultAuthorizerName()).isEqualTo("java-authorizer");
+        assertThat(described.authorizerConfig().allowAuthorizerOverride()).isTrue();
+        assertThat(described.lastStatusChangeDate()).isNotNull();
+        assertThat(described.tlsConfig().securityPolicy()).isEqualTo("IoTSecurityPolicy_TLS13_1_2_2022_10");
+
+        var tags = iot.listTagsForResource(ListTagsForResourceRequest.builder()
+                .resourceArn(created.domainConfigurationArn())
+                .build());
+        assertThat(tags.tags()).extracting(Tag::key).contains("env");
+
+        var listed = iot.listDomainConfigurations(ListDomainConfigurationsRequest.builder()
+                .serviceType(ServiceType.DATA)
+                .build());
+        assertThat(listed.domainConfigurations())
+                .extracting(DomainConfigurationSummary::domainConfigurationName)
+                .contains(name);
+
+        assertThatThrownBy(() -> iot.deleteDomainConfiguration(DeleteDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .build()))
+                .isInstanceOf(InvalidRequestException.class);
+
+        var updated = iot.updateDomainConfiguration(UpdateDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .domainConfigurationStatus(DomainConfigurationStatus.DISABLED)
+                .build());
+        assertThat(updated.domainConfigurationArn()).isEqualTo(created.domainConfigurationArn());
+        assertThat(iot.describeDomainConfiguration(DescribeDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .build()).domainConfigurationStatus())
+                .isEqualTo(DomainConfigurationStatus.DISABLED);
+
+        iot.deleteDomainConfiguration(DeleteDomainConfigurationRequest.builder().domainConfigurationName(name).build());
+        assertThatThrownBy(() -> iot.describeDomainConfiguration(DescribeDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .build()))
+                .isInstanceOf(ResourceNotFoundException.class);
     }
 
     @Test
