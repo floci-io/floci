@@ -19,6 +19,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -198,6 +199,28 @@ class RuleSqlParserTest {
                 () -> RuleSqlParser.parse("SELECT * FROM 'a/b' WHERE level = 99999999999999999999999"));
 
         assertEquals("99999999999999999999999", failure.token());
+    }
+
+    @Test
+    void acceptsAStatementExactlyOnTheTokenLimit() {
+        String sql = "SELECT * FROM 'a/b' WHERE a = 'x'" + " AND a = 'x'".repeat(248);
+
+        assertEquals(1000, tokenCount(sql));
+        assertNotNull(RuleSqlParser.parse(sql).where());
+    }
+
+    @Test
+    void rejectsAStatementPastTheTokenLimitNamingARealToken() {
+        String sql = "SELECT * FROM 'a/b' WHERE a = 'x'" + " AND a = 'x'".repeat(249);
+
+        RuleSqlParseException failure = assertThrows(RuleSqlParseException.class, () -> RuleSqlParser.parse(sql));
+
+        assertFalse(failure.token().isEmpty(), "The reported token must be a real token, not the end of input");
+    }
+
+    /** Mirrors the parser's tokenizer closely enough to pin the boundary the limit is checked against. */
+    private static int tokenCount(String sql) {
+        return 5 + 3 + 4 * (sql.split(" AND ", -1).length - 1);
     }
 
     @Test
