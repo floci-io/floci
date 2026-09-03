@@ -1,14 +1,19 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Extracts the DynamoDB IAM condition keys - {@code dynamodb:LeadingKeys},
@@ -51,13 +56,15 @@ public final class DynamoDbConditionKeys {
                 addLeadingKey(leadingKeys, item, pkName);
             }
             case "dynamodb:Query" -> {
+                String indexName = textOrNull(body.get("IndexName"));
+                String queryPkName = partitionKeyName(table, indexName);
                 String value = DynamoDbKeyConditionParser.partitionKeyEqualityValue(
                         textOrNull(body.get("KeyConditionExpression")),
                         body.get("ExpressionAttributeNames"),
                         body.get("ExpressionAttributeValues"),
-                        pkName);
+                        queryPkName);
                 if (value == null) {
-                    value = legacyKeyConditionEqualityValue(body.get("KeyConditions"), pkName);
+                    value = legacyKeyConditionEqualityValue(body.get("KeyConditions"), queryPkName);
                 }
                 if (value != null) {
                     leadingKeys.add(value);
@@ -105,7 +112,7 @@ public final class DynamoDbConditionKeys {
         addAttributesToGet(attributes, body.get("AttributesToGet"));
         addProjectionAttributes(attributes, textOrNull(body.get("ProjectionExpression")),
                 body.get("ExpressionAttributeNames"));
-        addUpdateExpressionTargets(attributes, textOrNull(body.get("UpdateExpression")),
+        addUpdateExpressionAttributes(attributes, textOrNull(body.get("UpdateExpression")),
                 body.get("ExpressionAttributeNames"));
         addExpressionAttributeNameValues(attributes, body.get("ExpressionAttributeNames"));
 
@@ -116,6 +123,11 @@ public final class DynamoDbConditionKeys {
         addExpressionAttributes(attributes, textOrNull(body.get("KeyConditionExpression")), exprAttrNames);
         addExpressionAttributes(attributes, textOrNull(body.get("FilterExpression")), exprAttrNames);
         addExpressionAttributes(attributes, textOrNull(body.get("ConditionExpression")), exprAttrNames);
+
+        // Legacy map forms naming attributes being read or updated.
+        addAttributeNames(attributes, body.get("AttributeUpdates"));
+        addAttributeNames(attributes, body.get("Expected"));
+        addAttributeNames(attributes, body.get("ScanFilter"));
 
         return new Result(List.copyOf(leadingKeys), List.copyOf(attributes),
                 textOrNull(body.get("Select")));
@@ -131,10 +143,37 @@ public final class DynamoDbConditionKeys {
     // -- Helpers -----------------------------------------------------------------
 
     private static String partitionKeyName(TableDefinition table) {
-        if (table == null || table.getKeySchema() == null) {
+        return partitionKeyName(table, null);
+    }
+
+    private static String partitionKeyName(TableDefinition table, String indexName) {
+        if (table == null) {
             return null;
         }
-        return table.getKeySchema().stream()
+        if (indexName != null) {
+            if (table.getGlobalSecondaryIndexes() != null) {
+                for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+                    if (indexName.equals(gsi.getIndexName())) {
+                        return hashKeyName(gsi.getKeySchema());
+                    }
+                }
+            }
+            if (table.getLocalSecondaryIndexes() != null) {
+                for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
+                    if (indexName.equals(lsi.getIndexName())) {
+                        return hashKeyName(lsi.getKeySchema());
+                    }
+                }
+            }
+        }
+        return hashKeyName(table.getKeySchema());
+    }
+
+    private static String hashKeyName(List<KeySchemaElement> schema) {
+        if (schema == null) {
+            return null;
+        }
+        return schema.stream()
                 .filter(key -> "HASH".equals(key.getKeyType()))
                 .map(KeySchemaElement::getAttributeName)
                 .findFirst()
@@ -215,57 +254,33 @@ public final class DynamoDbConditionKeys {
         });
     }
 
+    private static final Set<String> UPDATE_EXPRESSION_KEYWORDS = Set.of(
+            "set", "remove", "add", "delete", "if_not_exists", "list_append"
+    );
+    private static final Pattern UPDATE_EXPRESSION_ATTRIBUTE_PATTERN =
+            Pattern.compile("(?<![.#a-zA-Z0-9_:'\"])(#?[a-zA-Z_][a-zA-Z0-9_]*)");
+
     /**
-     * Top-level attribute names an UpdateExpression writes. Splits on the four clause
-     * keywords, then on commas, and keeps the first path segment of each target. Aliases are
-     * resolved through ExpressionAttributeNames.
+     * Top-level attribute names an UpdateExpression reads or writes. Captures LHS targets of
+     * SET/REMOVE/ADD/DELETE and RHS operands (such as attributes in arithmetic, list_append,
+     * or if_not_exists).
      */
-    private static void addUpdateExpressionTargets(Set<String> attributes, String updateExpression,
-                                                   JsonNode exprAttrNames) {
+    private static void addUpdateExpressionAttributes(Set<String> attributes, String updateExpression,
+                                                      JsonNode exprAttrNames) {
         if (updateExpression == null || updateExpression.isBlank()) {
             return;
         }
-        String[] clauses = updateExpression.split("(?i)\\b(SET|REMOVE|ADD|DELETE)\\b");
-        for (String clause : clauses) {
-            for (String assignment : clause.split(",")) {
-                String target = assignment.trim();
-                if (target.isEmpty()) {
-                    continue;
-                }
-                int equals = target.indexOf('=');
-                if (equals >= 0) {
-                    target = target.substring(0, equals).trim();
-                }
-                // ADD / DELETE take "path value"; keep only the path.
-                int space = target.indexOf(' ');
-                if (space > 0) {
-                    target = target.substring(0, space);
-                }
-                String name = firstPathSegment(target);
-                if (name == null) {
-                    continue;
-                }
-                if (name.startsWith("#") && exprAttrNames != null && exprAttrNames.has(name)) {
-                    attributes.add(exprAttrNames.get(name).asText());
-                } else if (!name.startsWith("#") && !name.startsWith(":")) {
-                    attributes.add(name);
-                }
+        Matcher matcher = UPDATE_EXPRESSION_ATTRIBUTE_PATTERN.matcher(updateExpression);
+        while (matcher.find()) {
+            String token = matcher.group(1);
+            if (UPDATE_EXPRESSION_KEYWORDS.contains(token.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            String resolved = resolveAlias(token, exprAttrNames);
+            if (resolved != null && !resolved.startsWith("#")) {
+                attributes.add(resolved);
             }
         }
-    }
-
-    private static String firstPathSegment(String path) {
-        int cut = path.length();
-        int dot = path.indexOf('.');
-        int bracket = path.indexOf('[');
-        if (dot >= 0) {
-            cut = Math.min(cut, dot);
-        }
-        if (bracket >= 0) {
-            cut = Math.min(cut, bracket);
-        }
-        String segment = path.substring(0, cut).trim();
-        return segment.isEmpty() ? null : segment;
     }
 
     /** The EQ value a legacy {@code KeyConditions} map pins the partition key to, or {@code null}. */

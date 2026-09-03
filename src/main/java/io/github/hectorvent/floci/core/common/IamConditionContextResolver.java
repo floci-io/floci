@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Builds the IAM request context — the condition keys a policy's Condition block can match —
+ * Builds the IAM request context: the condition keys a policy's Condition block can match,
  * for the request currently being enforced.
  */
 @ApplicationScoped
@@ -78,8 +78,8 @@ public class IamConditionContextResolver {
      * Populates {@code dynamodb:LeadingKeys}, {@code dynamodb:Attributes} and
      * {@code dynamodb:Select} from the buffered request body.
      *
-     * <p>A key that cannot be resolved — unknown table, a Key that omits the partition
-     * attribute, an unparseable KeyConditionExpression — is omitted rather than guessed. A
+     * <p>A key that cannot be resolved (unknown table, a Key that omits the partition
+     * attribute, an unparseable KeyConditionExpression) is omitted rather than guessed. A
      * policy scoping access through the missing key then does not match, so the request is
      * denied: a request that cannot be proven in scope is treated as out of scope.
      */

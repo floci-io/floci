@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -10,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -240,5 +243,118 @@ class DynamoDbConditionKeysTest {
 
         assertTrue(result.attributes().contains("email"), result.attributes().toString());
         assertTrue(result.attributes().contains("nickname"), result.attributes().toString());
+    }
+
+    @Test
+    void queryAgainstGsiResolvesGsiPartitionKeyAsLeadingKey() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex();
+        gsi.setIndexName("EmailGSI");
+        gsi.setKeySchema(List.of(
+                new KeySchemaElement("GSI_PK", "HASH"),
+                new KeySchemaElement("GSI_SK", "RANGE")));
+        table.setGlobalSecondaryIndexes(List.of(gsi));
+
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:Query",
+                json("""
+                    {"TableName":"FgacTable",
+                     "IndexName":"EmailGSI",
+                     "KeyConditionExpression":"GSI_PK = :email",
+                     "ExpressionAttributeValues":{":email":{"S":"alice@example.com"}}}"""),
+                table);
+
+        assertEquals(List.of("alice@example.com"), result.leadingKeys());
+        assertTrue(result.attributes().contains("GSI_PK"), result.attributes().toString());
+    }
+
+    @Test
+    void queryAgainstLsiResolvesTablePartitionKeyAsLeadingKey() {
+        LocalSecondaryIndex lsi = new LocalSecondaryIndex();
+        lsi.setIndexName("CreatedLSI");
+        lsi.setKeySchema(List.of(
+                new KeySchemaElement("PK", "HASH"),
+                new KeySchemaElement("CreatedAt", "RANGE")));
+        table.setLocalSecondaryIndexes(List.of(lsi));
+
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:Query",
+                json("""
+                    {"TableName":"FgacTable",
+                     "IndexName":"CreatedLSI",
+                     "KeyConditionExpression":"PK = :pk",
+                     "ExpressionAttributeValues":{":pk":{"S":"USER_alice"}}}"""),
+                table);
+
+        assertEquals(List.of("USER_alice"), result.leadingKeys());
+        assertTrue(result.attributes().contains("PK"), result.attributes().toString());
+    }
+
+    @Test
+    void updateItemExposesReadOperandsAndTargetsFromUpdateExpression() {
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:UpdateItem",
+                json("""
+                    {"TableName":"FgacTable",
+                     "Key":{"PK":{"S":"USER_alice"},"SK":{"S":"profile"}},
+                     "UpdateExpression":"SET total = price + :tax, history = list_append(oldHistory, :entry), city = if_not_exists(fallbackCity, :def) REMOVE oldFlag, tags[0] ADD score :pts DELETE categories :cat",
+                     "ExpressionAttributeValues":{":tax":{"N":"5"},":entry":{"S":"login"},":def":{"S":"HN"},":pts":{"N":"1"},":cat":{"SS":["old"]}}}"""),
+                table);
+
+        assertEquals(List.of("USER_alice"), result.leadingKeys());
+        assertTrue(result.attributes().contains("total"), result.attributes().toString());
+        assertTrue(result.attributes().contains("price"), result.attributes().toString());
+        assertTrue(result.attributes().contains("history"), result.attributes().toString());
+        assertTrue(result.attributes().contains("oldHistory"), result.attributes().toString());
+        assertTrue(result.attributes().contains("city"), result.attributes().toString());
+        assertTrue(result.attributes().contains("fallbackCity"), result.attributes().toString());
+        assertTrue(result.attributes().contains("oldFlag"), result.attributes().toString());
+        assertTrue(result.attributes().contains("tags"), result.attributes().toString());
+        assertTrue(result.attributes().contains("score"), result.attributes().toString());
+        assertTrue(result.attributes().contains("categories"), result.attributes().toString());
+    }
+
+    @Test
+    void updateItemDoesNotExposeNestedAttributeNamesAsTopLevelAttributes() {
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:UpdateItem",
+                json("""
+                    {"TableName":"FgacTable",
+                     "Key":{"PK":{"S":"USER_alice"}},
+                     "UpdateExpression":"SET #a.subfield = :v, nested[0].detail = :d",
+                     "ExpressionAttributeNames":{"#a":"actualTop"},
+                     "ExpressionAttributeValues":{":v":{"S":"val"},":d":{"S":"detail"}}}"""),
+                table);
+
+        assertTrue(result.attributes().contains("actualTop"), result.attributes().toString());
+        assertTrue(result.attributes().contains("nested"), result.attributes().toString());
+        assertFalse(result.attributes().contains("subfield"), result.attributes().toString());
+        assertFalse(result.attributes().contains("detail"), result.attributes().toString());
+    }
+
+    @Test
+    void legacyAttributeUpdatesAndExpectedAreExposedAsAttributes() {
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:UpdateItem",
+                json("""
+                    {"TableName":"FgacTable",
+                     "Key":{"PK":{"S":"USER_alice"}},
+                     "AttributeUpdates":{"status":{"Action":"PUT","Value":{"S":"active"}}},
+                     "Expected":{"version":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}"""),
+                table);
+
+        assertTrue(result.attributes().contains("status"), result.attributes().toString());
+        assertTrue(result.attributes().contains("version"), result.attributes().toString());
+    }
+
+    @Test
+    void scanExposesLegacyScanFilterAttributes() {
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:Scan",
+                json("""
+                    {"TableName":"FgacTable",
+                     "ScanFilter":{"inStock":{"ComparisonOperator":"EQ","AttributeValueList":[{"BOOL":true}]}}}"""),
+                table);
+
+        assertTrue(result.attributes().contains("inStock"), result.attributes().toString());
     }
 }

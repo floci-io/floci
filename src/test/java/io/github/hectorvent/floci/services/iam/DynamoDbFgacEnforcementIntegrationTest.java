@@ -106,6 +106,56 @@ class DynamoDbFgacEnforcementIntegrationTest {
                 .body(containsString("AccessDeniedException"));
     }
 
+    @Test
+    void leadingKeysScopedSessionQueriesGsiByItsOwnPartitionKeyAndIsDeniedAnother() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String tableName = "fgac-gsi-" + suffix;
+        String roleName = "FgacGsiRole" + suffix;
+
+        createTableWithGsi(tableName, "TenantGSI");
+        putItemWithGsiKey(tableName, "item-1", "USER_alice");
+        putItemWithGsiKey(tableName, "item-2", "USER_bob");
+        createRole(roleName);
+        putBroadDynamoDbRolePolicy(roleName);
+
+        String accessKeyId = assumeRoleWithLeadingKeysSessionPolicy(roleName);
+
+        // In scope: query targets GSI partition key matching USER_alice*.
+        given()
+                .header("Authorization", auth(accessKeyId, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.Query")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                    {"TableName":"%s",
+                     "IndexName":"TenantGSI",
+                     "KeyConditionExpression":"GSI_PK = :gsi",
+                     "ExpressionAttributeValues":{":gsi":{"S":"USER_alice"}}}"""
+                        .formatted(tableName))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("Count", equalTo(1))
+                .body("Items[0].PK.S", equalTo("item-1"));
+
+        // Out of scope: query targets GSI partition key of another tenant.
+        given()
+                .header("Authorization", auth(accessKeyId, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.Query")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                    {"TableName":"%s",
+                     "IndexName":"TenantGSI",
+                     "KeyConditionExpression":"GSI_PK = :gsi",
+                     "ExpressionAttributeValues":{":gsi":{"S":"USER_bob"}}}"""
+                        .formatted(tableName))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(403)
+                .body(containsString("AccessDeniedException"));
+    }
+
     private static void createTable(String tableName) {
         given()
                 .header("Authorization", auth(ROLE_ACCOUNT_ID, "dynamodb"))
@@ -131,6 +181,47 @@ class DynamoDbFgacEnforcementIntegrationTest {
                 .body("""
                     {"TableName":"%s","Item":{"PK":{"S":"%s"},"email":{"S":"x@y.z"}}}"""
                         .formatted(tableName, partitionKey))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+    }
+
+    private static void createTableWithGsi(String tableName, String indexName) {
+        given()
+                .header("Authorization", auth(ROLE_ACCOUNT_ID, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                    {"TableName":"%s",
+                     "KeySchema":[{"AttributeName":"PK","KeyType":"HASH"}],
+                     "AttributeDefinitions":[
+                       {"AttributeName":"PK","AttributeType":"S"},
+                       {"AttributeName":"GSI_PK","AttributeType":"S"}
+                     ],
+                     "GlobalSecondaryIndexes":[
+                       {
+                         "IndexName":"%s",
+                         "KeySchema":[{"AttributeName":"GSI_PK","KeyType":"HASH"}],
+                         "Projection":{"ProjectionType":"ALL"}
+                       }
+                     ],
+                     "BillingMode":"PAY_PER_REQUEST"}"""
+                        .formatted(tableName, indexName))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+    }
+
+    private static void putItemWithGsiKey(String tableName, String partitionKey, String gsiKey) {
+        given()
+                .header("Authorization", auth(ROLE_ACCOUNT_ID, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                    {"TableName":"%s","Item":{"PK":{"S":"%s"},"GSI_PK":{"S":"%s"},"email":{"S":"x@y.z"}}}"""
+                        .formatted(tableName, partitionKey, gsiKey))
         .when()
                 .post("/")
         .then()
