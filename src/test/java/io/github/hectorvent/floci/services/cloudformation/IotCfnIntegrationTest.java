@@ -52,7 +52,7 @@ class IotCfnIntegrationTest {
                     "PolicyName": "%s",
                     "PolicyDocument": {
                       "Version": "2012-10-17",
-                      "Statement": [{"Effect": "Allow", "Action": "%s", "Resource": "*"}]
+                      "Statement": [{"Effect": "Allow", "Action": "%s", "Resource": "arn:aws:iot:us-east-1:000000000000:client/${iot:Connection.Thing.ThingName}"}]
                     },
                     "Tags": [{"Key": "stack", "Value": "%s"}]
                   }
@@ -126,7 +126,8 @@ class IotCfnIntegrationTest {
             .statusCode(200)
             .body("policyArn", equalTo(policyArn))
             .body("defaultVersionId", equalTo("1"))
-            .body("policyDocument", containsString("iot:Connect"));
+            .body("policyDocument", containsString("iot:Connect"))
+            .body("policyDocument", containsString("${iot:Connection.Thing.ThingName}"));
         assertTagValue(policyArn, "v1");
         given()
         .when()
