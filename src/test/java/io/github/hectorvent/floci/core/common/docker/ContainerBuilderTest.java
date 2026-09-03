@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +53,20 @@ class ContainerBuilderTest {
                 .build();
 
         assertEquals("avoxx-network", spec.networkMode());
+    }
+
+    @Test
+    void withNetworkIpv4AddressRecordsStaticDockerAddress() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withDockerNetwork(Optional.of("test-network"))
+                .withNetworkIpv4Address("172.20.0.20")
+                .build();
+
+        assertEquals("test-network", spec.networkMode());
+        assertEquals("172.20.0.20", spec.networkIpv4Address());
+        assertTrue(spec.hasNetworkIpv4Address());
     }
 
     @Test

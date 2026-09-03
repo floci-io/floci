@@ -75,6 +75,13 @@ public class Cluster {
     private int hostPort;
 
     /**
+     * Floci-only runtime settings. Persisted by EksService's companion store rather than this
+     * AWS response model, which is serialized directly by DescribeCluster.
+     */
+    @JsonIgnore
+    private EksClusterRuntimeConfig runtimeConfig;
+
+    /**
      * Resolved Docker container/volume name for this cluster's k3s resources. In-memory only
      * (never part of the AWS response shape): assigned when the container is started, or
      * re-resolved deterministically from surviving Docker resources on restore.
@@ -145,6 +152,9 @@ public class Cluster {
 
     public List<EncryptionConfig> getEncryptionConfig() { return encryptionConfig; }
     public void setEncryptionConfig(List<EncryptionConfig> encryptionConfig) { this.encryptionConfig = encryptionConfig; }
+
+    public EksClusterRuntimeConfig getRuntimeConfig() { return runtimeConfig; }
+    public void setRuntimeConfig(EksClusterRuntimeConfig runtimeConfig) { this.runtimeConfig = runtimeConfig; }
 
     public String getDockerName() { return dockerName; }
     public void setDockerName(String dockerName) { this.dockerName = dockerName; }
