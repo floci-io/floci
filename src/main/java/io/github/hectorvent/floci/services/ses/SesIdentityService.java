@@ -232,7 +232,7 @@ public class SesIdentityService {
         } else {
             identity.getNotificationAttributes().remove(notificationType + "Topic");
         }
-        save(identity, region);
+        identityStore.put(identityKey(region, identityValue), identity);
     }
 
     public Identity getIdentityNotificationAttributes(String identityValue, String region) {
@@ -245,7 +245,7 @@ public class SesIdentityService {
                         "Identity " + identityValue
                                 + " is invalid. Must be a verified email address or domain.", 400));
         identity.setFeedbackForwardingEnabled(enabled);
-        save(identity, region);
+        identityStore.put(identityKey(region, identityValue), identity);
         LOG.infov("Updated feedback forwarding for {0}: enabled={1}", identityValue, enabled);
     }
 
@@ -266,7 +266,7 @@ public class SesIdentityService {
                         "Identity " + identityValue
                                 + " is invalid. It must be a verified email address or domain.", 400));
         identity.getHeadersInNotificationsEnabled().put(notificationType, enabled);
-        save(identity, region);
+        identityStore.put(identityKey(region, identityValue), identity);
         LOG.infov("Updated headers-in-notifications for {0}: {1}={2}",
                 identityValue, notificationType, enabled);
     }
@@ -335,7 +335,7 @@ public class SesIdentityService {
         // Route53 lookup in refreshIdentityState), not the enabled flag, matching real AWS, where
         // SetIdentityDkimEnabled / PutEmailIdentityDkimAttributes leave the verification status alone.
         identity.setDkimEnabled(signingEnabled);
-        save(identity, region);
+        identityStore.put(identityKey(region, identityValue), identity);
         LOG.infov("Updated DKIM attributes for {0}: signingEnabled={1}", identityValue, signingEnabled);
     }
 
@@ -392,7 +392,7 @@ public class SesIdentityService {
         if (!hasDkimTokens(identity)) {
             regenerateDkimTokens(identity);
         }
-        save(identity, region);
+        identityStore.put(identityKey(region, domain), identity);
         LOG.infov("VerifyDomainDkim: {0} (region {1})", domain, region);
         return identity.getDkimTokens();
     }
@@ -439,7 +439,7 @@ public class SesIdentityService {
             LOG.infov("PutEmailIdentityDkimSigningAttributes(AWS_SES): {0} keyLength={1}",
                     identityValue, nextKeyLength);
         }
-        save(refreshIdentityState(identity, region), region);
+        identityStore.put(identityKey(region, identityValue), refreshIdentityState(identity, region));
         Identity src = effectiveDkimSource(identity, region);
         return new DkimSigningResult(src.getDkimVerificationStatus(),
                 src.getDkimTokens() == null ? List.of() : src.getDkimTokens());
