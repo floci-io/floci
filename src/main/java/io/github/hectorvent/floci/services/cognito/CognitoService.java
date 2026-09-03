@@ -464,9 +464,36 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException",
                     "User pool cannot be deleted. It has a domain configured that should be deleted first.", 400);
         }
+        // Every record the pool owns goes with it. On AWS a pool id is never reused, so the
+        // question does not arise; here floci:override-id makes ids caller-chosen and therefore
+        // reusable, and anything left behind is inherited by the next pool pinned to the same id.
+        // Orphaned users keep their password hashes and orphaned clients keep their secrets.
         String prefix = id + "::";
         groupStore.scan(k -> k.startsWith(prefix))
                 .forEach(g -> groupStore.delete(groupKey(id, g.getGroupName())));
+        userStore.scan(k -> k.startsWith(prefix))
+                .forEach(u -> userStore.delete(userKey(id, u.getUsername())));
+        resourceServerStore.scan(k -> k.startsWith(prefix))
+                .forEach(rs -> resourceServerStore.delete(resourceServerKey(id, rs.getIdentifier())));
+        // Clients are keyed by client id alone, so they are found by their userPoolId field.
+        listUserPoolClients(id).forEach(c -> clientStore.delete(c.getClientId()));
+        // Revoked tokens are keyed revoked:{poolId}:{jti}, and a jti may itself contain a colon
+        // (global revocations use global:{username}), so the prefix cannot be bounded by the
+        // separator alone. Pool ids are caller-chosen and may also contain a colon, which would
+        // let this prefix match a live pool whose id extends this one and reinstate its revoked
+        // tokens. The record's own userPoolId settles ownership. Keys are collected before
+        // deleting so the backing key set is not modified while it is being iterated.
+        String revokedPrefix = "revoked:" + id + ":";
+        revokedTokenStore.keys().stream()
+                .filter(k -> k.startsWith(revokedPrefix))
+                .filter(k -> revokedTokenStore.get(k)
+                        .map(t -> id.equals(t.getUserPoolId()))
+                        .orElse(false))
+                .toList()
+                .forEach(revokedTokenStore::delete);
+        if (verificationCodeService != null) {
+            verificationCodeService.invalidateForPool(id);
+        }
         // Same lock as the provider mutations: a create or update that interleaves with
         // this cascade would otherwise reinstate a provider for a pool that is going away.
         synchronized (identityProviderLock) {

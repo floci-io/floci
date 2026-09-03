@@ -132,6 +132,37 @@ class VerificationCodeServiceTest {
             VerificationCode.Purpose.PASSWORD_RESET, resetCode));
     }
 
+    @Test
+    void invalidateForPool_removesOnlyThatPoolsCodes() {
+        service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        String otherCode = service.issue("other", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+
+        service.invalidateForPool("pool");
+
+        assertThrows(VerificationCodeException.class, () -> service.consume("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "000000"));
+        assertDoesNotThrow(() -> service.consume("other", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, otherCode));
+    }
+
+    @Test
+    void invalidateForPool_sparesPoolWhoseIdExtendsThisOne() {
+        // floci:override-id lets a caller pin an id containing a colon, so "pool:child" is a
+        // distinct live pool whose storage keys share the "pool:" prefix of the pool being deleted.
+        service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        String childCode = service.issue("pool:child", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+
+        service.invalidateForPool("pool");
+
+        assertDoesNotThrow(() -> service.consume("pool:child", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, childCode),
+            "deleting pool must not invalidate a code issued by pool:child");
+    }
+
     static final class MutableClock extends Clock {
         private Instant now;
         MutableClock(Instant start) { this.now = start; }

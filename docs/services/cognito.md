@@ -6,7 +6,7 @@
 Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth token endpoint, so local clients can mint and validate Cognito-like access tokens against RS256 signing keys.
 
 `CreateUserPool` supports overiding several values using user-pool tags **only** at creation time:
-* `floci:override-id`, to pin the resulting `UserPool.Id`. 
+* `floci:override-id`, to pin the resulting `UserPool.Id`. Because a pinned id is caller-chosen it can be reused, which AWS never does. `DeleteUserPool` therefore deletes everything the pool owns (users, groups, app clients, resource servers, revoked token records and outstanding verification codes) so a pool recreated on the same id starts empty rather than inheriting the deleted pool's password hashes and client secrets.
 * `floci:override-cognito-client-id`
   * set to `use-name` to use the client name as client ID.
   * set to `append-to-name:-somestring` to append a string to the client name to be used as client ID.
@@ -27,7 +27,7 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 | DescribeUserPool | Returns the stored user pool configuration. |
 | ListUserPools | Lists local user pools visible in the request region. |
 | UpdateUserPool | Updates mutable user pool settings and persisted user-pool tags. |
-| DeleteUserPool | Deletes a local user pool and its related state. |
+| DeleteUserPool | Deletes a local user pool and everything it owns: users, groups, app clients, resource servers, revoked tokens and verification codes. Refused with `InvalidParameterException` while a domain is still configured. |
 
 ### User Pool Tags
 
