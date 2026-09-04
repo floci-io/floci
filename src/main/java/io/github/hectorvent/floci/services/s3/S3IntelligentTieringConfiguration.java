@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -23,6 +24,10 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
     private static final List<String> STATUSES = List.of("Enabled", "Disabled");
     private static final List<String> ACCESS_TIERS = List.of("ARCHIVE_ACCESS", "DEEP_ARCHIVE_ACCESS");
 
+    private static final int ARCHIVE_ACCESS_MIN_DAYS = 90;
+    private static final int DEEP_ARCHIVE_ACCESS_MIN_DAYS = 180;
+    private static final int MAX_DAYS = 730;
+
     /** AWS reports a body that does not match the published schema this way. */
     private static AwsException malformed() {
         return new AwsException("MalformedXML",
@@ -31,17 +36,17 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
 
     /**
      * AWS reports a {@code Days} value outside the tier-specific allowed range this way: the XML
-     * is well-formed, but the value is semantically invalid. Minimums are tier-specific (90 for
-     * ARCHIVE_ACCESS, 180 for DEEP_ARCHIVE_ACCESS) and both are capped at 730. The response
-     * carries {@code ArgumentName} and {@code ArgumentValue} so the SDK can surface which input
-     * was rejected, matching the real S3 error shape.
+     * is well-formed, but the value is semantically invalid. Minimums are tier-specific
+     * ({@link #ARCHIVE_ACCESS_MIN_DAYS} for ARCHIVE_ACCESS, {@link #DEEP_ARCHIVE_ACCESS_MIN_DAYS}
+     * for DEEP_ARCHIVE_ACCESS) and both are capped at {@link #MAX_DAYS}. The response carries
+     * {@code ArgumentName} and {@code ArgumentValue} so the SDK can surface which input was
+     * rejected, matching the real S3 error shape.
      */
-    private static AwsException daysOutOfRange(String accessTier, int days) {
-        int min = "DEEP_ARCHIVE_ACCESS".equals(accessTier) ? 180 : 90;
+    private static AwsException daysOutOfRange(String accessTier, int min, int days) {
         String message = days < min
                 ? "Days must be at least " + min + " for AccessTier " + accessTier + "."
-                : "Days must be at most 730 for AccessTier " + accessTier + ".";
-        Map<String, Object> detail = new java.util.LinkedHashMap<>();
+                : "Days must be at most " + MAX_DAYS + " for AccessTier " + accessTier + ".";
+        Map<String, Object> detail = new LinkedHashMap<>();
         detail.put("ArgumentName", "Tiering.Days");
         detail.put("ArgumentValue", String.valueOf(days));
         return new AwsException("InvalidArgument", message, 400, detail);
@@ -146,7 +151,8 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
     /**
      * Serializes the {@code index}-th {@code Tiering} entry. Each tiering is an access tier and a
      * positive day count, and both are required. Days must also fall in the tier-specific range
-     * AWS enforces: 90-730 for ARCHIVE_ACCESS and 180-730 for DEEP_ARCHIVE_ACCESS.
+     * AWS enforces: {@link #ARCHIVE_ACCESS_MIN_DAYS}-{@link #MAX_DAYS} for ARCHIVE_ACCESS and
+     * {@link #DEEP_ARCHIVE_ACCESS_MIN_DAYS}-{@link #MAX_DAYS} for DEEP_ARCHIVE_ACCESS.
      */
     private static String tieringXml(String xml, int index) {
         List<Map<String, String>> entries = XmlParser.extractGroups(xml, "Tiering");
@@ -174,9 +180,9 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
         }
         // Beyond well-formedness, AWS enforces a tier-specific range. A value outside it is
         // semantically invalid, not malformed, so AWS answers InvalidArgument.
-        int min = "DEEP_ARCHIVE_ACCESS".equals(accessTier) ? 180 : 90;
-        if (dayCount < min || dayCount > 730) {
-            throw daysOutOfRange(accessTier, dayCount);
+        int min = "DEEP_ARCHIVE_ACCESS".equals(accessTier) ? DEEP_ARCHIVE_ACCESS_MIN_DAYS : ARCHIVE_ACCESS_MIN_DAYS;
+        if (dayCount < min || dayCount > MAX_DAYS) {
+            throw daysOutOfRange(accessTier, min, dayCount);
         }
         return new XmlBuilder()
                 .elem("AccessTier", accessTier)
