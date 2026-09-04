@@ -1235,13 +1235,30 @@ public class LambdaService implements ResourceProvider {
         return criteria;
     }
 
+    /** Match-array operators {@code PipesFilterMatcher} implements, with the operand shape each accepts. */
+    private static final Set<String> SUPPORTED_FILTER_OPERATORS =
+            Set.of("prefix", "suffix", "equals-ignore-case", "anything-but", "exists", "numeric");
+
+    /** Operators AWS documents that the matcher does not implement, rejected with a clearer message. */
+    private static final Set<String> UNIMPLEMENTED_FILTER_OPERATORS = Set.of("cidr", "wildcard");
+
+    /** Comparisons {@code matchesNumericFilter} understands. Anything else evaluates false for every record. */
+    private static final Set<String> NUMERIC_COMPARISONS = Set.of("=", ">", ">=", "<", "<=");
+
     /**
      * Validates the recursive shape of an EventBridge filter pattern: every field value must be either a
      * non-empty match array (a leaf) or a nested object (recursed into). A scalar or empty-array value is a
      * pattern the matcher can never satisfy, so, with enforcement active, it would silently drop every
-     * record; reject it at create/update instead. Operator names inside a match array are intentionally not
-     * allowlisted here: that would couple this validator to {@code PipesFilterMatcher}'s operator set, and an
-     * unknown operator is a documented deviation rather than a create-time rejection.
+     * record; reject it at create/update instead.
+     *
+     * <p>Match-array elements are validated against the operator set the matcher implements. This does couple
+     * the validator to {@code PipesFilterMatcher}, which is deliberate: now that the pollers enforce filters,
+     * a pattern the matcher cannot satisfy is destructive rather than inert. A bad operand silently corrupts
+     * delivery instead of erroring, and the failure direction is not even consistent. {@code
+     * {"numeric":[">","abc"]}} coerces its operand to zero and matches every positive value, {@code
+     * {"numeric":[">"]}} matches every record because the comparison loop never runs, and an unknown operator
+     * matches nothing, so every record is checkpointed past or deleted. Failing at create/update is the only
+     * point where the caller can still act on it.
      */
     private static void validatePatternStructure(JsonNode node) {
         for (Map.Entry<String, JsonNode> entry : node.properties()) {
@@ -1251,11 +1268,117 @@ public class LambdaService implements ResourceProvider {
                     throw new AwsException("InvalidParameterValueException",
                             "Filter Pattern field '" + entry.getKey() + "' must have a non-empty match array", 400);
                 }
+                for (JsonNode element : value) {
+                    validateMatchElement(entry.getKey(), element);
+                }
             } else if (value.isObject()) {
                 validatePatternStructure(value);
             } else {
                 throw new AwsException("InvalidParameterValueException",
                         "Filter Pattern field '" + entry.getKey() + "' must be an array or object", 400);
+            }
+        }
+    }
+
+    /**
+     * A match-array element is either a literal the matcher compares directly (string, number, or null for
+     * "absent") or a single-operator object. Two operators in one object is rejected because the matcher
+     * tests them in a fixed order and silently honours only the first.
+     */
+    private static void validateMatchElement(String field, JsonNode element) {
+        if (element.isTextual() || element.isNumber() || element.isNull()) {
+            return;
+        }
+        if (!element.isObject()) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' has an invalid match value: expected a string, number, null, or an operator object", 400);
+        }
+        List<String> operators = new ArrayList<>();
+        element.fieldNames().forEachRemaining(operators::add);
+        if (operators.size() != 1) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' must carry exactly one operator per match element, found " + operators.size(), 400);
+        }
+        String op = operators.get(0);
+        JsonNode operand = element.get(op);
+        if (UNIMPLEMENTED_FILTER_OPERATORS.contains(op)) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' uses operator '" + op + "', which Floci does not implement", 400);
+        }
+        if (!SUPPORTED_FILTER_OPERATORS.contains(op)) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' uses unknown operator '" + op + "'", 400);
+        }
+        switch (op) {
+            case "prefix", "suffix", "equals-ignore-case" -> requireTextual(field, op, operand);
+            case "exists" -> {
+                if (!operand.isBoolean()) {
+                    throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                            + "' operator 'exists' requires true or false", 400);
+                }
+            }
+            case "anything-but" -> validateAnythingBut(field, operand);
+            case "numeric" -> validateNumeric(field, operand);
+            default -> throw new IllegalStateException("unreachable operator " + op);
+        }
+    }
+
+    private static void requireTextual(String field, String op, JsonNode operand) {
+        if (!operand.isTextual()) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' operator '" + op + "' requires a string operand", 400);
+        }
+    }
+
+    /** {@code anything-but} accepts a string, a non-empty array of strings/numbers, or a nested prefix. */
+    private static void validateAnythingBut(String field, JsonNode operand) {
+        if (operand.isTextual()) {
+            return;
+        }
+        if (operand.isArray()) {
+            if (operand.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                        + "' operator 'anything-but' requires a non-empty array", 400);
+            }
+            for (JsonNode v : operand) {
+                if (!v.isTextual() && !v.isNumber()) {
+                    throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                            + "' operator 'anything-but' accepts only strings and numbers", 400);
+                }
+            }
+            return;
+        }
+        if (operand.isObject()) {
+            List<String> inner = new ArrayList<>();
+            operand.fieldNames().forEachRemaining(inner::add);
+            if (inner.size() == 1 && "prefix".equals(inner.get(0))) {
+                requireTextual(field, "anything-but prefix", operand.get("prefix"));
+                return;
+            }
+        }
+        throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                + "' operator 'anything-but' requires a string, a non-empty array, or {\"prefix\": \"...\"}", 400);
+    }
+
+    /**
+     * {@code numeric} is a flat sequence of comparison/operand pairs. An odd length leaves a trailing
+     * comparison the matcher never evaluates, which makes the whole element match every record.
+     */
+    private static void validateNumeric(String field, JsonNode operand) {
+        if (!operand.isArray() || operand.isEmpty() || operand.size() % 2 != 0) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' operator 'numeric' requires comparison/value pairs, for example [\">\", 5]", 400);
+        }
+        for (int i = 0; i < operand.size(); i += 2) {
+            JsonNode comparison = operand.get(i);
+            if (!comparison.isTextual() || !NUMERIC_COMPARISONS.contains(comparison.asText())) {
+                throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                        + "' operator 'numeric' has an invalid comparison at index " + i
+                        + ": expected one of =, >, >=, <, <=", 400);
+            }
+            if (!operand.get(i + 1).isNumber()) {
+                throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                        + "' operator 'numeric' requires a numeric value at index " + (i + 1), 400);
             }
         }
     }

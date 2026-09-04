@@ -49,6 +49,87 @@ class LambdaEsmFilterCriteriaValidationTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    // ──────────── match-element grammar (operator names, arity, operand types) ────────────
+
+    /**
+     * The three shapes that silently corrupted delivery before this validation existed. Each is a
+     * pattern the matcher cannot satisfy as written, and the failure direction differs per shape:
+     * a string operand coerced to zero so every positive value matched, an odd-length array skipped
+     * the comparison loop so every record matched, and an unknown comparison matched nothing so every
+     * record was checkpointed past or deleted.
+     */
+    @Test
+    void malformedNumericOperatorIsRejected() {
+        assertRejected(filtersReq("{\"value\":[{\"numeric\":[\">\",\"abc\"]}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"numeric\":[\">\"]}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"numeric\":[\"~\",3]}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"numeric\":[]}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"numeric\":\">5\"}]}"));
+    }
+
+    @Test
+    void validNumericOperatorIsAccepted() {
+        assertNotNull(LambdaService.parseFilterCriteria(
+                filtersReq("{\"value\":[{\"numeric\":[\">\",5]}]}"), MAPPER));
+        assertNotNull(LambdaService.parseFilterCriteria(
+                filtersReq("{\"value\":[{\"numeric\":[\">=\",1,\"<\",10]}]}"), MAPPER));
+    }
+
+    @Test
+    void unknownOperatorIsRejected() {
+        assertRejected(filtersReq("{\"value\":[{\"frobnicate\":[1]}]}"));
+    }
+
+    /** AWS documents these, the matcher does not implement them, so they fail loudly rather than drop records. */
+    @Test
+    void operatorAwsSupportsButFlociDoesNotIsRejected() {
+        assertRejected(filtersReq("{\"source\":[{\"cidr\":[\"10.0.0.0/8\"]}]}"));
+        assertRejected(filtersReq("{\"source\":[{\"wildcard\":[\"a*b\"]}]}"));
+    }
+
+    /** The matcher tests operators in a fixed order and honours only the first, so two is ambiguous. */
+    @Test
+    void multipleOperatorsInOneElementIsRejected() {
+        assertRejected(filtersReq("{\"value\":[{\"prefix\":\"a\",\"suffix\":\"z\"}]}"));
+        assertRejected(filtersReq("{\"value\":[{}]}"));
+    }
+
+    @Test
+    void wrongOperandTypeIsRejected() {
+        assertRejected(filtersReq("{\"value\":[{\"prefix\":5}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"suffix\":[\"z\"]}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"equals-ignore-case\":true}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"exists\":\"true\"}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"anything-but\":[]}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"anything-but\":[true]}]}"));
+        assertRejected(filtersReq("{\"value\":[{\"anything-but\":{\"suffix\":\"z\"}}]}"));
+    }
+
+    @Test
+    void supportedOperatorsAndLiteralsAreAccepted() {
+        assertNotNull(LambdaService.parseFilterCriteria(filtersReq(
+                "{\"a\":[\"literal\",5,null],"
+                + "\"b\":[{\"prefix\":\"p\"}],"
+                + "\"c\":[{\"suffix\":\"s\"}],"
+                + "\"d\":[{\"equals-ignore-case\":\"Q\"}],"
+                + "\"e\":[{\"exists\":false}],"
+                + "\"f\":[{\"anything-but\":\"x\"}],"
+                + "\"g\":[{\"anything-but\":[1,\"y\"]}],"
+                + "\"h\":[{\"anything-but\":{\"prefix\":\"z\"}}]}"), MAPPER));
+    }
+
+    /** Nested objects still recurse, so a malformed operator is caught at any depth. */
+    @Test
+    void malformedOperatorIsRejectedWhenNested() {
+        assertRejected(filtersReq("{\"body\":{\"inner\":[{\"numeric\":[\">\",\"abc\"]}]}}"));
+    }
+
+    /** A boolean literal is not a match value the matcher compares, so it can never match. */
+    @Test
+    void booleanLiteralMatchValueIsRejected() {
+        assertRejected(filtersReq("{\"value\":[true]}"));
+    }
+
     // ──────────── accepted ────────────
 
     @Test

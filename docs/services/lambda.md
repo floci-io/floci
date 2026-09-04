@@ -802,14 +802,28 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 !!! note "Supported operators"
     Filtering reuses Floci's shared EventBridge matcher (the same one EventBridge
-    Pipes uses). It supports exact match, `prefix`, `suffix`, `equals-ignore-case`,
-    `exists`, `anything-but` (string, array, including numeric arrays, or
-    `prefix`), and numeric operators. Known deviations from AWS, shared with Pipes:
-    boolean literals; event-value array intersection (matching when the record's
-    own field is itself an array and any element satisfies the pattern); and a
-    bare non-array numeric `anything-but` (wrap the number in an array,
-    `{"anything-but":[400]}`, to filter on it). Patterns using only the supported
-    operators behave as on AWS.
+    Pipes uses). It supports exact match on a string, number or `null`, plus
+    `prefix`, `suffix`, `equals-ignore-case`, `exists`, `anything-but` (a string,
+    a non-empty array of strings and numbers, or a nested `prefix`), and `numeric`
+    comparison/value pairs using `=`, `>`, `>=`, `<`, `<=`. Patterns using only
+    these behave as on AWS.
+
+    A pattern is validated at `CreateEventSourceMapping` and
+    `UpdateEventSourceMapping` and rejected with `InvalidParameterValueException`
+    when the matcher could not satisfy it: an unknown operator, an operator AWS
+    documents that Floci does not implement (`cidr`, `wildcard`), more than one
+    operator in a single match element, a boolean literal, a wrong operand type,
+    or a malformed `numeric` sequence such as an odd-length array or a
+    non-numeric value. This is stricter than AWS, which accepts several of these.
+    The trade is deliberate: the pollers checkpoint past (Kinesis, DynamoDB) or
+    delete (SQS) any record a pattern fails to match, so a pattern that cannot
+    match destroys records rather than being inert, and create time is the last
+    point at which the caller can still act on it.
+
+    One matcher deviation remains and is not a validation error, because it
+    depends on the record rather than the pattern: event-value array intersection,
+    where AWS matches when the record's own field is itself an array and any
+    element satisfies the pattern, and Floci does not.
 
 !!! warning "Direct Lambda API only"
     `FilterCriteria` is carried only by the direct Lambda
