@@ -218,9 +218,10 @@ statement with `SqlParseException` instead, the way AWS does. It is `false` by d
 
 Current limitations:
 
-- Not evaluated: `clientid()`, `timestamp()`, `accountid()`, `principal()`, `newuuid()`, `encode()`,
-  `get_thing_shadow()`, arithmetic, array indexing, `IN`, `IS NULL`, `CASE`, and `${}` substitution
-  templates in action fields. A rule using any of them takes the unparsed path described above.
+- Not evaluated: `clientid()`, `timestamp()`, `accountid()`, `principal()`, `newuuid()`, `isNull()`,
+  `isUndefined()`, `encode()`, `get_thing_shadow()`, arithmetic, array indexing, `IN`, `CASE`, and
+  `${}` substitution templates in action fields. A rule using any of them takes the unparsed path
+  described above.
 - `awsIotSqlVersion` in the rule payload is neither stored nor echoed back. The versions differ in
   how `SELECT *` treats arrays, which Floci does not model.
 - Less common AWS IoT rule action types are follow-up scope.
