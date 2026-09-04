@@ -554,7 +554,20 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaFunction updateFunctionCode(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
-        functionName = fn.getFunctionName();
+        // publishVersion copies roughly thirty fields off this same live object. Without the
+        // updaters holding the lock it copies under, an update landing mid-copy yields a snapshot
+        // that is part old code and part new configuration, carrying a sourceRevisionId that
+        // identifies neither state (issue #3007). The monitor is reentrant and per function ARN, so
+        // the nested acquisitions further down, and publishVersion's own when Publish is set, are
+        // no-ops rather than a second lock.
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            return updateFunctionCodeLocked(region, fn, request);
+        }
+    }
+
+    private LambdaFunction updateFunctionCodeLocked(String region, LambdaFunction fn,
+                                                    Map<String, Object> request) {
+        String functionName = fn.getFunctionName();
 
         String zipFileBase64 = (String) request.get("ZipFile");
         String imageUri = (String) request.get("ImageUri");
@@ -602,6 +615,16 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
+        // Same reason as updateFunctionCode: publishVersion's snapshot copy must not observe a
+        // half-applied configuration change (issue #3007).
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            return updateFunctionConfigurationLocked(region, fn, request);
+        }
+    }
+
+    private LambdaFunction updateFunctionConfigurationLocked(String region, LambdaFunction fn,
+                                                             Map<String, Object> request) {
+        String functionName = fn.getFunctionName();
 
         // Validated before any field mutation below, not inline where Layers is applied further
         // down - fn is the live object backing this store entry (InMemoryStorage#get returns the
@@ -1403,7 +1426,8 @@ public class LambdaService implements ResourceProvider {
         // delete, persisting a snapshot.codeLocalPath (below) that names a directory about to
         // be removed as unreferenced.
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
-            // Inside the lock UpdateFunctionCode takes, so the hash cannot be checked against one
+            // Inside the lock UpdateFunctionCode and UpdateFunctionConfiguration now take, so the
+            // hash cannot be checked against one
             // version of $LATEST and the snapshot then taken from another. Checking it outside
             // would let an overlapping deploy publish code the caller never authorised.
             // No isBlank() exclusion here. A present but empty value was previously treated as
