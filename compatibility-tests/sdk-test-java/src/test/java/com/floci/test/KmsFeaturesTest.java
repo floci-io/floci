@@ -8,6 +8,9 @@ import software.amazon.awssdk.services.kms.model.DisabledException;
 import software.amazon.awssdk.services.kms.model.EncryptionAlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.GetKeyPolicyResponse;
 import software.amazon.awssdk.services.kms.model.IncorrectKeyException;
+import software.amazon.awssdk.services.kms.model.InvalidKeyUsageException;
+import software.amazon.awssdk.services.kms.model.KeySpec;
+import software.amazon.awssdk.services.kms.model.KeyUsageType;
 import software.amazon.awssdk.services.kms.model.KmsInvalidStateException;
 import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
 
@@ -24,8 +27,9 @@ import static org.assertj.core.api.Assertions.*;
  *   #DescribeKey — Returns proper EncryptionAlgorithms, SigningAlgorithms, and MacAlgorithms
  *   #1844 — Decrypt enforces KeyId against the wrapping CMK (IncorrectKeyException)
  *   #1844 — ReEncrypt enforces SourceKeyId against the wrapping CMK (IncorrectKeyException)
+ *   #3024: Encrypt/Decrypt apply real RSAES-OAEP for RSA keys
  */
-@DisplayName("KMS features (#258 #259 #269 #1844)")
+@DisplayName("KMS features (#258 #259 #269 #1844 #3024)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class KmsFeaturesTest {
 
@@ -380,6 +384,85 @@ class KmsFeaturesTest {
                             .ciphertextBlob(ciphertext)
                             .keyId(keyId))
             ).isInstanceOf(KmsInvalidStateException.class);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    // ── Issue #3024: Encrypt/Decrypt apply real RSAES-OAEP for RSA keys ──────
+
+    @Test
+    @Order(70)
+    void rsaOaepEncryptDecryptRoundTrip() {
+        var keyId = kms.createKey(b -> b
+                        .keyUsage(KeyUsageType.ENCRYPT_DECRYPT)
+                        .keySpec(KeySpec.RSA_2048))
+                .keyMetadata().keyId();
+
+        try {
+            var encrypted = kms.encrypt(b -> b
+                    .keyId(keyId)
+                    .plaintext(SdkBytes.fromString("secret payload", StandardCharsets.UTF_8))
+                    .encryptionAlgorithm(EncryptionAlgorithmSpec.RSAES_OAEP_SHA_256));
+
+            assertThat(encrypted.ciphertextBlob().asByteArray()).hasSize(256);
+            assertThat(encrypted.encryptionAlgorithm()).isEqualTo(EncryptionAlgorithmSpec.RSAES_OAEP_SHA_256);
+
+            var decrypted = kms.decrypt(b -> b
+                    .keyId(keyId)
+                    .ciphertextBlob(encrypted.ciphertextBlob())
+                    .encryptionAlgorithm(EncryptionAlgorithmSpec.RSAES_OAEP_SHA_256));
+
+            assertThat(decrypted.plaintext().asUtf8String()).isEqualTo("secret payload");
+            assertThat(decrypted.encryptionAlgorithm()).isEqualTo(EncryptionAlgorithmSpec.RSAES_OAEP_SHA_256);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(71)
+    void decryptAcceptsRsaOaepCiphertextMadeWithGetPublicKey() throws Exception {
+        var keyId = kms.createKey(b -> b
+                        .keyUsage(KeyUsageType.ENCRYPT_DECRYPT)
+                        .keySpec(KeySpec.RSA_2048))
+                .keyMetadata().keyId();
+
+        try {
+            var publicKeyDer = kms.getPublicKey(b -> b.keyId(keyId)).publicKey().asByteArray();
+            var publicKey = java.security.KeyFactory.getInstance("RSA")
+                    .generatePublic(new java.security.spec.X509EncodedKeySpec(publicKeyDer));
+            var cipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding");
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
+                    "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256,
+                    javax.crypto.spec.PSource.PSpecified.DEFAULT));
+            var localCiphertext = cipher.doFinal("secret payload".getBytes(StandardCharsets.UTF_8));
+
+            var decrypted = kms.decrypt(b -> b
+                    .keyId(keyId)
+                    .ciphertextBlob(SdkBytes.fromByteArray(localCiphertext))
+                    .encryptionAlgorithm(EncryptionAlgorithmSpec.RSAES_OAEP_SHA_256));
+
+            assertThat(decrypted.plaintext().asUtf8String()).isEqualTo("secret payload");
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    @Test
+    @Order(72)
+    void rsaEncryptWithDefaultAlgorithmRaisesInvalidKeyUsage() {
+        var keyId = kms.createKey(b -> b
+                        .keyUsage(KeyUsageType.ENCRYPT_DECRYPT)
+                        .keySpec(KeySpec.RSA_2048))
+                .keyMetadata().keyId();
+
+        try {
+            assertThatThrownBy(
+                    () -> kms.encrypt(b -> b
+                            .keyId(keyId)
+                            .plaintext(SdkBytes.fromString("secret payload", StandardCharsets.UTF_8)))
+            ).isInstanceOf(InvalidKeyUsageException.class);
         } finally {
             kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
         }
