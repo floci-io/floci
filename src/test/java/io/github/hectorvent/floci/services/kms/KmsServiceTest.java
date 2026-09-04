@@ -1152,7 +1152,7 @@ class KmsServiceTest {
         }
 
         @Test
-        void generateDataKeyWithSignVerifyKeyNamesGenerateDataKey() {
+        void generateDataKeyWithSignVerifyKeyThrowsInvalidKeyUsage() {
             KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
 
             AwsException ex = assertThrows(AwsException.class, () ->
