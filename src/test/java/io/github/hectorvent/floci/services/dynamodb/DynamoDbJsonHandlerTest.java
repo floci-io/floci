@@ -613,4 +613,147 @@ class DynamoDbJsonHandlerTest {
                         && "ValidationException".equals(awsError.getErrorCode())),
                 () -> assertEquals(1, describedIndexes.size()));
     }
+
+    // Request validation for AWS parity: real DynamoDB rejects each of these with a
+    // ValidationException (paritysuite dynamodb-conformance tier1).
+
+    private JsonNode json(String body) {
+        try {
+            return mapper.readTree(body);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private AwsException expectValidationException(String action, JsonNode request) {
+        var ex = assertThrows(AwsException.class, () -> handler.handle(action, request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        return ex;
+    }
+
+    @Test
+    void createTableRejectsProvisionedThroughputWithPayPerRequest() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "PprTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: Neither ReadCapacityUnits nor "
+                + "WriteCapacityUnits can be specified when BillingMode is PAY_PER_REQUEST", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsGsiIncludeProjectionWithoutNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "GsiIncTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsLsiIncludeProjectionWithoutNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "LsiIncTable",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "lsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "lsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "lsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsKeysOnlyProjectionCarryingNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "KeysOnlyTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": ["x"]}
+                    }]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is KEYS_ONLY, but NonKeyAttributes is specified", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsStreamViewTypeWithStreamEnabledFalse() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "StreamFalseTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "StreamSpecification": {"StreamEnabled": false, "StreamViewType": "NEW_AND_OLD_IMAGES"}
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "StreamViewType cannot be specified when StreamEnabled is false", ex.getMessage());
+    }
+
+    @Test
+    void scanRejectsTotalSegmentsAboveTheMaximum() {
+        var ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Segment": 0, "TotalSegments": 1000001}
+                """));
+        assertEquals("1 validation error detected: Value '1000001' at 'totalSegments' failed to "
+                + "satisfy constraint: Member must have value less than or equal to 1000000", ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsExpressionAttributeNamesWithNoExpression() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateItem", json("""
+                {
+                    "TableName": "Users",
+                    "Key": {"userId": {"S": "u1"}},
+                    "ExpressionAttributeNames": {"#s": "status"}
+                }
+                """));
+        assertEquals("ExpressionAttributeNames can only be specified when using expressions: "
+                + "UpdateExpression is null, ConditionExpression is null", ex.getMessage());
+    }
 }

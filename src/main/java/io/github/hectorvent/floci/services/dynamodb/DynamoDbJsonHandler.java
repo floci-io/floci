@@ -143,6 +143,7 @@ public class DynamoDbJsonHandler {
                         nonKeyAttributes.add(nonKeyAttr.asText());
                     }
                 }
+                validateProjectionSpec(projectionType, nonKeyAttributes);
                 GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                 JsonNode gsiPt = gsiNode.path("ProvisionedThroughput");
                 if (!gsiPt.isMissingNode()) {
@@ -178,6 +179,7 @@ public class DynamoDbJsonHandler {
                 if (!lsiNonKeyAttrArray.isMissingNode() && lsiNonKeyAttrArray.isArray()) {
                     lsiNonKeyAttrArray.forEach(a -> lsiNonKeyAttributes.add(a.asText()));
                 }
+                validateProjectionSpec(projectionType, lsiNonKeyAttributes);
                 lsis.add(new LocalSecondaryIndex(indexName, lsiKeySchema, null, projectionType, lsiNonKeyAttributes));
             }
         }
@@ -195,6 +197,20 @@ public class DynamoDbJsonHandler {
         String sseType = sseEnabled ? sseSpec.path("SSEType").asText(SSE_TYPE_KMS) : null;
         if (sseEnabled) {
             validateSseType(sseType);
+        }
+
+        if ("PAY_PER_REQUEST".equals(billingMode) && !pt.isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Neither ReadCapacityUnits nor WriteCapacityUnits "
+                    + "can be specified when BillingMode is PAY_PER_REQUEST", 400);
+        }
+
+        JsonNode streamSpecCheck = request.path("StreamSpecification");
+        if (streamSpecCheck.isObject() && !streamSpecCheck.path("StreamEnabled").asBoolean(false)
+                && streamSpecCheck.hasNonNull("StreamViewType")) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: StreamViewType cannot be specified "
+                    + "when StreamEnabled is false", 400);
         }
 
         TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,
@@ -268,6 +284,20 @@ public class DynamoDbJsonHandler {
                     "1 validation error detected: Value '" + sseType
                     + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [AES256, KMS]", 400);
+        }
+    }
+
+    // INCLUDE requires the NonKeyAttributes list; every other projection type forbids it.
+    private static void validateProjectionSpec(String projectionType, List<String> nonKeyAttributes) {
+        if ("INCLUDE".equals(projectionType) && nonKeyAttributes.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: "
+                    + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", 400);
+        }
+        if (!"INCLUDE".equals(projectionType) && !nonKeyAttributes.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: "
+                    + "ProjectionType is " + projectionType + ", but NonKeyAttributes is specified", 400);
         }
     }
 
@@ -568,6 +598,11 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
         }
+
+        // EAN/EAV with no expression to reference them, mirroring the PutItem guard.
+        rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
+                updateExpression != null || conditionExpression != null,
+                "UpdateExpression is null, ConditionExpression is null");
 
         ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
@@ -993,6 +1028,12 @@ public class DynamoDbJsonHandler {
         if (totalSegments != null && segment == null) {
             throw new AwsException("ValidationException",
                     "The Segment parameter is required but was not present in the request when parameter TotalSegments is present", 400);
+        }
+        if (totalSegments != null && totalSegments > 1_000_000) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + totalSegments
+                    + "' at 'totalSegments' failed to satisfy constraint: "
+                    + "Member must have value less than or equal to 1000000", 400);
         }
         if (segment != null && totalSegments != null && segment >= totalSegments) {
             throw new AwsException("ValidationException",
