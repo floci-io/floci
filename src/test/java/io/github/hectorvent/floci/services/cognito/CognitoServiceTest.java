@@ -1468,6 +1468,20 @@ class CognitoServiceTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    @Test
+    void confirmSignUpNamesDeletedUserPoolInResourceNotFoundMessage() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "test-client", false, false, List.of(), List.of());
+        service.deleteUserPool(pool.getId());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.confirmSignUp(client.getClientId(), "carol", "123456"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("User pool " + pool.getId() + " does not exist.", ex.getMessage());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
     @ParameterizedTest
     @CsvSource({"email_verified", "phone_number_verified"})
     @SuppressWarnings("unchecked")
@@ -1854,9 +1868,12 @@ class CognitoServiceTest {
 
     @Test
     void adminGetUserRejectsUnknownPoolWithResourceNotFound() {
+        String missingPoolId = "us-east-1_missing";
+
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.adminGetUser("us-east-1_missing", "bob"));
+                () -> service.adminGetUser(missingPoolId, "bob"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("User pool " + missingPoolId + " does not exist.", ex.getMessage());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -1948,6 +1965,43 @@ class CognitoServiceTest {
 
         List<CognitoUser> result = service.listUsers(pool.getId(), "email = \"nobody@example.com\"");
         assertTrue(result.isEmpty());
+    }
+
+    // =========================================================================
+    // Issue #2952 - listUsers/listUserPoolClients against an absent user pool
+    // =========================================================================
+
+    @Test
+    void listUsersAgainstAnAbsentUserPoolFails() {
+        // listUsers scanned by a "{poolId}::" prefix without ever touching poolStore, so an
+        // absent pool was indistinguishable from an empty one. list-groups and
+        // list-resource-servers already resolve the pool and are correct; this brought
+        // list-users in line with them.
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.listUsers("us-east-1_nonexistent", null));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void listUserPoolClientsAgainstAnAbsentUserPoolFails() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.listUserPoolClients("us-east-1_nonexistent"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void listUsersAgainstAnExistingEmptyPoolStillReturnsEmpty() {
+        // The existence check must not turn a real, merely-empty pool into an error.
+        UserPool pool = service.createUserPool(Map.of("PoolName", "EmptyPool"), "us-east-1");
+
+        assertTrue(service.listUsers(pool.getId(), null).isEmpty());
+    }
+
+    @Test
+    void listUserPoolClientsAgainstAnExistingEmptyPoolStillReturnsEmpty() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "EmptyPool"), "us-east-1");
+
+        assertTrue(service.listUserPoolClients(pool.getId()).isEmpty());
     }
 
     /** Signs a hand-crafted {@code poolId|username|clientId|issuedAt|nonce} payload the same way buildRefreshToken does. */

@@ -113,6 +113,11 @@ than rejecting names a partial catalogue happens to be missing, which would refu
 AWS accepts. `DescribeCacheParameters` returns those parameters; a request for `system` or
 `engine-default` parameters returns none, and listings are unpaged.
 
+A replication group that names a parameter group is refused with `CacheParameterGroupNotFound` when
+no such group exists, and a parameter group still referenced by a replication group cannot be
+deleted: `DeleteCacheParameterGroup` answers `InvalidCacheParameterGroupState` until that
+replication group is gone.
+
 ## Configuration
 
 | Variable | Default | Description |

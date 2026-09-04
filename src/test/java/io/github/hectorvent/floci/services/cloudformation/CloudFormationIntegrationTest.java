@@ -4403,7 +4403,8 @@ class CloudFormationIntegrationTest {
                     "FunctionName": { "Ref": "MyFunction" },
                     "EventSourceArn": { "Fn::GetAtt": ["MyQueue", "Arn"] },
                     "Enabled": true,
-                    "BatchSize": 5
+                    "BatchSize": 5,
+                    "FunctionResponseTypes": ["ReportBatchItemFailures"]
                   }
                 }
               }
@@ -4456,6 +4457,15 @@ class CloudFormationIntegrationTest {
 
         JsonNode esmList = OBJECT_MAPPER.readTree(esmJson);
         String esmUuid = esmList.path("EventSourceMappings").get(0).path("UUID").asText();
+
+        // github.com/floci-io/floci/issues/2848: the CloudFormation path never read
+        // FunctionResponseTypes, so a CFN-provisioned mapping always came back with an empty
+        // list even though the template declared it and the direct CreateEventSourceMapping API
+        // path already honored it.
+        JsonNode responseTypes = esmList.path("EventSourceMappings").get(0).path("FunctionResponseTypes");
+        assertTrue(responseTypes.isArray() && responseTypes.size() == 1
+                        && "ReportBatchItemFailures".equals(responseTypes.get(0).asText()),
+                "expected FunctionResponseTypes to carry through from the template but was: " + responseTypes);
 
         // 5. Delete stack and verify ESM is gone
         given()

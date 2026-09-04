@@ -42,7 +42,13 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         String topicName = ctx.resolveOptional(props, "TopicName");
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         if (topicName == null || topicName.isBlank()) {
-            topicName = ctx.generatePhysicalName(r.getLogicalId(), TOPIC_NAME_MAX_LENGTH, false);
+            // ctx.stablePhysicalName does not fit here: the physical id is the topic ARN, so the
+            // prior name comes from the attribute recorded at create time. Reusing it keeps an
+            // unnamed topic (and its subscriptions) across updates instead of orphaning it.
+            String priorName = r.getAttributes().get("TopicName");
+            topicName = priorName != null && !priorName.isBlank()
+                    ? priorName
+                    : ctx.generatePhysicalName(r.getLogicalId(), TOPIC_NAME_MAX_LENGTH, false);
         }
 
         Map<String, String> attributes = new HashMap<>();

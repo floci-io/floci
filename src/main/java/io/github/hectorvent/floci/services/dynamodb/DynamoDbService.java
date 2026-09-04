@@ -1613,6 +1613,54 @@ public class DynamoDbService implements ResourceProvider {
         return table.getTags() != null ? table.getTags() : Map.of();
     }
 
+    /** Result of a successful GetResourcePolicy call: the raw policy document and its revision id. */
+    public record ResourcePolicyResult(String policy, String revisionId) {}
+
+    public String putResourcePolicy(String resourceArn, String policy, String expectedRevisionId, String region) {
+        TableDefinition table = findTableByArn(resourceArn, region);
+        if (expectedRevisionId != null
+                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
+            throw new AwsException("PolicyNotFoundException",
+                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+        }
+        String revisionId = UUID.randomUUID().toString();
+        table.setResourcePolicy(policy);
+        table.setResourcePolicyRevisionId(revisionId);
+        String storageKey = regionKey(region, table.getTableName());
+        tableStore.put(storageKey, table);
+        LOG.debugv("Put resource policy: {0}", resourceArn);
+        return revisionId;
+    }
+
+    public ResourcePolicyResult getResourcePolicy(String resourceArn, String region) {
+        TableDefinition table = findTableByArn(resourceArn, region);
+        if (table.getResourcePolicy() == null) {
+            throw new AwsException("PolicyNotFoundException",
+                    "No resource policy found for: " + resourceArn, 400);
+        }
+        return new ResourcePolicyResult(table.getResourcePolicy(), table.getResourcePolicyRevisionId());
+    }
+
+    public String deleteResourcePolicy(String resourceArn, String expectedRevisionId, String region) {
+        TableDefinition table = findTableByArn(resourceArn, region);
+        if (table.getResourcePolicy() == null) {
+            throw new AwsException("PolicyNotFoundException",
+                    "No resource policy found for: " + resourceArn, 400);
+        }
+        if (expectedRevisionId != null
+                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
+            throw new AwsException("PolicyNotFoundException",
+                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+        }
+        String revisionId = table.getResourcePolicyRevisionId();
+        table.setResourcePolicy(null);
+        table.setResourcePolicyRevisionId(null);
+        String storageKey = regionKey(region, table.getTableName());
+        tableStore.put(storageKey, table);
+        LOG.debugv("Deleted resource policy: {0}", resourceArn);
+        return revisionId;
+    }
+
     private TableDefinition findTableByArn(String arn, String region) {
         String prefix = region + "::";
         return tableStore.scan(k -> k.startsWith(prefix)).stream()
@@ -2866,7 +2914,8 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private AwsException resourceNotFoundException(String tableName) {
-        return new AwsException("ResourceNotFoundException", "Requested resource not found", 400);
+        return new AwsException("ResourceNotFoundException",
+                "Requested resource not found: Table: " + tableName + " not found", 400);
     }
 
     public record UpdateResult(JsonNode newItem, JsonNode oldItem) {}

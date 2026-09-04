@@ -355,7 +355,7 @@ public class SesController {
                 throw new AwsException("BadRequestException",
                         "EXTERNAL origin requires DomainSigningSelector and DomainSigningPrivateKey.", 400);
             }
-            SesService.DkimSigningResult result = sesService.putDkimSigningAttributes(
+            SesIdentityService.DkimSigningResult result = sesService.putDkimSigningAttributes(
                     emailIdentity, origin, selector, nextKeyLength, region);
             ObjectNode out = objectMapper.createObjectNode();
             out.put("DkimStatus", toV2Status(result.dkimStatus()));

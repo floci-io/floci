@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecr;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
@@ -28,6 +29,8 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -159,6 +162,57 @@ class EcrServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.deleteRepository(REPO, null, false, REGION));
         assertEquals("RepositoryNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteRepository_forceRemovesRepositoryStorageAndPrunesFinalRepositoryStorage() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+
+        service.deleteRepository(REPO, null, true, REGION);
+
+        verify(registryManager).deleteRepositoryStorage(ACCOUNT, REGION, REPO);
+        verify(registryManager).pruneStorage();
+    }
+
+    @Test
+    void deleteRepository_keepsSharedRegistryStorageForRemainingRepositories() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        service.createRepository("other", null, null, null, null, null, null, REGION);
+
+        service.deleteRepository(REPO, null, true, REGION);
+
+        verify(registryManager, never()).pruneStorage();
+    }
+
+    @Test
+    void deleteRepository_forceRetainsMetadataWhenRegistryCleanupFails() {
+        Mockito.doThrow(new IllegalStateException("registry unavailable"))
+                .when(registryManager).deleteRepositoryStorage(ACCOUNT, REGION, REPO);
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.deleteRepository(REPO, null, true, REGION));
+
+        assertEquals("ServerException", ex.getErrorCode());
+        assertEquals(REPO, service.describeRepositories(List.of(REPO), null, REGION).getFirst().getRepositoryName());
+        verify(registryManager, never()).pruneStorage();
+    }
+
+    @Test
+    void deleteRepository_keepsSharedStorageForRepositoriesOwnedByAnotherAccount() {
+        AccountAwareStorageBackend<Repository> repositories = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        EcrService accountAwareService = new EcrService(
+                repositories,
+                new InMemoryStorage<>(),
+                registryManager,
+                Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
+        accountAwareService.createRepository(REPO, null, null, null, null, null, null, REGION);
+        repositories.putForAccount("111111111111", REGION + "::111111111111::other", new Repository());
+
+        accountAwareService.deleteRepository(REPO, null, true, REGION);
+
+        verify(registryManager, never()).pruneStorage();
     }
 
     // ------------------------------------------------------------

@@ -1383,6 +1383,18 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaFunction publishVersion(String region, String functionName, String description) {
+        return publishVersion(region, functionName, description, null);
+    }
+
+    /**
+     * Publishes a version of {@code $LATEST}.
+     *
+     * <p>{@code CodeSha256} is a precondition: "only publish a version if the hash value matches the
+     * value that's specified". It was never parsed out of the request, so a caller that raced
+     * someone else's deploy published code it had not authorised, silently (issue #2822).
+     */
+    public LambdaFunction publishVersion(String region, String functionName, String description,
+                                         String expectedCodeSha256) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
         // Shares the per-function lock deleteFunction and extractZipCodeBytes take around their
@@ -1391,6 +1403,20 @@ public class LambdaService implements ResourceProvider {
         // delete, persisting a snapshot.codeLocalPath (below) that names a directory about to
         // be removed as unreferenced.
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            // Inside the lock UpdateFunctionCode takes, so the hash cannot be checked against one
+            // version of $LATEST and the snapshot then taken from another. Checking it outside
+            // would let an overlapping deploy publish code the caller never authorised.
+            // No isBlank() exclusion here. A present but empty value was previously treated as
+            // absent, so it skipped the comparison entirely and published without checking
+            // anything, which is the failure this precondition exists to prevent. It is simply
+            // compared like any other value and fails as a mismatch, which avoids inventing an
+            // error shape for the empty case that has not been measured against the live service.
+            if (expectedCodeSha256 != null && !expectedCodeSha256.equals(fn.getCodeSha256())) {
+                throw new AwsException("InvalidParameterValueException",
+                        "CodeSHA256 (" + expectedCodeSha256 + ") is different from current CodeSHA256 in $LATEST",
+                        400);
+            }
+
             int version = nextVersionNumber(versionCounterKey(region, fn),
                     legacyVersionCounterKey(region, functionName));
             LambdaFunction snapshot = new LambdaFunction();
@@ -2046,12 +2072,24 @@ public class LambdaService implements ResourceProvider {
         Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
-            fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
-            fn.setCodeSizeBytes(zipBytes.length);
+            // Publish the new code identity under the same per-function lock publishVersion holds.
+            // PublishVersion's CodeSha256 precondition is a check-then-act: it compares the hash and
+            // then snapshots the code. Mutating these fields without the lock lets an overlapping
+            // deploy move $LATEST between those two steps, so a version would carry code whose hash
+            // the caller never authorised even though the check passed. Extraction to disk stays
+            // outside the lock; only the fields that decide what a snapshot copies are inside it.
+            String newSha256 = null;
             try {
                 byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(zipBytes);
-                fn.setCodeSha256(Base64.getEncoder().encodeToString(digest));
+                newSha256 = Base64.getEncoder().encodeToString(digest);
             } catch (java.security.NoSuchAlgorithmException ignored) {}
+            synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+                fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
+                fn.setCodeSizeBytes(zipBytes.length);
+                if (newSha256 != null) {
+                    fn.setCodeSha256(newSha256);
+                }
+            }
 
             // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
             if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {

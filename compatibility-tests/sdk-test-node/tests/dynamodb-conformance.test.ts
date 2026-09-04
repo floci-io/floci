@@ -612,11 +612,12 @@ describe('DynamoDB — Phase 9: Reserved words', () => {
   });
 
   it('reserved word aliased via ExpressionAttributeNames passes', async () => {
-    // Using #st alias for the reserved word 'status'
+    // Using #st alias for the reserved word 'status'. The alias must be referenced
+    // by the expression: AWS rejects ExpressionAttributeNames entries left unused.
     await ddb.send(new PutItemCommand({
       TableName: table,
       Item: { pk: s('rw-ok'), sk: s('s'), status: s('active') },
-      ConditionExpression: 'attribute_not_exists(pk)',
+      ConditionExpression: 'attribute_not_exists(#st)',
       ExpressionAttributeNames: { '#st': 'status' },
     }));
 

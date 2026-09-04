@@ -227,7 +227,16 @@ public class CodeBuildService {
     public List<Project> batchGetProjects(String region, List<String> names) {
         Map<String, Project> store = projectsFor(region);
         return names.stream()
-                .map(store::get)
+                .map(identifier -> {
+                    Project project = store.get(identifier);
+                    if (project != null) {
+                        return project;
+                    }
+                    return store.values().stream()
+                            .filter(candidate -> identifier.equals(candidate.getArn()))
+                            .findFirst()
+                            .orElse(null);
+                })
                 .filter(p -> p != null)
                 .collect(Collectors.toList());
     }

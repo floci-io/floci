@@ -54,6 +54,7 @@ class GlueServiceTest {
 
     private GlueService glueService;
     private GlueSchemaRegistryService schemaRegistryService;
+    private StorageBackend<String, Database> databaseStore;
     private StorageBackend<String, Table> tableStore;
     private StorageBackend<String, Table> tableVersionStore;
     private StorageBackend<String, Map<String, Object>> columnStatisticsStore;
@@ -64,12 +65,13 @@ class GlueServiceTest {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
         schemaRegistryService = new GlueSchemaRegistryService(storageFactory, regionResolver);
+        databaseStore = new InMemoryStorage<>();
         tableStore = new InMemoryStorage<>();
         tableVersionStore = new InMemoryStorage<>();
         columnStatisticsStore = new InMemoryStorage<>();
         partitionStore = new InMemoryStorage<>();
         glueService = new GlueService(
-                new InMemoryStorage<String, Database>(),
+                databaseStore,
                 tableStore,
                 tableVersionStore,
                 columnStatisticsStore,
@@ -80,6 +82,24 @@ class GlueServiceTest {
                 new InMemoryStorage<String, Crawler>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null));
         glueService.createDatabase(new Database("db1"));
+    }
+
+    @Test
+    void createDatabasePersistsCatalogIdSoReadsDoNotWriteIt() {
+        assertEquals(ACCOUNT_ID, databaseStore.get("db1").orElseThrow().getCatalogId());
+        assertEquals(ACCOUNT_ID, glueService.getDatabase("db1").getCatalogId());
+    }
+
+    @Test
+    void databasePersistedBeforeCatalogIdWasModelledIsBackfilledOnRead() {
+        Database legacy = new Database("legacy-db");
+        legacy.setCatalogId(null);
+        databaseStore.put("legacy-db", legacy);
+
+        assertEquals(ACCOUNT_ID, glueService.getDatabase("legacy-db").getCatalogId());
+        assertEquals(ACCOUNT_ID, glueService.getDatabases().stream()
+                .filter(database -> "legacy-db".equals(database.getName()))
+                .findFirst().orElseThrow().getCatalogId());
     }
 
     @Test

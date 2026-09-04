@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
+import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,6 +35,7 @@ class MySqlProtocolHandlerTest {
     private static final int CLIENT_PROTOCOL_41 = 0x0200;
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
     private static final int CLIENT_SSL = 0x0800;
+    private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
 
     @TempDir
     Path tempDir;
@@ -97,6 +99,60 @@ class MySqlProtocolHandlerTest {
         }
 
         assertEquals((byte) 1, backendResponseSeq.get(), "sequence must be unchanged when no TLS upgrade occurs");
+        assertEquals("admin", extractUsername(backendResponsePayload.get()));
+    }
+
+    @Test
+    void validatesCachingSha2MasterScrambleAndForwardsResponse() throws Exception {
+        byte[] nonce = fixedNonce();
+        AtomicReference<Byte> backendResponseSeq = new AtomicReference<>();
+        AtomicReference<byte[]> backendResponsePayload = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockMySqlBackend(
+                            backendServer, nonce, "caching_sha2_password",
+                            backendResponseSeq, backendResponsePayload);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                Socket proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendServer.getLocalPort());
+                Thread authThread = Thread.ofVirtual().start(() -> {
+                    try {
+                        MySqlProtocolHandler.handleAuth(
+                                proxyClient, backend, "admin", "secret",
+                                false, testSigV4Validator(), testTlsCertificates(),
+                                (user, pass) -> true);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+                InputStream clientIn = ourClient.getInputStream();
+                OutputStream clientOut = ourClient.getOutputStream();
+                assertNotNull(readMysqlPacketRaw(clientIn));
+                byte[] scramble = HexFormat.of().parseHex(
+                        "746ebe205d56a0707acb3e796e834e0dd7b1d61743b26bd5202c7a623230c7c9");
+                clientOut.write(buildHandshakeResponse41("admin", scramble, (byte) 1));
+                clientOut.flush();
+                assertNotNull(readMysqlPacketRaw(clientIn));
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+
+        assertEquals((byte) 1, backendResponseSeq.get());
         assertEquals("admin", extractUsername(backendResponsePayload.get()));
     }
 
@@ -307,11 +363,17 @@ class MySqlProtocolHandlerTest {
     private static void mockMySqlBackend(ServerSocket server, byte[] nonce,
                                          AtomicReference<Byte> responseSeq,
                                          AtomicReference<byte[]> responsePayload) throws IOException {
+        mockMySqlBackend(server, nonce, null, responseSeq, responsePayload);
+    }
+
+    private static void mockMySqlBackend(ServerSocket server, byte[] nonce, String authPlugin,
+                                         AtomicReference<Byte> responseSeq,
+                                         AtomicReference<byte[]> responsePayload) throws IOException {
         try (Socket socket = server.accept()) {
             OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();
 
-            out.write(buildHandshakeV10(nonce));
+            out.write(buildHandshakeV10(nonce, authPlugin));
             out.flush();
 
             byte[] responseRaw = readMysqlPacketRaw(in);
@@ -328,6 +390,10 @@ class MySqlProtocolHandlerTest {
     // ── MySQL Handshake V10 (server -> client) ──────────────────────────────
 
     private static byte[] buildHandshakeV10(byte[] nonce) throws IOException {
+        return buildHandshakeV10(nonce, null);
+    }
+
+    private static byte[] buildHandshakeV10(byte[] nonce, String authPlugin) throws IOException {
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         payload.write(10); // protocol version
         payload.write("8.0.34".getBytes(StandardCharsets.UTF_8));
@@ -335,15 +401,23 @@ class MySqlProtocolHandlerTest {
         writeInt32LE(payload, 1); // connection id
         payload.write(nonce, 0, 8); // auth-plugin-data part 1
         payload.write(0); // filler
-        int capsLower = (CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION) & 0xFFFF; // no CLIENT_SSL
+        int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
+        if (authPlugin != null) {
+            capabilities |= CLIENT_PLUGIN_AUTH;
+        }
+        int capsLower = capabilities & 0xFFFF; // no CLIENT_SSL
         writeInt16LE(payload, capsLower);
         payload.write(0x21); // charset
         writeInt16LE(payload, 0x0002); // status flags
-        writeInt16LE(payload, 0); // capability flags upper
-        payload.write(0); // auth-plugin-data length (not advertised)
+        writeInt16LE(payload, (capabilities >>> 16) & 0xFFFF);
+        payload.write(authPlugin == null ? 0 : 21);
         payload.write(new byte[10]); // reserved
         payload.write(nonce, 8, 12); // auth-plugin-data part 2 (12 bytes)
         payload.write(0); // null terminator
+        if (authPlugin != null) {
+            payload.write(authPlugin.getBytes(StandardCharsets.UTF_8));
+            payload.write(0);
+        }
 
         return wrapPacket(0, payload.toByteArray());
     }

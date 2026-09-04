@@ -29,6 +29,11 @@ import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.DigestInfo;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.crypto.Digest;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.digests.SHA384Digest;
+import org.bouncycastle.crypto.digests.SHA512Digest;
+import org.bouncycastle.crypto.engines.RSABlindedEngine;
 import org.bouncycastle.crypto.params.ECDomainParameters;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -37,6 +42,9 @@ import org.bouncycastle.crypto.params.ECPublicKeyParameters;
 import org.bouncycastle.crypto.params.ParametersWithRandom;
 import org.bouncycastle.crypto.signers.ECDSASigner;
 import org.bouncycastle.crypto.signers.Ed25519phSigner;
+import org.bouncycastle.crypto.signers.PSSSigner;
+import org.bouncycastle.crypto.util.PrivateKeyFactory;
+import org.bouncycastle.crypto.util.PublicKeyFactory;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPrivateKey;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPublicKey;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyFactorySpi;
@@ -56,7 +64,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.interfaces.EdECPrivateKey;
 import java.security.spec.ECGenParameterSpec;
+import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.*;
@@ -248,16 +258,9 @@ public class KmsService implements ResourceProvider {
     }
 
     private static void validateKeyUsageForSpec(KmsKeyUsage keyUsage, KmsKeySpec spec) {
-        if (isHmac(spec) && KmsKeyUsage.GENERATE_VERIFY_MAC != keyUsage) {
+        if (!spec.allowedKeyUsages().contains(keyUsage)) {
             throw new AwsException("ValidationException",
-                    "KeyUsage " + keyUsage + " is not compatible with KeySpec " + spec
-                            + ". HMAC key specs require KeyUsage GENERATE_VERIFY_MAC.",
-                    400);
-        }
-        if (KmsKeyUsage.GENERATE_VERIFY_MAC == keyUsage && !isHmac(spec)) {
-            throw new AwsException("ValidationException",
-                    "KeyUsage GENERATE_VERIFY_MAC requires an HMAC KeySpec (HMAC_224, HMAC_256, HMAC_384, or HMAC_512).",
-                    400);
+                    "KeyUsage " + keyUsage + " is not compatible with KeySpec " + spec + ".", 400);
         }
     }
 
@@ -948,6 +951,9 @@ public class KmsService implements ResourceProvider {
             if (ed25519) {
                 return signEd25519(privateKey, message, algorithm);
             }
+            if (messageType == DIGEST && isRsaPssRequest(kmsKey.getKeySpec(), algorithm)) {
+                return signRsaPssDigest(privateKey, message, algorithm);
+            }
             String jcaAlgo = switch (messageType) {
                 // If message is already a digest, we need a "NONEwith..." algorithm
                 case DIGEST -> "NONEwith" + (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "ECDSA");
@@ -962,10 +968,12 @@ public class KmsService implements ResourceProvider {
             if (isSecgP256k1(kmsKey.getKeySpec())) {
                 return signSecgP256k1(privateKey, message, jcaAlgo);
             }
-            Signature sig = Signature.getInstance(jcaAlgo);
+            var sig = signatureFor(jcaAlgo);
             sig.initSign(privateKey);
             sig.update(message);
             return sig.sign();
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             throw new AwsException("InternalFailure", "Failed to sign message: " + e.getMessage(), 500);
         }
@@ -994,6 +1002,9 @@ public class KmsService implements ResourceProvider {
             String jcaAlgo = KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName();
 
             if (DIGEST.equals(messageType)) {
+                if (isRsaPssRequest(kmsKey.getKeySpec(), algorithm)) {
+                    return verifyRsaPssDigest(publicKey, message, signature, algorithm);
+                }
                 jcaAlgo = "NONEwith" + (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "ECDSA");
                 if (isPKCS1v1_5(kmsKey.getKeySpec().getAlgorithm().getFirst())) {
                     // Mirror sign(): verify against DigestInfo{hashOID, digest} (RFC 8017 9.2).
@@ -1003,10 +1014,12 @@ public class KmsService implements ResourceProvider {
             if (isSecgP256k1(kmsKey.getKeySpec())) {
                 return verifySecgP256k1(publicKey, message, signature, jcaAlgo);
             }
-            Signature sig = Signature.getInstance(jcaAlgo);
+            var sig = signatureFor(jcaAlgo);
             sig.initVerify(publicKey);
             sig.update(message);
             return sig.verify(signature);
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             LOG.warnv("Verification failed for key {0}: {1}", keyId, e.getMessage());
             return false;
@@ -1263,6 +1276,71 @@ public class KmsService implements ResourceProvider {
 
     private static byte[] ed25519Point(PublicKey publicKey) {
         return SubjectPublicKeyInfo.getInstance(publicKey.getEncoded()).getPublicKeyData().getBytes();
+    }
+
+    /**
+     * Builds the {@link Signature} for a KMS signing algorithm.
+     *
+     * <p>BouncyCastle names PSS signatures {@code SHAnnnwithRSA/PSS}, and only its provider
+     * answers to that name. The JDK exposes one {@code RSASSA-PSS} Signature whose digest,
+     * mask generation function and salt length come from a parameter spec instead. AWS KMS
+     * RSASSA_PSS_SHA_nnn uses MGF1 over the same digest with a salt as long as that digest,
+     * which is what BouncyCastle's alias defaults to, so a signature made either way verifies
+     * against the other. Every other name Floci asks for is a standard JCA name.
+     */
+    private static Signature signatureFor(String jcaAlgorithm) throws GeneralSecurityException {
+        if (!jcaAlgorithm.endsWith("withRSA/PSS")) {
+            return Signature.getInstance(jcaAlgorithm);
+        }
+        var digest = "SHA-" + jcaAlgorithm.substring("SHA".length(), jcaAlgorithm.indexOf("with"));
+        var maskGeneration = switch (digest) {
+            case "SHA-256" -> MGF1ParameterSpec.SHA256;
+            case "SHA-384" -> MGF1ParameterSpec.SHA384;
+            case "SHA-512" -> MGF1ParameterSpec.SHA512;
+            default -> throw new NoSuchAlgorithmException("Unsupported PSS digest: " + digest);
+        };
+        var saltLength = MessageDigest.getInstance(digest).getDigestLength();
+        var signature = Signature.getInstance("RSASSA-PSS");
+        signature.setParameter(new PSSParameterSpec(digest, "MGF1", maskGeneration, saltLength, 1));
+        return signature;
+    }
+
+    private static boolean isRsaPssRequest(KmsKeySpec spec, String algorithm) {
+        return spec.getKeyType() == KmsKeySpec.KeyType.RSA && algorithm.startsWith("RSASSA_PSS");
+    }
+
+    /**
+     * Signs a pre-computed digest with RSASSA-PSS.
+     *
+     * <p>Real KMS applies the PSS encoding directly to the digest a {@code MessageType=DIGEST}
+     * caller sends. The JDK's {@code RSASSA-PSS} Signature always hashes its input first, so
+     * this uses BouncyCastle's lightweight raw PSS signer, instantiated directly like the
+     * secp256k1 and Ed25519ph paths. The raw signer defaults to MGF1 over the same digest with
+     * a salt as long as that digest, matching {@link #signatureFor(String)}, so RAW and DIGEST
+     * signatures verify against each other.
+     */
+    private static byte[] signRsaPssDigest(PrivateKey privateKey, byte[] digest, String algorithm) throws Exception {
+        var signer = rawPssSigner(algorithm);
+        signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKey.getEncoded()), SECURE_RANDOM));
+        signer.update(digest, 0, digest.length);
+        return signer.generateSignature();
+    }
+
+    private static boolean verifyRsaPssDigest(PublicKey publicKey, byte[] digest, byte[] signature, String algorithm) throws Exception {
+        var signer = rawPssSigner(algorithm);
+        signer.init(false, PublicKeyFactory.createKey(publicKey.getEncoded()));
+        signer.update(digest, 0, digest.length);
+        return signer.verifySignature(signature);
+    }
+
+    private static PSSSigner rawPssSigner(String algorithm) {
+        Digest digest = switch (algorithm) {
+            case "RSASSA_PSS_SHA_256" -> new SHA256Digest();
+            case "RSASSA_PSS_SHA_384" -> new SHA384Digest();
+            case "RSASSA_PSS_SHA_512" -> new SHA512Digest();
+            default -> throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + algorithm, 400);
+        };
+        return PSSSigner.createRawSigner(new RSABlindedEngine(), digest);
     }
 
     private static boolean isPKCS1v1_5(KmsKeySpec.Algorithm spec) {

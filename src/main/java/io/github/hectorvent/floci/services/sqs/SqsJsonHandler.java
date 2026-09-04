@@ -239,11 +239,23 @@ public class SqsJsonHandler {
         return Response.ok(response).build();
     }
 
+    private Integer getOptionalIntField(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + node.asText() + " for parameter " + field + " is invalid. Reason: Must be an integer.", 400);
+        }
+        return node.asInt();
+    }
+
     private Response handleReceiveMessage(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         int maxMessages = request.path("MaxNumberOfMessages").asInt(1);
         int visibilityTimeout = request.path("VisibilityTimeout").asInt(-1);
-        int waitTimeSeconds = request.path("WaitTimeSeconds").asInt(0);
+        Integer waitTimeSeconds = getOptionalIntField(request, "WaitTimeSeconds");
 
         java.util.Set<String> requestedAttrs = new java.util.LinkedHashSet<>();
         requestedAttrs.addAll(jsonNodeToList(request.path("AttributeNames")));

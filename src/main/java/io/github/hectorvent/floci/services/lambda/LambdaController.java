@@ -395,16 +395,50 @@ public class LambdaController {
                                    String body) {
         String region = regionResolver.resolveRegion(headers);
         String description = null;
+        String codeSha256 = null;
         if (body != null && !body.isBlank()) {
+            Map<String, Object> req;
             try {
                 @SuppressWarnings("unchecked")
-                Map<String, Object> req = objectMapper.readValue(body, Map.class);
-                description = (String) req.get("Description");
-            } catch (Exception ignored) {}
+                Map<String, Object> parsed = objectMapper.readValue(body, Map.class);
+                req = parsed;
+            } catch (Exception e) {
+                // Swallowing this would treat a malformed body as an empty one, so a request whose
+                // CodeSha256 could not be read would publish instead of failing its precondition.
+                throw new AwsException("InvalidParameterValueException",
+                        "Could not parse request body: " + e.getMessage(), 400);
+            }
+            if (req == null) {
+                // A literal "null" body parses cleanly to a null map, so it never reaches the catch
+                // above. Checked here rather than inside the try, where this exception would be
+                // caught by that same catch and rewrapped as a parse failure it is not.
+                throw new AwsException("InvalidParameterValueException",
+                        "Request body must be a JSON object", 400);
+            }
+            description = stringField(req, "Description");
+            codeSha256 = stringField(req, "CodeSha256");
         }
-        LambdaFunction version = lambdaService.publishVersion(region, functionName, description);
+        LambdaFunction version = lambdaService.publishVersion(region, functionName, description, codeSha256);
         return Response.status(201).entity(buildFunctionConfiguration(version)).build();
     }
+
+    /**
+     * Reads a string field, rejecting a value of the wrong JSON type rather than letting a cast
+     * failure be swallowed. A {@code CodeSha256} that arrives as a number or an object is a
+     * malformed precondition, and treating it as absent would publish without checking anything.
+     */
+    private static String stringField(Map<String, Object> req, String name) {
+        Object value = req.get(name);
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof String text)) {
+            throw new AwsException("InvalidParameterValueException",
+                    name + " must be a string", 400);
+        }
+        return text;
+    }
+
 
     @GET
     @Path("/functions/{functionName}/versions")
