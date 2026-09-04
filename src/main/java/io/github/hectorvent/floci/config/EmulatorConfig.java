@@ -714,6 +714,7 @@ public interface EmulatorConfig {
         AccountServiceConfig account();
         AccessAnalyzerServiceConfig accessanalyzer();
         IdentityStoreServiceConfig identitystore();
+        Inspector2ServiceConfig inspector2();
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
@@ -758,6 +759,11 @@ public interface EmulatorConfig {
     }
 
     interface IdentityStoreServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface Inspector2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
