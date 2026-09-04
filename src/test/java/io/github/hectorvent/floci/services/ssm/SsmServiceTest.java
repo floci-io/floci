@@ -741,6 +741,12 @@ class SsmServiceTest {
      * references. {@code getContentForVersion} must not fabricate content for them, though — a
      * later review comment on the same PR pointed out that substituting the current content would
      * mislabel it as an older version's real content in GetDocument/DescribeDocument.
+     *
+     * <p>A third review comment on the same thread pointed out the resulting asymmetry: this test
+     * shows an association can reference "1" successfully while {@code hasRetainedContent("1")}
+     * (what GetDocument/DescribeDocument check) is false for the same document. That divergence is
+     * intentional, not a gap to close — see the javadoc on {@link SsmDocument#hasVersion} for why
+     * both alternatives (rejecting the association, or fabricating GetDocument content) are worse.
      */
     @Test
     void testCreateAssociation_LegacyDocumentVersionWithoutHistoryIsStillValid() {

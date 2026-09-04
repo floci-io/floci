@@ -116,6 +116,16 @@ public class SsmDocument {
      * <p>Use this only where no content is returned to the caller (association creation/update).
      * For anything that returns document content, use {@link #hasRetainedContent} instead —
      * substituting a different version's content here would mislabel it as the requested one.
+     *
+     * <p><b>This intentionally diverges from {@link #hasRetainedContent} for a legacy gap
+     * version</b>: an association may reference "1" successfully while a later
+     * {@code GetDocument(DocumentVersion="1")} on the same document 400s. That is not a bug to
+     * reconcile by tightening this method or loosening {@code hasRetainedContent} — content for
+     * that version was never captured and cannot be recovered, so the only two alternatives are
+     * both worse: rejecting the association reference blocks a legitimate operation for no benefit
+     * (the association does not need the content), and fabricating content for
+     * {@code GetDocument} would silently mislabel one version's content as another's. Keeping the
+     * two checks separate is what lets each caller get the most honest answer its use case allows.
      */
     public boolean hasVersion(String version) {
         if (version == null) {
