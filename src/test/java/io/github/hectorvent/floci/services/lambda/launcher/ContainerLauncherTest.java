@@ -483,13 +483,13 @@ class ContainerLauncherTest {
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
 
         when(ecrRegistryManager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1"))
-                .thenReturn("123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1");
+                .thenReturn("123456789012.dkr.ecr.us-east-1.localhost:4566/backend-user:1");
 
         launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
         verify(ecrRegistryManager).rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
-        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1",
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:4566/backend-user:1",
                 spec.image());
     }
 
@@ -501,13 +501,13 @@ class ContainerLauncherTest {
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
 
         when(ecrRegistryManager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1"))
-                .thenReturn("localhost:5100/123456789012/us-east-1/backend-user:1");
+                .thenReturn("localhost:4566/123456789012/us-east-1/backend-user:1");
 
         launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
         verify(ecrRegistryManager).rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
-        assertEquals("localhost:5100/123456789012/us-east-1/backend-user:1",
+        assertEquals("localhost:4566/123456789012/us-east-1/backend-user:1",
                 spec.image());
     }
 

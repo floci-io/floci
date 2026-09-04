@@ -1,8 +1,8 @@
 # ECR
 
 **Protocol:** JSON 1.1 (`X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.*`) for the control plane.
-**Data plane:** OCI Distribution Spec v2 (`/v2/...`), served by a real `registry:2` container managed by Floci.
-**Endpoint:** `POST http://localhost:4566/` for the control plane; `<account>.dkr.ecr.<region>.localhost:<port>/<repo>` for `docker push` / `docker pull`.
+**Data plane:** OCI Distribution Spec v2 (`/v2/...`), proxied by Floci to a real `registry:2` container.
+**Endpoint:** `POST http://localhost:4566/` for the control plane; `<account>.dkr.ecr.<region>.localhost:4566/<repo>` for `docker push` / `docker pull`.
 
 ## Supported Actions
 
@@ -16,7 +16,7 @@
 | `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
 | `BatchDeleteImage` | Delete images by tag or digest |
-| `PutImageTagMutability` | Set tag mutability (round-trip; not enforced on push) |
+| `PutImageTagMutability` | Set tag mutability and reject replacement pushes to immutable tags |
 | `TagResource` / `UntagResource` / `ListTagsForResource` | Resource tagging |
 | `PutLifecyclePolicy` / `GetLifecyclePolicy` / `DeleteLifecyclePolicy` | Lifecycle policy round-trip (stored, not enforced) |
 | `SetRepositoryPolicy` / `GetRepositoryPolicy` / `DeleteRepositoryPolicy` | Repository policy round-trip (stored, not enforced) |
@@ -29,13 +29,15 @@
 
 ## Emulation Behavior
 
-- **Real OCI registry backing.** A single shared `registry:2` container per Floci instance serves all repositories. The container is started lazily on the first ECR API call and reused across Floci restarts (`keep-running-on-shutdown: true` by default), so pushed image bytes survive restarts.
+- **Real OCI registry backing.** A single shared `registry:2` container per Floci instance stores all repositories. Floci proxies Docker Distribution traffic to it and starts it lazily on the first ECR API call. The container is reused across Floci restarts (`keep-running-on-shutdown: true` by default), so pushed image bytes survive restarts.
 - **Storage cleanup.** `DeleteRepository --force` removes repository manifests, including untagged manifests. When it deletes the final repository, or when a non-retained runtime stops, Floci removes the named registry volume only in `memory` mode or when `prune-volumes-on-delete: true`.
-- **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<registryPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and the docker daemon auto-trusts loopback as an insecure registry, so **no daemon configuration changes are required** — `docker push` and `docker pull` work out of the box. A `path` URI style fallback (`localhost:<port>/<account>/<region>/<repo>`) is available via `floci.services.ecr.uri-style: path` for environments where `*.localhost` resolution misbehaves.
+- **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<flociPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and the docker daemon auto-trusts loopback as an insecure registry, so `docker push` and `docker pull` work without daemon configuration. A `path` URI style fallback (`localhost:<flociPort>/<account>/<region>/<repo>`) is available via `floci.services.ecr.uri-style: path` for environments where `*.localhost` resolution misbehaves.
+- **Image tag mutability.** `IMMUTABLE` repositories allow the first manifest write for a tag and reject every replacement, including a replacement with the same manifest. The proxy forwards blob uploads and digest-addressed manifests unchanged.
 - **Authorization.** `GetAuthorizationToken` returns `Base64("AWS:floci")` plus a proxy endpoint. The backing `registry:2` runs without auth, so any `aws ecr get-login-password | docker login` succeeds.
 - **Manifest format negotiation.** `BatchGetImage` forwards the caller's `acceptedMediaTypes` as the upstream `Accept` header. Modern OCI manifests (`application/vnd.oci.image.manifest.v1+json`) and Docker v2 schema 2 are both supported.
 - **Cross-account / cross-region isolation.** Internally the registry namespaces repositories as `<account>/<region>/<repoName>`, so the same repository name in different accounts or regions cannot collide.
 - **Reconcile on first start.** When the registry container starts, Floci queries `GET /v2/_catalog` and recreates `Repository` metadata entries for any namespaces present in the registry but missing from local storage. This means image bytes are never orphaned across restarts.
+- **Upgrade from direct registry access.** Floci recreates an older backing container with the same volume and a loopback-only port binding. Repositories written through the former direct endpoint retain their physical paths and map to the default account and Region; their returned URI moves to port `4566`.
 - **Lambda integration.** Image-backed Lambda functions (`PackageType=Image`) reference the same loopback `repositoryUri`. Floci's Lambda runner rewrites real-AWS-shaped `<account>.dkr.ecr.<region>.amazonaws.com/...` URIs to the loopback registry at pull time, so CDK's `DockerImageFunction` (which generates AWS-shaped URIs in CloudFormation templates) works without any user-side rewriting.
 
 ## Configuration
@@ -45,8 +47,8 @@
 | `FLOCI_SERVICES_ECR_ENABLED` | `true` | Enable the ECR control plane and lazy registry start |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` | Backing OCI registry image |
 | `FLOCI_SERVICES_ECR_REGISTRY_CONTAINER_NAME` | `floci-ecr-registry` | Container name used for idempotent reuse across restarts |
-| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First port in the registry port range |
-| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last port in the registry port range |
+| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First private loopback port for the backing registry |
+| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last private loopback port for the backing registry |
 | `FLOCI_SERVICES_ECR_DATA_PATH` | `./data/ecr` | Bind-mount root for the registry data directory |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Leave the registry container running so the next Floci start adopts it |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | `hostname` = `*.dkr.ecr.<region>.localhost`; `path` = `localhost:<port>/<account>/<region>/<repo>` |
@@ -54,10 +56,10 @@
 
 ### Docker Compose port mapping
 
-The ECR registry sidecar container binds its host port directly — do **not** add `5100-5199` to the floci service's `ports` in `docker-compose.yml`. Adding that range pre-allocates those ports on the floci container and prevents the sidecar from binding them:
+ECR uses Floci's existing `4566` listener. The backing registry binds a loopback-only implementation port, so no ECR range belongs in `docker-compose.yml`:
 
 ```yaml
-# Correct — no ECR port range on the floci service
+# ECR uses the existing Floci API port
 services:
   floci:
     image: floci/floci:latest
@@ -69,7 +71,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 ```
 
-`docker login localhost:5100` works automatically once Floci starts the registry sidecar — no additional port mapping is needed.
+`docker login 000000000000.dkr.ecr.us-east-1.localhost:4566` works once Floci starts the registry sidecar.
 
 ## Examples
 
@@ -83,7 +85,7 @@ aws ecr create-repository \
 # {
 #   "repository": {
 #     "repositoryArn":  "arn:aws:ecr:us-east-1:000000000000:repository/floci-it/app",
-#     "repositoryUri":  "000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app",
+#     "repositoryUri":  "000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app",
 #     "imageTagMutability": "MUTABLE",
 #     ...
 #   }
@@ -92,27 +94,27 @@ aws ecr create-repository \
 # Authenticate stock docker against the emulated registry
 aws ecr get-login-password --endpoint-url $AWS_ENDPOINT \
   | docker login --username AWS --password-stdin \
-        000000000000.dkr.ecr.us-east-1.localhost:5100
+        000000000000.dkr.ecr.us-east-1.localhost:4566
 
 # Push an image
 docker pull alpine:3.19
 docker tag  alpine:3.19 \
-            000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
-docker push 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+            000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
+docker push 000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
 
 # Inspect via the AWS CLI
 aws ecr list-images     --repository-name floci-it/app --endpoint-url $AWS_ENDPOINT
 aws ecr describe-images --repository-name floci-it/app --endpoint-url $AWS_ENDPOINT
 
 # Pull from a clean local image store
-docker rmi  000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
-docker pull 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+docker rmi  000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
+docker pull 000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
 
 # Use the image as a Lambda function
 aws lambda create-function \
   --function-name my-image-fn \
   --package-type Image \
-  --code ImageUri=000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1 \
+  --code ImageUri=000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1 \
   --role arn:aws:iam::000000000000:role/lambda-role \
   --endpoint-url $AWS_ENDPOINT
 
@@ -126,11 +128,9 @@ aws ecr delete-repository  --repository-name floci-it/app --force \
 ```
 
 !!! note "Pulling from other containers (EKS, same-network consumers)"
-    The `localhost`-based repository URI only works from the host. From other containers
-    on the Docker network, the registry is reachable at `http://floci-ecr-registry:5000`
-    (container name + container-internal port — not the published `5100+` host port).
-    [Floci EKS](eks.md#pulling-images-from-floci-ecr) clusters get a containerd mirror
-    for this automatically, so Helm charts can reference the pushed URI as-is.
+    The `localhost`-based repository URI only works from the host. [Floci EKS](eks.md#pulling-images-from-floci-ecr)
+    configures a containerd mirror to reach Floci's data plane, so Helm charts can reference the
+    pushed URI as-is.
 
 ## SDK Example (Java)
 

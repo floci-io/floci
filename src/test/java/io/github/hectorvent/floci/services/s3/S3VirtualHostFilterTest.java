@@ -485,7 +485,7 @@ class S3VirtualHostFilterTest {
     @CsvSource({
             // ECR registry, as EcrRegistryManager emits it
             "123456789012.dkr.ecr.us-east-1.localhost,           localhost",
-            "123456789012.dkr.ecr.us-east-1.localhost:5100,      localhost",
+            "123456789012.dkr.ecr.us-east-1.localhost:4566,      localhost",
             "123456789012.dkr.ecr.eu-central-1.localhost.floci.io, localhost",
             // OpenSearch / Elasticsearch domain endpoints
             "search-mydomain-abc.us-east-1.es.localhost,         localhost",

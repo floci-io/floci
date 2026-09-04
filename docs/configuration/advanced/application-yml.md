@@ -268,7 +268,7 @@ floci:
       enabled: true
       registry-image: "registry:2"
       registry-container-name: floci-ecr-registry
-      registry-base-port: 5100
+      registry-base-port: 5100              # private loopback backing port range
       registry-max-port: 5199
       data-path: ./data/ecr
       tls-enabled: false

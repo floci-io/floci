@@ -51,8 +51,8 @@ class EcrServiceTest {
         registryManager = Mockito.mock(EcrRegistryManager.class);
         when(registryManager.getRepositoryUri(anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> inv.getArgument(0) + ".dkr.ecr." + inv.getArgument(1)
-                        + ".localhost:5000/" + inv.getArgument(2));
-        when(registryManager.getProxyEndpoint()).thenReturn("http://localhost:5000");
+                        + ".localhost:4566/" + inv.getArgument(2));
+        when(registryManager.getProxyEndpoint()).thenReturn("http://localhost:4566");
         when(registryManager.internalRepoName(anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> inv.getArgument(0) + "/" + inv.getArgument(1) + "/" + inv.getArgument(2));
         // ensureStarted() is a no-op on the mock — no Docker calls in any test below.
@@ -116,6 +116,44 @@ class EcrServiceTest {
         assertEquals("platform", repo.getTags().get("team"));
     }
 
+    @Test
+    void immutableRepositoryIsMarkedForDataPlaneTagProtection() {
+        service.createRepository(REPO, null, "IMMUTABLE", null, null, null, null, REGION);
+
+        assertTrue(service.isImageTagImmutable(REPO, ACCOUNT, REGION));
+    }
+
+    @Test
+    void mutableRepositoryIsNotMarkedForDataPlaneTagProtection() {
+        service.createRepository(REPO, null, "MUTABLE", null, null, null, null, REGION);
+
+        assertFalse(service.isImageTagImmutable(REPO, ACCOUNT, REGION));
+    }
+
+    @Test
+    void reconcilePreProxyRegistryNamespacePreservesItsStoragePath() {
+        String repositoryName = "legacy/service";
+
+        service.reconcileFromCatalog(List.of(repositoryName));
+
+        Repository repository = service.describeRepositories(List.of(repositoryName), null, REGION).getFirst();
+        assertEquals(repositoryName, repository.getRepositoryName());
+        assertEquals(repositoryName, service.registryRepositoryName(repositoryName, ACCOUNT, REGION));
+    }
+
+    @Test
+    void reconcilePreProxyRepositoryWithNamespaceShapedNamePreservesItsIdentity() {
+        String repositoryName = ACCOUNT + "/" + REGION + "/legacy";
+        service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+        service.reconcileFromCatalog(List.of(repositoryName));
+
+        assertEquals(repositoryName,
+                service.describeRepositories(List.of(repositoryName), null, REGION).getFirst().getRepositoryName());
+        assertEquals(repositoryName, service.registryRepositoryName(repositoryName, ACCOUNT, REGION));
+        assertThrows(AwsException.class, () -> service.describeRepositories(List.of("legacy"), null, REGION));
+    }
+
     // ------------------------------------------------------------
     // DescribeRepositories
     // ------------------------------------------------------------
@@ -170,7 +208,7 @@ class EcrServiceTest {
 
         service.deleteRepository(REPO, null, true, REGION);
 
-        verify(registryManager).deleteRepositoryStorage(ACCOUNT, REGION, REPO);
+        verify(registryManager).deleteRepositoryStorage(ACCOUNT + "/" + REGION + "/" + REPO);
         verify(registryManager).pruneStorage();
     }
 
@@ -187,7 +225,7 @@ class EcrServiceTest {
     @Test
     void deleteRepository_forceRetainsMetadataWhenRegistryCleanupFails() {
         Mockito.doThrow(new IllegalStateException("registry unavailable"))
-                .when(registryManager).deleteRepositoryStorage(ACCOUNT, REGION, REPO);
+                .when(registryManager).deleteRepositoryStorage(ACCOUNT + "/" + REGION + "/" + REPO);
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
 
         AwsException ex = assertThrows(AwsException.class,
@@ -378,11 +416,12 @@ class EcrServiceTest {
         service.reconcileFromCatalog(List.of(
                 ACCOUNT + "/" + REGION + "/recovered/one",
                 ACCOUNT + "/" + REGION + "/recovered/two",
-                "malformed-no-slashes"));
+                "legacy/repository"));
         List<Repository> repos = service.describeRepositories(null, null, REGION);
-        assertEquals(2, repos.size());
+        assertEquals(3, repos.size());
         assertTrue(repos.stream().anyMatch(r -> "recovered/one".equals(r.getRepositoryName())));
         assertTrue(repos.stream().anyMatch(r -> "recovered/two".equals(r.getRepositoryName())));
+        assertTrue(repos.stream().anyMatch(r -> "legacy/repository".equals(r.getRepositoryName())));
     }
 
     @Test
