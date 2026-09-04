@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.guardduty.model.AdminAccount;
 import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.Detector;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
@@ -215,24 +214,5 @@ public class GuardDutyController {
     public Response disableOrganizationAdminAccount(@Context HttpHeaders headers, String body) {
         service.disableOrganizationAdminAccount(regionResolver.resolveRegion(headers), parse(body));
         return Response.ok(objectMapper.createObjectNode()).build();
-    }
-
-    @GET
-    @Path("/admin")
-    public Response listOrganizationAdminAccounts(
-            @Context HttpHeaders headers,
-            @QueryParam("maxResults") String maxResults,
-            @QueryParam("nextToken") String nextToken) {
-        GuardDutyService.Page<AdminAccount> page = service.listOrganizationAdminAccounts(
-                regionResolver.resolveRegion(headers), maxResults, nextToken);
-        ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode accounts = response.putArray("adminAccounts");
-        for (AdminAccount account : page.items()) {
-            accounts.add(objectMapper.valueToTree(account));
-        }
-        if (page.nextToken() != null) {
-            response.put("nextToken", page.nextToken());
-        }
-        return Response.ok(response).build();
     }
 }

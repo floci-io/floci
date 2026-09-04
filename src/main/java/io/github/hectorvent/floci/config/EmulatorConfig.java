@@ -710,6 +710,7 @@ public interface EmulatorConfig {
         NetworkFirewallServiceConfig networkfirewall();
         ServiceCatalogServiceConfig servicecatalog();
         SsoAdminServiceConfig ssoadmin();
+        Macie2ServiceConfig macie2();
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
@@ -734,6 +735,11 @@ public interface EmulatorConfig {
     }
 
     interface SsoAdminServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface Macie2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

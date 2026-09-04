@@ -372,6 +372,8 @@ floci:
       enabled: true
     ssoadmin:
       enabled: true
+    macie2:
+      enabled: true
     controltower:
       enabled: true
       seed-landing-zone: true

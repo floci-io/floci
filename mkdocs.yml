@@ -120,6 +120,7 @@ nav:
     - STS: services/sts.md
     - Organizations: services/organizations.md
     - IAM Identity Center (SSO Admin): services/ssoadmin.md
+    - Amazon Macie: services/macie2.md
     - Control Tower: services/controltower.md
     - AWS Service Catalog: services/service-catalog.md
     - ElastiCache: services/elasticache.md
