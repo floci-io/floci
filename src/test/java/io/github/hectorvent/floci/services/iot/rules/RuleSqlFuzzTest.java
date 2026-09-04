@@ -51,6 +51,7 @@ class RuleSqlFuzzTest {
             bytes("{\"a\":1,\"b\":\"x\",\"c\":true,\"level\":3,\"name\":\"o'brien\",\"clientToken\":\"job:inbound\",\"clientId\":\"gw-1\"}"),
             bytes("{\"state\":{\"reported\":{\"temperature\":31}},\"size\":11,\"weight\":-3,\"active\":false}"),
             bytes("{\"a\":{\"b\":[1,{\"c\":null}]},\"n\":null,\"level\":1e400,\"big\":99999999999999999999999}"),
+            bytes("{\"level\":1e-400,\"size\":0.30000000000000004,\"weight\":9007199254740993.0,\"temperature\":-1E-2}"),
             bytes("{\"a\":[],\"b\":{},\"c\":\"\",\"level\":\"3\",\"active\":\"TRUE\"}"),
             bytes("{\"size\":\"1e-2147483648\",\"weight\":\"1e99999999999\",\"level\":\"9e9999999999\",\"temperature\":\"-1e-2147483649\"}"),
             bytes("[1,2,3]"),

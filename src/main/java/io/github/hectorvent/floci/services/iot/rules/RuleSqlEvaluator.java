@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.iot.rules;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Aliased;
@@ -34,6 +37,9 @@ import java.util.regex.Pattern;
  * a comparison, {@code AND}, {@code OR} or {@code NOT} with an undefined operand is undefined,
  * and a rule fires only when its {@code WHERE} is true. JSON {@code null} is not undefined: it
  * is a value that equals only itself.
+ *
+ * <p>Payload numbers are read as {@code BigDecimal}, never through a {@code double}, so they
+ * compare exactly at any size or precision, as AWS's Decimal does.
  */
 public final class RuleSqlEvaluator {
 
@@ -43,9 +49,13 @@ public final class RuleSqlEvaluator {
     private static final Pattern NUMERIC_STRING = Pattern.compile("-?\\d+(\\.\\d+)?([eE]-?\\d+)?");
 
     private final ObjectMapper objectMapper;
+    private final ObjectReader payloadReader;
 
     public RuleSqlEvaluator(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        this.payloadReader = objectMapper.reader()
+                .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                .with(JsonNodeFactory.withExactBigDecimals(true));
     }
 
     /**
@@ -73,7 +83,7 @@ public final class RuleSqlEvaluator {
             return null;
         }
         try {
-            JsonNode document = objectMapper.readTree(payload);
+            JsonNode document = payloadReader.readTree(payload);
             return document instanceof ObjectNode object ? object : null;
         } catch (IOException e) {
             LOG.debugv(e, "Topic rule payload is not JSON");
@@ -176,7 +186,7 @@ public final class RuleSqlEvaluator {
     private JsonNode compare(Comparison comparison, String topic, ObjectNode document) {
         JsonNode left = value(comparison.left(), topic, document);
         JsonNode right = value(comparison.right(), topic, document);
-        if (left == null || right == null || !representable(left) || !representable(right)) {
+        if (left == null || right == null) {
             return null;
         }
         Operator operator = comparison.operator();
@@ -219,16 +229,6 @@ public final class RuleSqlEvaluator {
             }
         }
         return null;
-    }
-
-    /**
-     * Numbers are compared exactly, so a value wider than a long or a double still orders
-     * correctly. A JSON number too large for a double reaches us as an infinity, which has no
-     * exact value left to compare: it is Undefined, like any other operand the rule cannot
-     * evaluate.
-     */
-    private boolean representable(JsonNode value) {
-        return !(value.isDouble() || value.isFloat()) || Double.isFinite(value.doubleValue());
     }
 
     private boolean matches(Operator operator, int comparison) {
