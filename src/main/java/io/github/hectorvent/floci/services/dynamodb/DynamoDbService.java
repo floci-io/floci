@@ -505,11 +505,12 @@ public class DynamoDbService implements ResourceProvider {
         putItem(tableName, item, null, null, null, region, "NONE");
     }
 
-    public void putItem(String tableName, JsonNode item,
+    /** Returns the previous item stored under the same key, or null when the put inserted. */
+    public JsonNode putItem(String tableName, JsonNode item,
                          String conditionExpression,
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
                          String region, String returnValuesOnConditionCheckFailure) {
-        putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
+        return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
                         region, returnValuesOnConditionCheckFailure, true);
     }
 
