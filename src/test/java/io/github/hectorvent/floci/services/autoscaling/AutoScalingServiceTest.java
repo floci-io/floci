@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doThrow;
@@ -781,5 +782,119 @@ class AutoScalingServiceTest {
                     .getInstances()
                     .add(instance);
         }
+    }
+
+    // The AWS provider calls SuspendProcesses/ResumeProcesses unconditionally around ASG
+    // creation whenever wait_for_capacity_timeout is non-zero (the default), so an
+    // unimplemented SuspendProcesses fails ASG creation outright - found crossing
+    // terraform-aws-modules/terraform-aws-eks against floci.
+    @Test
+    void suspendProcessesRecordsNamedProcessesAndResumeClearsThem() {
+        service.suspendProcesses(REGION, "test-asg", List.of("Launch", "Terminate"));
+
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of("Launch", "Terminate"), group.getSuspendedProcesses());
+
+        service.resumeProcesses(REGION, "test-asg", List.of("Launch"));
+        group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of("Terminate"), group.getSuspendedProcesses());
+
+        service.resumeProcesses(REGION, "test-asg", List.of());
+        group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of(), group.getSuspendedProcesses());
+    }
+
+    @Test
+    void suspendProcessesWithNoNamesSuspendsEveryScalingProcess() {
+        service.suspendProcesses(REGION, "test-asg", List.of());
+
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertTrue(group.getSuspendedProcesses().contains("Launch"));
+        assertTrue(group.getSuspendedProcesses().contains("Terminate"));
+        assertTrue(group.getSuspendedProcesses().contains("HealthCheck"));
+    }
+
+    @Test
+    void attachTrafficSourcesRecordsIdentifierAndTypeAndDetachRemovesIt() {
+        service.attachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:aws:elasticloadbalancing:...:tg/ex", "elbv2")));
+
+        assertEquals(Map.of("arn:aws:elasticloadbalancing:...:tg/ex", "elbv2"),
+                service.describeTrafficSources(REGION, "test-asg", null));
+
+        service.detachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:aws:elasticloadbalancing:...:tg/ex", null)));
+
+        assertEquals(Map.of(), service.describeTrafficSources(REGION, "test-asg", null));
+    }
+
+    @Test
+    void describeTrafficSourcesFiltersByType() {
+        service.attachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:elbv2-source", "elbv2"),
+                new AutoScalingService.TrafficSourceIdentifier("arn:lattice-source", "vpc-lattice")));
+
+        assertEquals(Map.of("arn:elbv2-source", "elbv2"),
+                service.describeTrafficSources(REGION, "test-asg", "elbv2"));
+    }
+
+    @Test
+    void putScheduledUpdateGroupActionRecordsScheduleAndDeleteRemovesIt() {
+        service.putScheduledUpdateGroupAction(REGION, "test-asg", "morning",
+                null, null, "0 7 * * 1-5", "Europe/Rome", 0, 1, 1);
+
+        var actions = service.describeScheduledActions(REGION, "test-asg", List.of());
+        assertEquals(1, actions.size());
+        assertEquals("morning", actions.getFirst().getScheduledActionName());
+        assertEquals("0 7 * * 1-5", actions.getFirst().getRecurrence());
+        assertEquals("Europe/Rome", actions.getFirst().getTimeZone());
+        assertEquals(0, actions.getFirst().getMinSize());
+        assertEquals(1, actions.getFirst().getMaxSize());
+        assertEquals(1, actions.getFirst().getDesiredCapacity());
+        assertNotNull(actions.getFirst().getScheduledActionArn());
+
+        service.deleteScheduledAction(REGION, "test-asg", "morning");
+        assertEquals(List.of(), service.describeScheduledActions(REGION, "test-asg", List.of()));
+    }
+
+    @Test
+    void putWarmPoolReplacesConfigurationAndMapsTheClearSentinel() {
+        service.putWarmPool(REGION, "test-asg", 2, 1, "Running", true);
+
+        var pool = service.describeWarmPool(REGION, "test-asg");
+        assertEquals(2, pool.getMaxGroupPreparedCapacity());
+        assertEquals(1, pool.getMinSize());
+        assertEquals("Running", pool.getPoolState());
+        assertTrue(pool.isReuseOnScaleIn());
+
+        // A Put that omits fields resets them to the wire model's documented defaults,
+        // and -1 is the documented sentinel for clearing MaxGroupPreparedCapacity.
+        service.putWarmPool(REGION, "test-asg", -1, null, null, null);
+        pool = service.describeWarmPool(REGION, "test-asg");
+        assertNull(pool.getMaxGroupPreparedCapacity());
+        assertEquals(0, pool.getMinSize());
+        assertEquals("Stopped", pool.getPoolState());
+        assertFalse(pool.isReuseOnScaleIn());
+
+        service.deleteWarmPool(REGION, "test-asg", false);
+        assertNull(service.describeWarmPool(REGION, "test-asg"));
+    }
+
+    @Test
+    void deleteAutoScalingGroupAlsoRemovesItsScheduledActionsAndWarmPool() {
+        service.putScheduledUpdateGroupAction(REGION, "test-asg", "morning",
+                null, null, "0 7 * * 1-5", null, 0, 1, 1);
+        service.putWarmPool(REGION, "test-asg", null, 1, "Stopped", false);
+        service.createAutoScalingGroup("eu-west-1", "test-asg", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("eu-west-1a"), List.of("subnet-12345678"), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of());
+        service.putScheduledUpdateGroupAction("eu-west-1", "test-asg", "morning",
+                null, null, "0 7 * * 1-5", null, 0, 1, 1);
+
+        service.deleteAutoScalingGroup(REGION, "test-asg", true);
+
+        assertEquals(List.of(), service.describeScheduledActions(REGION, "test-asg", List.of()));
+        assertThrows(AwsException.class, () -> service.describeWarmPool(REGION, "test-asg"));
+        assertEquals(1, service.describeScheduledActions("eu-west-1", "test-asg", List.of()).size());
     }
 }

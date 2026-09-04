@@ -97,6 +97,7 @@ public class ApiGatewayExecuteController {
     private final ApiGatewayExecuteRouteContext routeContext;
     private final JwtSignatureVerifier jwtSignatureVerifier;
     private final RequestContext requestContext;
+    private final ExecuteApiSigV4Authorizer sigV4Authorizer;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -108,7 +109,8 @@ public class ApiGatewayExecuteController {
                                        SqsQueryHandler sqsQueryHandler,
                                        ApiGatewayExecuteRouteContext routeContext,
                                        JwtSignatureVerifier jwtSignatureVerifier,
-                                       RequestContext requestContext) {
+                                       RequestContext requestContext,
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -122,6 +124,7 @@ public class ApiGatewayExecuteController {
         this.routeContext = routeContext;
         this.jwtSignatureVerifier = jwtSignatureVerifier;
         this.requestContext = requestContext;
+        this.sigV4Authorizer = sigV4Authorizer;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -356,6 +359,20 @@ public class ApiGatewayExecuteController {
 
         // 1. Authorizer
         String resolvedApiKey = resolveApiKeyForRequest(region, apiId, stageName, headers);
+
+        // AWS_IAM is verified before the CUSTOM authorizer path because it gates the request on the
+        // caller's signature rather than on a Lambda's verdict, and a method carries one
+        // authorizationType, so at most one of the two branches applies.
+        ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity = null;
+        if ("AWS_IAM".equalsIgnoreCase(method.getAuthorizationType())) {
+            ExecuteApiSigV4Authorizer.Result iamResult =
+                    sigV4Authorizer.authorize(httpMethod, headers, uriInfo, body, routeContext.signedRequestPath());
+            if (!iamResult.authorized()) {
+                return restIamRejection(iamResult);
+            }
+            iamIdentity = iamResult.identity();
+        }
+
         AuthorizerResult authorizerResult = invokeAuthorizer(region, apiId, stageName, httpMethod, path, matched.getPath(), matched.getId(), stage, method, headers, uriInfo, resolvedApiKey);
         if (authorizerResult.errorResponse() != null) return authorizerResult.errorResponse();
 
@@ -375,7 +392,8 @@ public class ApiGatewayExecuteController {
 
         return switch (integration.getType().toUpperCase()) {
             case "AWS_PROXY" -> invokeProxy(region, apiId, httpMethod, path, proxy, stageName,
-                    matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey);
+                    matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey,
+                    iamIdentity);
             case "AWS" -> invokeAwsIntegration(region, httpMethod, path, proxy, stageName,
                     matched, integration, headers, uriInfo, body);
             case "MOCK" -> invokeMock(region, httpMethod, path, stageName, matched, integration, headers, uriInfo, body);
@@ -397,7 +415,8 @@ public class ApiGatewayExecuteController {
                                  Stage stage,
                                  Integration integration, HttpHeaders headers,
                                  UriInfo uriInfo, byte[] body,
-                                 AuthorizerResult authorizerResult, String resolvedApiKey) {
+                                 AuthorizerResult authorizerResult, String resolvedApiKey,
+                                 ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         String functionName = functionNameFromUri(integration.getUri());
         if (functionName == null) {
             return Response.status(500)
@@ -408,7 +427,7 @@ public class ApiGatewayExecuteController {
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildProxyEvent(region, apiId, httpMethod, path, proxy, resource.getPath(),
                 resource.getId(), stageName, stage, headers, uriInfo, body, requestId,
-                authorizerResult.principalId(), authorizerResult.context(), resolvedApiKey);
+                authorizerResult.principalId(), authorizerResult.context(), resolvedApiKey, iamIdentity);
 
         try {
             InvokeResult result = lambdaService.invoke(region, functionName, eventJson.getBytes(),
@@ -682,14 +701,17 @@ public class ApiGatewayExecuteController {
         return LambdaArnUtils.extractFunctionNameFromUri(uri);
     }
 
-    private String buildProxyEvent(String region, String apiId,
-                                   String httpMethod, String path, String proxy,
-                                   String resourcePath, String resourceId,
-                                   String stageName, Stage stage,
-                                   HttpHeaders headers, UriInfo uriInfo,
-                                   byte[] body, String requestId,
-                                   String principalId, Map<String, Object> authorizerContext,
-                                   String resolvedApiKey) {
+    // Package-private rather than private so a focused unit test can assert the event's wire shape
+    // without standing up a Lambda runtime, mirroring the buildV2ProxyEvent tests.
+    String buildProxyEvent(String region, String apiId,
+                           String httpMethod, String path, String proxy,
+                           String resourcePath, String resourceId,
+                           String stageName, Stage stage,
+                           HttpHeaders headers, UriInfo uriInfo,
+                           byte[] body, String requestId,
+                           String principalId, Map<String, Object> authorizerContext,
+                           String resolvedApiKey,
+                           ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         // The JAX-RS {proxy} binding strips a trailing slash, but a trailing slash is
         // significant in the delivered path (routers treat /x and /x/ as distinct routes).
         // Recover it from the raw request URI for the event path fields. Resource matching
@@ -747,27 +769,29 @@ public class ApiGatewayExecuteController {
         ctx.put("stage", stageName);
 
         // identity — full shape matching AWS proxy event spec.
-        // Fields that require auth mechanisms not implemented in v1 REST API dispatch:
-        //   - accessKey, accountId, caller, user, userArn, principalOrgId: only set for AWS_IAM auth
-        //     (v1 dispatch does not implement AWS_IAM — invokeAuthorizer only handles CUSTOM)
+        // accessKey, accountId, caller, user and userArn carry the verified SigV4 caller on an
+        // AWS_IAM method (iamIdentity is non-null only then) and are explicit JSON null otherwise,
+        // exactly as AWS renders them. Fields that require auth mechanisms Floci does not implement
+        // are always null:
+        //   - principalOrgId: AWS Organizations membership is not modelled
         //   - cognitoIdentityId, cognitoIdentityPoolId, cognitoAuthenticationType,
         //     cognitoAuthenticationProvider: only set for COGNITO_USER_POOLS auth (not implemented in v1)
         //   - clientCert: only set when mutual TLS is configured (not supported in Floci)
         // AWS sends these as explicit JSON null (not absent), so we match that wire format.
         ObjectNode identity = ctx.putObject("identity");
-        identity.putNull("accessKey");
-        identity.putNull("accountId");
-        identity.putNull("caller");
+        putOrNull(identity, "accessKey", iamIdentity == null ? null : iamIdentity.accessKey());
+        putOrNull(identity, "accountId", iamIdentity == null ? null : iamIdentity.accountId());
+        putOrNull(identity, "caller", iamIdentity == null ? null : iamIdentity.userId());
         identity.putNull("cognitoAuthenticationProvider");
         identity.putNull("cognitoAuthenticationType");
         identity.putNull("cognitoIdentityId");
         identity.putNull("cognitoIdentityPoolId");
         identity.putNull("principalOrgId");
         identity.put("sourceIp", "127.0.0.1");
-        identity.putNull("user");
+        putOrNull(identity, "user", iamIdentity == null ? null : iamIdentity.userId());
         String userAgent = headers.getHeaderString("User-Agent");
         identity.put("userAgent", userAgent != null ? userAgent : "");
-        identity.putNull("userArn");
+        putOrNull(identity, "userArn", iamIdentity == null ? null : iamIdentity.userArn());
         identity.putNull("clientCert"); // null when mTLS is not configured (Floci does not support mTLS)
         // apiKey: use pre-resolved value from usage plan keys linked to this (apiId, stage)
         if (resolvedApiKey != null) {
@@ -1470,6 +1494,19 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
+        // A route carries exactly one authorizationType, so AWS_IAM, JWT and CUSTOM are mutually
+        // exclusive branches. AWS_IAM was previously absent here, which let an unsigned request
+        // through to the integration as if the route were NONE.
+        ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity = null;
+        if ("AWS_IAM".equalsIgnoreCase(route.getAuthorizationType())) {
+            ExecuteApiSigV4Authorizer.Result iamResult =
+                    sigV4Authorizer.authorize(httpMethod, headers, uriInfo, body, routeContext.signedRequestPath());
+            if (!iamResult.authorized()) {
+                return httpApiIamRejection(iamResult);
+            }
+            iamIdentity = iamResult.identity();
+        }
+
         Map<String, String> jwtClaims = null;
         List<String> jwtScopes = null;
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
@@ -1526,7 +1563,7 @@ public class ApiGatewayExecuteController {
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
                 apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims, jwtScopes,
-                lambdaAuthorizerContext);
+                lambdaAuthorizerContext, iamIdentity);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1803,6 +1840,51 @@ public class ApiGatewayExecuteController {
         }
 
         return new JwtAuthorizerResult(null, claims.raw, tokenScopes); // authorized
+    }
+
+    // ──────────────────────────── AWS_IAM (SigV4) rejections ────────────────────────────
+
+    private record RestIamError(String errorType, String message) {}
+
+    /**
+     * Renders a failed AWS_IAM check the way a REST API does: always {@code 403}, with the message
+     * and {@code x-amzn-ErrorType} AWS pairs with that class of failure. The signature-mismatch body
+     * omits the canonical-string dump real AWS appends, which is a debugging aid rather than part of
+     * the contract; the reason is logged instead.
+     */
+    private Response restIamRejection(ExecuteApiSigV4Authorizer.Result result) {
+        LOG.debugv("execute-api AWS_IAM rejected a REST request: {0} ({1})",
+                result.failure(), result.detail());
+        RestIamError error = switch (result.failure()) {
+            case MISSING -> new RestIamError("MissingAuthenticationTokenException",
+                    "Missing Authentication Token");
+            case MALFORMED -> new RestIamError("IncompleteSignatureException",
+                    "Incomplete Signature");
+            case UNKNOWN_KEY -> new RestIamError("UnrecognizedClientException",
+                    "The security token included in the request is invalid.");
+            case EXPIRED -> new RestIamError("InvalidSignatureException",
+                    "Signature expired");
+            case MISMATCH -> new RestIamError("InvalidSignatureException",
+                    "The request signature we calculated does not match the signature you provided."
+                            + " Check your AWS Secret Access Key and signing method.");
+        };
+        return Response.status(403)
+                .header("x-amzn-ErrorType", error.errorType())
+                .entity(jsonMessage(error.message()))
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    /**
+     * HTTP APIs collapse every IAM failure into {@code 403 {"message":"Forbidden"}} rather than
+     * naming the reason, matching both real AWS and the JWT/REQUEST authorizer rejections above.
+     * The specific reason is logged so a caller debugging a local 403 can still find it.
+     */
+    private Response httpApiIamRejection(ExecuteApiSigV4Authorizer.Result result) {
+        LOG.debugv("execute-api AWS_IAM rejected an HTTP API request: {0} ({1})",
+                result.failure(), result.detail());
+        return Response.status(403)
+                .entity(jsonMessage("Forbidden"))
+                .type(MediaType.APPLICATION_JSON).build();
     }
 
     // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
@@ -2256,6 +2338,18 @@ public class ApiGatewayExecuteController {
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId, Map<String, String> jwtClaims,
                                      List<String> jwtScopes, ObjectNode lambdaAuthorizerContext) {
+        return buildV2ProxyEvent(httpMethod, path, routeKey, apiId, region, stageName,
+                headers, uriInfo, body, requestId, jwtClaims, jwtScopes, lambdaAuthorizerContext, null);
+    }
+
+    // iamIdentity is the verified SigV4 caller on an AWS_IAM route, and is mutually exclusive with
+    // both jwtClaims and lambdaAuthorizerContext for the same reason they are with each other.
+    String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
+                                     String apiId, String region, String stageName,
+                                     HttpHeaders headers, UriInfo uriInfo,
+                                     byte[] body, String requestId, Map<String, String> jwtClaims,
+                                     List<String> jwtScopes, ObjectNode lambdaAuthorizerContext,
+                                     ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         // The JAX-RS {proxy} binding strips a trailing slash, but rawPath is by contract the
         // raw path and routers treat /x and /x/ as distinct routes. Recover it from the raw
         // request URI for the event path fields. Route matching in dispatchV2 and the
@@ -2339,6 +2433,19 @@ public class ApiGatewayExecuteController {
             // is not surfaced here, and a context-less allow leaves the authorizer node absent
             // rather than rendering "lambda": null.
             ctx.putObject("authorizer").set("lambda", lambdaAuthorizerContext);
+        } else if (iamIdentity != null) {
+            // AWS's IAM-authorized HTTP API shape: requestContext.authorizer.iam. cognitoIdentity
+            // and principalOrgId stay null - Floci models neither an identity pool federating into
+            // execute-api nor Organizations membership. callerId and userId are the same principal
+            // id AWS repeats across both fields for a long-term IAM user credential.
+            ObjectNode iamNode = ctx.putObject("authorizer").putObject("iam");
+            iamNode.put("accessKey", iamIdentity.accessKey());
+            iamNode.put("accountId", iamIdentity.accountId());
+            iamNode.put("callerId", iamIdentity.userId());
+            iamNode.putNull("cognitoIdentity");
+            iamNode.putNull("principalOrgId");
+            iamNode.put("userArn", iamIdentity.userArn());
+            iamNode.put("userId", iamIdentity.userId());
         }
 
         if (body != null && body.length > 0) {
@@ -2380,6 +2487,15 @@ public class ApiGatewayExecuteController {
 
     private String jsonMessage(String message) {
         return objectMapper.createObjectNode().put("message", message).toString();
+    }
+
+    /** Writes an explicit JSON null rather than omitting the field, which is what AWS sends. */
+    private static void putOrNull(ObjectNode node, String field, String value) {
+        if (value == null) {
+            node.putNull(field);
+        } else {
+            node.put(field, value);
+        }
     }
 
     /**

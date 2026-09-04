@@ -15,6 +15,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -45,7 +46,10 @@ public class EcrRegistryManager {
 
     private static final Logger LOG = Logger.getLogger(EcrRegistryManager.class);
     private static final int CONTAINER_INTERNAL_PORT = 5000;
+    private static final int REPOSITORY_DELETION_TIMEOUT_SECONDS = 10;
+    private static final int REPOSITORY_DELETION_KILL_GRACE_SECONDS = 1;
     private static final String NAMED_VOLUME = "floci-ecr-registry-data";
+    private static final String REPOSITORIES_PATH = "/var/lib/registry/docker/registry/v2/repositories/";
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -92,7 +96,10 @@ public class EcrRegistryManager {
      * starting the backing registry container on first use. Any image that doesn't
      * match the AWS ECR URI shape (e.g. a plain Docker Hub reference or an image
      * already pointing at Floci's registry) is returned unchanged, without starting
-     * the registry container.
+     * the registry container, as is an AWS-shaped URI naming an image the Docker
+     * daemon already has (under the reference {@link ContainerBuilder#resolveImage}
+     * launches, so {@code floci.docker.image-registry-base} is honoured) while
+     * {@code floci.services.ecr.prefer-local-images} is on.
      */
     public String rewriteImageUri(String image) {
         if (image == null) {
@@ -102,6 +109,13 @@ public class EcrRegistryManager {
         if (!m.matches()) {
             return image;
         }
+        if (config.services().ecr().preferLocalImages()) {
+            String resolved = containerBuilder.resolveImage(image);
+            if (isPresentOnDaemon(resolved)) {
+                LOG.infov("Using locally present image {0} as-is (not rewriting to the emulated ECR registry)", resolved);
+                return image;
+            }
+        }
         String account = m.group(1);
         String region = m.group(2);
         String repoAndTag = m.group(3);
@@ -109,6 +123,19 @@ public class EcrRegistryManager {
         String rewritten = getRepositoryUri(account, region, repoAndTag);
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
+    }
+
+    private boolean isPresentOnDaemon(String image) {
+        try {
+            lifecycleManager.getDockerClient().inspectImageCmd(image).exec();
+            return true;
+        } catch (NotFoundException e) {
+            return false;
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not inspect image {0} on the Docker daemon ({1}); rewriting to the emulated ECR registry",
+                    image, e.getMessage());
+            return false;
+        }
     }
 
     /** Returns the docker-pullable repository URI for the given account/region/name. */
@@ -363,16 +390,100 @@ public class EcrRegistryManager {
         return new GcResult(output.toString(), durationMs);
     }
 
+    /** Removes repository manifest storage without removing descendant repository directories. */
+    public synchronized void deleteRepositoryStorage(String accountId, String region, String repositoryName) {
+        ensureStarted();
+        if (!started || containerId == null) {
+            throw new IllegalStateException("ECR registry is not started");
+        }
+        String repository = internalRepoName(accountId, region, repositoryName);
+        String path = repositoryStoragePath(repository);
+        StringBuilder output = new StringBuilder();
+        DockerClient dockerClient = lifecycleManager.getDockerClient();
+        ExecCreateCmdResponse exec = dockerClient
+                .execCreateCmd(containerId)
+                .withCmd("timeout", "-k", String.valueOf(REPOSITORY_DELETION_KILL_GRACE_SECONDS),
+                        String.valueOf(REPOSITORY_DELETION_TIMEOUT_SECONDS), "rm", "-rf",
+                        path + "/_layers", path + "/_manifests", path + "/_uploads")
+                .withAttachStdout(true)
+                .withAttachStderr(true)
+                .exec();
+        try {
+            boolean completed = dockerClient.execStartCmd(exec.getId())
+                    .exec(new ResultCallback.Adapter<Frame>() {
+                        @Override
+                        public void onNext(Frame frame) {
+                            output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                        }
+                    })
+                    .awaitCompletion(REPOSITORY_DELETION_TIMEOUT_SECONDS
+                            + REPOSITORY_DELETION_KILL_GRACE_SECONDS + 1, TimeUnit.SECONDS);
+            if (!completed) {
+                throw new RuntimeException("repository deletion timed out");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("repository deletion interrupted", e);
+        }
+        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
+        if (exitCode == null || exitCode != 0) {
+            throw new RuntimeException("repository deletion failed: " + output);
+        }
+    }
+
     /** Stops the container if {@code keepRunningOnShutdown=false}. Called from EmulatorLifecycle hooks. */
-    public void shutdown() {
+    public synchronized void shutdown() {
+        if (config.services().ecr().keepRunningOnShutdown()) {
+            if (started && containerId != null) {
+                LOG.infov("Leaving ECR backing registry container {0} running for next start-up", containerId);
+            }
+            return;
+        }
+        stopRegistry();
+        removeStorageIfConfigured();
+    }
+
+    /** Removes the shared registry storage after the final ECR repository is deleted. */
+    public synchronized void pruneStorage() {
+        if (!shouldPruneStorage()) {
+            return;
+        }
+        stopRegistry();
+        removeStorageIfConfigured();
+    }
+
+    private void stopRegistry() {
         if (!started || containerId == null) {
             return;
         }
-        if (config.services().ecr().keepRunningOnShutdown()) {
-            LOG.infov("Leaving ECR backing registry container {0} running for next start-up", containerId);
+        lifecycleManager.stopAndRemove(containerId, logStream);
+        portAllocator.release(hostPort);
+        containerId = null;
+        logStream = null;
+        started = false;
+        reconciled = false;
+        hostPort = config.services().ecr().registryBasePort();
+    }
+
+    private void removeStorageIfConfigured() {
+        if (!shouldPruneStorage() || !ContainerStorageHelper.isNamedVolumeMode(config)) {
             return;
         }
-        lifecycleManager.stopAndRemove(containerId, logStream);
+        ContainerStorageHelper.removeNamedVolume(
+                config, lifecycleManager, ContainerStorageHelper.dockerName(config, NAMED_VOLUME));
+    }
+
+    private boolean shouldPruneStorage() {
+        return "memory".equals(config.storage().mode()) || config.storage().pruneVolumesOnDelete();
+    }
+
+    private static String repositoryStoragePath(String repository) {
+        for (String segment : repository.split("/")) {
+            if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
+                throw new IllegalArgumentException("Invalid registry repository path");
+            }
+        }
+        return REPOSITORIES_PATH + repository;
     }
 
     private void adoptExisting(Container existing) {

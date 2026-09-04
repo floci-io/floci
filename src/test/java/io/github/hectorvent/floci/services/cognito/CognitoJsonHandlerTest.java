@@ -492,4 +492,46 @@ class CognitoJsonHandlerTest {
                 .collect(Collectors.toSet());
     }
 
+    private String createPoolWithPrefixDomain(String domain) {
+        ObjectNode poolReq = mapper.createObjectNode().put("PoolName", "domain-pool");
+        String poolId = ((JsonNode) handler.handle("CreateUserPool", poolReq, "us-east-1").getEntity())
+                .get("UserPool").get("Id").asText();
+        ObjectNode domainReq = mapper.createObjectNode()
+                .put("Domain", domain)
+                .put("UserPoolId", poolId)
+                .put("ManagedLoginVersion", 1);
+        handler.handle("CreateUserPoolDomain", domainReq, "us-east-1");
+        return poolId;
+    }
+
+    @Test
+    void updateUserPoolDomainTreatsANullManagedLoginVersionAsAbsent() {
+        String poolId = createPoolWithPrefixDomain("null-version");
+        ObjectNode updateReq = mapper.createObjectNode().put("Domain", "null-version").put("UserPoolId", poolId);
+        updateReq.putNull("ManagedLoginVersion");
+
+        JsonNode updated = (JsonNode) handler.handle("UpdateUserPoolDomain", updateReq, "us-east-1").getEntity();
+
+        assertEquals(1, updated.get("ManagedLoginVersion").asInt());
+        JsonNode described = (JsonNode) handler.handle("DescribeUserPoolDomain",
+                mapper.createObjectNode().put("Domain", "null-version"), "us-east-1").getEntity();
+        assertEquals(1, described.get("DomainDescription").get("ManagedLoginVersion").asInt());
+    }
+
+    @Test
+    void userPoolDomainRejectsAManagedLoginVersionThatIsNotAnInteger() {
+        String poolId = createPoolWithPrefixDomain("typed-version");
+        ObjectNode updateReq = mapper.createObjectNode()
+                .put("Domain", "typed-version")
+                .put("UserPoolId", poolId)
+                .put("ManagedLoginVersion", "two");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateUserPoolDomain", updateReq, "us-east-1"));
+
+        assertEquals("SerializationException", failure.getErrorCode());
+        JsonNode described = (JsonNode) handler.handle("DescribeUserPoolDomain",
+                mapper.createObjectNode().put("Domain", "typed-version"), "us-east-1").getEntity();
+        assertEquals(1, described.get("DomainDescription").get("ManagedLoginVersion").asInt());
+    }
 }

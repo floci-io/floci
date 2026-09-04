@@ -102,14 +102,33 @@ public class ContainerLifecycleManager {
      * @return the container ID
      */
     public String create(ContainerSpec spec) {
-        LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image());
+        return create(spec, resolvedImage, null);
+    }
 
-        imageCacheService.ensureImageExists(spec.image());
+    /**
+     * Creates a container for a specific Docker platform.
+     *
+     * @param spec the container specification
+     * @param platform Docker platform, such as {@code linux/arm64}
+     * @return the container ID
+     */
+    public String create(ContainerSpec spec, String platform) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image(), platform);
+        return create(spec, resolvedImage, platform);
+    }
+
+    private String create(ContainerSpec spec, String resolvedImage, String platform) {
+        LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
         HostConfig hostConfig = buildHostConfig(spec);
 
-        CreateContainerCmd createCmd = dockerClient.createContainerCmd(spec.image())
+        CreateContainerCmd createCmd = dockerClient.createContainerCmd(resolvedImage)
                 .withHostConfig(hostConfig);
+
+        if (platform != null && !platform.isBlank()) {
+            createCmd.withPlatform(platform);
+        }
 
         if (spec.name() != null) {
             createCmd.withName(spec.name());

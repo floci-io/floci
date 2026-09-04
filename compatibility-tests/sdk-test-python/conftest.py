@@ -110,6 +110,12 @@ def kinesis_client(aws_config, client_config):
 
 
 @pytest.fixture
+def firehose_client(aws_config, client_config):
+    """Create Firehose client."""
+    return boto3.client("firehose", config=client_config, **aws_config)
+
+
+@pytest.fixture
 def cloudwatch_client(aws_config, client_config):
     """Create CloudWatch client."""
     return boto3.client("cloudwatch", config=client_config, **aws_config)

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -9,6 +10,9 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.*;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.Base64;
 
@@ -35,8 +39,39 @@ class DynamoDbPartiQLHandler {
 
     private JsonNode executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
         TableDefinition table = service.describeTable(stmt.table(), region);
-        String pkName = table.getPartitionKeyName();
-        String skName = table.getSortKeyName();
+        // ExecuteStatement omits the index name from the missing-index message,
+        // unlike Query/Scan (characterised on real AWS, eu-west-1, 2026-09-02).
+        DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, stmt.index(),
+                "The table does not have the specified index");
+
+        // Consistent reads are rejected on statements qualified with a GSI.
+        // Characterised on real AWS (eu-west-1, 2026-09-02): the wording
+        // differs from the Query/Scan rejection.
+        if (ctx.consistentRead() && accessPath.isGlobalSecondaryIndex()) {
+            throw new AwsException("ValidationException",
+                    "Strongly consistent read is not supported on Global Secondary Indexes", 400);
+        }
+
+        // A GSI-qualified statement can only select attributes the index
+        // projects; the message preserves statement order (characterised on
+        // real AWS, eu-west-1, 2026-09-02). An LSI read reaches the co-located
+        // base item, so non-projected columns stay legal there.
+        if (accessPath.isGlobalSecondaryIndex()) {
+            Set<String> projected = accessPath.projectedAttributeNames(table);
+            List<String> unprojected = stmt.columns().stream()
+                    .filter(c -> !"*".equals(c))
+                    .filter(c -> !projected.contains(c))
+                    .toList();
+            if (!unprojected.isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Global secondary index "
+                                + accessPath.indexName() + " does not project ["
+                                + String.join(", ", unprojected) + "]", 400);
+            }
+        }
+
+        String pkName = accessPath.partitionKeyName();
+        String skName = accessPath.sortKeyName();
 
         Cond.Eq pkEq = null;
         Cond skCond = null;
@@ -60,13 +95,28 @@ class DynamoDbPartiQLHandler {
         List<JsonNode> items;
         JsonNode lastEvaluatedKey = null;
 
-        if (stmt.where().isEmpty()) {
-            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken());
-            DynamoDbService.ScanResult result = service.scan(
-                    stmt.table(), null, null, null, null, ctx.limit(), exclusiveStartKey, region);
+        if (pkEq == null) {
+            // No equality on the selected source's partition key: AWS performs
+            // a full scan of the table or index and applies the remaining
+            // conditions as a filter (characterised on real AWS, eu-west-1,
+            // 2026-09-02).
+            ExprAttrBuilder eav = new ExprAttrBuilder();
+            ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+            List<Cond> scanFilters = new ArrayList<>(filterConds);
+            if (skCond != null) {
+                scanFilters.add(skCond);
+            }
+            String fe = buildFe(scanFilters, eav, ean);
+            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
+            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, true);
+            DynamoDbService.ScanResult result = service.scan(stmt.table(), fe,
+                    ean.isEmpty() ? null : ean.toNode(mapper),
+                    eav.isEmpty() ? null : eav.toNode(mapper),
+                    null, ctx.limit(), exclusiveStartKey, accessPath.indexName(), region);
             items = result.items();
             lastEvaluatedKey = result.lastEvaluatedKey();
-        } else if (pkEq != null && skName == null && skCond == null && filterConds.isEmpty()) {
+        } else if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
+                && skCond == null && filterConds.isEmpty()) {
             ObjectNode key = mapper.createObjectNode();
             key.set(pkName, toTypedNode(pkEq.val()));
             JsonNode item = service.getItem(stmt.table(), key, region);
@@ -76,13 +126,19 @@ class DynamoDbPartiQLHandler {
             ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
             String kce = buildKce(pkEq, skCond, pkName, skName, eav, ean);
             String fe = buildFe(filterConds, eav, ean);
+            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
+            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
             DynamoDbService.QueryResult result = service.query(
                     stmt.table(), null, eav.toNode(mapper), kce, fe,
-                    null, null, null, null, ean.isEmpty() ? null : ean.toNode(mapper), region);
+                    ctx.limit(), null, accessPath.indexName(), exclusiveStartKey,
+                    ean.isEmpty() ? null : ean.toNode(mapper), region);
             items = result.items();
+            lastEvaluatedKey = result.lastEvaluatedKey();
         }
 
-        // Apply column projection for non-* SELECT
+        // Apply column projection for non-* SELECT. Projects against the full
+        // item: an LSI read can reach attributes outside the index projection
+        // (characterised on real AWS, eu-west-1, 2026-09-02).
         if (!stmt.columns().isEmpty()) {
             ExprAttrNameBuilder projEan = new ExprAttrNameBuilder();
             String proj = stmt.columns().stream()
@@ -95,39 +151,75 @@ class DynamoDbPartiQLHandler {
                     .toList();
         }
 
+        // SELECT * over an index reads the projection, not the whole item.
+        if (stmt.columns().isEmpty() && accessPath.isIndex()) {
+            Set<String> projected = accessPath.projectedAttributeNames(table);
+            items = items.stream()
+                    .map(item -> (JsonNode) ProjectionEvaluator.trimToAttributes((ObjectNode) item, projected))
+                    .toList();
+        }
+
         ArrayNode arr = mapper.createArrayNode();
         items.forEach(arr::add);
         ObjectNode resp = mapper.createObjectNode();
         resp.set("Items", arr);
         if (lastEvaluatedKey != null) {
-            resp.put("NextToken", encodeNextToken(lastEvaluatedKey));
+            resp.put("NextToken", encodeNextToken(lastEvaluatedKey, ctx.tokenBinding()));
         }
         return resp;
     }
 
-    private String encodeNextToken(JsonNode lastEvaluatedKey) {
+    // NextToken is opaque to the client, so it carries a digest binding it to
+    // the statement text and parameter values that minted it. Real AWS rejects
+    // a token replayed against any other statement, table or access path with
+    // "NextToken does not match request", while a changed Limit or a dropped
+    // ConsistentRead is accepted (characterised on real AWS, eu-west-1,
+    // 2026-09-03).
+    String tokenBinding(String statement, List<JsonNode> parameters) {
         try {
-            return Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(lastEvaluatedKey));
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(statement.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            for (JsonNode parameter : parameters) {
+                digest.update(mapper.writeValueAsBytes(parameter));
+                digest.update((byte) 0);
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException | JsonProcessingException e) {
+            throw new IllegalStateException("Failed to bind the PartiQL NextToken to its statement", e);
+        }
+    }
+
+    private String encodeNextToken(JsonNode lastEvaluatedKey, String tokenBinding) {
+        try {
+            ObjectNode payload = mapper.createObjectNode();
+            payload.set("k", lastEvaluatedKey);
+            payload.put("b", tokenBinding);
+            return Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(payload));
         } catch (Exception e) {
             throw new AwsException("InternalServerError", "Failed to encode NextToken", 500);
         }
     }
 
-    private JsonNode decodeNextToken(String nextToken) {
+    private JsonNode decodeNextToken(String nextToken, String tokenBinding) {
         if (nextToken == null) return null;
+        JsonNode payload;
         try {
-            return mapper.readTree(Base64.getDecoder().decode(nextToken));
+            payload = mapper.readTree(Base64.getDecoder().decode(nextToken));
         } catch (Exception e) {
             throw new AwsException("ValidationException", "Invalid NextToken", 400);
         }
+        if (!payload.isObject() || !payload.hasNonNull("k")
+                || !tokenBinding.equals(payload.path("b").asText())) {
+            throw new AwsException("ValidationException", "NextToken does not match request", 400);
+        }
+        return payload.get("k");
     }
 
     private String buildKce(Cond.Eq pkEq, Cond skCond, String pkName, String skName,
                              ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
-        if (pkEq == null) {
-            throw new AwsException("ValidationException",
-                    "WHERE clause of a SELECT must include an equality condition on the partition key", 400);
-        }
+        // Query branch: callers only reach this with a partition-key equality
+        // in the WHERE clause; every other shape routes to the scan branch.
         String pkAlias = ean.alias(pkName);
         String pkPlaceholder = eav.add(toTypedNode(pkEq.val()));
         StringBuilder kce = new StringBuilder(pkAlias).append(" = ").append(pkPlaceholder);

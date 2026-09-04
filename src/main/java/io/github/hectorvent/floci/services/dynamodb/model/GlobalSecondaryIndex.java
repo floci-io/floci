@@ -19,6 +19,8 @@ public class GlobalSecondaryIndex {
     private long itemCount;
     private long indexSizeBytes;
     private List<String> nonKeyAttributes;
+    private Integer onDemandMaxReadRequestUnits;
+    private Integer onDemandMaxWriteRequestUnits;
 
     public GlobalSecondaryIndex() {
         this.provisionedThroughput = new ProvisionedThroughput(0, 0);
@@ -63,6 +65,12 @@ public class GlobalSecondaryIndex {
 
     public long getIndexSizeBytes() { return indexSizeBytes; }
     public void setIndexSizeBytes(long indexSizeBytes) { this.indexSizeBytes = indexSizeBytes; }
+
+    public Integer getOnDemandMaxReadRequestUnits() { return onDemandMaxReadRequestUnits; }
+    public void setOnDemandMaxReadRequestUnits(Integer v) { this.onDemandMaxReadRequestUnits = v; }
+
+    public Integer getOnDemandMaxWriteRequestUnits() { return onDemandMaxWriteRequestUnits; }
+    public void setOnDemandMaxWriteRequestUnits(Integer v) { this.onDemandMaxWriteRequestUnits = v; }
 
     @JsonIgnore
     public String getPartitionKeyName() {

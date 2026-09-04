@@ -372,7 +372,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
-        containerId = lifecycleManager.create(spec);
+        containerId = createContainer(spec, fn);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
         // Docker now holds the real container-to-volume reference, which removeVolume's own in-use
         // check protects from here on - release the in-flight marker that stood in for it before
@@ -513,6 +513,33 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             }
             throw e;
         }
+    }
+
+    private static Optional<String> dockerPlatform(LambdaFunction fn) {
+        List<String> architectures = fn.getArchitectures();
+        if (architectures == null) {
+            return Optional.of("linux/amd64");
+        }
+        if (architectures.size() != 1) {
+            return Optional.empty();
+        }
+        return switch (architectures.getFirst()) {
+            case "arm64" -> Optional.of("linux/arm64");
+            case "x86_64" -> Optional.of("linux/amd64");
+            default -> Optional.empty();
+        };
+    }
+
+    private String createContainer(ContainerSpec spec, LambdaFunction fn) {
+        if (!config.services().lambda().honourArchitectures()) {
+            return lifecycleManager.create(spec);
+        }
+        Optional<String> platform = dockerPlatform(fn);
+        if (platform.isEmpty()) {
+            throw new IllegalStateException("Invalid persisted architectures "
+                    + fn.getArchitectures() + " for function '" + fn.getFunctionName() + "'");
+        }
+        return lifecycleManager.create(spec, platform.get());
     }
 
     public void stop(ContainerHandle handle) {
@@ -876,19 +903,19 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
         // tar-copy the code into it, then discard it — the data persists in the volume.
-        ContainerSpec helperSpec = containerBuilder.newContainer(image)
+        ContainerBuilder.Builder helperBuilder = containerBuilder.newContainer(image)
                 .withName(resolveContainerNamePrefix(config) + "-codevol-" + fn.getFunctionName() + "-" + shortId)
                 .withEnv(java.util.List.of())
                 .withEntrypoint(java.util.List.of("sleep"))
                 .withCmd(java.util.List.of("3600"))
-                .withNamedVolume(volName, TASK_DIR, false)
-                .build();
+                .withNamedVolume(volName, TASK_DIR, false);
+        ContainerSpec helperSpec = helperBuilder.build();
         // Gate the heavy work (helper create + ~90MB tar copy) so a burst of first-time populates
         // doesn't thrash the Docker daemon. Only populates are serialized — plain cold starts aren't.
         acquirePopulatePermit(fn.getFunctionName());
         String helperId = null;
         try {
-            helperId = lifecycleManager.create(helperSpec);
+            helperId = createContainer(helperSpec, fn);
             lifecycleManager.startCreated(helperId, helperSpec);
             copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId,
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());

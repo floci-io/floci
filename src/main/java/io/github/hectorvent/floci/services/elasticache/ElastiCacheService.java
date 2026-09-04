@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
@@ -57,7 +58,7 @@ public class ElastiCacheService implements ResourceProvider {
 
     private final StorageBackend<String, ReplicationGroup> groups;
     private final StorageBackend<String, ElastiCacheUser> users;
-    private final StorageBackend<String, CacheParameterGroup> parameterGroups;
+    private final AccountAwareStorageBackend<CacheParameterGroup> parameterGroups;
     private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
     private final ElastiCacheContainerManager containerManager;
     private final ElastiCacheProxyManager proxyManager;
@@ -69,6 +70,14 @@ public class ElastiCacheService implements ResourceProvider {
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> provisioningGroupIds = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> parameterGroupLocks = new ConcurrentHashMap<>();
+    /**
+     * Parameter groups claimed by in-flight creates, keyed by account and name (see
+     * {@link #parameterGroupReservationKey}) with the number of creates holding each. A
+     * replication group is only persisted once provisioning finishes, so the stored-groups scan
+     * alone would let a delete slip in during that window and leave the new group pointing at a
+     * parameter group that no longer exists.
+     */
+    private final ConcurrentHashMap<String, Integer> reservedParameterGroups = new ConcurrentHashMap<>();
 
     @Inject
     public ElastiCacheService(ElastiCacheContainerManager containerManager,
@@ -144,25 +153,68 @@ public class ElastiCacheService implements ResourceProvider {
         // resolved with the other validations, before a port is taken or a container started
         ReplicationGroupSettings resolvedSettings =
                 settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), request.region()));
-        if (groups.get(groupId).isPresent()) {
-            throw new AwsException("ReplicationGroupAlreadyExistsFault",
-                    "Replication group " + groupId + " already exists.", 400);
-        }
-        // Claim the id for the whole provisioning attempt so a concurrent create can't race
-        // ahead and be stopped by this request's handle-less rollback fallback.
-        if (!provisioningGroupIds.add(groupId)) {
-            throw new AwsException("ReplicationGroupAlreadyExistsFault",
-                    "Replication group " + groupId + " is already being created.", 400);
-        }
-
+        // Held until the group is persisted (or the attempt fails) so a concurrent
+        // DeleteCacheParameterGroup sees the dependency before the stored-groups scan can.
+        String parameterGroupReservation = reserveParameterGroup(request.cacheParameterGroupName());
         try {
-            if (resolveClusterEnabled(request)) {
-                return provisionClusterModeGroup(request, resolvedSettings);
+            if (groups.get(groupId).isPresent()) {
+                throw new AwsException("ReplicationGroupAlreadyExistsFault",
+                        "Replication group " + groupId + " already exists.", 400);
             }
-            return provisionSingleNodeGroup(request, resolvedSettings);
+            // Claim the id for the whole provisioning attempt so a concurrent create can't race
+            // ahead and be stopped by this request's handle-less rollback fallback.
+            if (!provisioningGroupIds.add(groupId)) {
+                throw new AwsException("ReplicationGroupAlreadyExistsFault",
+                        "Replication group " + groupId + " is already being created.", 400);
+            }
+
+            try {
+                if (resolveClusterEnabled(request)) {
+                    return provisionClusterModeGroup(request, resolvedSettings);
+                }
+                return provisionSingleNodeGroup(request, resolvedSettings);
+            } finally {
+                provisioningGroupIds.remove(groupId);
+            }
         } finally {
-            provisioningGroupIds.remove(groupId);
+            releaseParameterGroup(parameterGroupReservation);
         }
+    }
+
+    /**
+     * Checks the parameter group exists and marks it in use for the calling create, under the
+     * same monitor {@link #deleteCacheParameterGroup} takes, so the existence check and the claim
+     * can't straddle a delete. Returns the reservation key, or {@code null} when the request
+     * names no parameter group, for the matching {@link #releaseParameterGroup} call.
+     */
+    private String reserveParameterGroup(String requestedName) {
+        if (requestedName == null || requestedName.isBlank()) {
+            return null;
+        }
+        synchronized (lockFor(requestedName)) {
+            requireParameterGroup(requestedName);
+            String reservation = parameterGroupReservationKey(requestedName);
+            reservedParameterGroups.merge(reservation, 1, Integer::sum);
+            return reservation;
+        }
+    }
+
+    private void releaseParameterGroup(String reservation) {
+        if (reservation == null) {
+            return;
+        }
+        reservedParameterGroups.computeIfPresent(reservation,
+                (key, holders) -> holders > 1 ? holders - 1 : null);
+    }
+
+    /**
+     * Parameter groups are stored per account, so a reservation is scoped the same way: the
+     * account the store is currently prefixing keys with, then the name. Without that, one
+     * account's in-flight create would block another account's delete of its own group of the
+     * same name.
+     */
+    private String parameterGroupReservationKey(String name) {
+        return parameterGroups.accountId() + "/" + name;
     }
 
     private ReplicationGroup provisionSingleNodeGroup(CreateReplicationGroupRequest request,
@@ -1143,9 +1195,24 @@ public class ElastiCacheService implements ResourceProvider {
                 throw new AwsException("CacheParameterGroupNotFound",
                         "CacheParameterGroupnot found: " + name, 404);
             }
+            if (isParameterGroupInUse(name)) {
+                throw new AwsException("InvalidCacheParameterGroupState",
+                        "One or more cache clusters are still members of this parameter group "
+                                + name + ", so the group cannot be deleted.", 400);
+            }
             parameterGroups.delete(name);
         }
         LOG.infov("Deleted cache parameter group {0}", name);
+    }
+
+    /**
+     * Whether a stored replication group still references the parameter group by that name, or a
+     * create that named it is still provisioning and about to store one.
+     */
+    private boolean isParameterGroupInUse(String name) {
+        return reservedParameterGroups.containsKey(parameterGroupReservationKey(name))
+                || groups.scan(key -> true).stream()
+                        .anyMatch(group -> name.equals(group.getCacheParameterGroupName()));
     }
 
     @Override

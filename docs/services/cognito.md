@@ -98,6 +98,7 @@ always returns it.
 |--------|-------------|
 | CreateUserPoolDomain | Creates a Cognito prefix domain, or a custom domain when `CustomDomainConfig.CertificateArn` is given. |
 | DescribeUserPoolDomain | Returns a domain's description, including `CloudFrontDistribution` for custom domains. |
+| UpdateUserPoolDomain | Replaces a custom domain's certificate or changes the managed login version in place. The domain keeps its `CloudFrontDistribution`. |
 | DeleteUserPoolDomain | Deletes a domain from its user pool. |
 
 ### Log Delivery

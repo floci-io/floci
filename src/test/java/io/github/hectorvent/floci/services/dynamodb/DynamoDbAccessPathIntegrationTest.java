@@ -8,8 +8,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -17,6 +22,7 @@ class DynamoDbAccessPathIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String TABLE = "access-path-validation";
+    private static final String SIBLING_TABLE = "access-path-validation-sibling";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -411,6 +417,342 @@ class DynamoDbAccessPathIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("The provided starting key is invalid"));
+    }
+
+    @Test
+    @Order(20)
+    void executeStatementRejectsConsistentReadOnQualifiedGsi() {
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\".\\"status-index\\"",
+                  "ConsistentRead":true
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Strongly consistent read is not supported on Global Secondary Indexes"));
+    }
+
+    @Test
+    @Order(21)
+    void executeStatementReadsThroughQualifiedGsi() {
+        request("DynamoDB_20120810.PutItem", """
+                {
+                  "TableName":"%s",
+                  "Item":{"pk":{"S":"partiql-gsi"},"sk":{"S":"s1"},
+                    "status":{"S":"partiql-status"},"createdAt":{"S":"2026-01-01"},
+                    "alternate":{"S":"alt-1"},"summary":{"S":"first"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+        request("DynamoDB_20120810.PutItem", """
+                {
+                  "TableName":"%s",
+                  "Item":{"pk":{"S":"partiql-gsi"},"sk":{"S":"s2"},
+                    "status":{"S":"partiql-status"},"createdAt":{"S":"2026-01-02"},
+                    "alternate":{"S":"alt-2"},"summary":{"S":"second"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+        // A row matching the base-table predicate but absent from the index:
+        // it must stay invisible to the qualified read.
+        request("DynamoDB_20120810.PutItem", """
+                {
+                  "TableName":"%s",
+                  "Item":{"pk":{"S":"partiql-sparse"},"sk":{"S":"s2"},
+                    "alternate":{"S":"alt-9"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+
+        // Equality on the index partition key routes through an index query.
+        // status-index projects INCLUDE summary, so non-projected attributes
+        // stay out of the result (SELECT * reads the projection).
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\".\\"status-index\\" WHERE status = 'partiql-status'"
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", equalTo(2))
+            .body("Items[0].summary.S", equalTo("first"))
+            .body("Items[0].alternate", equalTo(null));
+
+        // Without equality on the index partition key, the statement performs
+        // a full index scan and applies the remaining conditions as a filter.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\".\\"status-index\\" WHERE sk = 's2'"
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", equalTo(1))
+            .body("Items[0].sk.S", equalTo("s2"));
+    }
+
+    @Test
+    @Order(22)
+    void executeStatementQualifiedLsiAcceptsConsistentReads() {
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\".\\"alternate-index\\" WHERE pk = 'partiql-gsi'",
+                  "ConsistentRead":true
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", equalTo(2))
+            .body("Items[0].alternate.S", equalTo("alt-1"))
+            .body("Items[0].summary", equalTo(null));
+
+        // An unqualified statement stays legal with ConsistentRead, even when
+        // its WHERE clause names a GSI attribute.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\" WHERE status = 'partiql-status'",
+                  "ConsistentRead":true
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", equalTo(2));
+
+        // An LSI read reaches the co-located base item, so an explicit column
+        // outside the index projection still returns (characterised on real
+        // AWS, eu-west-1, 2026-09-02). alternate-index is KEYS_ONLY.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT summary FROM \\"%s\\".\\"alternate-index\\" WHERE pk = 'partiql-gsi'"
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", equalTo(2))
+            .body("Items[0].summary.S", equalTo("first"));
+    }
+
+    @Test
+    @Order(26)
+    void executeStatementRejectsUnprojectedGsiColumnsInStatementOrder() {
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT zdrop, adrop FROM \\"%s\\".\\"status-index\\" WHERE status = 'partiql-status'"
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(
+                    "One or more parameter values were invalid: Global secondary index status-index "
+                            + "does not project [zdrop, adrop]"));
+    }
+
+    @Test
+    @Order(23)
+    void executeStatementRejectsUnknownQualifiedIndex() {
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\".\\"no-such-index\\""
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The table does not have the specified index"));
+    }
+
+    @Test
+    @Order(24)
+    void executeStatementScanAndQueryBranchesPaginate() {
+        request("DynamoDB_20120810.PutItem", """
+                {
+                  "TableName":"%s",
+                  "Item":{"pk":{"S":"partiql-page-1"},"sk":{"S":"a"},
+                    "status":{"S":"partiql-page"},"createdAt":{"S":"2026-02-01"},
+                    "alternate":{"S":"page-1"},"summary":{"S":"one"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+        request("DynamoDB_20120810.PutItem", """
+                {
+                  "TableName":"%s",
+                  "Item":{"pk":{"S":"partiql-page-2"},"sk":{"S":"b"},
+                    "status":{"S":"partiql-page"},"createdAt":{"S":"2026-02-02"},
+                    "alternate":{"S":"page-2"},"summary":{"S":"two"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+
+        // Filter scan (no partition-key equality): Limit caps scanned items, so
+        // a page may come back empty while the cursor still advances. Page
+        // until the cursor is exhausted and collect both matches.
+        Set<String> scannedPks = new HashSet<>();
+        String scanToken = null;
+        int scanPages = 0;
+        do {
+            String pageBody = """
+                    {"Statement":"SELECT * FROM \\"%s\\" WHERE status = 'partiql-page'",
+                      "Limit":1%s}
+                    """.formatted(TABLE, scanToken == null ? "" : ",\"NextToken\":\"" + scanToken + "\"");
+            io.restassured.response.ValidatableResponse page =
+                request("DynamoDB_20120810.ExecuteStatement", pageBody).statusCode(200);
+            page.body("Items.size()", lessThanOrEqualTo(1));
+            List<String> pagePks = page.extract().jsonPath().getList("Items.pk.S");
+            if (pagePks != null) scannedPks.addAll(pagePks);
+            scanToken = page.extract().jsonPath().getString("NextToken");
+            scanPages++;
+        } while (scanToken != null && scanPages < 10);
+
+        org.junit.jupiter.api.Assertions.assertEquals(Set.of("partiql-page-1", "partiql-page-2"), scannedPks);
+
+        // Query branch (partition-key equality): same pagination contract.
+        String queryToken = request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'partiql-gsi' AND begins_with(sk, 's')",
+                  "Limit":1
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", equalTo(1))
+            .extract().jsonPath().getString("NextToken");
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {
+                  "Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'partiql-gsi' AND begins_with(sk, 's')",
+                  "Limit":1,
+                  "NextToken":"%s"
+                }
+                """.formatted(TABLE, queryToken))
+            .statusCode(200)
+            .body("Items.size()", equalTo(1));
+    }
+
+    @Test
+    @Order(25)
+    void batchExecuteStatementRejectsSelectsOutsideThePrimaryKey() {
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {
+                  "Statements":[
+                    {"Statement":"SELECT * FROM \\"%s\\".\\"status-index\\" WHERE status = 'partiql-status'"},
+                    {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'partiql-page-1'"}
+                  ]
+                }
+                """.formatted(TABLE, TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(
+                    "Select statements within BatchExecuteStatement must specify the primary key in the where clause."))
+            .body("Responses[1].Error.Code", equalTo("ValidationError"))
+            .body("Responses[1].Error.Message", equalTo(
+                    "Select statements within BatchExecuteStatement must specify the primary key in the where clause."));
+    }
+
+    @Test
+    @Order(27)
+    void executeStatementRejectsForeignNextTokens() {
+        // The NextToken is opaque and bound to the issuing statement text and
+        // parameters (characterised on real AWS, eu-west-1, 2026-09-03):
+        // replaying one against a different statement, parameter set or access
+        // path is rejected, while a different Limit is accepted.
+        String scanToken = request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE status = 'partiql-page'","Limit":1}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Items.size()", lessThanOrEqualTo(1))
+            .extract().jsonPath().getString("NextToken");
+
+        // Different statement over the same table.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\"","Limit":1,"NextToken":"%s"}
+                """.formatted(TABLE, scanToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // Base-table token replayed on an index-qualified statement.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\".\\"status-index\\" WHERE status = 'partiql-page'","Limit":1,"NextToken":"%s"}
+                """.formatted(TABLE, scanToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // Index-qualified token replayed on the base table.
+        String gsiToken = request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\".\\"status-index\\" WHERE status = 'partiql-page'","Limit":1}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .extract().jsonPath().getString("NextToken");
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE status = 'partiql-page'","Limit":1,"NextToken":"%s"}
+                """.formatted(TABLE, gsiToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // Same statement text with different parameters.
+        String parameterToken = request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Limit":1,"Parameters":[{"S":"partiql-gsi"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .extract().jsonPath().getString("NextToken");
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Limit":1,"Parameters":[{"S":"partiql-page-1"}],"NextToken":"%s"}
+                """.formatted(TABLE, parameterToken))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NextToken does not match request"));
+
+        // A different Limit is not part of the binding.
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Limit":2,"Parameters":[{"S":"partiql-gsi"}],"NextToken":"%s"}
+                """.formatted(TABLE, parameterToken))
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(28)
+    void executeStatementRejectsNextTokenFromAnotherTable() {
+        // Even with an identical key schema, a token minted against one table
+        // is rejected on another (characterised on real AWS, eu-west-1,
+        // 2026-09-03).
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "TableName":"%s",
+                  "AttributeDefinitions":[
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"sk","AttributeType":"S"}
+                  ],
+                  "KeySchema":[
+                    {"AttributeName":"pk","KeyType":"HASH"},
+                    {"AttributeName":"sk","KeyType":"RANGE"}
+                  ],
+                  "BillingMode":"PAY_PER_REQUEST"
+                }
+                """.formatted(SIBLING_TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        try {
+            String token = request("DynamoDB_20120810.ExecuteStatement", """
+                    {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'partiql-gsi' AND begins_with(sk, 's')","Limit":1}
+                    """.formatted(TABLE))
+                .statusCode(200)
+                .extract().jsonPath().getString("NextToken");
+            request("DynamoDB_20120810.ExecuteStatement", """
+                    {"Statement":"SELECT * FROM \\"%s\\"","Limit":1,"NextToken":"%s"}
+                    """.formatted(SIBLING_TABLE, token))
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("NextToken does not match request"));
+        } finally {
+            given()
+                .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+                .contentType(CONTENT_TYPE)
+                .body("{\"TableName\":\"" + SIBLING_TABLE + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
     }
 
     @Test

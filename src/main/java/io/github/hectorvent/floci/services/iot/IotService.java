@@ -159,7 +159,7 @@ public class IotService {
 
     public String describeEndpoint(String endpointType) {
         String effectiveType = endpointType == null || endpointType.isBlank() ? DEFAULT_ENDPOINT_TYPE : endpointType;
-        if (!Set.of(DEFAULT_ENDPOINT_TYPE, "iot:Data", "iot:Jobs").contains(effectiveType)) {
+        if (!Set.of(DEFAULT_ENDPOINT_TYPE, "iot:Data", "iot:Jobs", "iot:CredentialProvider").contains(effectiveType)) {
             throw new AwsException("InvalidRequestException", "Unsupported endpoint type: " + effectiveType, 400);
         }
         startMqttIfEnabled();

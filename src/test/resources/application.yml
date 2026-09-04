@@ -127,6 +127,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      honour-architectures: false
       # aws-config-path:
       hot-reload:
         enabled: true

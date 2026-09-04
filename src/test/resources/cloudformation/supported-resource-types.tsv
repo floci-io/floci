@@ -18,6 +18,7 @@ AWS::Batch::ComputeEnvironment	LEGACY_SWITCH
 AWS::Batch::JobDefinition	LEGACY_SWITCH
 AWS::Batch::JobQueue	LEGACY_SWITCH
 AWS::CDK::Metadata	CdkMetadataCfnProvisioner
+AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	LEGACY_SWITCH
 AWS::CloudFront::Distribution	LEGACY_SWITCH
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
@@ -27,6 +28,7 @@ AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner
 AWS::CodePipeline::Webhook	CodePipelineCfnProvisioner
 AWS::Cognito::UserPool	LEGACY_SWITCH
 AWS::Cognito::UserPoolClient	LEGACY_SWITCH
+AWS::Cognito::UserPoolDomain	CognitoCfnProvisioner
 AWS::Config::ConfigRule	ConfigCfnProvisioner
 AWS::DynamoDB::GlobalTable	LEGACY_SWITCH
 AWS::DynamoDB::Table	LEGACY_SWITCH
@@ -70,6 +72,7 @@ AWS::IAM::ManagedPolicy	LEGACY_SWITCH
 AWS::IAM::Policy	LEGACY_SWITCH
 AWS::IAM::Role	IamRoleCfnProvisioner
 AWS::IAM::User	LEGACY_SWITCH
+AWS::IoT::DomainConfiguration	IotDomainConfigurationCfnProvisioner
 AWS::KMS::Alias	KmsCfnProvisioner
 AWS::KMS::Key	KmsCfnProvisioner
 AWS::Kinesis::Stream	KinesisCfnProvisioner

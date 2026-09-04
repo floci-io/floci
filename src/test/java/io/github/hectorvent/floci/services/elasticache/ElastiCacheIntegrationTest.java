@@ -336,7 +336,7 @@ class ElastiCacheIntegrationTest {
                     equalTo(GROUP_ID + "-reused"));
     }
 
-    private static boolean isDockerAvailable() {
+    static boolean isDockerAvailable() {
         try {
             Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
                     .redirectErrorStream(true)

@@ -15,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -46,6 +47,43 @@ class RdsContainerManagerTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void mysql84UsesSupportedNativePasswordOptions() {
+        assertEquals(
+                List.of(
+                        "--mysql-native-password=ON",
+                        "--authentication-policy=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.MYSQL, "mysql:8.4"));
+        assertEquals(
+                List.of(
+                        "--mysql-native-password=ON",
+                        "--authentication-policy=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(
+                        DatabaseEngine.MYSQL,
+                        "registry.example.com:5000/mysql:8.4.3-oracle@sha256:abcdef"));
+    }
+
+    @Test
+    void olderMysqlKeepsLegacyNativePasswordOption() {
+        assertEquals(
+                List.of("--default-authentication-plugin=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.MYSQL, "mysql:8.0.36"));
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.POSTGRES, "postgres:18").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MARIADB, "mariadb:11").isEmpty());
+    }
+
+    @Test
+    void defersToServerAuthenticationForMysql9AndUnversionedImages() {
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MYSQL, "mysql:9.0").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MYSQL, "mysql:latest").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MYSQL, "mysql@sha256:abcdef").isEmpty());
+    }
 
     @Test
     void postgresInitSqlCreatesRdsIamRoleWhenMissing() {

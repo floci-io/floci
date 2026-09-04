@@ -48,6 +48,12 @@
 | `RotateKeyOnDemand` | Rotate key material on demand (symmetric keys only) |
 <!-- floci:actions:end -->
 
+## Asymmetric Encryption
+
+`Encrypt`, `Decrypt`, and `ReEncrypt` apply real RSAES-OAEP for RSA keys (`RSA_2048`, `RSA_3072`, `RSA_4096`) when `EncryptionAlgorithm` is `RSAES_OAEP_SHA_1` or `RSAES_OAEP_SHA_256`. The ciphertext is raw RSA output of the modulus length, for example exactly 256 bytes for `RSA_2048`. A ciphertext produced locally with the public key from `GetPublicKey` decrypts the same way it does on real AWS, which makes the usual envelope pattern work. Only the encrypting side needs the public key. As on real AWS, asymmetric `Decrypt` requires `KeyId`, an `EncryptionContext` is rejected for asymmetric keys, and plaintext larger than the OAEP capacity of the key fails validation.
+
+Symmetric keys keep the emulator's internal ciphertext format, which is not compatible with ciphertexts from real AWS KMS.
+
 ## Grant Support Scope
 
 Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.

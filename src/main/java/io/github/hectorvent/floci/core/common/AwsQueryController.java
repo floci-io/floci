@@ -142,7 +142,7 @@ public class AwsQueryController {
     );
 
     private static final Set<String> EC2_ACTIONS = Set.of(
-            "RunInstances", "DescribeInstances", "TerminateInstances", "StartInstances", "StopInstances",
+            "RunInstances", "CreateFleet", "DescribeInstances", "TerminateInstances", "StartInstances", "StopInstances",
             "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
             "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
             "DescribeVpcEndpointServices", "CreateVpcEndpoint", "DescribeVpcEndpoints", "DeleteVpcEndpoints",
@@ -165,6 +165,8 @@ public class AwsQueryController {
             "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
             "ReplaceNetworkAclAssociation",
             "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
+            "CreateCapacityReservation", "DescribeCapacityReservations",
+            "ModifyCapacityReservation", "CancelCapacityReservation",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
             "DescribeAddressesAttribute",
             "DescribeIamInstanceProfileAssociations",
@@ -300,8 +302,9 @@ public class AwsQueryController {
             case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams, region);
             case "rds" -> {
                 // Neptune signs requests with "rds" credential scope (same wire protocol).
-                // Route to Neptune when Engine=neptune (create ops) or when the cluster/instance
-                // already exists in Neptune storage (describe/modify/delete ops).
+                // Route to Neptune when Engine=neptune (create ops), when the cluster/instance
+                // already exists in Neptune storage (describe/modify/delete ops), or when a
+                // tagging ResourceName is a Neptune ARN.
                 String engine = formParams.getFirst("Engine");
                 String clusterId = formParams.getFirst("DBClusterIdentifier");
                 String instanceId = formParams.getFirst("DBInstanceIdentifier");
@@ -313,7 +316,8 @@ public class AwsQueryController {
 
                 if ("neptune".equalsIgnoreCase(engine)
                         || neptuneService.hasCluster(clusterId)
-                        || neptuneService.hasInstance(instanceId)) {
+                        || neptuneService.hasInstance(instanceId)
+                        || neptuneService.hasResourceWithArn(formParams.getFirst("ResourceName"))) {
                     yield neptuneQueryHandler.handle(action, formParams);
                 }
 
@@ -516,6 +520,7 @@ public class AwsQueryController {
             "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup", "DeleteDBSubnetGroup",
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
+            "AddRoleToDBCluster", "RemoveRoleFromDBCluster",
             "DescribeGlobalClusters",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",

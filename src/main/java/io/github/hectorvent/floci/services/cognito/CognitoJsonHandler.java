@@ -70,6 +70,7 @@ public class CognitoJsonHandler {
             case "DeleteIdentityProvider" -> handleDeleteIdentityProvider(request);
             case "CreateUserPoolDomain" -> handleCreateUserPoolDomain(request);
             case "DescribeUserPoolDomain" -> handleDescribeUserPoolDomain(request);
+            case "UpdateUserPoolDomain" -> handleUpdateUserPoolDomain(request);
             case "DeleteUserPoolDomain" -> handleDeleteUserPoolDomain(request);
             case "SetLogDeliveryConfiguration" -> handleSetLogDeliveryConfiguration(request);
             case "GetLogDeliveryConfiguration" -> handleGetLogDeliveryConfiguration(request);
@@ -443,16 +444,46 @@ public class CognitoJsonHandler {
     }
 
     private Response handleCreateUserPoolDomain(JsonNode request) {
-        JsonNode customDomainConfigNode = request.path("CustomDomainConfig");
-        Map<String, Object> customDomainConfig = customDomainConfigNode.isObject()
-                ? objectMapper.convertValue(customDomainConfigNode, new TypeReference<Map<String, Object>>() {})
-                : null;
         UserPoolDomain domain = service.createUserPoolDomain(
                 request.path("Domain").asText(),
                 request.path("UserPoolId").asText(),
-                customDomainConfig,
-                request.has("ManagedLoginVersion") ? request.path("ManagedLoginVersion").asInt() : null
+                customDomainConfig(request),
+                managedLoginVersion(request)
         );
+        return Response.ok(userPoolDomainResultToNode(domain)).build();
+    }
+
+    private Response handleUpdateUserPoolDomain(JsonNode request) {
+        UserPoolDomain domain = service.updateUserPoolDomain(
+                request.path("Domain").asText(),
+                request.path("UserPoolId").asText(),
+                customDomainConfig(request),
+                managedLoginVersion(request)
+        );
+        return Response.ok(userPoolDomainResultToNode(domain)).build();
+    }
+
+    private Map<String, Object> customDomainConfig(JsonNode request) {
+        JsonNode node = request.path("CustomDomainConfig");
+        return node.isObject()
+                ? objectMapper.convertValue(node, new TypeReference<Map<String, Object>>() {})
+                : null;
+    }
+
+    /** Absent or null yields null; a value of another JSON type is a SerializationException, as on AWS. */
+    private static Integer managedLoginVersion(JsonNode request) {
+        JsonNode node = request.get("ManagedLoginVersion");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber()) {
+            throw new AwsException("SerializationException", "Expected integer or null", 400);
+        }
+        return node.intValue();
+    }
+
+    /** CreateUserPoolDomain and UpdateUserPoolDomain share this result shape. */
+    private ObjectNode userPoolDomainResultToNode(UserPoolDomain domain) {
         ObjectNode response = objectMapper.createObjectNode();
         if (domain.isCustomDomain()) {
             response.put("CloudFrontDomain", domain.getCloudFrontDistribution());
@@ -460,7 +491,7 @@ public class CognitoJsonHandler {
         if (domain.getManagedLoginVersion() != null) {
             response.put("ManagedLoginVersion", domain.getManagedLoginVersion());
         }
-        return Response.ok(response).build();
+        return response;
     }
 
     private Response handleDescribeUserPoolDomain(JsonNode request) {

@@ -164,6 +164,47 @@ class CustomResourceProvisionerTest {
     }
 
     @Test
+    void updateWithUnchangedResolvedPropertiesSkipsHandlerInvocation() {
+        stubHandler("phys-123", Map.of("Greeting", "hello"));
+
+        // Initial Create — stashes the resolved ResourceProperties on the resource.
+        StackResource created = provisioner.provision("MyCr", "Custom::Test", props(),
+                engine(), "us-east-1", "000000000000", "my-stack");
+        assertEquals("phys-123", created.getPhysicalId());
+
+        // "Update" with byte-identical resolved properties: real CloudFormation would not send
+        // any request to the custom resource at all (UserGuide/template-custom-resources-sns.md:
+        // "During a stack update, if no changes are made to a custom resource, CloudFormation
+        // will not send any requests to it.").
+        StackResource updated = provisioner.provision("MyCr", "Custom::Test", props(),
+                engine(), "us-east-1", "000000000000", "my-stack",
+                created.getPhysicalId(), created.getAttributes());
+
+        verify(lambdaService, times(1)).invoke(any(), eq(SERVICE_TOKEN), any(),
+                eq(InvocationType.RequestResponse));
+        assertEquals("CREATE_COMPLETE", updated.getStatus());
+        assertEquals("phys-123", updated.getPhysicalId());
+        assertEquals("hello", updated.getAttributes().get("Greeting"));
+    }
+
+    @Test
+    void updateWithChangedResolvedPropertiesStillInvokesHandler() {
+        stubHandler("phys-123", Map.of("Greeting", "hello"));
+
+        StackResource created = provisioner.provision("MyCr", "Custom::Test", props(),
+                engine(), "us-east-1", "000000000000", "my-stack");
+
+        ObjectNode changedProps = props();
+        changedProps.put("Message", "bye");
+        provisioner.provision("MyCr", "Custom::Test", changedProps,
+                engine(), "us-east-1", "000000000000", "my-stack",
+                created.getPhysicalId(), created.getAttributes());
+
+        verify(lambdaService, times(2)).invoke(any(), eq(SERVICE_TOKEN), any(),
+                eq(InvocationType.RequestResponse));
+    }
+
+    @Test
     void deleteReinvokesHandlerWithDeleteRequestType() {
         stubHandler("phys-123", Map.of("Greeting", "hello"));
         StackResource r = provisioner.provision("MyCr", "Custom::Test", props(),

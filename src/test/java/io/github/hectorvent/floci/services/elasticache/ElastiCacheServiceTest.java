@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.kms.KmsService;
@@ -28,6 +29,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+
+import jakarta.enterprise.inject.Instance;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -676,5 +679,155 @@ class ElastiCacheServiceTest {
         assertNull(modifyOutcome.get(), "modify completed before the delete");
         assertThrows(AwsException.class, () -> svc.getReplicationGroup("g1"),
                 "the deleted group must not come back from the modify");
+    }
+
+    private static ElastiCacheService.CreateReplicationGroupRequest requestWithParameterGroup(
+            String groupId, String parameterGroupName) {
+        return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
+                AuthMode.NO_AUTH, null, "us-east-1", null, null, null,
+                parameterGroupName, null, null, null, null,
+                null, null, null, ReplicationGroupSettings.defaults(), Map.of());
+    }
+
+    @Test
+    void createReferencingAnUnknownParameterGroupIsRefusedBeforeProvisioning() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(requestWithParameterGroup("grp", "absent-pg")));
+
+        assertEquals("CacheParameterGroupNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+        verify(containerManager, never()).start(anyString(), anyString());
+        verify(containerManager, never()).start(anyString(), anyString(), any());
+        assertThrows(AwsException.class, () -> service.getReplicationGroup("grp"));
+    }
+
+    @Test
+    void aParameterGroupStillReferencedByAReplicationGroupCannotBeDeleted() {
+        service.createCacheParameterGroup("custom-pg", "redis7", "in use", Map.of());
+        service.createReplicationGroup(requestWithParameterGroup("grp", "custom-pg"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.deleteCacheParameterGroup("custom-pg"));
+        assertEquals("InvalidCacheParameterGroupState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(service.findParameterGroup("custom-pg").isPresent(),
+                "a refused delete must leave the group in place");
+
+        service.deleteReplicationGroup("grp");
+        service.deleteCacheParameterGroup("custom-pg");
+        assertTrue(service.findParameterGroup("custom-pg").isEmpty());
+    }
+
+    @Test
+    void aParameterGroupNamedByAProvisioningCreateCannotBeDeleted() throws InterruptedException {
+        service.createCacheParameterGroup("custom-pg", "redis7", "in use", Map.of());
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
+        });
+
+        Thread create = new Thread(() ->
+                service.createReplicationGroup(requestWithParameterGroup("grp", "custom-pg")));
+        create.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
+
+        // The replication group is not stored yet: only the reservation can refuse this.
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.deleteCacheParameterGroup("custom-pg"));
+        assertEquals("InvalidCacheParameterGroupState", ex.getErrorCode());
+        assertTrue(service.findParameterGroup("custom-pg").isPresent());
+
+        releaseLatch.countDown();
+        create.join(5000);
+
+        assertEquals("custom-pg", service.getReplicationGroup("grp").getCacheParameterGroupName());
+        assertEquals("InvalidCacheParameterGroupState",
+                assertThrows(AwsException.class, () -> service.deleteCacheParameterGroup("custom-pg"))
+                        .getErrorCode());
+
+        service.deleteReplicationGroup("grp");
+        service.deleteCacheParameterGroup("custom-pg");
+        assertTrue(service.findParameterGroup("custom-pg").isEmpty());
+    }
+
+    @Test
+    void aClaimHeldByOneAccountDoesNotBlockAnotherAccountsDeleteOfItsOwnSameNamedGroup()
+            throws InterruptedException {
+        // Storage prefixes keys with the account of the calling thread; the default account
+        // applies to a thread that never registered one.
+        ConcurrentHashMap<Thread, String> accountByThread = new ConcurrentHashMap<>();
+        RequestContext requestContext = mock(RequestContext.class);
+        when(requestContext.getAccountId()).thenAnswer(inv -> accountByThread.get(Thread.currentThread()));
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        when(requestContextInstance.get()).thenReturn(requestContext);
+        StorageFactory factory = mock(StorageFactory.class);
+        when(factory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"));
+        ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
+                factory, config, mock(Ec2Service.class),
+                new RegionResolver("us-east-1", "000000000000"), kmsService);
+
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
+        });
+
+        // Account A: owns shared-pg and is provisioning a replication group that names it.
+        Thread accountA = new Thread(() -> {
+            accountByThread.put(Thread.currentThread(), "111111111111");
+            svc.createCacheParameterGroup("shared-pg", "redis7", "account A", Map.of());
+            svc.createReplicationGroup(requestWithParameterGroup("grp", "shared-pg"));
+        });
+        accountA.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
+
+        // Account B: owns an unrelated shared-pg of its own; account A's claim must not hold it.
+        accountByThread.put(Thread.currentThread(), "222222222222");
+        svc.createCacheParameterGroup("shared-pg", "redis7", "account B", Map.of());
+        svc.deleteCacheParameterGroup("shared-pg");
+        assertTrue(svc.findParameterGroup("shared-pg").isEmpty());
+
+        // Account A's own group is still held by its in-flight create.
+        accountByThread.put(Thread.currentThread(), "111111111111");
+        assertEquals("InvalidCacheParameterGroupState",
+                assertThrows(AwsException.class, () -> svc.deleteCacheParameterGroup("shared-pg"))
+                        .getErrorCode());
+
+        releaseLatch.countDown();
+        accountA.join(5000);
+        assertEquals("shared-pg", svc.getReplicationGroup("grp").getCacheParameterGroupName());
+    }
+
+    @Test
+    void aFailedCreateReleasesItsClaimOnTheParameterGroup() {
+        service.createCacheParameterGroup("custom-pg", "redis7", "in use", Map.of());
+        when(containerManager.start(anyString(), anyString()))
+                .thenThrow(new RuntimeException("docker is down"));
+
+        assertThrows(RuntimeException.class,
+                () -> service.createReplicationGroup(requestWithParameterGroup("grp", "custom-pg")));
+
+        service.deleteCacheParameterGroup("custom-pg");
+        assertTrue(service.findParameterGroup("custom-pg").isEmpty());
+    }
+
+    @Test
+    void aCreateThatFailsBeforeProvisioningStillReleasesItsClaimOnTheParameterGroup() {
+        service.createCacheParameterGroup("custom-pg", "redis7", "in use", Map.of());
+        service.createReplicationGroup("grp", "test", AuthMode.NO_AUTH, null, "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(requestWithParameterGroup("grp", "custom-pg")));
+        assertEquals("ReplicationGroupAlreadyExistsFault", ex.jsonType());
+
+        service.deleteCacheParameterGroup("custom-pg");
+        assertTrue(service.findParameterGroup("custom-pg").isEmpty());
     }
 }

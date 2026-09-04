@@ -35,11 +35,13 @@ order:
   - AWS::CodeBuild
   - AWS::Batch
   - AWS::Cognito
+  - AWS::CertificateManager
   - AWS::Events
   - AWS::Scheduler
   - AWS::Pipes
   - AWS::Kinesis
   - AWS::KinesisFirehose
+  - AWS::IoT
   - AWS::CloudFront
   - AWS::CloudWatch
   - AWS::Logs
@@ -98,6 +100,7 @@ service_labels:
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
   AWS::CDK: CDK
+  AWS::CertificateManager: ACM
   AWS::CloudFormation: CloudFormation
   AWS::CloudFront: CloudFront
   AWS::CloudWatch: CloudWatch
@@ -113,6 +116,7 @@ service_labels:
   AWS::ElasticLoadBalancingV2: Elastic Load Balancing v2
   AWS::Events: EventBridge
   AWS::IAM: IAM
+  AWS::IoT: IoT Core
   AWS::KMS: KMS
   AWS::Kinesis: Kinesis
   AWS::KinesisFirehose: Kinesis Data Firehose
@@ -143,6 +147,7 @@ notes:
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
   AWS::CDK::Metadata: accepted; no-op
+  AWS::IoT::DomainConfiguration: '`ServerCertificates` resolves to a JSON string'
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
 
 # Trailing prose appended to a row after its type list, for behaviour that belongs to the service

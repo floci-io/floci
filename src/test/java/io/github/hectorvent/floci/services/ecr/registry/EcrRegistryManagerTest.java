@@ -9,7 +9,19 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.ExecCreateCmd;
+import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.InspectExecCmd;
+import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.command.InspectImageCmd;
+import com.github.dockerjava.api.command.InspectImageResponse;
+import com.github.dockerjava.api.exception.DockerClientException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.Frame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -38,6 +50,7 @@ class EcrRegistryManagerTest {
     private static final int BASE_PORT = 6100;
     private static final int MAX_PORT = 6101; // pool of exactly two ports
     private static final String REGISTRY_NAME = "floci-test-ecr-registry";
+    private static final String AWS_ECR_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1";
 
     private PortAllocator portAllocator;
     private ContainerLifecycleManager lifecycleManager;
@@ -45,20 +58,30 @@ class EcrRegistryManagerTest {
     private CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private EmulatorConfig.DockerConfig docker;
     private EmulatorConfig.EcrServiceConfig ecr;
+    private EmulatorConfig.StorageConfig storage;
+    private ContainerBuilder containerBuilder;
     private ContainerBuilder.Builder builder;
+    private DockerClient dockerClient;
+    private InspectImageCmd inspectImage;
     private EcrRegistryManager manager;
 
     @BeforeEach
     void setUp() {
         portAllocator = new PortAllocator();
 
-        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        containerBuilder = Mockito.mock(ContainerBuilder.class);
         builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(inv -> inv.getArgument(0));
         when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
 
         lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
         when(lifecycleManager.findByName(anyString())).thenReturn(Optional.empty());
+        dockerClient = Mockito.mock(DockerClient.class);
+        inspectImage = Mockito.mock(InspectImageCmd.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(dockerClient.inspectImageCmd(anyString())).thenReturn(inspectImage);
+        Mockito.doThrow(new NotFoundException("No such image")).when(inspectImage).exec();
 
         ContainerLogStreamer logStreamer = Mockito.mock(ContainerLogStreamer.class);
         containerDetector = Mockito.mock(ContainerDetector.class);
@@ -68,7 +91,7 @@ class EcrRegistryManagerTest {
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
         docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
-        EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+        storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
         when(config.services().ecr()).thenReturn(ecr);
         when(config.docker()).thenReturn(docker);
@@ -76,11 +99,13 @@ class EcrRegistryManagerTest {
         when(docker.resourceNamespace()).thenReturn(Optional.empty());
         // Empty host-persistent-path selects named-volume mode (no host bind-mount logic).
         when(storage.hostPersistentPath()).thenReturn("");
+        when(storage.mode()).thenReturn("persistent");
         when(ecr.registryContainerName()).thenReturn(REGISTRY_NAME);
         when(ecr.registryImage()).thenReturn("registry:2");
         when(ecr.registryBasePort()).thenReturn(BASE_PORT);
         when(ecr.registryMaxPort()).thenReturn(MAX_PORT);
         when(ecr.dockerNetwork()).thenReturn(Optional.empty());
+        when(ecr.preferLocalImages()).thenReturn(true);
 
         manager = new EcrRegistryManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, currentContainerNetworkResolver, portAllocator, config, regionResolver);
@@ -199,5 +224,143 @@ class EcrRegistryManagerTest {
     @Test
     void rewriteImageUri_nullImage_returnsNull() {
         assertNull(manager.rewriteImageUri(null));
+    }
+
+    @Test
+    void rewriteImageUri_imagePresentOnDaemon_returnsUnchangedWithoutStartingRegistry() {
+        Mockito.doReturn(new InspectImageResponse()).when(inspectImage).exec();
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals(AWS_ECR_IMAGE, rewritten);
+        verify(dockerClient).inspectImageCmd(AWS_ECR_IMAGE);
+        verify(lifecycleManager, Mockito.never()).createAndStart(any());
+    }
+
+    @Test
+    void rewriteImageUri_imagePresentOnDaemon_preferLocalImagesOff_rewritesWithoutInspecting() {
+        when(ecr.preferLocalImages()).thenReturn(false);
+        Mockito.doReturn(new InspectImageResponse()).when(inspectImage).exec();
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:" + BASE_PORT + "/backend-user:1", rewritten);
+        verify(dockerClient, Mockito.never()).inspectImageCmd(anyString());
+    }
+
+    @Test
+    void rewriteImageUri_imageRegistryBaseConfigured_inspectsResolvedReference() {
+        String mirrored = "ghcr.io/floci-io/mirror/" + AWS_ECR_IMAGE;
+        when(containerBuilder.resolveImage(AWS_ECR_IMAGE)).thenReturn(mirrored);
+        Mockito.doReturn(new InspectImageResponse()).when(inspectImage).exec();
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals(AWS_ECR_IMAGE, rewritten);
+        verify(dockerClient).inspectImageCmd(mirrored);
+        verify(dockerClient, Mockito.never()).inspectImageCmd(AWS_ECR_IMAGE);
+        verify(lifecycleManager, Mockito.never()).createAndStart(any());
+    }
+
+    @Test
+    void rewriteImageUri_imageRegistryBaseConfigured_unprefixedLocalImageDoesNotCount() {
+        String mirrored = "ghcr.io/floci-io/mirror/" + AWS_ECR_IMAGE;
+        when(containerBuilder.resolveImage(AWS_ECR_IMAGE)).thenReturn(mirrored);
+        InspectImageCmd inspectUnprefixed = Mockito.mock(InspectImageCmd.class);
+        Mockito.doReturn(new InspectImageResponse()).when(inspectUnprefixed).exec();
+        when(dockerClient.inspectImageCmd(AWS_ECR_IMAGE)).thenReturn(inspectUnprefixed);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:" + BASE_PORT + "/backend-user:1", rewritten);
+        verify(dockerClient).inspectImageCmd(mirrored);
+        verify(lifecycleManager).createAndStart(any());
+    }
+
+    @Test
+    void rewriteImageUri_daemonInspectFails_rewritesToLocalRegistry() {
+        Mockito.doThrow(new DockerClientException("daemon unavailable")).when(inspectImage).exec();
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:" + BASE_PORT + "/backend-user:1", rewritten);
+        verify(lifecycleManager).createAndStart(any());
+    }
+
+    @Test
+    void pruneStorageRemovesTheRegistryAndVolumeWhenConfigured() {
+        when(storage.pruneVolumesOnDelete()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+
+        manager.pruneStorage();
+
+        verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
+        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+    }
+
+    @Test
+    void pruneStorageRetainsTheRegistryWhenVolumePruningIsDisabled() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+
+        manager.pruneStorage();
+
+        verify(lifecycleManager, Mockito.never()).stopAndRemove(anyString(), Mockito.isNull());
+        verify(lifecycleManager, Mockito.never()).removeVolume(anyString());
+    }
+
+    @Test
+    void shutdownRemovesTheRegistryVolumeWhenItIsNotRetained() {
+        when(storage.pruneVolumesOnDelete()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+
+        manager.shutdown();
+
+        verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
+        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+    }
+
+    @Test
+    void deleteRepositoryStorageBoundsCleanupAndPreservesNestedRepositories() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        ExecCreateCmd execCreate = Mockito.mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse exec = Mockito.mock(ExecCreateCmdResponse.class);
+        when(exec.getId()).thenReturn("exec-id");
+        when(execCreate.exec()).thenReturn(exec);
+        when(dockerClient.execCreateCmd("container-id")).thenReturn(execCreate);
+        ExecStartCmd execStart = Mockito.mock(ExecStartCmd.class);
+        when(execStart.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback<Frame> callback = invocation.getArgument(0);
+            callback.onComplete();
+            return callback;
+        });
+        when(dockerClient.execStartCmd("exec-id")).thenReturn(execStart);
+        InspectExecCmd inspect = Mockito.mock(InspectExecCmd.class);
+        InspectExecResponse result = Mockito.mock(InspectExecResponse.class);
+        when(result.getExitCodeLong()).thenReturn(0L);
+        when(inspect.exec()).thenReturn(result);
+        when(dockerClient.inspectExecCmd("exec-id")).thenReturn(inspect);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+        manager.deleteRepositoryStorage("000000000000", "us-east-1", "team/app");
+
+        verify(execCreate).withCmd("timeout", "-k", "1", "10", "rm", "-rf",
+                "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_layers",
+                "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_manifests",
+                "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_uploads");
     }
 }

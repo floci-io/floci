@@ -79,12 +79,14 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool`, `UserPoolClient` |
+| Cognito | `UserPool`, `UserPoolClient`, `UserPoolDomain` |
+| ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
+| IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string) |
 | CloudFront | `Distribution` |
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |
@@ -231,7 +233,7 @@ before provisioning:
 - `AWS::SSM::Parameter::Value<List<String>>` and `AWS::SSM::Parameter::Name` typed parameters are
   **not yet** resolved — they are passed through as their literal input.
 
-The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, and `Name` attributes through
+The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, `Name`, and `Arn` attributes through
 `Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
 
 ## AWS::Include (`Fn::Transform`)

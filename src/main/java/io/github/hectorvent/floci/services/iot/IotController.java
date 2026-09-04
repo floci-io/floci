@@ -44,12 +44,15 @@ import java.util.Map;
 public class IotController {
 
     private final IotService iotService;
+    private final IotTagHandler iotTagHandler;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public IotController(IotService iotService, RegionResolver regionResolver, ObjectMapper objectMapper) {
+    public IotController(IotService iotService, IotTagHandler iotTagHandler, RegionResolver regionResolver,
+                         ObjectMapper objectMapper) {
         this.iotService = iotService;
+        this.iotTagHandler = iotTagHandler;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -126,10 +129,12 @@ public class IotController {
 
     @POST
     @Path("/untag")
-    public Response untagResource(String body) {
+    public Response untagResource(@Context HttpHeaders headers, String body) {
         try {
             JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
-            iotService.untagResource(request.path("resourceArn").asText(null), parseTagKeys(request.path("tagKeys")));
+            // Through the tag handler, like /tags, so every IoT resource kind is reachable here.
+            iotTagHandler.untagResource(regionResolver.resolveRegion(headers),
+                    request.path("resourceArn").asText(null), parseTagKeys(request.path("tagKeys")));
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (JsonProcessingException e) {
             throw new AwsException("InvalidRequestException", e.getMessage(), 400);
