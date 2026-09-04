@@ -58,10 +58,6 @@ public class SesTemplateService {
                 new TypeReference<Map<String, EmailTemplate>>() {}), objectMapper, new SecureRandom());
     }
 
-    SesTemplateService(StorageBackend<String, EmailTemplate> templateStore) {
-        this(templateStore, new ObjectMapper(), new SecureRandom());
-    }
-
     SesTemplateService(StorageBackend<String, EmailTemplate> templateStore,
                        ObjectMapper objectMapper, SecureRandom boundaryRandom) {
         this.templateStore = templateStore;
