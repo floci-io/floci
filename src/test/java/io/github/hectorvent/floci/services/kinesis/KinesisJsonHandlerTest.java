@@ -29,6 +29,8 @@ class KinesisJsonHandlerTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "123456789012";
     private static final String STREAM_ARN = "arn:aws:kinesis:us-east-1:123456789012:stream/test-stream";
+    private static final String MAX_HASH_KEY_PLUS_ONE = "340282366920938463463374607431768211456";
+    private static final String NON_DECIMAL_HASH_KEY = "1.5";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private KinesisService service;
@@ -418,6 +420,38 @@ class KinesisJsonHandlerTest {
         req.put("PartitionKey", "pk1");
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordRejectsExplicitHashKeyOutsideHashKeySpace() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", "dGVzdA==");
+        req.put("PartitionKey", "pk1");
+        req.put("ExplicitHashKey", MAX_HASH_KEY_PLUS_ONE);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordsRejectsNonDecimalExplicitHashKey() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject()
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk1")
+                .put("ExplicitHashKey", NON_DECIMAL_HASH_KEY);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
         assertEquals("InvalidArgumentException", ex.getErrorCode());
     }
 

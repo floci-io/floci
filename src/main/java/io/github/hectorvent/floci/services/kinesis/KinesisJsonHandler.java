@@ -478,8 +478,10 @@ public class KinesisJsonHandler {
             throw new AwsException("SerializationException", "Data is not valid base64.", 400);
         }
         String partitionKey = request.path("PartitionKey").asText();
+        String explicitHashKey = request.path("ExplicitHashKey").asText(null);
 
-        KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);
+        KinesisService.PutRecordResult result = service.putRecordWithShardId(
+                streamName, data, partitionKey, explicitHashKey, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("SequenceNumber", result.sequenceNumber());
@@ -501,7 +503,7 @@ public class KinesisJsonHandler {
         // check. The count cap is checked upfront and the byte cap as the
         // loop goes, so neither an over-long batch nor an oversized one is
         // fully decoded before it is rejected.
-        record Entry(JsonNode node, byte[] data) {}
+        record Entry(JsonNode node, byte[] data, String explicitHashKey) {}
         List<Entry> entries = new ArrayList<>();
         long totalBytes = 0;
         for (JsonNode node : recordsNode) {
@@ -515,6 +517,8 @@ public class KinesisJsonHandler {
                 }
             }
             String partitionKey = node.path("PartitionKey").asText();
+            String explicitHashKey = node.path("ExplicitHashKey").asText(null);
+            service.validateExplicitHashKey(explicitHashKey);
             service.validateRecordSize(stream, data, partitionKey);
             // Data that did not decode still travelled in the request, so it counts toward the
             // request cap at the bytes the caller sent rather than as nothing — otherwise a batch
@@ -526,7 +530,7 @@ public class KinesisJsonHandler {
                             : dataNode.toString().getBytes(StandardCharsets.UTF_8).length,
                     partitionKey);
             service.validateRequestSize(totalBytes);
-            entries.add(new Entry(node, data));
+            entries.add(new Entry(node, data, explicitHashKey));
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -544,7 +548,8 @@ public class KinesisJsonHandler {
                     data = Base64.getDecoder().decode(dataNode.asText());
                 }
                 String partitionKey = entry.node().path("PartitionKey").asText();
-                KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);
+                KinesisService.PutRecordResult result = service.putRecordWithShardId(
+                        streamName, data, partitionKey, entry.explicitHashKey(), region);
                 results.addObject()
                         .put("SequenceNumber", result.sequenceNumber())
                         .put("ShardId", result.shardId());
