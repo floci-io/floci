@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.List;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -27,6 +28,18 @@ public class SsmDocument {
 
     @JsonProperty("CreatedDate")
     private Instant createdDate;
+
+    @JsonProperty("Owner")
+    private String owner;
+
+    @JsonProperty("SchemaVersion")
+    private String schemaVersion = "1.0";
+
+    @JsonProperty("DocumentFormat")
+    private String documentFormat = "JSON";
+
+    @JsonProperty("PlatformTypes")
+    private List<String> platformTypes = List.of("Windows", "Linux", "MacOS");
 
     public SsmDocument() {}
 
@@ -55,4 +68,16 @@ public class SsmDocument {
 
     public Instant getCreatedDate() { return createdDate; }
     public void setCreatedDate(Instant createdDate) { this.createdDate = createdDate; }
+
+    public String getOwner() { return owner; }
+    public void setOwner(String owner) { this.owner = owner; }
+
+    public String getSchemaVersion() { return schemaVersion; }
+    public void setSchemaVersion(String schemaVersion) { this.schemaVersion = schemaVersion; }
+
+    public String getDocumentFormat() { return documentFormat; }
+    public void setDocumentFormat(String documentFormat) { this.documentFormat = documentFormat; }
+
+    public List<String> getPlatformTypes() { return platformTypes; }
+    public void setPlatformTypes(List<String> platformTypes) { this.platformTypes = platformTypes; }
 }
