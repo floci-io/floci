@@ -60,6 +60,19 @@ class CloudFormationTemplateEngineTest {
                 engine().resolve(json("{\"Fn::Select\": [2, {\"Fn::Cidr\": [\"10.0.0.0/16\", 4, 8]}]}")));
     }
 
+    /**
+     * Fn::Select is positional: a blank entry ahead of the selected index is still a real list
+     * element and must not shift the elements after it, unlike resolveStringList's provisioner-
+     * facing contract of dropping blanks (issue found in PR #2946 review).
+     */
+    @Test
+    void selectFromLiteralArrayKeepsBlankEntriesAtTheirPosition() {
+        CloudFormationTemplateEngine e = engine();
+        assertEquals("", e.resolve(json("{\"Fn::Select\": [0, [\"\", \"subnet-b\", \"subnet-c\"]]}")));
+        assertEquals("subnet-b", e.resolve(json("{\"Fn::Select\": [1, [\"\", \"subnet-b\", \"subnet-c\"]]}")));
+        assertEquals("subnet-c", e.resolve(json("{\"Fn::Select\": [2, [\"\", \"subnet-b\", \"subnet-c\"]]}")));
+    }
+
     @Test
     void resolveJsonAttributeUnwrapsAlreadySerializedStringFromFnJoin() {
         // Reproduces #2317: CDK emits RedrivePolicy / FilterPolicy / Definition as an Fn::Join

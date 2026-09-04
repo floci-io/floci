@@ -270,7 +270,7 @@ public class CloudFormationTemplateEngine {
             return out;
         }
         if (node.isArray()) {
-            return resolveStringList(node);
+            return resolveListElements(node);
         }
         if (node.isObject()) {
             if (node.has("Fn::GetAZs")) {
@@ -299,6 +299,26 @@ public class CloudFormationTemplateEngine {
     }
 
     /**
+     * Expands a literal array's elements, recursing into any element that is itself a
+     * list-valued intrinsic ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}, or an
+     * {@code Fn::If} evaluating to one) so it contributes its own elements rather than one
+     * comma-joined string. Unlike {@link #resolveStringList}, this keeps blank entries: a
+     * literal array is positional (consumed by {@code Fn::Select} via {@link #resolveList}),
+     * so dropping a blank element ahead of the selected index would shift every later index.
+     */
+    private List<String> resolveListElements(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode element : node) {
+            if (isListValuedIntrinsic(element)) {
+                out.addAll(resolveList(element));
+            } else {
+                out.add(resolve(element));
+            }
+        }
+        return out;
+    }
+
+    /**
      * Resolves a node to a flat list of strings, expanding list-valued intrinsics
      * ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}, or an {@code Fn::If} evaluating
      * to one) whether the node itself is one or they appear as elements of a literal array,
@@ -315,13 +335,7 @@ public class CloudFormationTemplateEngine {
             return out;
         }
         if (node.isArray()) {
-            for (JsonNode element : node) {
-                if (isListValuedIntrinsic(element)) {
-                    out.addAll(resolveList(element));
-                } else {
-                    out.add(resolve(element));
-                }
-            }
+            out.addAll(resolveListElements(node));
         } else {
             out.addAll(resolveList(node));
         }
