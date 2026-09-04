@@ -790,13 +790,31 @@ public class Ec2QueryHandler {
             if (!launchedInstanceIds.isEmpty()) {
                 LOG.warnv("CreateFleet failed after launching instances {0}; rolling them back: {1}",
                         launchedInstanceIds, e.getMessage());
+                List<String> rollbackFailureInstanceIds = new ArrayList<>();
+                List<RuntimeException> rollbackFailures = new ArrayList<>();
                 for (String instanceId : launchedInstanceIds) {
                     try {
                         service.terminateInstances(region, List.of(instanceId));
                     } catch (RuntimeException cleanupFailure) {
-                        LOG.warnv("CreateFleet rollback failed for instance {0}: {1}",
+                        rollbackFailureInstanceIds.add(instanceId);
+                        rollbackFailures.add(cleanupFailure);
+                        LOG.errorv(cleanupFailure, "CreateFleet rollback failed for instance {0}: {1}",
                                 instanceId, cleanupFailure.getMessage());
                     }
+                }
+                if (!rollbackFailures.isEmpty()) {
+                    String rollbackMessage = "CreateFleet rollback incomplete for instance(s): "
+                            + String.join(", ", rollbackFailureInstanceIds);
+                    if (e instanceof AwsException awsFailure) {
+                        AwsException enrichedFailure = new AwsException(
+                                awsFailure.getErrorCode(),
+                                awsFailure.getMessage() + " " + rollbackMessage,
+                                awsFailure.getHttpStatus());
+                        enrichedFailure.addSuppressed(e);
+                        rollbackFailures.forEach(enrichedFailure::addSuppressed);
+                        throw enrichedFailure;
+                    }
+                    rollbackFailures.forEach(e::addSuppressed);
                 }
             }
             throw e;

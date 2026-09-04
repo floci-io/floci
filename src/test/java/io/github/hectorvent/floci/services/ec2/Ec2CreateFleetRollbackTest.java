@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -29,7 +30,7 @@ class Ec2CreateFleetRollbackTest {
     private static final String REGION = "us-east-1";
 
     @Test
-    void rollbackContinuesAfterOneTerminationFailure() {
+    void rollbackContinuesAfterOneTerminationFailureAndReportsIncompleteCleanup() {
         Ec2Service service = mock(Ec2Service.class);
         LaunchTemplateData template = new LaunchTemplateData();
         template.setImageId("ami-test");
@@ -52,6 +53,9 @@ class Ec2CreateFleetRollbackTest {
         Response response = handler.handle("CreateFleet", params(), REGION);
 
         assertEquals(400, response.getStatus());
+        String responseBody = response.getEntity().toString();
+        assertTrue(responseBody.contains("<Code>InvalidSubnetID.NotFound</Code>"));
+        assertTrue(responseBody.contains("CreateFleet rollback incomplete for instance(s): i-first"));
         verify(service).terminateInstances(REGION, List.of("i-first"));
         verify(service).terminateInstances(REGION, List.of("i-second"));
     }
