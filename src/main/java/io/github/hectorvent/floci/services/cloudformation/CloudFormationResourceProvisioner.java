@@ -830,7 +830,8 @@ public class CloudFormationResourceProvisioner {
         // provision() re-runs for every resource on every update. Re-creating an unchanged group
         // would mint a new group id (and collide on the name whenever the VPC id is stable), so
         // reuse the group this resource already points at.
-        var sg = existingSecurityGroupToReconcile(r.getPhysicalId(), groupName, region);
+        var sg = existingSecurityGroupToReconcile(r.getPhysicalId(), groupName, description, vpcId, region);
+        boolean reused = sg != null;
         if (sg == null) {
             sg = ec2Service.createSecurityGroup(region, groupName, description, vpcId);
         }
@@ -844,13 +845,23 @@ public class CloudFormationResourceProvisioner {
         // Inline rule properties — previously dropped, leaving the group empty. The mapping is
         // shared with the standalone SecurityGroupIngress/Egress resource types, which live in
         // Ec2SecurityGroupRuleCfnProvisioner; this arm joins them when it is extracted.
+        // Authorize appends without a duplicate check, so re-running this on a reused group would
+        // stack another copy of every inline rule on each update. Clear the sets the template
+        // declares first, which also drops rules the template no longer lists. A set the template
+        // does not declare is left alone, so the group keeps its default egress.
         if (props != null && props.has("SecurityGroupIngress")) {
+            if (reused && !sg.getIpPermissions().isEmpty()) {
+                ec2Service.revokeSecurityGroupIngress(region, sg.getGroupId(), List.copyOf(sg.getIpPermissions()));
+            }
             for (JsonNode rule : props.get("SecurityGroupIngress")) {
                 ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(),
                         List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
             }
         }
         if (props != null && props.has("SecurityGroupEgress")) {
+            if (reused && !sg.getIpPermissionsEgress().isEmpty()) {
+                ec2Service.revokeSecurityGroupEgress(region, sg.getGroupId(), List.copyOf(sg.getIpPermissionsEgress()));
+            }
             for (JsonNode rule : props.get("SecurityGroupEgress")) {
                 ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(),
                         List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
@@ -1397,10 +1408,13 @@ public class CloudFormationResourceProvisioner {
      * left it unchanged. Unlike most resources the physical id here is the group <em>id</em>, not
      * the name, so the rename check compares the stored group's name against the template's.
      *
-     * <p>Returns {@code null} for a fresh create, a rename (a replacement on AWS), or a group
-     * deleted out of band - the caller then creates.
+     * <p>Returns {@code null} for a fresh create, a group deleted out of band, or any change AWS
+     * treats as a replacement: GroupName, GroupDescription and VpcId are all immutable on a
+     * security group, so a template that changes one wants a new group, not an edit to this one.
+     * The caller then creates.
      */
-    private SecurityGroup existingSecurityGroupToReconcile(String priorPhysicalId, String groupName, String region) {
+    private SecurityGroup existingSecurityGroupToReconcile(String priorPhysicalId, String groupName,
+                                                           String description, String vpcId, String region) {
         if (priorPhysicalId == null || priorPhysicalId.isBlank()) {
             return null;
         }
@@ -1408,6 +1422,9 @@ public class CloudFormationResourceProvisioner {
             return ec2Service.describeSecurityGroups(region, List.of(priorPhysicalId), List.of(), Map.of())
                     .stream()
                     .filter(existing -> groupName == null || groupName.equals(existing.getGroupName()))
+                    .filter(existing -> description == null || description.equals(existing.getDescription()))
+                    // A template that omits VpcId is not asking to move the group out of its VPC.
+                    .filter(existing -> vpcId == null || vpcId.equals(existing.getVpcId()))
                     .findFirst()
                     .orElse(null);
         } catch (AwsException notFound) {

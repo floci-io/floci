@@ -110,6 +110,72 @@ class CfnUnchangedResourceUpdateIntegrationTest {
                 label + ": unchanged resource was re-created under a new physical id");
     }
 
+    private static final String EC2_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260808/us-west-2/ec2/aws4_request";
+
+    /** Runs create-then-update and hands back the Named physical id before and after. */
+    private String[] createThenUpdate(String label, String createBody, String updateBody) {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "probe-" + label + "-" + suffix;
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", stackWith(createBody.replace("SUFFIX", suffix), "probe-q-a-" + suffix))
+        .when().post("/").then().statusCode(200);
+
+        String before = namedPhysicalId(stackName);
+        assertNotNull(before, "no PhysicalResourceId for Named after create");
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", stackWith(updateBody.replace("SUFFIX", suffix), "probe-q-b-" + suffix))
+        .when().post("/").then().statusCode(200);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
+            .body(not(containsString("ROLLBACK")));
+
+        return new String[] {before, namedPhysicalId(stackName)};
+    }
+
+    private static final String SG_WITH_INGRESS = """
+            "Named": {
+              "Type": "AWS::EC2::SecurityGroup",
+              "Properties": {
+                "GroupName": "probe-sg-SUFFIX",
+                "GroupDescription": "probe DESCRIPTION",
+                "SecurityGroupIngress": [
+                  {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIp": "10.0.0.0/8"}
+                ]
+              }
+            }""";
+
+    /**
+     * AuthorizeSecurityGroupIngress appends without a duplicate check, so re-running provision on a
+     * reused group stacks another copy of every inline rule on each update. Retaining the group id
+     * is not enough on its own: the group has to still describe the rules the template declares,
+     * once each.
+     */
+    @Test
+    void securityGroupInlineRulesAreNotDuplicatedByAnUpdate() {
+        String body = SG_WITH_INGRESS.replace("DESCRIPTION", "stable");
+        String[] ids = createThenUpdate("sg-rules", body, body);
+        assertEquals(ids[0], ids[1], "unchanged security group was re-created under a new physical id");
+
+        String described = given()
+                .contentType("application/x-www-form-urlencoded").header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeSecurityGroups").formParam("GroupId.1", ids[1])
+            .when().post("/").then().statusCode(200)
+            .extract().body().asString();
+
+        int occurrences = described.split("<fromPort>22</fromPort>", -1).length - 1;
+        assertEquals(1, occurrences,
+                "inline ingress rule appears " + occurrences + " times after one update; "
+                        + "provision re-authorized it on the reused group");
+    }
+
     @Test
     void logGroup() {
         assertUnchangedResourceSurvivesUpdate("loggroup", """
