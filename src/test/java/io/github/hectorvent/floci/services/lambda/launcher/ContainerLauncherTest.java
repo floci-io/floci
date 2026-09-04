@@ -299,7 +299,7 @@ class ContainerLauncherTest {
 
     @ParameterizedTest
     @MethodSource("invalidPersistedArchitectures")
-    void launchFunction_keepsDaemonDefaultPlatformForInvalidPersistedArchitectures(
+    void launchFunction_rejectsInvalidPersistedArchitecturesBeforeCreatingContainer(
             List<String> architectures) throws Exception {
         EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
         when(lambda.honourArchitectures()).thenReturn(true);
@@ -312,9 +312,12 @@ class ContainerLauncherTest {
         fn.setCodeLocalPath(codePath.toString());
         fn.setArchitectures(architectures);
 
-        launcher.launch(fn);
+        IllegalStateException exception = assertThrows(IllegalStateException.class,
+                () -> launcher.launch(fn));
 
-        captureRealContainerSpec();
+        assertEquals("Invalid persisted architectures " + architectures
+                + " for function 'legacy-invalid-architecture-fn'", exception.getMessage());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
         verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
         assertSame(architectures, fn.getArchitectures());
     }

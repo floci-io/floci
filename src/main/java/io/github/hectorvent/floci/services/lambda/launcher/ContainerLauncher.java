@@ -536,10 +536,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
         Optional<String> platform = dockerPlatform(fn);
         if (platform.isEmpty()) {
-            LOG.warnv("Ignoring invalid persisted architectures {0} for function {1}; "
-                            + "using Docker daemon default platform",
-                    fn.getArchitectures(), fn.getFunctionName());
-            return lifecycleManager.create(spec);
+            throw new IllegalStateException("Invalid persisted architectures "
+                    + fn.getArchitectures() + " for function '" + fn.getFunctionName() + "'");
         }
         return lifecycleManager.create(spec, platform.get());
     }
