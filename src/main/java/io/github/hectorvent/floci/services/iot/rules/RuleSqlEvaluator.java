@@ -20,21 +20,27 @@ import io.github.hectorvent.floci.services.iot.rules.RuleSql.SelectAll;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
- * Evaluates a parsed topic rule statement against one published message.
+ * Evaluates a parsed topic rule statement against one published message, following the
+ * operator and conversion tables of the AWS IoT SQL reference.
  *
- * <p>A value that AWS reports as {@code Undefined} (a missing field, an out of range topic
- * segment, or an operand of the wrong type) is represented by a {@code null} {@link JsonNode}.
- * Every comparison against it yields {@code Undefined}, {@code AND}/{@code OR}/{@code NOT}
- * propagate it as SQL three-valued logic, and a rule fires only when its {@code WHERE}
- * evaluates to true, so an undefined predicate never triggers an action.
+ * <p>A value AWS reports as {@code Undefined} (a missing field, an out of range topic segment,
+ * a function argument that cannot be converted) is a {@code null} {@link JsonNode}. It spreads:
+ * a comparison, {@code AND}, {@code OR} or {@code NOT} with an undefined operand is undefined,
+ * and a rule fires only when its {@code WHERE} is true. JSON {@code null} is not undefined: it
+ * is a value that equals only itself.
  */
 public final class RuleSqlEvaluator {
 
     private static final Logger LOG = Logger.getLogger(RuleSqlEvaluator.class);
+
+    /** The string forms AWS converts to a number when an ordering operator meets a string. */
+    private static final Pattern NUMERIC_STRING = Pattern.compile("-?\\d+(\\.\\d+)?([eE]-?\\d+)?");
 
     private final ObjectMapper objectMapper;
 
@@ -138,14 +144,14 @@ public final class RuleSqlEvaluator {
                     ? topicSegment(topic, position.value().asLong())
                     : null;
         }
-        JsonNode subject = value(call.arguments().get(0), topic, document);
-        JsonNode argument = value(call.arguments().get(1), topic, document);
-        if (subject == null || !subject.isTextual() || argument == null || !argument.isTextual()) {
+        String subject = text(value(call.arguments().get(0), topic, document));
+        String argument = text(value(call.arguments().get(1), topic, document));
+        if (subject == null || argument == null) {
             return null;
         }
         return booleanNode(call.function().equals("startswith")
-                ? subject.textValue().startsWith(argument.textValue())
-                : subject.textValue().endsWith(argument.textValue()));
+                ? subject.startsWith(argument)
+                : subject.endsWith(argument));
     }
 
     private JsonNode topicSegment(String topic, long position) {
@@ -153,18 +159,60 @@ public final class RuleSqlEvaluator {
         return position < 1 || position > segments.length ? null : TextNode.valueOf(segments[(int) position - 1]);
     }
 
+    /**
+     * AWS's standard conversion to String: numbers, booleans, arrays and objects convert,
+     * {@code null} and Undefined do not.
+     */
+    private String text(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (value.isTextual()) {
+            return value.textValue();
+        }
+        return value.isContainerNode() ? value.toString() : value.asText();
+    }
+
     private JsonNode compare(Comparison comparison, String topic, ObjectNode document) {
         JsonNode left = value(comparison.left(), topic, document);
         JsonNode right = value(comparison.right(), topic, document);
-        if (left == null || right == null || left.isNull() || right.isNull()) {
+        if (left == null || right == null || !representable(left) || !representable(right)) {
             return null;
         }
-        if (left.isNumber() && right.isNumber()) {
-            return representable(left) && representable(right)
-                    ? booleanNode(matches(comparison.operator(), left.decimalValue().compareTo(right.decimalValue())))
-                    : null;
+        Operator operator = comparison.operator();
+        if (operator == Operator.EQUAL || operator == Operator.NOT_EQUAL) {
+            return booleanNode(equal(left, right) == (operator == Operator.EQUAL));
         }
-        return equality(comparison.operator(), left, right);
+        BigDecimal leftNumber = decimal(left);
+        BigDecimal rightNumber = decimal(right);
+        return leftNumber == null || rightNumber == null
+                ? null
+                : booleanNode(matches(operator, leftNumber.compareTo(rightNumber)));
+    }
+
+    /**
+     * AWS compares two numbers by value and everything else by type and value, so operands
+     * of different types are simply not equal, and {@code null} equals only {@code null}.
+     */
+    private boolean equal(JsonNode left, JsonNode right) {
+        if (left.isNumber() && right.isNumber()) {
+            return left.decimalValue().compareTo(right.decimalValue()) == 0;
+        }
+        return left.getNodeType() == right.getNodeType() && left.equals(right);
+    }
+
+    /**
+     * The ordering operators convert both operands to a number: numbers as they are, strings
+     * when they look like a number, anything else is Undefined.
+     */
+    private BigDecimal decimal(JsonNode value) {
+        if (value.isNumber()) {
+            return value.decimalValue();
+        }
+        if (value.isTextual() && NUMERIC_STRING.matcher(value.textValue()).matches()) {
+            return new BigDecimal(value.textValue());
+        }
+        return null;
     }
 
     /**
@@ -175,21 +223,6 @@ public final class RuleSqlEvaluator {
      */
     private boolean representable(JsonNode value) {
         return !(value.isDouble() || value.isFloat()) || Double.isFinite(value.doubleValue());
-    }
-
-    /**
-     * Ordering operators are numeric only, and equality holds only between operands of the
-     * same JSON type. Anything else is a type mismatch, which AWS reports as Undefined.
-     */
-    private JsonNode equality(Operator operator, JsonNode left, JsonNode right) {
-        if (operator != Operator.EQUAL && operator != Operator.NOT_EQUAL) {
-            return null;
-        }
-        boolean comparable = (left.isTextual() && right.isTextual()) || (left.isBoolean() && right.isBoolean());
-        if (!comparable) {
-            return null;
-        }
-        return booleanNode(left.equals(right) == (operator == Operator.EQUAL));
     }
 
     private boolean matches(Operator operator, int comparison) {
@@ -203,22 +236,32 @@ public final class RuleSqlEvaluator {
         };
     }
 
+    /** AWS gives Undefined for {@code AND} and {@code OR} unless both operands convert to a boolean. */
     private Boolean and(Boolean left, Boolean right) {
-        if (Boolean.FALSE.equals(left) || Boolean.FALSE.equals(right)) {
-            return Boolean.FALSE;
-        }
-        return left == null || right == null ? null : Boolean.TRUE;
+        return left == null || right == null ? null : left && right;
     }
 
     private Boolean or(Boolean left, Boolean right) {
-        if (Boolean.TRUE.equals(left) || Boolean.TRUE.equals(right)) {
-            return Boolean.TRUE;
-        }
-        return left == null || right == null ? null : Boolean.FALSE;
+        return left == null || right == null ? null : left || right;
     }
 
+    /** A boolean, or the strings {@code "true"} and {@code "false"} in any case; anything else is Undefined. */
     private Boolean truth(JsonNode value) {
-        return value != null && value.isBoolean() ? value.booleanValue() : null;
+        if (value == null) {
+            return null;
+        }
+        if (value.isBoolean()) {
+            return value.booleanValue();
+        }
+        if (value.isTextual()) {
+            if (value.textValue().equalsIgnoreCase("true")) {
+                return Boolean.TRUE;
+            }
+            if (value.textValue().equalsIgnoreCase("false")) {
+                return Boolean.FALSE;
+            }
+        }
+        return null;
     }
 
     private JsonNode booleanNode(Boolean value) {

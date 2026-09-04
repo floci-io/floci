@@ -72,12 +72,15 @@ class RuleSqlEvaluatorTest {
     }
 
     @Test
-    void projectsAJsonNullFieldButNeverMatchesItInAComparison() {
+    void treatsJsonNullAsAValueDistinctFromUndefined() {
         Optional<byte[]> projected = evaluate("SELECT clientToken FROM 'a/b'", "a/b", "{\"clientToken\":null}");
         assertEquals("{\"clientToken\":null}", text(projected));
 
         assertFalse(evaluate("SELECT * FROM 'a/b' WHERE clientToken = 'x'", "a/b", "{\"clientToken\":null}").isPresent());
-        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE clientToken <> 'x'", "a/b", "{\"clientToken\":null}").isPresent());
+        assertTrue(evaluate("SELECT * FROM 'a/b' WHERE clientToken <> 'x'", "a/b", "{\"clientToken\":null}").isPresent());
+        assertTrue(evaluate("SELECT * FROM 'a/b' WHERE clientToken = NULL", "a/b", "{\"clientToken\":null}").isPresent());
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE clientToken <> 'x'", "a/b", "{}").isPresent());
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE clientToken = NULL", "a/b", "{}").isPresent());
     }
 
     @ParameterizedTest
@@ -120,28 +123,71 @@ class RuleSqlEvaluatorTest {
             "level < 3          | false",
             "level <= 3         | true",
             "level = '3'        | false",
+            "level <> '3'       | true",
+            "NOT level = '3'    | true",
             "name = 'ok'        | true",
             "name > 'a'         | false",
+            "name = 3           | false",
+            "name <> 3          | true",
             "enabled = TRUE     | true",
             "enabled <> FALSE   | true",
             "enabled = 'true'   | false",
+            "enabled <> 'true'  | true",
+            "level > '2'        | true",
+            "level >= '3.0'     | true",
+            "level < '1E1'      | true",
+            "level < 'abc'      | false",
+            "code > 9           | true",
+            "code > '9'         | true",
             "missing = 3        | false",
             "missing <> 3       | false",
             "NOT level = 4      | true",
             "NOT missing = 3    | false"
     })
     void evaluatesComparisonsWithUndefinedSemantics(String predicate, boolean fires) {
-        String payload = "{\"level\":3,\"name\":\"ok\",\"enabled\":true}";
+        String payload = "{\"level\":3,\"name\":\"ok\",\"enabled\":true,\"code\":\"10\"}";
 
         assertEquals(fires, evaluate("SELECT level FROM 'a/b' WHERE " + predicate, "a/b", payload).isPresent());
     }
 
-    @Test
-    void treatsAnUndefinedOperandAsUnknownInsteadOfFalseUnderNot() {
-        assertTrue(evaluate("SELECT level FROM 'a/b' WHERE missing = 3 OR level = 3", "a/b", "{\"level\":3}")
-                .isPresent());
-        assertFalse(evaluate("SELECT level FROM 'a/b' WHERE missing = 3 AND level = 3", "a/b", "{\"level\":3}")
-                .isPresent());
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "missing = 3 OR level = 3   | false",
+            "level = 3 OR missing = 3   | false",
+            "missing = 3 AND level = 3  | false",
+            "NOT missing = 3            | false",
+            "level = 3 AND level = 3    | true",
+            "level = 4 OR level = 3     | true",
+            "flag                       | true",
+            "flag AND level = 3         | true",
+            "NOT off                    | true",
+            "off OR flag                | true",
+            "name AND flag              | false",
+            "NOT name                   | false",
+            "level AND flag             | false"
+    })
+    void propagatesUndefinedThroughAndOrNotAndCoercesBooleanStrings(String predicate, boolean fires) {
+        String payload = "{\"level\":3,\"name\":\"ok\",\"flag\":\"TRUE\",\"off\":\"false\"}";
+
+        assertEquals(fires, evaluate("SELECT level FROM 'a/b' WHERE " + predicate, "a/b", payload).isPresent());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "endswith(code, '2')        | true",
+            "startswith(flag, 'tr')     | true",
+            "startswith(obj, '{')       | true",
+            "endswith(list, ']')        | true",
+            "endswith(name, 5)          | true",
+            "startswith(name, 5)        | false",
+            "endswith(nothing, 'x')     | false",
+            "endswith(name, nothing)    | false",
+            "endswith(missing, 'x')     | false"
+    })
+    void convertsStringFunctionArgumentsToStringsExceptNullAndUndefined(String predicate, boolean fires) {
+        String payload = "{\"code\":42,\"flag\":true,\"obj\":{\"a\":1},\"list\":[1],\"name\":\"a5\",\"nothing\":null}";
+
+        assertEquals(fires, evaluate("SELECT * FROM 'a/b' WHERE " + predicate, "a/b", payload).isPresent());
     }
 
     @Test

@@ -126,6 +126,14 @@ class RuleSqlParserTest {
     }
 
     @Test
+    void acceptsDoubleQuotedStringsAsAwsExamplesDo() {
+        assertEquals(RuleSqlParser.parse("SELECT * FROM 'a/b' WHERE startswith(name, 'ra''n')"),
+                RuleSqlParser.parse("SELECT * FROM \"a/b\" WHERE startswith(name, \"ra'n\")"));
+        assertEquals(RuleSql.text("say \"hi\""),
+                ((Comparison) RuleSqlParser.parse("SELECT * FROM 'a' WHERE x = \"say \"\"hi\"\"\"").where()).right());
+    }
+
+    @Test
     void keepsReservedTopicFiltersVerbatim() {
         RuleSql query = RuleSqlParser.parse("SELECT * FROM '$aws/events/presence/connected/+'");
 
@@ -163,7 +171,6 @@ class RuleSqlParserTest {
             "SELECT * 'a/b'",
             "SELECT FROM 'a/b'",
             "SELECT * FROM 'a/b",
-            "SELECT * FROM \"a/b\"",
             "SELECT * FROM 'a/b' WHERE",
             "SELECT * FROM 'a/b' WHERE a =",
             "SELECT * FROM 'a/b' WHERE (a = 'b'",
