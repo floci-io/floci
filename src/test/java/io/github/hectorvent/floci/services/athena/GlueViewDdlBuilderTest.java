@@ -256,5 +256,18 @@ class GlueViewDdlBuilderTest {
         org.junit.jupiter.api.Assertions.assertNull(GlueViewDdlBuilder.extractBucket(null));
         org.junit.jupiter.api.Assertions.assertNull(GlueViewDdlBuilder.extractBucket("http://example.com/data"));
     }
+
+    @Test
+    void testContextDatabaseTablesFetchedOnlyOnce() {
+        Database db = createDatabase("shop");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+        Table table = createTable("orders", "s3://bucket/data", null, null);
+        when(glueService.getTables("shop")).thenReturn(List.of(table));
+
+        String ddl = builder.build("shop");
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"shop\".\"orders\""));
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"orders\""));
+        Mockito.verify(glueService, Mockito.times(1)).getTables("shop");
+    }
 }
 

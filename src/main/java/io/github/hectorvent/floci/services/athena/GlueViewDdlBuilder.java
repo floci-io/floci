@@ -31,6 +31,7 @@ public class GlueViewDdlBuilder {
 
     public String build(String contextDatabase) {
         StringBuilder sb = new StringBuilder();
+        boolean contextDbHandled = false;
         List<Database> databases = glueService.getDatabases();
         if (databases != null) {
             for (Database db : databases) {
@@ -45,13 +46,17 @@ public class GlueViewDdlBuilder {
                 try {
                     List<Table> tables = glueService.getTables(schema);
                     appendViews(sb, schema, tables, true);
+                    if (schema.equals(contextDatabase)) {
+                        appendViews(sb, schema, tables, false);
+                        contextDbHandled = true;
+                    }
                 } catch (Exception e) {
                     LOG.debugv("Could not fetch tables for Glue database {0}: {1}", schema, e.getMessage());
                 }
             }
         }
 
-        if (contextDatabase != null && !contextDatabase.isBlank()) {
+        if (!contextDbHandled && contextDatabase != null && !contextDatabase.isBlank()) {
             try {
                 List<Table> tables = glueService.getTables(contextDatabase);
                 appendViews(sb, contextDatabase, tables, false);
