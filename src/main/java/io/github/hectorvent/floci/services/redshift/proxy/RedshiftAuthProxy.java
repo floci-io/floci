@@ -142,7 +142,9 @@ public class RedshiftAuthProxy {
                     client, backend, masterUsername, masterPassword, dbName,
                     false, sigV4, tlsCertificates, passwordValidator::validate);
             if (activeClient != null) {
-                PostgresProtocolHandler.bridge(activeClient, backend);
+                // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
+                // PostgreSQL backend on the way through; every other message is relayed verbatim.
+                new RedshiftInterceptingBridge(activeClient, backend).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
