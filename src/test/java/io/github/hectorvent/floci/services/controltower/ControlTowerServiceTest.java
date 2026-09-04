@@ -206,7 +206,9 @@ class ControlTowerServiceTest {
         // Another account, and another region of the same account, must not see it at all.
         assertTrue(operationIdentifiers("000000000102", REGION).isEmpty());
         assertTrue(operationIdentifiers(ACCOUNT, "us-west-2").isEmpty());
-        assertEquals("UPDATE", service.getOperationType("000000000102", REGION, opId));
+        AwsException foreign = assertThrows(AwsException.class,
+                () -> service.getOperationType("000000000102", REGION, opId));
+        assertEquals("ResourceNotFoundException", foreign.getErrorCode());
     }
 
     @Test
@@ -312,7 +314,7 @@ class ControlTowerServiceTest {
     }
 
     @Test
-    void getOperationTypeReportsUpdateForIssuedAndUnknownIds() throws Exception {
+    void getOperationTypeReportsUpdateForIssuedAndRejectsUnknownIds() throws Exception {
         JsonNode request = objectMapper.readTree("""
                 {"version":"4.0","landingZoneIdentifier":"%s",
                  "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
@@ -320,7 +322,12 @@ class ControlTowerServiceTest {
         String opId = service.updateLandingZone(ACCOUNT, REGION, request);
 
         assertEquals("UPDATE", service.getOperationType(ACCOUNT, REGION, opId));
-        assertNotNull(service.getOperationType(ACCOUNT, REGION, "never-issued"));
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.getOperationType(ACCOUNT, REGION, "never-issued"));
+        assertEquals("ValidationException", invalid.getErrorCode());
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.getOperationType(ACCOUNT, REGION, "11111111-1111-4111-8111-111111111111"));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
     }
 
     @Test
@@ -421,11 +428,11 @@ class ControlTowerServiceTest {
         assertEquals("5.0", stored.getBaselineVersion());
         assertEquals("SUCCEEDED", stored.getStatus());
 
-        assertEquals("BASELINE_ENABLED", service.getBaselineOperationType(ACCOUNT, REGION, result.operationIdentifier()));
+        assertEquals("ENABLE_BASELINE", service.getBaselineOperationType(ACCOUNT, REGION, result.operationIdentifier()));
     }
 
     @Test
-    void enableBaselineTwiceForSameTargetReplacesNotDuplicates() throws Exception {
+    void enableBaselineTwiceForSameTargetReturnsConflict() throws Exception {
         String ctBaselineArn = service.listBaselines(REGION).stream()
                 .filter(b -> "AWSControlTowerBaseline".equals(b.get("name").asText()))
                 .findFirst().orElseThrow().get("arn").asText();
@@ -435,7 +442,10 @@ class ControlTowerServiceTest {
                 {"baselineIdentifier":"%s","baselineVersion":"5.0","targetIdentifier":"%s"}
                 """.formatted(ctBaselineArn, ouArn));
         service.enableBaseline(ACCOUNT, REGION, request);
-        service.enableBaseline(ACCOUNT, REGION, request);
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.enableBaseline(ACCOUNT, REGION, request));
+        assertEquals("ConflictException", duplicate.getErrorCode());
+        assertEquals(409, duplicate.getHttpStatus());
 
         long matching = service.listEnabledBaselines(ACCOUNT, REGION).stream()
                 .filter(e -> ouArn.equals(e.getTargetIdentifier()))
@@ -562,7 +572,7 @@ class ControlTowerServiceTest {
         String opId = service.resetEnabledBaseline(ACCOUNT, REGION, enabled.getArn());
         assertNotNull(opId);
         assertFalse(opId.isBlank());
-        assertEquals("BASELINE_RESET", service.getBaselineOperationType(ACCOUNT, REGION, opId));
+        assertEquals("RESET_ENABLED_BASELINE", service.getBaselineOperationType(ACCOUNT, REGION, opId));
     }
 
     @Test
@@ -608,13 +618,13 @@ class ControlTowerServiceTest {
                 .findFirst().orElseThrow();
 
         JsonNode updateRequest = objectMapper.readTree("""
-                {"enabledBaselineIdentifier":"%s","baselineVersion":"6.0",
+                {"enabledBaselineIdentifier":"%s","baselineVersion":"4.0",
                  "parameters":[{"key":"Example","value":{"enabled":true}}]}
                 """.formatted(enabled.getArn()));
         String opId = service.updateEnabledBaseline(ACCOUNT, REGION, updateRequest);
 
         EnabledBaseline updated = service.getEnabledBaseline(ACCOUNT, REGION, enabled.getArn());
-        assertEquals("6.0", updated.getBaselineVersion());
+        assertEquals("4.0", updated.getBaselineVersion());
         assertEquals(true, updated.getParameters().path(0).path("value").path("enabled").asBoolean());
         assertEquals("UPDATE_ENABLED_BASELINE", service.getBaselineOperationType(ACCOUNT, REGION, opId));
     }

@@ -776,6 +776,9 @@ public interface EmulatorConfig {
     interface ControlTowerServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean seedLandingZone();
     }
 
     interface GuardDutyServiceConfig {

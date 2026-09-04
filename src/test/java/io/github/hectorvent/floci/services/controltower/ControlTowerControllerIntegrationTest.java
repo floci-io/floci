@@ -1,6 +1,10 @@
 package io.github.hectorvent.floci.services.controltower;
 
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.organizations.model.Organization;
+import io.github.hectorvent.floci.services.organizations.model.OrganizationalUnit;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import jakarta.inject.Inject;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -22,6 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ControlTowerControllerIntegrationTest {
 
     private static final String EAST = "us-east-1";
+
+    @Inject
+    OrganizationsService organizationsService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -263,7 +270,7 @@ class ControlTowerControllerIntegrationTest {
                 .filter(e -> identityCenterBaselineArn.equals(e.get("baselineIdentifier")))
                 .findFirst().orElseThrow().get("arn").toString();
 
-        String ouArn = "arn:aws:organizations::000000000204:ou/o-floci0001/ou-abcd-33333333";
+        String ouArn = createOuArn("000000000204", "register-ou");
         String enableBody = """
                 {"baselineIdentifier":"%s","baselineVersion":"5.0","targetIdentifier":"%s",
                  "parameters":[{"key":"IdentityCenterEnabledBaselineArn","value":"%s"}]}
@@ -321,7 +328,7 @@ class ControlTowerControllerIntegrationTest {
         String baselineArn = ((List<Map<String, Object>>) baselines.path("baselines")).stream()
                 .filter(b -> "AWSControlTowerBaseline".equals(b.get("name")))
                 .findFirst().orElseThrow().get("arn").toString();
-        String targetArn = "arn:aws:organizations::000000000207:ou/o-floci0001/ou-update-00000001";
+        String targetArn = createOuArn("000000000207", "update-ou");
 
         given()
                 .contentType("application/json")
@@ -349,7 +356,7 @@ class ControlTowerControllerIntegrationTest {
                 .contentType("application/json")
                 .header("Authorization", authorization)
                 .body("{\"enabledBaselineIdentifier\":\"" + enabledArn
-                        + "\",\"baselineVersion\":\"6.0\",\"parameters\":[{\"key\":\"Example\",\"value\":{\"enabled\":true}}]}")
+                        + "\",\"baselineVersion\":\"4.0\",\"parameters\":[{\"key\":\"Example\",\"value\":{\"enabled\":true}}]}")
                 .when()
                 .post("/update-enabled-baseline")
                 .then()
@@ -376,7 +383,7 @@ class ControlTowerControllerIntegrationTest {
                 .post("/get-enabled-baseline")
                 .then()
                 .statusCode(200)
-                .body("enabledBaselineDetails.baselineVersion", equalTo("6.0"))
+                .body("enabledBaselineDetails.baselineVersion", equalTo("4.0"))
                 .body("enabledBaselineDetails.parameters[0].key", equalTo("Example"))
                 .body("enabledBaselineDetails.parameters[0].value.enabled", equalTo(true));
     }
@@ -424,6 +431,13 @@ class ControlTowerControllerIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body(containsString("controltower"));
+    }
+
+    private String createOuArn(String accountId, String name) {
+        Organization organization = organizationsService.createOrganization(accountId, "ALL");
+        OrganizationalUnit unit = organizationsService.createOrganizationalUnit(
+                accountId, organization.getRoot().getId(), name, Map.of());
+        return unit.getArn();
     }
 
     private static String listLandingZonesArn(String authorization) {
