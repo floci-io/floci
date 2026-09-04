@@ -454,6 +454,26 @@ public class IotService {
         }
     }
 
+    /**
+     * Deletes the oldest version so a new one fits under the cap, as the AWS CloudFormation handler
+     * does once the service refuses a sixth. A default version cannot be deleted, so when the oldest
+     * is the default the newest becomes the default first. One step under the version lock, so
+     * nothing else can move the selection in between.
+     */
+    public void deleteOldestPolicyVersion(String policyName, String region) {
+        synchronized (policyVersionLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
+                    .sorted(Comparator.comparingInt(version -> Integer.parseInt(version.getVersionId())))
+                    .toList();
+            String oldest = versions.get(0).getVersionId();
+            if (oldest.equals(policy.getDefaultVersionId())) {
+                setDefaultPolicyVersion(policyName, versions.get(versions.size() - 1).getVersionId(), region);
+            }
+            deletePolicyVersion(policyName, oldest, region);
+        }
+    }
+
     public void attachPolicy(String policyName, String target, String region) {
         getPolicy(policyName, region);
         Set<String> targets = new HashSet<>(policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()));
