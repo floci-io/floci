@@ -198,9 +198,9 @@ Semantics:
   different types are simply not equal: `level = '3'` is false and `level <> '3'` is true when
   `level` is the number 3. These follow the operator tables in the AWS IoT SQL reference.
 - `<`, `<=`, `>` and `>=` convert both operands to a number. A string converts when it looks like
-  one (`'10' > 9` is true); any other operand makes the comparison undefined. Numbers are compared
-  exactly, so a value wider than a double still orders correctly, but a payload number too large
-  for a double is `Undefined`: its value is already lost before the rule sees it.
+  one (`'10' > 9` is true); any other operand makes the comparison undefined.
+- Payload numbers are read exactly, never through a double, so `9007199254740993.0`, `1e-400` and
+  `0.30000000000000004` compare as written, at any size or precision, as AWS's Decimal does.
 - `AND`, `OR` and `NOT` take booleans or the strings `'true'` and `'false'` in any case. Any other
   operand makes the result undefined.
 - `startswith` and `endswith` convert numbers, booleans, arrays and objects to their string form

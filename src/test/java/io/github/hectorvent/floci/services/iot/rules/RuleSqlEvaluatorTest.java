@@ -208,12 +208,39 @@ class RuleSqlEvaluatorTest {
         assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level >= '1e5'", "a/b", payload).isPresent());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "1e400                   | level > 1                          | true",
+            "1e400                   | level < 1                          | false",
+            "1e-400                  | level = 0                          | false",
+            "1e-400                  | level > 0                          | true",
+            "9007199254740993.0      | level = 9007199254740993.0         | true",
+            "9007199254740993.0      | level = 9007199254740992.0         | false",
+            "0.1                     | level = 0.1                        | true",
+            "0.30000000000000004     | level <> 0.3                       | true",
+            "0.30000000000000004     | level = 0.30000000000000004        | true",
+            "3.0                     | level = 3                          | true",
+            "123456789012345678901234567890.123456789 | level > 123456789012345678901234567890.123456788 | true",
+            "1E2                     | level = 100                        | true"
+    })
+    void readsPayloadNumbersExactlyWhateverTheirSizeOrPrecision(String number, String predicate, boolean fires) {
+        assertEquals(fires, evaluate("SELECT * FROM 'a/b' WHERE " + predicate, "a/b",
+                "{\"level\":" + number + "}").isPresent());
+    }
+
     @Test
-    void treatsAPayloadNumberTooLargeForADoubleAsUndefined() {
-        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level > 1", "a/b", "{\"level\":1e400}").isPresent());
-        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level < 1", "a/b", "{\"level\":1e400}").isPresent());
-        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level = 1" + "0".repeat(400) + ".0", "a/b",
+    void comparesAHugePayloadNumberAgainstItsPlainForm() {
+        assertTrue(evaluate("SELECT * FROM 'a/b' WHERE level = 1" + "0".repeat(400) + ".0", "a/b",
                 "{\"level\":1e400}").isPresent());
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level = 1" + "0".repeat(399) + ".0", "a/b",
+                "{\"level\":1e400}").isPresent());
+    }
+
+    @Test
+    void projectsADecimalPayloadNumberAsWritten() {
+        assertEquals("{\"level\":21.50}", text(evaluate("SELECT level FROM 'a/b'", "a/b", "{\"level\":21.50}")));
+        assertEquals("{\"level\":9007199254740993.0}",
+                text(evaluate("SELECT level FROM 'a/b'", "a/b", "{\"level\":9007199254740993.0}")));
     }
 
     @Test
