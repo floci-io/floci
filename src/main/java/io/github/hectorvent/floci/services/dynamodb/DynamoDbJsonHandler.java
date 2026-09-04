@@ -1334,6 +1334,10 @@ public class DynamoDbJsonHandler {
             TableDefinition currentTable = dynamoDbService.describeTable(tableName, region);
             for (JsonNode updateNode : gsiUpdatesToApply) {
                 String indexName = updateNode.path("IndexName").asText();
+                if (gsiDeletes.contains(indexName)) {
+                    throw new AwsException("ValidationException",
+                            "Cannot delete and update the same index: " + indexName, 400);
+                }
                 if (currentTable.findGsi(indexName).isEmpty()) {
                     throw new AwsException("ValidationException",
                             "The table does not have the specified index: " + indexName, 400);

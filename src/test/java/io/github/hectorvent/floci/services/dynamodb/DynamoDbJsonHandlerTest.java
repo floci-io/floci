@@ -38,6 +38,22 @@ class DynamoDbJsonHandlerTest {
                 5L, 5L, region);
     }
 
+    private void createProvisionedTableWithGsi(String tableName, String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "TitleIndex",
+                List.of(new KeySchemaElement("title", "HASH")),
+                null, "ALL", null);
+        gsi.getProvisionedThroughput().setReadCapacityUnits(5);
+        gsi.getProvisionedThroughput().setWriteCapacityUnits(5);
+        service.createTable(
+                tableName,
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(
+                        new AttributeDefinition("id", "S"),
+                        new AttributeDefinition("title", "S")),
+                5L, 5L, List.of(gsi), region);
+    }
+
     private ObjectNode attributeValue(String type, String value) {
         ObjectNode attrValue = mapper.createObjectNode();
         attrValue.put(type, value);
@@ -492,19 +508,7 @@ class DynamoDbJsonHandlerTest {
 
     @Test
     void updateTableChangesGsiProvisionedThroughput() throws Exception {
-        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
-                "TitleIndex",
-                List.of(new KeySchemaElement("title", "HASH")),
-                null, "ALL", null);
-        gsi.getProvisionedThroughput().setReadCapacityUnits(5);
-        gsi.getProvisionedThroughput().setWriteCapacityUnits(5);
-        service.createTable(
-                "gsi-provisioned-table",
-                List.of(new KeySchemaElement("id", "HASH")),
-                List.of(
-                        new AttributeDefinition("id", "S"),
-                        new AttributeDefinition("title", "S")),
-                5L, 5L, List.of(gsi), "eu-west-1");
+        createProvisionedTableWithGsi("gsi-provisioned-table", "eu-west-1");
 
         ObjectNode updateAction = mapper.createObjectNode();
         updateAction.put("IndexName", "TitleIndex");
@@ -530,5 +534,34 @@ class DynamoDbJsonHandlerTest {
         JsonNode describedGsi = describeBody.get("Table").get("GlobalSecondaryIndexes").get(0);
         assertEquals(20, describedGsi.get("ProvisionedThroughput").get("ReadCapacityUnits").asInt());
         assertEquals(30, describedGsi.get("ProvisionedThroughput").get("WriteCapacityUnits").asInt());
+    }
+
+    @Test
+    void updateTableRejectsConflictingDeleteAndUpdateWithoutRemovingGsi() throws Exception {
+        createProvisionedTableWithGsi("gsi-conflicting-update-table", "eu-west-1");
+
+        ObjectNode updateRequest = mapper.createObjectNode();
+        updateRequest.put("TableName", "gsi-conflicting-update-table");
+        updateRequest.set("GlobalSecondaryIndexUpdates", mapper.createArrayNode()
+                .add(mapper.createObjectNode().set("Delete",
+                        mapper.createObjectNode().put("IndexName", "TitleIndex")))
+                .add(mapper.createObjectNode().set("Update", mapper.createObjectNode()
+                        .put("IndexName", "TitleIndex")
+                        .set("ProvisionedThroughput", mapper.createObjectNode()
+                                .put("ReadCapacityUnits", 20)
+                                .put("WriteCapacityUnits", 30)))));
+
+        RuntimeException error = assertThrows(RuntimeException.class,
+                () -> handler.handle("UpdateTable", updateRequest, "eu-west-1"));
+
+        ObjectNode describeRequest = mapper.createObjectNode();
+        describeRequest.put("TableName", "gsi-conflicting-update-table");
+        Response describeResponse = handler.handle("DescribeTable", describeRequest, "eu-west-1");
+        JsonNode describeBody = mapper.convertValue(describeResponse.getEntity(), JsonNode.class);
+        JsonNode describedIndexes = describeBody.get("Table").path("GlobalSecondaryIndexes");
+        assertAll(
+                () -> assertTrue(error instanceof AwsException awsError
+                        && "ValidationException".equals(awsError.getErrorCode())),
+                () -> assertEquals(1, describedIndexes.size()));
     }
 }
