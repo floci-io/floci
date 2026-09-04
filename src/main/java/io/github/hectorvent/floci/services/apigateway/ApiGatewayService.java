@@ -1295,14 +1295,7 @@ public class ApiGatewayService {
         domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
         domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
-        domain.setEndpointConfigurationType(endpointTypeOf(request));
-        if ("EDGE".equals(domain.getEndpointConfigurationType())) {
-            // An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
-            // distribution's name in the fixed CloudFront hosted zone AWS documents for every region.
-            domain.setDistributionDomainName(
-                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + ".cloudfront.net");
-            domain.setDistributionHostedZoneId("Z2FDTNDATAQYW2");
-        }
+        applyEndpointType(domain, endpointTypeOf(request));
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
         domain.setDomainNameStatus("AVAILABLE");
@@ -1324,6 +1317,24 @@ public class ApiGatewayService {
         }
         LOG.infov("Created custom domain {0} in {1}", domainName, region);
         return domain;
+    }
+
+    /**
+     * An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
+     * distribution's name in the fixed CloudFront hosted zone AWS documents for every region. A
+     * regional domain has none, so a move to {@code REGIONAL} drops the distribution again while a
+     * move to {@code EDGE} puts one in front of the domain, as the migration does on AWS.
+     */
+    private static void applyEndpointType(CustomDomain domain, String endpointType) {
+        domain.setEndpointConfigurationType(endpointType);
+        if (!"EDGE".equals(endpointType)) {
+            domain.setDistributionDomainName(null);
+            domain.setDistributionHostedZoneId(null);
+        } else if (domain.getDistributionDomainName() == null) {
+            domain.setDistributionDomainName(
+                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + ".cloudfront.net");
+            domain.setDistributionHostedZoneId("Z2FDTNDATAQYW2");
+        }
     }
 
     /**
@@ -1428,7 +1439,7 @@ public class ApiGatewayService {
         domain.setRegionalCertificateName(newRegionalCertificateName);
         domain.setRegionalCertificateArn(newRegionalCertificateArn);
         domain.setSecurityPolicy(newSecurityPolicy);
-        domain.setEndpointConfigurationType(newEndpointConfigurationType);
+        applyEndpointType(domain, newEndpointConfigurationType);
         domainStore.put(domainKey, domain);
         return domain;
     }

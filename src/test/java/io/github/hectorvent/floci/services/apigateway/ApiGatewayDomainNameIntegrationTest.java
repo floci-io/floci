@@ -85,14 +85,43 @@ class ApiGatewayDomainNameIntegrationTest {
                 {"domainName":"%s","certificateArn":"%s","endpointConfiguration":{"types":["EDGE"]}}
                 """.formatted(domain, CERTIFICATE_ARN));
 
-        // The patch path names the type the domain has now, the value the type it should get.
+        // The patch path names the type the domain has now, the value the type it should get. A
+        // regional domain has no distribution, so the move drops the CloudFront fields.
         given().contentType(ContentType.JSON)
             .body("""
                 {"patchOperations":[{"op":"replace","path":"/endpointConfiguration/types/EDGE","value":"REGIONAL"}]}
                 """)
         .when().patch("/domainnames/" + domain).then()
             .statusCode(200)
-            .body("endpointConfiguration.types[0]", equalTo("REGIONAL"));
+            .body("endpointConfiguration.types[0]", equalTo("REGIONAL"))
+            .body("distributionDomainName", nullValue())
+            .body("distributionHostedZoneId", nullValue());
+
+        deleteDomain(domain);
+    }
+
+    @Test
+    void endpointTypeCanBeMovedFromRegionalToEdge() {
+        String domain = "edge-migration.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","regionalCertificateArn":"%s","endpointConfiguration":{"types":["REGIONAL"]}}
+                """.formatted(domain, CERTIFICATE_ARN))
+            .body("distributionDomainName", nullValue());
+
+        // Moving to EDGE puts a distribution in front of the domain, as on AWS.
+        given().contentType(ContentType.JSON)
+            .body("""
+                {"patchOperations":[{"op":"replace","path":"/endpointConfiguration/types/REGIONAL","value":"EDGE"}]}
+                """)
+        .when().patch("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("endpointConfiguration.types[0]", equalTo("EDGE"))
+            .body("distributionDomainName", endsWith(".cloudfront.net"))
+            .body("distributionHostedZoneId", equalTo("Z2FDTNDATAQYW2"));
+
+        given().when().get("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("distributionDomainName", endsWith(".cloudfront.net"));
 
         deleteDomain(domain);
     }
