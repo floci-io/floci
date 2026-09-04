@@ -56,7 +56,7 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         // CloudFront distribution a DNS alias points at survives, as on AWS.
         UserPoolDomain existing = ctx.isUpdate() ? findExisting(ctx.priorPhysicalId()) : null;
         UserPoolDomain provisioned;
-        if (existing != null && domain.equals(existing.getDomain()) && userPoolId.equals(existing.getUserPoolId())) {
+        if (existing != null && ctx.reusesPriorEntity(domain) && userPoolId.equals(existing.getUserPoolId())) {
             provisioned = cognitoService.updateUserPoolDomain(domain, userPoolId, customDomainConfig, managedLoginVersion);
         } else {
             provisioned = cognitoService.createUserPoolDomain(domain, userPoolId, customDomainConfig, managedLoginVersion);

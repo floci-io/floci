@@ -3354,6 +3354,22 @@ class CognitoServiceTest {
     }
 
     @Test
+    void updateUserPoolDomainReplacesTheSecurityPolicyAndKeepsItWhenOmitted() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        assertEquals("TLS_V1_2_2021", service.describeUserPoolDomain("auth.example.com").getSecurityPolicy());
+
+        service.updateUserPoolDomain("auth.example.com", pool.getId(),
+                Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN, "SecurityPolicy", "TLS_V1_2_2019"), null);
+        assertEquals("TLS_V1_2_2019", service.describeUserPoolDomain("auth.example.com").getSecurityPolicy());
+
+        service.updateUserPoolDomain("auth.example.com", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null);
+
+        UserPoolDomain stored = service.describeUserPoolDomain("auth.example.com");
+        assertEquals("TLS_V1_2_2019", stored.getSecurityPolicy());
+        assertEquals(CERTIFICATE_ARN, stored.getCertificateArn());
+    }
+
+    @Test
     void updateUserPoolDomainOfAnUnknownPoolIsNotFound() {
         createPoolWithCustomDomain("auth.example.com");
 
