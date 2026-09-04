@@ -370,7 +370,7 @@ public class DynamoDbJsonHandler {
             response.set("Attributes", oldItem);
         }
         addItemCollectionMetrics(response, request, tableName, item, region);
-        addConsumedCapacity(response, request, tableName, 1, true);
+        addConsumedCapacity(response, request, tableName, 1.0);
         return Response.ok(response).build();
     }
 
@@ -404,6 +404,7 @@ public class DynamoDbJsonHandler {
         }
 
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
+        long itemBytes = item != null ? DynamoDbItemSize.calculateItemSize(item) : 0;
         if (item != null && projectionExpression != null) {
             item = ProjectionEvaluator.project(item, projectionExpression, exprAttrNames);
         } else if (item != null && attributesToGet != null) {
@@ -416,7 +417,8 @@ public class DynamoDbJsonHandler {
         if (item != null) {
             response.set("Item", item);
         }
-        addConsumedCapacity(response, request, tableName, item != null ? 1 : 0, false);
+        addConsumedCapacity(response, request, tableName,
+                readCapacityUnits(itemBytes, request.path("ConsistentRead").asBoolean(false)));
         return Response.ok(response).build();
     }
 
@@ -482,7 +484,7 @@ public class DynamoDbJsonHandler {
             response.set("Attributes", oldItem);
         }
         addItemCollectionMetrics(response, request, tableName, key, region);
-        addConsumedCapacity(response, request, tableName, 1, true);
+        addConsumedCapacity(response, request, tableName, 1.0);
         return Response.ok(response).build();
     }
 
@@ -594,7 +596,7 @@ public class DynamoDbJsonHandler {
             response.set("Attributes", getChangedAttributes(result.oldItem(), result.newItem()));
         }
         addItemCollectionMetrics(response, request, tableName, key, region);
-        addConsumedCapacity(response, request, tableName, 1, true);
+        addConsumedCapacity(response, request, tableName, 1.0);
         return Response.ok(response).build();
     }
 
@@ -903,7 +905,8 @@ public class DynamoDbJsonHandler {
         if (result.lastEvaluatedKey() != null) {
             response.set("LastEvaluatedKey", result.lastEvaluatedKey());
         }
-        addConsumedCapacity(response, request, tableName, queryItems.size(), false);
+        addConsumedCapacity(response, request, tableName,
+                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)));
         return Response.ok(response).build();
     }
 
@@ -1039,7 +1042,8 @@ public class DynamoDbJsonHandler {
         if (result.lastEvaluatedKey() != null) {
             response.set("LastEvaluatedKey", result.lastEvaluatedKey());
         }
-        addConsumedCapacity(response, request, tableName, scanItems.size(), false);
+        addConsumedCapacity(response, request, tableName,
+                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)));
         return Response.ok(response).build();
     }
 
@@ -1955,12 +1959,19 @@ public class DynamoDbJsonHandler {
                 .toList();
     }
 
+    /**
+     * Half a read unit per 4KB read, doubled for a strongly consistent read, with the
+     * half-unit minimum DynamoDB charges even when nothing is found.
+     */
+    private static double readCapacityUnits(long bytes, boolean consistentRead) {
+        var units = Math.max(1, (bytes + 4095) / 4096) * 0.5;
+        return consistentRead ? units * 2 : units;
+    }
+
     private void addConsumedCapacity(ObjectNode response, JsonNode request, String tableName,
-                                      int itemCount, boolean isWrite) {
+                                      double cu) {
         String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
         if ("NONE".equals(returnCC)) return;
-
-        double cu = isWrite ? Math.max(1.0, itemCount) : Math.max(0.5, itemCount * 0.5);
 
         ObjectNode cc = objectMapper.createObjectNode();
         cc.put("TableName", DynamoDbTableNames.resolve(tableName));

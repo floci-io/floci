@@ -857,7 +857,7 @@ public class DynamoDbService implements ResourceProvider {
         List<String> sortKeyNames = accessPath.sortKeyNames();
 
         var items = itemsByTable.get(scopedItemsKey(storageKey));
-        if (items == null) return new QueryResult(List.of(), 0, null);
+        if (items == null) return new QueryResult(List.of(), 0, 0, null);
 
         List<JsonNode> results = new ArrayList<>();
 
@@ -986,7 +986,7 @@ public class DynamoDbService implements ResourceProvider {
 
         LOG.tracev("Query on {0}: returned={1} scanned={2}",
                 canonicalTableName, evaluatedItems.size(), scannedCount);
-        return new QueryResult(evaluatedItems, scannedCount, lastEvaluatedKey);
+        return new QueryResult(evaluatedItems, scannedCount, accSize, lastEvaluatedKey);
     }
 
     public ScanResult scan(String tableName, String filterExpression,
@@ -1009,7 +1009,7 @@ public class DynamoDbService implements ResourceProvider {
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
 
         var items = itemsByTable.get(scopedItemsKey(storageKey));
-        if (items == null) return new ScanResult(List.of(), 0, null);
+        if (items == null) return new ScanResult(List.of(), 0, 0, null);
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
         // Use tailMap for O(log n) pagination instead of O(n) linear search.
@@ -1080,7 +1080,7 @@ public class DynamoDbService implements ResourceProvider {
 
         LOG.tracev("Scan on {0}: returned={1} scanned={2}",
                 canonicalTableName, results.size(), totalScanned);
-        return new ScanResult(results, totalScanned, lastEvaluatedKey);
+        return new ScanResult(results, totalScanned, accSize, lastEvaluatedKey);
     }
 
     public boolean matchesScanFilterPublic(JsonNode item, JsonNode scanFilter) {
@@ -3172,8 +3172,11 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     public record UpdateResult(JsonNode newItem, JsonNode oldItem) {}
-    public record ScanResult(List<JsonNode> items, int scannedCount, JsonNode lastEvaluatedKey) {}
-    public record QueryResult(List<JsonNode> items, int scannedCount, JsonNode lastEvaluatedKey) {}
+
+    // scannedBytes carries the pre-filter size of the read items: DynamoDB bills a
+    // Query or Scan on what it read, not on what survived the filter or projection.
+    public record ScanResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey) {}
+    public record QueryResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey) {}
 
     // --- Export Operations ---
 
