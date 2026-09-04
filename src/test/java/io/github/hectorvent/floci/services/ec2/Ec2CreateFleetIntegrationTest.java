@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -126,7 +127,7 @@ class Ec2CreateFleetIntegrationTest {
             launchTemplateId = createLaunchTemplate();
         }
 
-        String instanceId = given()
+        given()
                 .formParam("Action", "CreateFleet")
                 .formParam("Type", "instant")
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", launchTemplateId)
@@ -134,7 +135,7 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", CONTRACT_IMAGE_ID)
                 .formParam("LaunchTemplateConfig.1.Overrides.1.AvailabilityZone", "us-east-1b")
-                .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
+                .formParam("TargetCapacitySpecification.TotalTargetCapacity", "2")
                 .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
                 .header("Authorization", AUTH_HEADER)
                 .when()
@@ -142,16 +143,16 @@ class Ec2CreateFleetIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("CreateFleetResponse.fleetId", startsWith("fleet-"))
-                .body("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item", startsWith("i-"))
+                .body("CreateFleetResponse.fleetInstanceSet.item.size()", equalTo(1))
+                .body("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item.size()", equalTo(2))
+                .body("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item", everyItem(startsWith("i-")))
                 .body("CreateFleetResponse.fleetInstanceSet.item.instanceType", equalTo("t3.micro"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.availabilityZone", equalTo("us-east-1b"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.lifecycle", equalTo("on-demand"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.launchTemplateSpecification.launchTemplateId",
                         equalTo(launchTemplateId))
                 .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.overrides.imageId",
-                        equalTo(CONTRACT_IMAGE_ID))
-                .extract()
-                .path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
+                        equalTo(CONTRACT_IMAGE_ID));
     }
 
     private static String createLaunchTemplate() {

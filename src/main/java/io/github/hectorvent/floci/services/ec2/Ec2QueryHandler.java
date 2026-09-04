@@ -807,13 +807,23 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("fleetId", "fleet-" + UUID.randomUUID().toString().replace("-", ""))
                 .start("fleetInstanceSet");
+        // AWS groups instances that share a launch template and overrides into one fleet
+        // instance entry. Keep the first-seen order stable while collecting all instance IDs.
+        Map<FleetLaunchKey, List<FleetLaunchResult>> groupedResults = new LinkedHashMap<>();
         for (FleetLaunchResult result : results) {
-            Instance instance = result.instance();
-            FleetLaunch launch = result.launch();
-                xml.start("item")
-                    .start("instanceIds")
-                    .elem("item", instance.getInstanceId())
-                    .end("instanceIds")
+            groupedResults.computeIfAbsent(FleetLaunchKey.from(result.launch()), ignored -> new ArrayList<>())
+                    .add(result);
+        }
+        for (List<FleetLaunchResult> group : groupedResults.values()) {
+            FleetLaunchResult first = group.getFirst();
+            Instance instance = first.instance();
+            FleetLaunch launch = first.launch();
+            xml.start("item")
+                    .start("instanceIds");
+            for (FleetLaunchResult result : group) {
+                xml.elem("item", result.instance().getInstanceId());
+            }
+            xml.end("instanceIds")
                     .elem("instanceType", instance.getInstanceType())
                     .elem("availabilityZone", instance.getPlacement() != null
                             ? instance.getPlacement().getAvailabilityZone() : null)
@@ -927,6 +937,15 @@ public class Ec2QueryHandler {
                                String instanceType, String imageId, String subnetId, String availabilityZone,
                                String keyName, String userData, String iamInstanceProfileArn,
                                List<String> securityGroupIds, List<Tag> instanceTags) {}
+
+    private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
+                                  String instanceType, String imageId, String subnetId, String availabilityZone) {
+        private static FleetLaunchKey from(FleetLaunch launch) {
+            return new FleetLaunchKey(launch.launchTemplateId(), launch.launchTemplateName(),
+                    launch.launchTemplateVersion(), launch.instanceType(), launch.imageId(), launch.subnetId(),
+                    launch.availabilityZone());
+        }
+    }
 
     private record FleetLaunchResult(Instance instance, FleetLaunch launch) {}
 
