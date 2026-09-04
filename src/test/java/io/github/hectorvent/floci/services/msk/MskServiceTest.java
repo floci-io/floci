@@ -137,17 +137,14 @@ class MskServiceTest {
     }
 
     @Test
-    void createClusterReportsActiveFromFirstReadWhileBrokerStarts() {
-        // Non-mock mode with a working Docker daemon: the cluster record reports its terminal
-        // ACTIVE state from the first read (what SDK/Terraform waiters poll on DescribeCluster)
-        // instead of gating on Redpanda readiness, same pattern as MediaLive multiplexes.
+    void createClusterStaysCreatingWhileBrokerStarts() {
         when(config.services().msk().mock()).thenReturn(false);
         when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(true);
 
         MskCluster cluster = mskService.createCluster("docker-cluster");
 
-        assertEquals(ClusterState.ACTIVE, cluster.getState());
-        assertEquals(ClusterState.ACTIVE,
+        assertEquals(ClusterState.CREATING, cluster.getState());
+        assertEquals(ClusterState.CREATING,
                 mskService.describeCluster(cluster.getClusterArn()).getState());
     }
 

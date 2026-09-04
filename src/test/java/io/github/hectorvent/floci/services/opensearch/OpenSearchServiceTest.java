@@ -10,16 +10,15 @@ import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * SDK and Terraform waiters poll DescribeDomain until {@code Processing=false}, so a domain must
- * report its terminal state from the first read (same pattern as MediaLive multiplexes) instead of
- * gating on backing-container readiness: with a working Docker daemon, without one, and in mock
- * mode alike.
+ * A domain stays {@code Processing=true} until the readiness poller flips it. Mock mode and a
+ * Floci with no reachable Docker daemon report {@code Processing=false} from the first read.
  */
 class OpenSearchServiceTest {
 
@@ -43,15 +42,15 @@ class OpenSearchServiceTest {
     }
 
     @Test
-    void createDomainReportsProcessingFalseFromFirstReadWhileContainerStarts() {
+    void createDomainKeepsProcessingTrueWhileContainerStarts() {
         when(domainManager.tryStartDomain(any())).thenReturn(true);
 
         Domain domain = service.createDomain("docker-domain", "OpenSearch_2.11",
                 null, null, null, "us-east-1");
 
-        assertFalse(domain.isProcessing(),
-                "waiters poll Processing; it must be terminal from the first read");
-        assertFalse(service.describeDomain("docker-domain").isProcessing());
+        assertTrue(domain.isProcessing(),
+                "the readiness poller flips Processing once the container answers");
+        assertTrue(service.describeDomain("docker-domain").isProcessing());
         verify(domainManager).tryStartDomain(any());
     }
 

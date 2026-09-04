@@ -88,6 +88,7 @@ public class ElastiCacheContainerManager {
             if (isDockerReachable()) {
                 throw e;
             }
+            stopByGroupId(groupId);
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "
