@@ -17,8 +17,10 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.time.Duration;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.h2.Driver;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,6 +34,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class RdsDataServiceTest {
+
+    static {
+        Driver.load();
+    }
 
     private static final String RESOURCE_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:test";
     private static final String FALLBACK_RESOURCE_ARN = "arn:aws:rds:us-west-2:111111111111:cluster:test";
@@ -864,14 +870,29 @@ class RdsDataServiceTest {
                                 String username,
                                 String password,
                                 String database) throws SQLException {
-                    return DriverManager.getConnection(jdbcUrl, "sa", "");
+                    return getConnection();
                 }
             };
             service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory, transactionTtl);
         }
 
+        private Connection getConnection() throws SQLException {
+            try {
+                return DriverManager.getConnection(jdbcUrl, "sa", "");
+            } catch (SQLException e) {
+                Properties props = new Properties();
+                props.setProperty("user", "sa");
+                props.setProperty("password", "");
+                Connection conn = new Driver().connect(jdbcUrl, props);
+                if (conn != null) {
+                    return conn;
+                }
+                throw e;
+            }
+        }
+
         private void createTables() throws SQLException {
-            try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
+            try (Connection connection = getConnection();
                  Statement statement = connection.createStatement()) {
                 statement.execute("""
                         create table data_api_items(
@@ -897,7 +918,7 @@ class RdsDataServiceTest {
          * harnesses standing in for PostgreSQL.
          */
         private void createEventsTable() throws SQLException {
-            try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
+            try (Connection connection = getConnection();
                  Statement statement = connection.createStatement()) {
                 statement.execute("""
                         create table data_api_events(
