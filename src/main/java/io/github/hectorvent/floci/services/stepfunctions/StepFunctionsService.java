@@ -528,17 +528,26 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         var sm = describeStateMachine(selection.stateMachineArn());
         var mockedTestCase = resolveMockedTestCase(sm, selection);
         var execName = (name != null && !name.isBlank()) ? name : UUID.randomUUID().toString();
-        var arn = regionResolver.buildArn("states", region, "execution:" + sm.getName() + ":" + execName);
+        boolean express = "EXPRESS".equals(sm.getType());
+        // An EXPRESS name is not unique on AWS: every start is its own execution that runs alongside
+        // the others, so the ARN (which is also the execution-store key) carries a per-start id after
+        // the name, under the express: namespace startSyncExecution already uses. A STANDARD execution
+        // keeps the name-derived ARN whose uniqueness AWS enforces.
+        var arn = express
+                ? regionResolver.buildArn("states", region,
+                        "express:" + sm.getName() + ":" + execName + ":" + UUID.randomUUID())
+                : regionResolver.buildArn("states", region, "execution:" + sm.getName() + ":" + execName);
 
         Execution exec;
         ExecutionHistory history;
         synchronized (executionStartLock) {
-            Optional<Execution> existing = executionStore.get(arn);
+            Optional<Execution> existing = express ? Optional.empty() : executionStore.get(arn);
             if (existing.isPresent()) {
                 Execution prior = existing.get();
                 // AWS idempotency (STANDARD only): the same name + same input while the original is still
                 // RUNNING returns the original execution as a success; a different input, or a closed
-                // execution with that name, is a conflict. EXPRESS workflows get no idempotency guarantee.
+                // execution with that name, is a conflict. An EXPRESS start never reaches this branch:
+                // its names are reusable and each start got its own ARN above.
                 if ("STANDARD".equals(sm.getType())
                         && "RUNNING".equals(prior.getStatus())
                         && Objects.equals(prior.getInput(), input)) {

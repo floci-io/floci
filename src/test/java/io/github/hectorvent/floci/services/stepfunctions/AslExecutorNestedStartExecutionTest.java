@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
@@ -18,6 +19,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -26,8 +29,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -161,5 +166,118 @@ class AslExecutorNestedStartExecutionTest {
         assertEquals("FAILED", exec.getStatus());
         assertEquals("States.Runtime", exec.getError());
         verify(childSfn, never()).startExecution(any(), any(), any(), any());
+    }
+
+    // ── Nested StartExecution refusal → typed, catchable error on the optimized states:startExecution
+    //    path. AWS reports StepFunctions.<Code>Exception here (the aws-sdk:sfn: path uses Sfn.<Code>),
+    //    never the uncatchable States.Runtime it collapsed to before this fix.
+
+    private static final String PARAMS = "{\"StateMachineArn\":\"" + CHILD_ARN + "\"}";
+
+    private static String parentMode(String mode) {
+        return "{\"StartAt\":\"Nest\",\"States\":{"
+                + "\"Nest\":{\"Type\":\"Task\","
+                + "\"Resource\":\"arn:aws:states:::states:startExecution" + mode + "\","
+                + "\"Parameters\":" + PARAMS + ",\"End\":true}}}";
+    }
+
+    private static String parentCatch(String errorEquals) {
+        return "{\"StartAt\":\"Nest\",\"States\":{"
+                + "\"Nest\":{\"Type\":\"Task\","
+                + "\"Resource\":\"arn:aws:states:::states:startExecution\","
+                + "\"Parameters\":" + PARAMS + ","
+                + "\"Catch\":[{\"ErrorEquals\":[\"" + errorEquals + "\"],\"Next\":\"Recover\"}],\"End\":true},"
+                + "\"Recover\":{\"Type\":\"Pass\",\"End\":true}}}";
+    }
+
+    private static String parentRetry(String errorEquals) {
+        return "{\"StartAt\":\"Nest\",\"States\":{"
+                + "\"Nest\":{\"Type\":\"Task\","
+                + "\"Resource\":\"arn:aws:states:::states:startExecution\","
+                + "\"Parameters\":" + PARAMS + ","
+                + "\"Retry\":[{\"ErrorEquals\":[\"" + errorEquals + "\"],\"MaxAttempts\":1,\"IntervalSeconds\":0}],"
+                + "\"End\":true}}}";
+    }
+
+    private void childRefuses(String errorCode) {
+        doThrow(new AwsException(errorCode, "Execution already exists: " + CHILD_ARN, 400))
+                .when(childSfn).startExecution(any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", ".sync", ".sync:2"})
+    void childRefusalIsATypedFailure(String mode) {
+        childRefuses("ExecutionAlreadyExists");
+        Execution exec = runParent(parentMode(mode), "{}");
+        assertEquals("FAILED", exec.getStatus());
+        assertEquals("StepFunctions.ExecutionAlreadyExistsException", exec.getError());
+    }
+
+    @Test
+    void childRefusalIsCaughtByItsTypedName() {
+        childRefuses("ExecutionAlreadyExists");
+        Execution exec = runParent(parentCatch("StepFunctions.ExecutionAlreadyExistsException"), "{}");
+        assertEquals("SUCCEEDED", exec.getStatus());
+    }
+
+    @Test
+    void childRefusalIsCaughtByStatesTaskFailed() {
+        childRefuses("ExecutionAlreadyExists");
+        Execution exec = runParent(parentCatch("States.TaskFailed"), "{}");
+        assertEquals("SUCCEEDED", exec.getStatus());
+    }
+
+    @Test
+    void childRefusalIsRetriedByItsTypedName() {
+        childRefuses("ExecutionAlreadyExists");
+        Execution exec = runParent(parentRetry("StepFunctions.ExecutionAlreadyExistsException"), "{}");
+        assertEquals("FAILED", exec.getStatus());
+        assertEquals("StepFunctions.ExecutionAlreadyExistsException", exec.getError());
+        // MaxAttempts=1: the initial attempt plus one retry both reach the child.
+        verify(childSfn, times(2)).startExecution(any(), any(), any(), any());
+    }
+
+    @Test
+    void sfnPrefixedCatchDoesNotMatchTheOptimizedPath() {
+        // The aws-sdk integration's Sfn. prefix must NOT catch the optimized path's StepFunctions. error
+        // (catchMatches is exact for non-States names), so the task still fails with the typed name.
+        childRefuses("ExecutionAlreadyExists");
+        Execution exec = runParent(parentCatch("Sfn.ExecutionAlreadyExistsException"), "{}");
+        assertEquals("FAILED", exec.getStatus());
+        assertEquals("StepFunctions.ExecutionAlreadyExistsException", exec.getError());
+    }
+
+    @Test
+    void missingChildIsATypedFailure() {
+        childRefuses("StateMachineDoesNotExist");
+        Execution exec = runParent(parentMode(""), "{}");
+        assertEquals("FAILED", exec.getStatus());
+        assertEquals("StepFunctions.StateMachineDoesNotExistException", exec.getError());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {".sync", ".sync:2"})
+    void syncChildSuccessIsUndisturbedByTheWrap(String mode) throws Exception {
+        // Regression guard: wrapping the start call in try/catch must not disturb the .sync/.sync:2
+        // success branches. The child starts RUNNING (setUp) then the poll observes it SUCCEEDED.
+        Execution done = new Execution();
+        done.setExecutionArn("arn:aws:states:us-east-1:000000000000:execution:child:e1");
+        done.setStateMachineArn(CHILD_ARN);
+        done.setName("e1");
+        done.setStatus("SUCCEEDED");
+        done.setStartDate(1.0);
+        done.setStopDate(2.0);
+        done.setOutput("{\"ok\":true}");
+        when(childSfn.describeExecution(any())).thenReturn(done);
+
+        Execution exec = runParent(parentMode(mode), "{}");
+        assertEquals("SUCCEEDED", exec.getStatus());
+        var output = mapper.readTree(exec.getOutput());
+        if (".sync:2".equals(mode)) {
+            assertTrue(output.path("ok").asBoolean(), "sync:2 returns the parsed child output");
+        } else {
+            assertEquals("SUCCEEDED", output.path("status").asText(), "sync returns the execution envelope");
+            assertEquals("{\"ok\":true}", output.path("output").asText(), "envelope output is the child output JSON string");
+        }
     }
 }

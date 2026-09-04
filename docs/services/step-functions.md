@@ -261,6 +261,27 @@ with `States.QueryEvaluationError` where AWS answers a string, and `0/0` fails t
 it, because NaN is dropped as not-a-number without even a refusal to read it from. A state that
 fails is one a `Catch` fires on, which is the half of the divergence worth keeping.
 
+## Execution names
+
+A Standard execution name is unique per account, Region and state machine. Starting a Standard
+execution with a name and input that match one still running returns that original execution, so a
+retried call is idempotent; any other reuse of the name, whether a different input or a name whose
+execution has already closed, fails with `ExecutionAlreadyExists`.
+
+One deviation. AWS frees a Standard name 90 days after the execution closes; Floci keeps it taken for
+the life of the emulator, so a closed name never becomes reusable on its own.
+
+An Express execution name is not unique. Every `StartExecution` on an Express state machine is its
+own execution that runs alongside any others of the same name, and its ARN carries a per-start id
+after the name (`express:<stateMachine>:<name>:<id>`). Reusing an Express name never returns an
+earlier execution and never fails with `ExecutionAlreadyExists`.
+
+One more. AWS keeps no record of an Express execution once it ends, only its logs, and does not serve
+`DescribeExecution`, `GetExecutionHistory` or `ListExecutions` for one. Floci keeps every Express
+execution, running or finished, in its execution store (and, in persistent mode, in
+`sfn-executions.json`), and nothing evicts them while the emulator runs. A workload that
+starts the same Express name in a tight loop therefore grows that store without bound.
+
 ## Nested workflows
 
 A parent workflow calls a child workflow through one of several integrations, and they differ in
@@ -281,6 +302,12 @@ integrations, and only the casing of the result tells them apart.
 SDK call itself succeeded, so the task result carries `Status`, `Error` and `Cause` and the parent
 decides what to do next.
 
+A `Name` a Standard child already used fails the calling task with the child's collision error, named
+for the integration that raised it: `StepFunctions.ExecutionAlreadyExistsException` through
+`states:startExecution` in any of its modes, and `Sfn.ExecutionAlreadyExistsException` through
+`aws-sdk:sfn:startExecution`. An Express child starts a new execution instead, so the same `Name`
+never fails it.
+
 ## AWS SDK task integrations
 
 A resource of the form `arn:aws:states:::aws-sdk:<service>:<action>` calls the service's API and
@@ -297,7 +324,7 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 
 | Resource | Result | Notable failure |
 | --- | --- | --- |
-| `arn:aws:states:::aws-sdk:sfn:startExecution` | `{ExecutionArn, StartDate}` | `Sfn.ExecutionAlreadyExistsException` when `Name` is reused |
+| `arn:aws:states:::aws-sdk:sfn:startExecution` | `{ExecutionArn, StartDate}` | `Sfn.ExecutionAlreadyExistsException` when `Name` is reused on a Standard child |
 | `arn:aws:states:::aws-sdk:sfn:startSyncExecution` | execution envelope | `Sfn.StateMachineTypeNotSupportedException` for a Standard child |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess` | `{}` | `Sfn.InvalidTokenException` when no task is waiting on the token |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |

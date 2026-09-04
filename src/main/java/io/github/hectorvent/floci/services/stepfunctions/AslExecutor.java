@@ -1161,6 +1161,16 @@ public class AslExecutor {
                 : service + "." + errorCode + "Exception";
     }
 
+    /**
+     * The optimized {@code states:startExecution} integration names a refused StartExecution with the
+     * {@code StepFunctions.} prefix on AWS, e.g. {@code StepFunctions.ExecutionAlreadyExistsException},
+     * where {@code aws-sdk:sfn:startExecution} uses the {@code Sfn.} prefix. Only the prefix differs;
+     * the {@code Exception}-suffix rule is the one {@link #sdkExceptionName} already applies.
+     */
+    private static String optimizedSfnErrorName(String errorCode) {
+        return sdkExceptionName("StepFunctions", errorCode);
+    }
+
     private static String sdkTimestamp(double epochSeconds) {
         return SDK_TIMESTAMP.format(Instant.ofEpochMilli(Math.round(epochSeconds * 1000)));
     }
@@ -1372,8 +1382,15 @@ public class AslExecutor {
             childName = null;
         }
 
-        io.github.hectorvent.floci.services.stepfunctions.model.Execution exec =
-                sfnService.get().startExecution(smArn, childName, childInput, region);
+        io.github.hectorvent.floci.services.stepfunctions.model.Execution exec;
+        try {
+            exec = sfnService.get().startExecution(smArn, childName, childInput, region);
+        } catch (AwsException e) {
+            // A StartExecution refusal (e.g. a reused STANDARD name) is a typed task failure a Catch or
+            // Retry can name, not a States.Runtime that nothing can catch. Same bridge as
+            // invokeAwsSdkSfnStartExecution, under the prefix this optimized integration reports on AWS.
+            throw new FailStateException(optimizedSfnErrorName(e.getErrorCode()), e.getMessage());
+        }
         String execArn = exec.getExecutionArn();
 
         if ("".equals(mode)) {

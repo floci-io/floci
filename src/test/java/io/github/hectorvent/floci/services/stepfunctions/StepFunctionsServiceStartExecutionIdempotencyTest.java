@@ -25,7 +25,8 @@ import static org.mockito.Mockito.when;
  * return-existing / conflict branch, which resolves before {@code aslExecutor.executeAsync}, so the
  * executor is never touched (it cannot be loaded in this offline sandbox: it needs Vert.x). The
  * create-and-launch path and the concurrency race are covered by
- * {@code StepFunctionsServiceStartExecutionRaceTest} (CI-only).
+ * {@code StepFunctionsServiceStartExecutionRaceTest} (CI-only); EXPRESS name reuse (which AWS allows,
+ * so it never conflicts) is covered by {@code StepFunctionsServiceStartExecutionExpressTest}.
  */
 class StepFunctionsServiceStartExecutionIdempotencyTest {
 
@@ -100,15 +101,5 @@ class StepFunctionsServiceStartExecutionIdempotencyTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.startExecution(SM_ARN, "run", "{\"a\":1}", REGION));
         assertEquals("ExecutionAlreadyExists", ex.getErrorCode());
-    }
-
-    @Test
-    void expressGetsNoIdempotentReturn() {
-        StepFunctionsService service = buildService("EXPRESS");
-        seedExecution("run", "{\"a\":1}", "RUNNING");
-        // STANDARD-only idempotency: EXPRESS with the same name+input still conflicts (it does not take the
-        // return-existing branch). AWS actually allows EXPRESS name reuse: a known divergence, out of scope.
-        assertThrows(AwsException.class,
-                () -> service.startExecution(SM_ARN, "run", "{\"a\":1}", REGION));
     }
 }
