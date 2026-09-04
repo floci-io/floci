@@ -11,6 +11,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -47,6 +49,7 @@ public class FlociUiManager {
     private static final int CONTAINER_INTERNAL_PORT = 4500;
     private static final String FLOCI_ENDPOINT_ENV = "FLOCI_ENDPOINT";
     private static final Pattern IPV4_LITERAL = Pattern.compile("^\\d{1,3}(\\.\\d{1,3}){3}$");
+    private static final String RUNTIME_STATUS_PATH = "/api/clouds/aws/status";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -56,6 +59,7 @@ public class FlociUiManager {
     private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final ObjectMapper objectMapper;
 
     private volatile boolean started;
     private volatile int hostPort;
@@ -87,7 +91,8 @@ public class FlociUiManager {
                           CurrentContainerNetworkResolver currentContainerNetworkResolver,
                           DockerHostResolver dockerHostResolver,
                           EmulatorConfig config,
-                          RegionResolver regionResolver) {
+                          RegionResolver regionResolver,
+                          ObjectMapper objectMapper) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -96,6 +101,7 @@ public class FlociUiManager {
         this.dockerHostResolver = dockerHostResolver;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
     }
 
     /** Snapshot of the sidecar state for the interstitial page. */
@@ -203,8 +209,11 @@ public class FlociUiManager {
         if (lastError != null) {
             return new UiStatus(started, false, hostPort, lastError);
         }
-        boolean ready = started && probeReady();
-        if (started && !ready && shouldReArm(lifecycleManager.presenceOf(containerId))) {
+        if (!started) {
+            return new UiStatus(false, false, hostPort, null);
+        }
+        RuntimeProbe probe = probeRuntime();
+        if (!probe.ready() && shouldReArm(lifecycleManager.presenceOf(containerId))) {
             LOG.infov("floci-ui sidecar {0} is gone — starting it again so the dashboard "
                     + "recovers without Floci being restarted", containerId);
             this.started = false;
@@ -214,7 +223,7 @@ public class FlociUiManager {
             this.kicked.set(false);
             ensureStartedAsync();
         }
-        return new UiStatus(started, ready, hostPort, null);
+        return new UiStatus(started, probe.ready(), hostPort, probe.error());
     }
 
     /** Host port the UI is published on. Valid once {@link #ensureStarted()} succeeds. */
@@ -438,8 +447,8 @@ public class FlociUiManager {
     }
 
     /**
-     * Resolves the URL the readiness probe should connect to from the sidecar's
-     * resolved endpoint. {@link EndpointInfo} already returns a Floci-reachable
+     * Resolves the sidecar runtime-status URL that the readiness probe should query.
+     * {@link EndpointInfo} already returns a Floci-reachable
      * address — {@code localhost:hostPort} when Floci runs natively, or the
      * sidecar's container IP on the shared Docker network when Floci runs in a
      * container (where the published host port is not reachable from inside).
@@ -447,26 +456,48 @@ public class FlociUiManager {
      */
     String resolveProbeUrl(EndpointInfo endpoint, int fallbackHostPort) {
         if (endpoint != null) {
-            return "http://" + endpoint.host() + ":" + endpoint.port() + "/";
+            return "http://" + endpoint.host() + ":" + endpoint.port() + RUNTIME_STATUS_PATH;
         }
-        return "http://localhost:" + fallbackHostPort + "/";
+        return "http://localhost:" + fallbackHostPort + RUNTIME_STATUS_PATH;
     }
 
-    private boolean probeReady() {
+    private record RuntimeProbe(boolean ready, String error) {
+    }
+
+    private RuntimeProbe probeRuntime() {
         String url = probeUrl;
         if (url == null) {
-            return false;
+            return new RuntimeProbe(false, null);
         }
+        HttpURLConnection conn = null;
         try {
-            HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
+            conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
             conn.setConnectTimeout(800);
             conn.setReadTimeout(800);
             conn.setRequestMethod("GET");
             int code = conn.getResponseCode();
-            conn.disconnect();
-            return code > 0;
+            if (code != HttpURLConnection.HTTP_OK) {
+                return new RuntimeProbe(false, null);
+            }
+            JsonNode status;
+            try (var input = conn.getInputStream()) {
+                status = objectMapper.readTree(input);
+            }
+            String runtime = status.path("runtime").asText("");
+            if ("reachable".equalsIgnoreCase(runtime)) {
+                return new RuntimeProbe(true, null);
+            }
+            if ("unavailable".equalsIgnoreCase(runtime)) {
+                return new RuntimeProbe(false, runtimeUnavailableMessage(status));
+            }
+            return new RuntimeProbe(false, null);
         } catch (Exception e) {
-            return false;
+            LOG.debugv(e, "Failed to probe floci-ui runtime at {0}", url);
+            return new RuntimeProbe(false, null);
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
 
@@ -505,6 +536,19 @@ public class FlociUiManager {
                     existing.getId(), e.getMessage());
             return false;
         }
+    }
+
+    private static String runtimeUnavailableMessage(JsonNode status) {
+        String endpoint = status.path("endpoint").asText("");
+        String error = status.path("error").asText("");
+        StringBuilder message = new StringBuilder("The Floci UI cannot reach Floci");
+        if (!endpoint.isBlank()) {
+            message.append(" at ").append(endpoint);
+        }
+        if (!error.isBlank()) {
+            message.append(": ").append(error);
+        }
+        return message.append('.').toString();
     }
 
     private void adoptExisting(Container existing) {
