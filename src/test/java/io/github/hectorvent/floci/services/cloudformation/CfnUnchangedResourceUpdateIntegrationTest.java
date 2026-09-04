@@ -158,6 +158,49 @@ class CfnUnchangedResourceUpdateIntegrationTest {
      * is not enough on its own: the group has to still describe the rules the template declares,
      * once each.
      */
+    /**
+     * A group can carry rules from standalone AWS::EC2::SecurityGroupIngress resources as well as
+     * its own inline ones. Reconciling the inline set by clearing the group first would revoke
+     * those too, so a stack update unrelated to them would silently close their ports.
+     */
+    @Test
+    void anUpdateLeavesRulesOwnedByStandaloneResourcesAlone() {
+        String body = """
+                "Named": {
+                  "Type": "AWS::EC2::SecurityGroup",
+                  "Properties": {
+                    "GroupName": "probe-sg-mixed-SUFFIX",
+                    "GroupDescription": "probe mixed",
+                    "SecurityGroupIngress": [
+                      {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIp": "10.0.0.0/8"}
+                    ]
+                  }
+                },
+                "ExtraRule": {
+                  "Type": "AWS::EC2::SecurityGroupIngress",
+                  "Properties": {
+                    "GroupId": {"Ref": "Named"},
+                    "IpProtocol": "tcp",
+                    "FromPort": 8080,
+                    "ToPort": 8080,
+                    "CidrIp": "10.9.0.0/16"
+                  }
+                }""";
+        String[] ids = createThenUpdate("sg-mixed", body, body);
+        assertEquals(ids[0], ids[1], "unchanged security group was re-created under a new physical id");
+
+        String described = given()
+                .contentType("application/x-www-form-urlencoded").header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeSecurityGroups").formParam("GroupId.1", ids[1])
+            .when().post("/").then().statusCode(200)
+            .extract().body().asString();
+
+        assertEquals(1, described.split("<fromPort>22</fromPort>", -1).length - 1,
+                "inline rule should appear exactly once after an update");
+        assertEquals(1, described.split("<fromPort>8080</fromPort>", -1).length - 1,
+                "the standalone resource's rule was revoked by the inline reconciliation");
+    }
+
     @Test
     void securityGroupInlineRulesAreNotDuplicatedByAnUpdate() {
         String body = SG_WITH_INGRESS.replace("DESCRIPTION", "stable");
