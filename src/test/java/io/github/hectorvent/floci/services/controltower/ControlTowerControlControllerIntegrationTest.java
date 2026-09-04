@@ -68,6 +68,12 @@ class ControlTowerControlControllerIntegrationTest {
     }
 
     @Test
+    void listEnabledControlsRejectsNegativeNextToken() {
+        post("/list-enabled-controls", "{\"nextToken\":\"-1\"}")
+                .then().statusCode(400).body("__type", containsString("ValidationException"));
+    }
+
+    @Test
     void validationRejectsMalformedIdentifiersAndOperationIds() {
         post("/enable-control", "{\"controlIdentifier\":\"bad\",\"targetIdentifier\":\"" + TARGET + "\"}")
                 .then().statusCode(400).body("__type", containsString("ValidationException"));

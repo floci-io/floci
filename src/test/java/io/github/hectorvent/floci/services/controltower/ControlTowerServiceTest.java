@@ -554,6 +554,47 @@ class ControlTowerServiceTest {
     }
 
     @Test
+    void legacyEnabledBaselineKeysMigrateWithoutDuplicates() throws Exception {
+        InMemoryStorage<String, EnabledBaseline> baselines = new InMemoryStorage<>();
+        String baselineArn = "arn:aws:controltower:us-east-1::baseline/17BSJV3IGJ2QSGA2";
+        String targetArn = "arn:aws:organizations::000000000101:ou/o-floci0001/ou-legacy-00000001";
+        String enabledArn = "arn:aws:controltower:us-east-1:000000000101:enabledbaseline/legacy000001";
+        EnabledBaseline legacy = new EnabledBaseline(
+                enabledArn, baselineArn, "5.0", targetArn, "SUCCEEDED", null);
+        baselines.put(REGION + "::" + targetArn, legacy);
+        ControlTowerService migrated = new ControlTowerService(new InMemoryStorage<>(), baselines);
+
+        long matching = migrated.listEnabledBaselines(ACCOUNT, REGION).stream()
+                .filter(entry -> targetArn.equals(entry.getTargetIdentifier()))
+                .count();
+        assertEquals(1, matching);
+        assertTrue(baselines.get(REGION + "::" + targetArn).isEmpty());
+        assertTrue(baselines.get(REGION + "::" + targetArn + "::" + baselineArn).isPresent());
+
+        JsonNode duplicateRequest = objectMapper.readTree("""
+                {"baselineIdentifier":"%s","baselineVersion":"5.0","targetIdentifier":"%s"}
+                """.formatted(baselineArn, targetArn));
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> migrated.enableBaseline(ACCOUNT, REGION, duplicateRequest));
+        assertEquals("ConflictException", duplicate.getErrorCode());
+    }
+
+    @Test
+    void negativeNextTokensReturnValidationException() throws Exception {
+        AwsException baselines = assertThrows(AwsException.class,
+                () -> service.listEnabledBaselines(ACCOUNT, REGION,
+                        objectMapper.readTree("{\"nextToken\":\"-1\"}")));
+        assertEquals("ValidationException", baselines.getErrorCode());
+        assertEquals(400, baselines.getHttpStatus());
+
+        AwsException operations = assertThrows(AwsException.class,
+                () -> service.listLandingZoneOperations(ACCOUNT, REGION,
+                        objectMapper.readTree("{\"nextToken\":\"-1\"}")));
+        assertEquals("ValidationException", operations.getErrorCode());
+        assertEquals(400, operations.getHttpStatus());
+    }
+
+    @Test
     void resetEnabledBaselineReturnsOperationIdentifierForValidBaseline() throws Exception {
         String baselineArn = service.listBaselines(REGION).stream()
                 .filter(b -> "AWSControlTowerBaseline".equals(b.get("name").asText()))

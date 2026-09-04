@@ -320,6 +320,7 @@ public class ControlTowerService {
     public synchronized ListEnabledBaselinesResult listEnabledBaselines(
             String accountId, String region, JsonNode request) {
         requireObject(request, "Request body");
+        migrateLegacyEnabledBaselines(region);
         String prefix = region + "::";
         List<EnabledBaseline> stored = enabledBaselineStore.scan(key -> key.startsWith(prefix));
         reconcileControlTowerGuardrails(accountId, stored);
@@ -414,6 +415,31 @@ public class ControlTowerService {
         return region + "::" + targetIdentifier + "::" + baselineIdentifier;
     }
 
+    private static String legacyEnabledBaselineKey(String region, String targetIdentifier) {
+        return region + "::" + targetIdentifier;
+    }
+
+    private void migrateLegacyEnabledBaselines(String region) {
+        String prefix = region + "::";
+        List<EnabledBaseline> snapshot = enabledBaselineStore.scan(key -> key.startsWith(prefix));
+        for (EnabledBaseline baseline : snapshot) {
+            if (baseline.getTargetIdentifier() == null || baseline.getBaselineIdentifier() == null) {
+                continue;
+            }
+            String legacyKey = legacyEnabledBaselineKey(region, baseline.getTargetIdentifier());
+            EnabledBaseline legacy = enabledBaselineStore.get(legacyKey).orElse(null);
+            if (legacy == null) {
+                continue;
+            }
+            String compositeKey = enabledBaselineKey(
+                    region, legacy.getTargetIdentifier(), legacy.getBaselineIdentifier());
+            if (enabledBaselineStore.get(compositeKey).isEmpty()) {
+                enabledBaselineStore.put(compositeKey, legacy);
+            }
+            enabledBaselineStore.delete(legacyKey);
+        }
+    }
+
     private boolean isIdentityCenterBaseline(String arn) {
         return arn != null && arn.endsWith(":enabledbaseline/" + IDENTITY_CENTER_ENABLED_BASELINE_ID);
     }
@@ -435,6 +461,7 @@ public class ControlTowerService {
         requireBaselineExists(region, baselineIdentifier);
         requireSupportedBaselineVersion(region, baselineIdentifier, baselineVersion);
         requireOrganizationalUnitTarget(accountId, targetIdentifier);
+        migrateLegacyEnabledBaselines(region);
 
         String key = enabledBaselineKey(region, targetIdentifier, baselineIdentifier);
         if (enabledBaselineStore.get(key).isPresent()) {
@@ -717,7 +744,11 @@ public class ControlTowerService {
             throw validation("nextToken must be a non-empty string.");
         }
         try {
-            return Integer.parseInt(value.textValue());
+            int offset = Integer.parseInt(value.textValue());
+            if (offset < 0) {
+                throw validation("nextToken is invalid.");
+            }
+            return offset;
         } catch (NumberFormatException e) {
             throw validation("nextToken is invalid.");
         }

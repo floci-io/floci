@@ -243,8 +243,15 @@ public class ControlTowerControlService {
         JsonNode value = request.get("nextToken");
         if (value == null || value.isNull()) return 0;
         if (!value.isTextual() || value.asText().isBlank()) throw validation("nextToken must be a non-empty string.");
-        try { return Integer.parseInt(value.asText()); }
-        catch (NumberFormatException e) { throw validation("nextToken is invalid."); }
+        try {
+            int offset = Integer.parseInt(value.asText());
+            if (offset < 0) {
+                throw validation("nextToken is invalid.");
+            }
+            return offset;
+        } catch (NumberFormatException e) {
+            throw validation("nextToken is invalid.");
+        }
     }
 
     private static AwsException validation(String message) {
