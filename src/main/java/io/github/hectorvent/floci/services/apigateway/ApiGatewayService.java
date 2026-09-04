@@ -1292,6 +1292,12 @@ public class ApiGatewayService {
     public CustomDomain createDomainName(String region, Map<String, Object> request) {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
+        String endpointType = endpointTypeOf(request);
+        if (!"REGIONAL".equals(endpointType) && !"EDGE".equals(endpointType)) {
+            // Private custom domains are not emulated; anything else would be a domain that is
+            // neither regional nor edge-optimized, which nothing here could route or describe.
+            throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + endpointType, 400);
+        }
 
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(domainName);
@@ -1301,7 +1307,7 @@ public class ApiGatewayService {
         domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
         domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
-        applyEndpointType(domain, endpointTypeOf(request));
+        applyEndpointType(domain, endpointType);
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
         domain.setDomainNameStatus("AVAILABLE");

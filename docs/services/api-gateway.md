@@ -116,8 +116,9 @@ domain between the two types with `UpdateDomainName` creates or drops the distri
 `GetDomainName` returns the `domainNameArn`, the `endpointConfiguration`, both certificate ARNs
 and the `tags`. Tags are managed through `TagResource`, `UntagResource` and `GetTags` on
 `arn:aws:apigateway:<region>::/domainnames/<domain>`. A second mapping on a base path that
-already has one is a `ConflictException`. Mutual TLS, ownership verification certificates, routing
-modes and endpoint access modes are accepted and ignored.
+already has one is a `ConflictException`. A `PRIVATE` endpoint type is refused: private custom
+domains are not emulated. Mutual TLS, ownership verification certificates, routing modes and
+endpoint access modes are accepted and ignored.
 
 Templates can create domains and mappings with `AWS::ApiGateway::DomainName` and
 `AWS::ApiGateway::BasePathMapping`; see [CloudFormation](cloudformation.md).

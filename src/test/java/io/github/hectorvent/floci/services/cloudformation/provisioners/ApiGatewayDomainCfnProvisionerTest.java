@@ -179,6 +179,31 @@ class ApiGatewayDomainCfnProvisionerTest {
     }
 
     @Test
+    void createWhenTheDomainNameIsAlreadyTakenFailsWithoutTouchingIt() {
+        // Domain names are unique across regions, so a template naming one that exists outside the
+        // stack fails the resource, as on AWS, and never deletes what it did not create.
+        when(apiGateway.createDomainName(eq(REGION), anyMap()))
+                .thenThrow(new AwsException("BadRequestException", "The domain name you provided already exists.", 400));
+        StackResource r = resource(DOMAIN_TYPE);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, domainProps(CERTIFICATE_ARN, "TLS_1_2"), ctx()));
+
+        assertEquals("BadRequestException", failure.getErrorCode());
+        verify(apiGateway, never()).deleteDomainName(any(), any());
+        assertEquals(null, r.getPhysicalId());
+    }
+
+    @Test
+    void resourcesWithoutPropertiesAreRejected() {
+        assertThrows(IllegalArgumentException.class, () -> provisioner.provision(resource(DOMAIN_TYPE), null, ctx()));
+        assertThrows(IllegalArgumentException.class, () -> provisioner.provision(resource(MAPPING_TYPE), null, ctx()));
+
+        verify(apiGateway, never()).createDomainName(any(), anyMap());
+        verify(apiGateway, never()).createBasePathMapping(any(), any(), anyMap());
+    }
+
+    @Test
     void domainRequiresDomainName() {
         ObjectNode props = mapper.createObjectNode().put("RegionalCertificateArn", CERTIFICATE_ARN);
 

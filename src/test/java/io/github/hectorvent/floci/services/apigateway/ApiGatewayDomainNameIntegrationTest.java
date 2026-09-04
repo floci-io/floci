@@ -127,6 +127,23 @@ class ApiGatewayDomainNameIntegrationTest {
     }
 
     @Test
+    void createRejectsAnEndpointTypeOtherThanRegionalOrEdge() {
+        // Private custom domains are not emulated, and an unknown type would leave a domain that is
+        // neither regional nor edge, so both are refused up front and nothing is stored.
+        String domain = "private.apigw-domain-it.example.com";
+        for (String type : List.of("PRIVATE", "FOOBAR")) {
+            given().contentType(ContentType.JSON)
+                .body("""
+                    {"domainName":"%s","regionalCertificateArn":"%s","endpointConfiguration":{"types":["%s"]}}
+                    """.formatted(domain, CERTIFICATE_ARN, type))
+            .when().post("/domainnames").then()
+                .statusCode(400)
+                .body("message", equalTo("Invalid value for endpoint type: " + type));
+        }
+        given().when().get("/domainnames/" + domain).then().statusCode(404);
+    }
+
+    @Test
     void endpointTypePatchPathMustNameTheCurrentType() {
         String domain = "endpoint-path.apigw-domain-it.example.com";
         createDomain("""
