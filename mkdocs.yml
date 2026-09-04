@@ -122,6 +122,7 @@ nav:
     - AWS Account Management: services/account.md
     - IAM Access Analyzer: services/access-analyzer.md
     - IAM Identity Center (SSO Admin): services/ssoadmin.md
+    - Identity Store: services/identitystore.md
     - Amazon Macie: services/macie2.md
     - Control Tower: services/controltower.md
     - AWS Service Catalog: services/service-catalog.md

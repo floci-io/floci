@@ -713,6 +713,7 @@ public interface EmulatorConfig {
         Macie2ServiceConfig macie2();
         AccountServiceConfig account();
         AccessAnalyzerServiceConfig accessanalyzer();
+        IdentityStoreServiceConfig identitystore();
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
@@ -741,6 +742,7 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+<<<<<<< HEAD
     interface Macie2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -752,6 +754,9 @@ public interface EmulatorConfig {
     }
 
     interface AccessAnalyzerServiceConfig {
+=======
+    interface IdentityStoreServiceConfig {
+>>>>>>> bea80853 (feat(identitystore): add groups users and memberships)
         @WithDefault("true")
         boolean enabled();
     }
