@@ -190,6 +190,20 @@ class ServiceQuotasIntegrationTest {
     }
 
     @Test
+    void listRequestedQuotaHistoryByQuotaRejectsImpossibleNextToken() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistoryByQuota")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\",\"NextToken\":\"MQ\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidPaginationTokenException"));
+    }
+
+    @Test
     void listRequestedQuotaHistoryByQuotaRejectsUnknownQuota() {
         given()
             .contentType(CONTENT_TYPE)
@@ -201,6 +215,22 @@ class ServiceQuotasIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("NoSuchResourceException"));
+    }
+
+    @Test
+    void requestOrganizationsQuotaIncreasePreservesGlobalQuota() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\",\"DesiredValue\":100}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RequestedQuota.ServiceCode", equalTo("organizations"))
+            .body("RequestedQuota.QuotaCode", equalTo("L-E619E033"))
+            .body("RequestedQuota.GlobalQuota", equalTo(true));
     }
 
     @Test

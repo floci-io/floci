@@ -54,11 +54,11 @@ public class ServiceQuotasService {
 
     private static final Map<String, List<QuotaDefinition>> CURATED_QUOTAS = Map.of(
             "codebuild", List.of(
-                    new QuotaDefinition("L-2DC20C30", "Concurrently running builds", GENERIC_QUOTA_VALUE)),
+                    new QuotaDefinition("L-2DC20C30", "Concurrently running builds", GENERIC_QUOTA_VALUE, false)),
             "lambda", List.of(
-                    new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE)),
+                    new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE, false)),
             "organizations", List.of(
-                    new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0)));
+                    new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true)));
 
     private static final List<String> GENERIC_QUOTA_NAMES = List.of(
             "Resources per Region",
@@ -111,7 +111,9 @@ public class ServiceQuotasService {
     List<QuotaDefinition> quotasFor(String serviceCode) {
         List<QuotaDefinition> quotas = new ArrayList<>(CURATED_QUOTAS.getOrDefault(serviceCode, List.of()));
         for (String name : GENERIC_QUOTA_NAMES) {
-            quotas.add(new QuotaDefinition(syntheticQuotaCode(serviceCode, name), name, GENERIC_QUOTA_VALUE));
+            quotas.add(new QuotaDefinition(
+                    syntheticQuotaCode(serviceCode, name), name, GENERIC_QUOTA_VALUE,
+                    "organizations".equals(serviceCode)));
         }
         return quotas;
     }
@@ -137,7 +139,7 @@ public class ServiceQuotasService {
         node.put("Value", quota.value());
         node.put("Unit", "None");
         node.put("Adjustable", true);
-        node.put("GlobalQuota", "organizations".equals(serviceCode));
+        node.put("GlobalQuota", quota.globalQuota());
         node.put("QuotaAppliedAtLevel", "ACCOUNT");
         return node;
     }
@@ -206,7 +208,7 @@ public class ServiceQuotasService {
         if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
             throw new AwsException("IllegalArgumentException", "Invalid input: MaxResults must be between 1 and 100.", 400);
         }
-        if (nextToken != null && !nextToken.isEmpty() && decodeToken(nextToken) < 0) {
+        if (nextToken != null && !nextToken.isEmpty()) {
             throw new AwsException("InvalidPaginationTokenException", "Invalid NextToken.", 400);
         }
         ObjectNode response = objectMapper.createObjectNode();
@@ -214,7 +216,7 @@ public class ServiceQuotasService {
         return response;
     }
 
-    record QuotaDefinition(String quotaCode, String quotaName, double value) {
+    record QuotaDefinition(String quotaCode, String quotaName, double value, boolean globalQuota) {
     }
 
     private record Page(List<QuotaDefinition> items, String nextToken) {
@@ -259,7 +261,7 @@ public class ServiceQuotasService {
         requestedQuota.put("Status", "PENDING");
         requestedQuota.put("Requester", "floci-emulator");
         requestedQuota.put("Unit", "None");
-        requestedQuota.put("GlobalQuota", false);
+        requestedQuota.put("GlobalQuota", quota.globalQuota());
         requestedQuota.put("QuotaRequestedAtLevel", "ACCOUNT");
         requestedQuota.put("Created", now);
         requestedQuota.put("LastUpdated", now);
