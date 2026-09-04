@@ -28,10 +28,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.calls;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -283,5 +285,94 @@ class IotPolicyCfnProvisionerTest {
         verify(iot, never()).deletePolicy("gone", REGION);
         AwsException e = assertThrows(AwsException.class, () -> provisioner.delete(TYPE, "stuck", REGION));
         assertEquals("InternalFailureException", e.getErrorCode());
+    }
+
+    private static IotPolicy.PolicyVersion version(String id) {
+        IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
+        version.setVersionId(id);
+        return version;
+    }
+
+    private static AwsException versionsLimit() {
+        return new AwsException("VersionsLimitExceededException", "The number of policy versions exceeds the limit", 409);
+    }
+
+    @Test
+    void policyUpdateDeletesTheOldestVersionWhenTheServiceRefusesASixthAndCreatesAgain() throws Exception {
+        String changed = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        IotPolicy policy = policy("device-policy", DOCUMENT);
+        policy.setDefaultVersionId("10");
+        when(iot.getPolicy("device-policy", REGION)).thenReturn(policy);
+        // Sorted as text, "10" would come first; the oldest version is the numerically smallest id.
+        when(iot.listPolicyVersions("device-policy", REGION)).thenReturn(List.of(
+                version("10"), version("6"), version("7"), version("8"), version("9")));
+        when(iot.createPolicyVersion("device-policy", changed, true, REGION))
+                .thenThrow(versionsLimit())
+                .thenReturn(version("11"));
+        StackResource r = resource(TYPE, "Policy");
+
+        provisioner.provision(r, props("device-policy", mapper.readTree(changed), null), ctx("device-policy"));
+
+        InOrder inOrder = inOrder(iot);
+        inOrder.verify(iot, calls(1)).createPolicyVersion("device-policy", changed, true, REGION);
+        inOrder.verify(iot).deletePolicyVersion("device-policy", "6", REGION);
+        inOrder.verify(iot, calls(1)).createPolicyVersion("device-policy", changed, true, REGION);
+        verify(iot, never()).setDefaultPolicyVersion(anyString(), anyString(), anyString());
+        verify(iot, times(1)).deletePolicyVersion(anyString(), anyString(), anyString());
+        assertEquals(ARN, r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void policyUpdateMakesTheNewestVersionTheDefaultBeforeDeletingAnOldestDefault() throws Exception {
+        String changed = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        when(iot.getPolicy("device-policy", REGION)).thenReturn(policy("device-policy", DOCUMENT));
+        when(iot.listPolicyVersions("device-policy", REGION)).thenReturn(List.of(
+                version("1"), version("2"), version("3"), version("4"), version("5")));
+        when(iot.createPolicyVersion("device-policy", changed, true, REGION))
+                .thenThrow(versionsLimit())
+                .thenReturn(version("6"));
+        StackResource r = resource(TYPE, "Policy");
+
+        provisioner.provision(r, props("device-policy", mapper.readTree(changed), null), ctx("device-policy"));
+
+        InOrder inOrder = inOrder(iot);
+        inOrder.verify(iot).setDefaultPolicyVersion("device-policy", "5", REGION);
+        inOrder.verify(iot).deletePolicyVersion("device-policy", "1", REGION);
+        inOrder.verify(iot, calls(1)).createPolicyVersion("device-policy", changed, true, REGION);
+    }
+
+    @Test
+    void policyUpdatePassesOtherVersionErrorsThroughWithoutPruning() throws Exception {
+        String changed = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        when(iot.getPolicy("device-policy", REGION)).thenReturn(policy("device-policy", DOCUMENT));
+        when(iot.createPolicyVersion("device-policy", changed, true, REGION))
+                .thenThrow(new AwsException("InternalFailureException", "storage", 500));
+        StackResource r = resource(TYPE, "Policy");
+        ObjectNode props = props("device-policy", mapper.readTree(changed), null);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("device-policy")));
+
+        assertEquals("InternalFailureException", e.getErrorCode());
+        verify(iot, never()).listPolicyVersions(anyString(), anyString());
+        verify(iot, never()).deletePolicyVersion(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void policyUpdateGivesUpWhenTheServiceStillRefusesAfterOneVersionWasDeleted() throws Exception {
+        String changed = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        when(iot.getPolicy("device-policy", REGION)).thenReturn(policy("device-policy", DOCUMENT));
+        when(iot.listPolicyVersions("device-policy", REGION)).thenReturn(List.of(
+                version("1"), version("2"), version("3"), version("4"), version("5"), version("6")));
+        when(iot.createPolicyVersion("device-policy", changed, true, REGION))
+                .thenThrow(versionsLimit())
+                .thenThrow(versionsLimit());
+        StackResource r = resource(TYPE, "Policy");
+        ObjectNode props = props("device-policy", mapper.readTree(changed), null);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("device-policy")));
+
+        assertEquals("VersionsLimitExceededException", e.getErrorCode());
+        verify(iot, times(1)).deletePolicyVersion(anyString(), anyString(), anyString());
+        verify(iot, times(2)).createPolicyVersion("device-policy", changed, true, REGION);
     }
 }
