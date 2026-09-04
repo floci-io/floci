@@ -41,7 +41,7 @@ final class EsmFilterCriteriaUtils {
      * Maps the matcher's result back to the source records it corresponds to. {@code PipesFilterMatcher}
      * preserves input order and returns the same {@link JsonNode} instances it was given, so a
      * reference-identity two-pointer walk recovers the matched source records without relying on any content
-     * field — robust to duplicate payloads and to filter nodes that deliberately omit a correlating key.
+     * field, robust to duplicate payloads and to filter nodes that deliberately omit a correlating key.
      *
      * @param sources      the source records, in the same order their filter nodes were built
      * @param filterNodes  the per-record filter nodes passed to the matcher, index-aligned with {@code sources}

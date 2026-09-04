@@ -157,7 +157,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     /**
      * Hard happens-after barrier: re-kick until a SECOND fetch is observed. {@code activePolls} serializes
-     * polls per ESM, so fetch #2 cannot begin until poll #1's finally-block ran — poll #1 is fully complete.
+     * polls per ESM, so fetch #2 cannot begin until poll #1's finally-block ran, so poll #1 is fully complete.
      */
     private void awaitPollCompletedViaSecondFetch(DynamoDbStreamsEventSourcePoller p, EventSourceMapping esm) {
         long deadline = System.currentTimeMillis() + 5000;
@@ -220,7 +220,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     private void stubTrimHorizon(List<DynamoDbStreamRecord> records) {
         // Match any iterator type/seq so a re-kicked poll after a checkpoint advance (AFTER_SEQUENCE_NUMBER)
-        // still resolves an iterator — the second-fetch barrier depends on poll N+1 fetching.
+        // still resolves an iterator: the second-fetch barrier depends on poll N+1 fetching.
         when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID), anyString(), any()))
                 .thenReturn("it");
         when(streamService.getRecords("it", 10))

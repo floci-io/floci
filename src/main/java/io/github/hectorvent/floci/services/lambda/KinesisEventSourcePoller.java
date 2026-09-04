@@ -138,7 +138,7 @@ public class KinesisEventSourcePoller implements Resettable {
                     }
 
                     // The checkpoint must advance to the newest FETCHED record whenever the batch is
-                    // disposed of — whether by a successful invoke or because a filter matched nothing —
+                    // disposed of, whether by a successful invoke or because a filter matched nothing,
                     // so filtered-out records are consumed, not re-read forever. Only an invoke that was
                     // attempted and failed leaves the checkpoint unmoved (the whole window retries).
                     String newestFetchedSeq = records.get(records.size() - 1).getSequenceNumber();
@@ -220,7 +220,7 @@ public class KinesisEventSourcePoller implements Resettable {
      * filters the <em>top-level</em> {@code data} key (plus metadata such as {@code partitionKey}), not the
      * nested/base64 invocation envelope produced by {@link #buildKinesisEvent}. This is a separate,
      * filter-only view: {@code data} is the base64-decoded payload, parsed as JSON when it parses, else kept
-     * as the decoded string (an object pattern then won't match it — AWS drops on format mismatch).
+     * as the decoded string (an object pattern then won't match it: AWS drops on format mismatch).
      */
     private JsonNode buildKinesisFilterNode(KinesisRecord rec) {
         ObjectNode node = objectMapper.createObjectNode();

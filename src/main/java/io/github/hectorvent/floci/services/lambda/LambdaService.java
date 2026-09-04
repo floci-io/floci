@@ -1166,11 +1166,11 @@ public class LambdaService implements ResourceProvider {
      * {@link #parseDestinationConfig} in shape and error behavior; static (with the mapper passed in) so the
      * validation can be unit-tested without constructing the service.
      *
-     * <p>AWS rejects invalid filter patterns at create/update time. Because the pollers silently drop — and
-     * checkpoint past (Kinesis/DynamoDB) or delete (SQS) — any record a pattern fails to match, an unvalidated
+     * <p>AWS rejects invalid filter patterns at create/update time. Because the pollers silently drop, and
+     * checkpoint past (Kinesis/DynamoDB) or delete (SQS), any record a pattern fails to match, an unvalidated
      * malformed pattern would become silent data loss. Patterns are therefore validated to be well-formed JSON
      * objects here, before persistence. Returns {@code null} (filtering off) when {@code FilterCriteria} is
-     * absent, an empty object, or has an empty {@code Filters} array — AWS treats an empty object as the
+     * absent, an empty object, or has an empty {@code Filters} array: AWS treats an empty object as the
      * removal operation.
      */
     static EventSourceMapping.FilterCriteria parseFilterCriteria(Map<String, Object> request, ObjectMapper objectMapper) {
@@ -1238,7 +1238,7 @@ public class LambdaService implements ResourceProvider {
     /**
      * Validates the recursive shape of an EventBridge filter pattern: every field value must be either a
      * non-empty match array (a leaf) or a nested object (recursed into). A scalar or empty-array value is a
-     * pattern the matcher can never satisfy, so — with enforcement active — it would silently drop every
+     * pattern the matcher can never satisfy, so, with enforcement active, it would silently drop every
      * record; reject it at create/update instead. Operator names inside a match array are intentionally not
      * allowlisted here: that would couple this validator to {@code PipesFilterMatcher}'s operator set, and an
      * unknown operator is a documented deviation rather than a create-time rejection.

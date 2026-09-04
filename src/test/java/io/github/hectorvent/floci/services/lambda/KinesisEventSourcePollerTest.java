@@ -42,10 +42,10 @@ import static org.mockito.Mockito.when;
 /**
  * Fills the poller-test gap for Kinesis and covers FilterCriteria enforcement: the checkpoint must advance
  * past filtered-out records (never wedge the shard), delivery stays base64, and the Kinesis filter dialect is
- * top-level decoded {@code data} — not the {@code {"kinesis":{"data":...}}} envelope.
+ * top-level decoded {@code data}, not the {@code {"kinesis":{"data":...}}} envelope.
  *
  * <p>Async note: {@code pollAndInvoke} submits to a background executor. Assertions wait on a positive terminal
- * signal via Mockito {@code timeout(...)} — {@code esmStore.saveForAccount} for a checkpoint advance, or the
+ * signal via Mockito {@code timeout(...)}: {@code esmStore.saveForAccount} for a checkpoint advance, or the
  * invoke itself. {@code never()} assertions target actions the exercised code path never performs on any thread
  * (invoke in a fully-filtered path; save in an invoke-error path), so they are timing-independent.
  */
@@ -135,7 +135,7 @@ class KinesisEventSourcePollerTest {
 
     /**
      * Hard happens-after barrier: re-kick the poll until a SECOND fetch is observed. Because {@code activePolls}
-     * serializes polls per ESM, fetch #2 cannot begin until poll #1's finally-block ran — so poll #1, including its
+     * serializes polls per ESM, fetch #2 cannot begin until poll #1's finally-block ran, so poll #1, including its
      * invoke/checkpoint decision, is fully complete. Negative assertions after this are race-free rather than
      * relying on structural unreachability alone. (A kick while poll #1 is still in flight is a no-op, so we retry.)
      */
@@ -178,7 +178,7 @@ class KinesisEventSourcePollerTest {
     @Test
     void filterDeliversOnlyMatchingRecordsKeepsDataBase64AndCheckpointsNewestFetched() {
         stubFunction();
-        // order (matches) then refund (does not) — refund is the newest FETCHED record.
+        // order (matches) then refund (does not): refund is the newest FETCHED record.
         stubStreamWith(List.of(record("s1", "p1", "{\"type\":\"order\"}"),
                 record("s2", "p2", "{\"type\":\"refund\"}")));
         when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
@@ -252,7 +252,7 @@ class KinesisEventSourcePollerTest {
     void nestedKinesisDataPatternMatchesNothingDialectPin() {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "{\"type\":\"order\"}")));
-        // The invocation-envelope dialect {"kinesis":{"data":...}} must NOT match — AWS filters top-level data.
+        // The invocation-envelope dialect {"kinesis":{"data":...}} must NOT match: AWS filters top-level data.
         EventSourceMapping esm = esm("{\"kinesis\":{\"data\":{\"type\":[\"order\"]}}}");
 
         poller.pollAndInvoke(esm);

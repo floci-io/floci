@@ -444,7 +444,7 @@ class SqsEventSourcePollerTest {
     /**
      * Hard happens-after barrier: re-stub the fetch to return empty, then re-kick until a SECOND
      * receiveMessage is observed. {@code activePolls} serializes polls per ESM, so fetch #2 cannot begin until
-     * poll #1's finally-block ran — poll #1 is fully complete. The empty re-stub makes poll #2 a no-op, so
+     * poll #1's finally-block ran, so poll #1 is fully complete. The empty re-stub makes poll #2 a no-op, so
      * poll #1's exact delete/return counts are preserved for the assertions.
      */
     private void awaitPollCompleted(EventSourceMapping esm) {

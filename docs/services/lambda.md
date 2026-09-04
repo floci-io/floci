@@ -796,19 +796,19 @@ the queue.
 
 Validation mirrors AWS and runs before the mapping is stored: each `Pattern`
 must be a JSON object whose field values are non-empty match arrays or nested
-objects, at most 5 `Filters`, and each `Pattern` at most 4096 characters —
+objects, at most 5 `Filters`, and each `Pattern` at most 4096 characters:
 violations are rejected with `InvalidParameterValueException`. A `FilterCriteria`
 of `{}` or with an empty `Filters` array clears any existing filters.
 
 !!! note "Supported operators"
     Filtering reuses Floci's shared EventBridge matcher (the same one EventBridge
     Pipes uses). It supports exact match, `prefix`, `suffix`, `equals-ignore-case`,
-    `exists`, `anything-but` (string, array — including numeric arrays — or
+    `exists`, `anything-but` (string, array, including numeric arrays, or
     `prefix`), and numeric operators. Known deviations from AWS, shared with Pipes:
     boolean literals; event-value array intersection (matching when the record's
     own field is itself an array and any element satisfies the pattern); and a
-    bare non-array numeric `anything-but` (wrap the number in an array —
-    `{"anything-but":[400]}` — to filter on it). Patterns using only the supported
+    bare non-array numeric `anything-but` (wrap the number in an array,
+    `{"anything-but":[400]}`, to filter on it). Patterns using only the supported
     operators behave as on AWS.
 
 !!! warning "Direct Lambda API only"

@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 /**
  * Proves {@code FilterCriteria} persists on {@code EventSourceMapping}: once through the real
  * {@code EsmStore} (wiring), and once through an explicit Jackson serialize/reload leg that reproduces
- * {@code PersistentStorage}'s mechanism — since {@code InMemoryStorage} keeps live references, the wiring
+ * {@code PersistentStorage}'s mechanism: since {@code InMemoryStorage} keeps live references, the wiring
  * test alone would not exercise JSON serialization.
  */
 class EsmStoreFilterCriteriaTest {

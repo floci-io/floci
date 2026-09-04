@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * End-to-end proof that a stored {@link EventSourceMapping.FilterCriteria}, wrapped by
  * {@link EsmFilterCriteriaUtils#matcherSourceParameters}, actually drives the REAL
- * {@link PipesFilterMatcher} — not just that the wrapper has the right field names. Without this, the
+ * {@link PipesFilterMatcher}, not just that the wrapper has the right field names. Without this, the
  * wrapper could be shaped wrong (silently disabling filtering) and unit tests inspecting only its fields
  * would stay green. Uses supported EventBridge operators the matcher implements; known matcher deviations
  * (boolean literals, event-array intersection, numeric anything-but) are documented, not covered here, per

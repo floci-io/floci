@@ -1152,7 +1152,7 @@ class EsmIntegrationTest {
         .when().post(LAMBDA_BASE + "/event-source-mappings")
         .then().statusCode(400);
 
-        // scalar (non-array/object) value — a silent drop-all pattern
+        // scalar (non-array/object) value: a silent drop-all pattern
         given().contentType("application/json")
             .body("""
                 { "FunctionName": "%s", "EventSourceArn": "%s",

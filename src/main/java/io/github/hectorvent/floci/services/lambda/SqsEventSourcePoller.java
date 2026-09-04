@@ -164,7 +164,7 @@ public class SqsEventSourcePoller implements Resettable {
                 LOG.infov("ESM {0}: received {1} message(s)", esm.getUuid(), messages.size());
 
                 // Apply FilterCriteria. AWS consumes (permanently deletes) filtered-out SQS messages, so
-                // non-matching messages are deleted immediately — leaving them would redeliver every
+                // non-matching messages are deleted immediately: leaving them would redeliver every
                 // visibility window forever and never reach the DLQ. A batch that matches nothing
                 // short-circuits without invoking.
                 List<Message> matched = messages;
@@ -333,7 +333,7 @@ public class SqsEventSourcePoller implements Resettable {
     }
 
     /**
-     * Builds the single SQS record node — top-level {@code body} plus attributes and metadata. This is both
+     * Builds the single SQS record node: top-level {@code body} plus attributes and metadata. This is both
      * the delivery record shape and the structure an SQS filter pattern matches against (patterns nest under
      * {@code body}; the matcher auto-reparses a JSON body).
      */

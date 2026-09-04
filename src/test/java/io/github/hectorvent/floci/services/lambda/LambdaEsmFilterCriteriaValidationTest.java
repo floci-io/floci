@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Drives the package-private static {@code LambdaService.parseFilterCriteria} directly — the create/update
+ * Drives the package-private static {@code LambdaService.parseFilterCriteria} directly: the create/update
  * validation is a pure function of the request map, so it is unit-testable without constructing the service
  * (whose full wiring needs the Quarkus runtime, unavailable in this sandbox).
  */
@@ -124,7 +124,7 @@ class LambdaEsmFilterCriteriaValidationTest {
 
     @Test
     void oversizedPatternRejectedButBoundaryOk() {
-        // {"a":["<filler>"]} — fixed chars = 10, so filler 4086 → total exactly 4096.
+        // {"a":["<filler>"]}: fixed chars = 10, so filler 4086 → total exactly 4096.
         String ok4096 = "{\"a\":[\"" + "x".repeat(4086) + "\"]}";
         assertEquals(4096, ok4096.length());
         assertNotNull(LambdaService.parseFilterCriteria(filtersReq(ok4096), MAPPER));
@@ -148,7 +148,7 @@ class LambdaEsmFilterCriteriaValidationTest {
     @Test
     void scalarValuePatternRejected() {
         // Object root but a scalar value: the matcher can never satisfy this, so with enforcement
-        // active it would silently drop every record — reject at create/update instead.
+        // active it would silently drop every record, so reject at create/update instead.
         assertRejected(filtersReq("{\"eventName\":\"INSERT\"}"));
     }
 

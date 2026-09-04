@@ -165,8 +165,8 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                     return;
                 }
 
-                // Advance to the newest FETCHED record whenever the batch is disposed of — invoked or
-                // fully filtered out — so filtered-out records are consumed, not re-read forever. Leave
+                // Advance to the newest FETCHED record whenever the batch is disposed of, invoked or
+                // fully filtered out, so filtered-out records are consumed, not re-read forever. Leave
                 // the checkpoint unmoved only when an attempted invoke fails (the window retries).
                 String newestFetchedSeq = records.get(records.size() - 1).getSequenceNumber();
 
@@ -230,10 +230,10 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     }
 
     /**
-     * Builds the single-record node — top-level {@code eventName}/metadata plus the {@code dynamodb} map
+     * Builds the single-record node: top-level {@code eventName}/metadata plus the {@code dynamodb} map
      * with AttributeValue-wrapped images. This is both the delivery record shape and the exact structure a
      * DynamoDB filter pattern matches against, so it serves the matcher unchanged. (Numeric operators
-     * naturally never match here because AttributeValue numbers are JSON strings — AWS parity for free.)
+     * naturally never match here because AttributeValue numbers are JSON strings, AWS parity for free.)
      */
     private ObjectNode buildDynamoDbRecordNode(DynamoDbStreamRecord rec, EventSourceMapping esm) {
         ObjectNode item = objectMapper.createObjectNode();
