@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
@@ -99,6 +100,7 @@ public class S3Controller {
     private final CloudTrailService cloudTrailService;
     private final AccountResolver accountResolver;
     private final RequestContext requestContext;
+    private final IamService iamService;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
@@ -108,7 +110,8 @@ public class S3Controller {
                         io.github.hectorvent.floci.services.floci.ui.UiPages uiPages,
                         CloudTrailService cloudTrailService,
                         AccountResolver accountResolver,
-                        RequestContext requestContext) {
+                        RequestContext requestContext,
+                        IamService iamService) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
@@ -118,6 +121,7 @@ public class S3Controller {
         this.cloudTrailService = cloudTrailService;
         this.accountResolver = accountResolver;
         this.requestContext = requestContext;
+        this.iamService = iamService;
     }
 
     private void emitCloudTrailEvent(String eventName, String bucket, String key,
@@ -2758,10 +2762,14 @@ public class S3Controller {
             lcFields.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
         }
 
-        // Validate policy conditions if present
-        String policy = lcFields.get("policy");
-        if (policy != null && !policy.isEmpty()) {
-            validatePolicyConditions(policy, bucket, lcFields, fileData.length);
+        if (s3Service.isAuthEnforced()) {
+            validatePresignedPostAuth(lcFields, bucket, fileData.length);
+        } else {
+            // Validate policy conditions if present
+            String policy = lcFields.get("policy");
+            if (policy != null && !policy.isEmpty()) {
+                validatePolicyConditions(policy, bucket, lcFields, fileData.length);
+            }
         }
 
         // Use Content-Type from form fields, fall back to file part Content-Type
@@ -2804,6 +2812,58 @@ public class S3Controller {
             response.header("x-amz-version-id", obj.getVersionId());
         }
         return response.build();
+    }
+
+    /**
+     * Enforces real S3 presigned-POST auth: a {@code policy} field must be present and
+     * SigV4-signed by a known secret key referenced through {@code x-amz-credential}, matching
+     * real S3's behavior of rejecting fabricated or absent credentials with 403 AccessDenied.
+     */
+    private void validatePresignedPostAuth(Map<String, String> fields, String bucket, int contentLength) {
+        String policy = fields.get("policy");
+        String credential = fields.get("x-amz-credential");
+        String signature = fields.get("x-amz-signature");
+        String algorithm = fields.get("x-amz-algorithm");
+        if (policy == null || policy.isEmpty()
+                || credential == null || credential.isEmpty()
+                || signature == null || signature.isEmpty()) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+        if (algorithm != null && !algorithm.isEmpty() && !"AWS4-HMAC-SHA256".equals(algorithm)) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+
+        String accessKeyId = credential.split("/", 2)[0];
+        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId);
+        if (secretKey.isEmpty()
+                || !S3PostPolicySigner.verifySignature(policy, credential, signature, secretKey.get())) {
+            throw new AwsException("SignatureDoesNotMatch",
+                    "The request signature we calculated does not match the signature you provided. "
+                            + "Check your key and signing method.", 403);
+        }
+
+        validatePolicyExpiration(policy);
+        validatePolicyConditions(policy, bucket, fields, contentLength);
+    }
+
+    private void validatePolicyExpiration(String policyBase64) {
+        try {
+            byte[] decoded = java.util.Base64.getDecoder().decode(policyBase64);
+            JsonNode policy = OBJECT_MAPPER.readTree(decoded);
+            JsonNode expirationNode = policy.get("expiration");
+            if (expirationNode != null && !expirationNode.isNull()) {
+                Instant expiration = Instant.parse(expirationNode.asText());
+                if (Instant.now().isAfter(expiration)) {
+                    throw new AwsException("AccessDenied",
+                            "Invalid according to Policy: Policy expired.", 403);
+                }
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("AccessDenied",
+                    "Invalid according to Policy: unable to parse policy document.", 403);
+        }
     }
 
     private void validatePolicyConditions(String policyBase64, String bucket,
