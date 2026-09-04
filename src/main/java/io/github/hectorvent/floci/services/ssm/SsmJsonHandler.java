@@ -431,7 +431,7 @@ public class SsmJsonHandler {
 
         if (requestedVersion != null && !requestedVersion.isBlank()
                 && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
-            if (!document.hasVersion(requestedVersion)) {
+            if (!document.hasRetainedContent(requestedVersion)) {
                 throw new AwsException("InvalidDocumentVersion",
                         "The document version is not valid or does not exist.", 400);
             }
@@ -1204,7 +1204,7 @@ public class SsmJsonHandler {
 
         if (requestedVersion != null && !requestedVersion.isBlank()
                 && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
-            if (!document.hasVersion(requestedVersion)) {
+            if (!document.hasRetainedContent(requestedVersion)) {
                 throw new AwsException("InvalidDocumentVersion",
                         "The document version is not valid or does not exist.", 400);
             }

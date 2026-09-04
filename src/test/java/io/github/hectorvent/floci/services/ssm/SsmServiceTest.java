@@ -737,7 +737,10 @@ class SsmServiceTest {
      * A document persisted before {@code Versions} was tracked deserializes with an empty
      * versions map even though its DocumentVersion may already be past 1 (issue found in PR #3057
      * review): only its current content was ever retained, so versions "1"/"2" have no recorded
-     * content, but they are still valid version numbers that must not be rejected.
+     * content, but they are still valid version numbers that must not be rejected as association
+     * references. {@code getContentForVersion} must not fabricate content for them, though — a
+     * later review comment on the same PR pointed out that substituting the current content would
+     * mislabel it as an older version's real content in GetDocument/DescribeDocument.
      */
     @Test
     void testCreateAssociation_LegacyDocumentVersionWithoutHistoryIsStillValid() {
@@ -757,8 +760,10 @@ class SsmServiceTest {
         assertTrue(legacyDoc.hasVersion("2"));
         assertTrue(legacyDoc.hasVersion("3"));
         assertFalse(legacyDoc.hasVersion("4"));
-        assertEquals("v3-content", legacyDoc.getContentForVersion("1"),
-                "content for a legacy version predating history is a best-effort fallback to current content");
+        assertFalse(legacyDoc.hasRetainedContent("1"),
+                "content for version 1 was never captured for a document already at version 3 when history tracking began");
+        assertTrue(legacyDoc.hasRetainedContent("3"), "the current version's content is always retained");
+        assertNull(legacyDoc.getContentForVersion("1"), "no content must be fabricated for an unretained version");
 
         SsmAssociation assoc = service.createAssociation(
                 "LegacyDoc", "legacy-assoc", "1", "i-12345", null, null, null, "us-east-1");

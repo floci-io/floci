@@ -104,12 +104,18 @@ public class SsmDocument {
     }
 
     /**
-     * Whether {@code version} could ever have existed on this document. A document persisted
-     * before {@link #versions} was introduced backfills only its current version's content (the
-     * older content was never retained), so a document already at version 3 when this field
-     * shipped has no recorded content for "1" or "2" even though both were real, valid versions.
-     * Falling back to a numeric range check (rather than requiring map membership) keeps those
-     * legacy version numbers resolvable instead of permanently rejecting them as invalid.
+     * Whether {@code version} could ever have existed on this document — a reference check with
+     * no content implied. A document persisted before {@link #versions} was introduced backfills
+     * only its current version's content (the older content was never retained), so a document
+     * already at version 3 when this field shipped has no recorded content for "1" or "2" even
+     * though both were real, valid versions. Falling back to a numeric range check (rather than
+     * requiring map membership) keeps those legacy version numbers resolvable — e.g. an
+     * association's {@code DocumentVersion} pointing at "1" is a legitimate reference even though
+     * this store cannot return "1"'s actual content.
+     *
+     * <p>Use this only where no content is returned to the caller (association creation/update).
+     * For anything that returns document content, use {@link #hasRetainedContent} instead —
+     * substituting a different version's content here would mislabel it as the requested one.
      */
     public boolean hasVersion(String version) {
         if (version == null) {
@@ -127,15 +133,17 @@ public class SsmDocument {
     }
 
     /**
-     * Content for {@code version}, or the current content as a best-effort fallback when the
-     * version is valid ({@link #hasVersion}) but its original content was never retained. Returns
-     * {@code null} only when the version could not have existed at all.
+     * Whether this document's actual content for {@code version} was retained and can be
+     * returned to a caller. Unlike {@link #hasVersion}, this does not treat a legacy version
+     * predating {@link #versions} as available — GetDocument/DescribeDocument must not return
+     * the current content mislabeled as an older version whose real content was never captured.
      */
+    public boolean hasRetainedContent(String version) {
+        return version != null && getVersions().containsKey(version);
+    }
+
+    /** Retained content for {@code version}, or {@code null} if it was never captured. */
     public String getContentForVersion(String version) {
-        String stored = getVersions().get(version);
-        if (stored != null) {
-            return stored;
-        }
-        return hasVersion(version) ? content : null;
+        return getVersions().get(version);
     }
 }
