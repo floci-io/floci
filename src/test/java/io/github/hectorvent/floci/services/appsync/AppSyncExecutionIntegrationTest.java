@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.appsync;
 
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncErrorFormatter;
-import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
+import io.github.hectorvent.floci.services.floci.appsync.FlociAppSyncClient;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -18,7 +18,6 @@ import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class AppSyncExecutionIntegrationTest {
@@ -26,7 +25,7 @@ class AppSyncExecutionIntegrationTest {
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request";
 
     @Inject
-    SchemaRegistry schemaRegistry;
+    FlociAppSyncClient flociAppSyncClient;
 
     private String apiId;
     private String apiKey;
@@ -300,8 +299,7 @@ class AppSyncExecutionIntegrationTest {
         startSchema(hydrateApi, "type Query { hello: String }");
         awaitSchemaSuccess(hydrateApi);
 
-        schemaRegistry.remove(hydrateApi);
-        assertTrue(schemaRegistry.getSchema(hydrateApi).isEmpty());
+        flociAppSyncClient.deleteSchema(hydrateApi);
 
         given()
             .header("x-api-key", hydrateKey)

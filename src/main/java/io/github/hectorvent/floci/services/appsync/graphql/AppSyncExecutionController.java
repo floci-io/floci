@@ -9,7 +9,11 @@ import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuthContext;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthMiddleware;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthRequestInfo;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.IamAuthValidator;
+import io.github.hectorvent.floci.services.appsync.model.AdditionalAuthenticationProvider;
+import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
+import io.github.hectorvent.floci.services.floci.appsync.FlociAppSyncClient;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -23,6 +27,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -31,6 +36,12 @@ import java.util.UUID;
 /**
  * AppSync GraphQL data-plane HTTP endpoint (separate from management {@code AppSyncController}).
  * Accepts {@code application/graphql} and {@code application/json}.
+ *
+ * <p>Everything up to and including request authentication stays here (content-type/body
+ * parsing, API lookup, API key/IAM/Cognito/OIDC/Lambda-authorizer authentication) exactly as
+ * before. Schema lookup and query execution now happen in the floci-app-sync sidecar (issue
+ * #2917) — this class's job past authentication is just building the payload the sidecar
+ * needs and translating its response back into this envelope.
  */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -40,27 +51,27 @@ public class AppSyncExecutionController {
     private static final String HEADER_ERROR_TYPE = "x-amzn-errortype";
 
     private final AppSyncService appSyncService;
-    private final SchemaRegistry schemaRegistry;
-    private final QueryExecutor queryExecutor;
+    private final FlociAppSyncClient flociAppSyncClient;
     private final AppSyncErrorFormatter errorFormatter;
     private final ObjectMapper objectMapper;
     private final AuthMiddleware authMiddleware;
+    private final IamAuthValidator iamAuthValidator;
     private final RequestContext requestContext;
 
     @Inject
     public AppSyncExecutionController(AppSyncService appSyncService,
-                                      SchemaRegistry schemaRegistry,
-                                      QueryExecutor queryExecutor,
+                                      FlociAppSyncClient flociAppSyncClient,
                                       AppSyncErrorFormatter errorFormatter,
                                       ObjectMapper objectMapper,
                                       AuthMiddleware authMiddleware,
+                                      IamAuthValidator iamAuthValidator,
                                       RequestContext requestContext) {
         this.appSyncService = appSyncService;
-        this.schemaRegistry = schemaRegistry;
-        this.queryExecutor = queryExecutor;
+        this.flociAppSyncClient = flociAppSyncClient;
         this.errorFormatter = errorFormatter;
         this.objectMapper = objectMapper;
         this.authMiddleware = authMiddleware;
+        this.iamAuthValidator = iamAuthValidator;
         this.requestContext = requestContext;
     }
 
@@ -102,20 +113,16 @@ public class AppSyncExecutionController {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
 
-            var graphQLOpt = schemaRegistry.getGraphQL(apiId);
-            if (graphQLOpt.isEmpty()) {
-                return graphqlError(502, "GraphQLSchemaException",
-                        AppSyncErrorFormatter.MSG_NO_SCHEMA);
-            }
+            FlociAppSyncClient.ExecuteResult result = flociAppSyncClient.execute(
+                    apiId, parsed.query(), parsed.variables(), parsed.operationName(),
+                    toEngineAuthContext(authContext));
 
-            try {
-                Map<String, Object> result = queryExecutor.execute(
-                        graphQLOpt.get(), parsed.query(), parsed.variables(), parsed.operationName(),
-                        graphQlContext(authContext));
-                return Response.ok(result).type(MediaType.APPLICATION_JSON).build();
-            } catch (AppSyncTransportException e) {
-                return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
+            if (result.status() == 200) {
+                return Response.ok(result.body()).type(MediaType.APPLICATION_JSON).build();
             }
+            String errorType = extractErrorType(result.body());
+            String message = extractErrorMessage(result.body());
+            return graphqlError(result.status(), errorType, message);
         } catch (RuntimeException e) {
             LOG.errorv(e, "Unexpected error executing GraphQL for API {0}", apiId);
             return graphqlError(500, "InternalFailure", "InternalFailure");
@@ -237,15 +244,67 @@ public class AppSyncExecutionController {
         return ips;
     }
 
-    private static Map<Object, Object> graphQlContext(AppSyncAuthContext authContext) {
-        Map<Object, Object> context = new HashMap<>();
-        context.put(AppSyncAuthContext.KEY, authContext);
-        if (authContext.identity() != null) {
-            context.put("identity", authContext.identity());
+    /**
+     * Shapes the request-scoped auth outcome into floci-app-sync's wire {@code AppSyncAuthContext}
+     * (its {@code graphqlApi} is a flat {@code GraphqlApiAuthConfig}, not the full model, and it
+     * carries a resolved {@code CallerContext} for field-level IAM checks the sidecar now does
+     * itself — see {@code IamFieldAuthorizer} there).
+     */
+    private Map<String, Object> toEngineAuthContext(AppSyncAuthContext authContext) {
+        Map<String, Object> graphqlApiPayload = new LinkedHashMap<>();
+        graphqlApiPayload.put("apiId", authContext.graphqlApi().getApiId());
+        graphqlApiPayload.put("authenticationType", authContext.graphqlApi().getAuthenticationType());
+        graphqlApiPayload.put("additionalAuthenticationTypes", additionalAuthTypes(authContext.graphqlApi()));
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("identity", authContext.identity());
+        payload.put("authType", authContext.authType());
+        payload.put("authenticationType", authContext.authenticationType());
+        payload.put("deniedFields", authContext.deniedFieldsList());
+        payload.put("graphqlApi", graphqlApiPayload);
+        payload.put("accessKeyId", authContext.accessKeyId());
+        payload.put("region", authContext.region());
+        payload.put("accountId", authContext.accountId());
+        if (authContext.authenticationType() == AuthenticationType.AWS_IAM) {
+            payload.put("callerContext", iamAuthValidator.resolveCallerContextForSidecar(authContext.accessKeyId()));
         }
-        context.put("authType", authContext.authType());
-        context.put("deniedFields", authContext.deniedFieldsList());
-        return context;
+        return payload;
+    }
+
+    private static List<AuthenticationType> additionalAuthTypes(GraphqlApi api) {
+        List<AuthenticationType> types = new ArrayList<>();
+        if (api.getAdditionalAuthenticationProviders() != null) {
+            for (AdditionalAuthenticationProvider provider : api.getAdditionalAuthenticationProviders()) {
+                if (provider != null && provider.getAuthenticationType() != null) {
+                    types.add(provider.getAuthenticationType());
+                }
+            }
+        }
+        return types;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String extractErrorType(Map<String, Object> body) {
+        Object errors = body.get("errors");
+        if (errors instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Map<?, ?> first) {
+            Object type = first.get("errorType");
+            if (type != null) {
+                return String.valueOf(type);
+            }
+        }
+        return "InternalFailure";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String extractErrorMessage(Map<String, Object> body) {
+        Object errors = body.get("errors");
+        if (errors instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Map<?, ?> first) {
+            Object message = first.get("message");
+            if (message != null) {
+                return String.valueOf(message);
+            }
+        }
+        return "InternalFailure";
     }
 
     private Response graphqlError(int status, String errorType, String message) {

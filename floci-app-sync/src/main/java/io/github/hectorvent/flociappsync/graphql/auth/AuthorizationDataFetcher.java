@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql.auth;
+package io.github.hectorvent.flociappsync.graphql.auth;
 
 import graphql.execution.DataFetcherResult;
 import graphql.schema.DataFetcher;
@@ -7,27 +7,31 @@ import graphql.schema.GraphQLAppliedDirective;
 import graphql.schema.GraphQLAppliedDirectiveArgument;
 import graphql.schema.GraphQLFieldDefinition;
 import graphql.schema.GraphQLObjectType;
-import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
-import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Adapted from Floci's {@code services.appsync.graphql.auth.AuthorizationDataFetcher}:
+ * takes {@link IamFieldAuthorizer} instead of {@code IamAuthValidator}, and
+ * {@link GraphqlApiAuthConfig} instead of the full {@code GraphqlApi} model — see those
+ * classes for why. Logic is otherwise unchanged.
+ */
 public class AuthorizationDataFetcher implements DataFetcher<Object> {
 
     private DataFetcher<?> delegate;
     private final String typeName;
     private final String fieldName;
-    private final IamAuthValidator iamAuthValidator;
+    private final IamFieldAuthorizer iamFieldAuthorizer;
 
     public AuthorizationDataFetcher(DataFetcher<?> delegate, String typeName, String fieldName,
-                                    IamAuthValidator iamAuthValidator) {
+                                    IamFieldAuthorizer iamFieldAuthorizer) {
         this.delegate = delegate;
         this.typeName = typeName;
         this.fieldName = fieldName;
-        this.iamAuthValidator = iamAuthValidator;
+        this.iamFieldAuthorizer = iamFieldAuthorizer;
     }
 
     public void setDelegate(DataFetcher<?> delegate) {
@@ -60,10 +64,10 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
         if (!modeAllowed(environment, auth)) {
             return false;
         }
-        if (auth.authenticationType() == AuthenticationType.AWS_IAM && iamAuthValidator != null) {
-            String fieldArn = IamAuthValidator.fieldArn(
-                    auth.region(), auth.accountId(), auth.graphqlApi().getApiId(), typeName, fieldName);
-            if (iamAuthValidator.isFieldDenied(auth.accessKeyId(), fieldArn)) {
+        if (auth.authenticationType() == AuthenticationType.AWS_IAM && iamFieldAuthorizer != null) {
+            String fieldArn = IamFieldAuthorizer.fieldArn(
+                    auth.region(), auth.accountId(), auth.graphqlApi().apiId(), typeName, fieldName);
+            if (iamFieldAuthorizer.isFieldDenied(auth.callerContext(), auth.accessKeyId(), fieldArn)) {
                 return false;
             }
         }
@@ -79,8 +83,8 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
         if (denied.contains(shortForm)) {
             return true;
         }
-        String thisArn = IamAuthValidator.fieldArn(
-                auth.region(), auth.accountId(), auth.graphqlApi().getApiId(), typeName, fieldName);
+        String thisArn = IamFieldAuthorizer.fieldArn(
+                auth.region(), auth.accountId(), auth.graphqlApi().apiId(), typeName, fieldName);
         for (String entry : denied) {
             if (thisArn.equals(entry)) {
                 return true;
@@ -90,10 +94,10 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
     }
 
     private boolean modeAllowed(DataFetchingEnvironment environment, AppSyncAuthContext auth) {
-        GraphqlApi api = auth.graphqlApi();
+        GraphqlApiAuthConfig api = auth.graphqlApi();
         List<AuthRequirement> requirements = effectiveRequirements(environment, api);
         if (requirements.isEmpty()) {
-            return auth.authenticationType() == api.getAuthenticationType();
+            return auth.authenticationType() == api.authenticationType();
         }
         for (AuthRequirement requirement : requirements) {
             if (requirement.mode() == auth.authenticationType() && groupsAllowed(requirement, auth)) {
@@ -103,7 +107,7 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
         return false;
     }
 
-    private List<AuthRequirement> effectiveRequirements(DataFetchingEnvironment environment, GraphqlApi api) {
+    private List<AuthRequirement> effectiveRequirements(DataFetchingEnvironment environment, GraphqlApiAuthConfig api) {
         GraphQLFieldDefinition field = environment.getFieldDefinition();
         GraphQLObjectType parent = parentObjectType(environment);
         List<AuthRequirement> fieldReqs = requirementsFrom(field == null ? List.of() : field.getAppliedDirectives(), api);
@@ -121,9 +125,9 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
         return null;
     }
 
-    static List<AuthRequirement> requirementsFrom(List<GraphQLAppliedDirective> directives, GraphqlApi api) {
+    static List<AuthRequirement> requirementsFrom(List<GraphQLAppliedDirective> directives, GraphqlApiAuthConfig api) {
         List<AuthRequirement> requirements = new ArrayList<>();
-        boolean ignoreAwsAuth = AuthMiddleware.hasAdditionalModes(api);
+        boolean ignoreAwsAuth = api.hasAdditionalModes();
         for (GraphQLAppliedDirective directive : directives) {
             String name = directive.getName();
             switch (name) {
@@ -134,7 +138,7 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
                 case "aws_cognito_user_pools" -> requirements.add(
                         new AuthRequirement(AuthenticationType.AMAZON_COGNITO_USER_POOLS, groupsArg(directive)));
                 case "aws_auth" -> {
-                    if (!ignoreAwsAuth && api.getAuthenticationType() == AuthenticationType.AMAZON_COGNITO_USER_POOLS) {
+                    if (!ignoreAwsAuth && api.authenticationType() == AuthenticationType.AMAZON_COGNITO_USER_POOLS) {
                         requirements.add(new AuthRequirement(
                                 AuthenticationType.AMAZON_COGNITO_USER_POOLS, groupsArg(directive)));
                     }

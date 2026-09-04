@@ -47,16 +47,16 @@ public class IamAuthValidator {
         return IdentityBuilder.iam(info.accountId(), accessKeyId, username, userArn, info.sourceIp());
     }
 
-    public boolean isFieldDenied(String accessKeyId, String fieldArn) {
+    /**
+     * Resolves the caller's {@link CallerContext} for forwarding to the floci-app-sync
+     * sidecar, which does field-level IAM authorization itself (see {@code IamFieldAuthorizer}
+     * there) — this service no longer evaluates per-field ARNs in-process.
+     */
+    public CallerContext resolveCallerContextForSidecar(String accessKeyId) {
         if (accessKeyId == null || isEmulatorAllow(accessKeyId)) {
-            return false;
+            return null;
         }
-        CallerContext caller = iamService.resolveCallerContext(accessKeyId);
-        if (caller == null) {
-            return false;
-        }
-        return iamPolicyEvaluator.evaluate(caller, null, "appsync:GraphQL", fieldArn, null)
-                == IamPolicyEvaluator.Decision.DENY;
+        return iamService.resolveCallerContext(accessKeyId);
     }
 
     static boolean isEmulatorAllow(String accessKeyId) {
@@ -66,11 +66,6 @@ public class IamAuthValidator {
     static String requestArn(String region, String accountId, String apiId) {
         return "arn:aws:appsync:" + nullToEmpty(region) + ":" + nullToEmpty(accountId)
                 + ":apis/" + apiId + "/*";
-    }
-
-    static String fieldArn(String region, String accountId, String apiId, String typeName, String fieldName) {
-        return "arn:aws:appsync:" + nullToEmpty(region) + ":" + nullToEmpty(accountId)
-                + ":apis/" + apiId + "/types/" + typeName + "/fields/" + fieldName;
     }
 
     static String usernameFromArn(String userArn, String accessKeyId) {

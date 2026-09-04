@@ -9,11 +9,11 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
-import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
 import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
+import io.github.hectorvent.floci.services.floci.appsync.FlociAppSyncClient;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -312,10 +312,10 @@ class AppSyncServiceTest {
                 "fieldName", "hello",
                 "dataSourceName", "none"
         ), "us-east-1");
-        verify(schemaRegistry, never()).register(any(), any());
+        verify(flociAppSyncClient, never()).compileSchema(any(), any());
     }
 
-    private SchemaRegistry schemaRegistry;
+    private FlociAppSyncClient flociAppSyncClient;
 
     @SuppressWarnings("unchecked")
     private AppSyncService newService(Clock clock) {
@@ -344,14 +344,14 @@ class AppSyncServiceTest {
             }
         };
         Instance<RequestContext> requestContext = mock(Instance.class);
-        schemaRegistry = mock(SchemaRegistry.class);
+        flociAppSyncClient = mock(FlociAppSyncClient.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         return new AppSyncService(
                 storageFactory,
                 config,
                 new RegionResolver("us-east-1", "000000000000"),
-                schemaRegistry,
+                flociAppSyncClient,
                 mock(SchemaCreationWorker.class),
                 requestContext,
                 new ObjectMapper(),

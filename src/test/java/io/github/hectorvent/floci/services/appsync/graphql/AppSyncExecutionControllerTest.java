@@ -1,15 +1,16 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import graphql.GraphQL;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuth;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuthContext;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthMiddleware;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.IamAuthValidator;
 import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
+import io.github.hectorvent.floci.services.floci.appsync.FlociAppSyncClient;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
@@ -21,12 +22,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
@@ -39,11 +40,11 @@ class AppSyncExecutionControllerTest {
     @Mock
     AppSyncService appSyncService;
     @Mock
-    SchemaRegistry schemaRegistry;
-    @Mock
-    QueryExecutor queryExecutor;
+    FlociAppSyncClient flociAppSyncClient;
     @Mock
     AuthMiddleware authMiddleware;
+    @Mock
+    IamAuthValidator iamAuthValidator;
     @Mock
     RequestContext requestContext;
 
@@ -54,11 +55,11 @@ class AppSyncExecutionControllerTest {
     void setUp() {
         controller = new AppSyncExecutionController(
                 appSyncService,
-                schemaRegistry,
-                queryExecutor,
+                flociAppSyncClient,
                 new AppSyncErrorFormatter(),
                 new ObjectMapper(),
                 authMiddleware,
+                iamAuthValidator,
                 requestContext);
 
         jsonHeaders = mock(HttpHeaders.class);
@@ -67,13 +68,45 @@ class AppSyncExecutionControllerTest {
     }
 
     @Test
-    void unexpectedExecutorFailureReturns500InternalFailure() {
+    void successfulExecutePassesThroughSidecarBody() {
         GraphqlApi api = new GraphqlApi();
         api.setApiId("api-1");
         when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
         when(authMiddleware.authenticate(any(), any(), any())).thenReturn(authContext(api));
-        when(schemaRegistry.getGraphQL("api-1")).thenReturn(Optional.of(mock(GraphQL.class)));
-        when(queryExecutor.execute(any(GraphQL.class), eq("{ hello }"), isNull(), isNull(), any()))
+        when(flociAppSyncClient.execute(eq("api-1"), eq("{ hello }"), isNull(), isNull(), any()))
+                .thenReturn(new FlociAppSyncClient.ExecuteResult(200, Map.of("data", Map.of("hello", "world"))));
+
+        Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
+
+        assertEquals(200, response.getStatus());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getEntity();
+        assertEquals(Map.of("hello", "world"), body.get("data"));
+    }
+
+    @Test
+    void noSchemaRegisteredPassesThroughSidecar502() {
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-1");
+        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(authMiddleware.authenticate(any(), any(), any())).thenReturn(authContext(api));
+        when(flociAppSyncClient.execute(eq("api-1"), anyString(), any(), any(), any()))
+                .thenReturn(new FlociAppSyncClient.ExecuteResult(502, Map.of("errors", List.of(
+                        Map.of("errorType", "GraphQLSchemaException", "message", AppSyncErrorFormatter.MSG_NO_SCHEMA)))));
+
+        Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
+
+        assertEquals(502, response.getStatus());
+        assertEquals("GraphQLSchemaException", response.getHeaderString("x-amzn-errortype"));
+    }
+
+    @Test
+    void unexpectedSidecarFailureReturns500InternalFailure() {
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-1");
+        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(authMiddleware.authenticate(any(), any(), any())).thenReturn(authContext(api));
+        when(flociAppSyncClient.execute(eq("api-1"), eq("{ hello }"), isNull(), isNull(), any()))
                 .thenThrow(new RuntimeException("boom"));
 
         Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
@@ -138,7 +171,7 @@ class AppSyncExecutionControllerTest {
     }
 
     @Test
-    void authFailureReturns401WithoutCallingExecutor() {
+    void authFailureReturns401WithoutCallingSidecar() {
         GraphqlApi api = new GraphqlApi();
         api.setApiId("api-1");
         when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);

@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql.auth;
+package io.github.hectorvent.flociappsync.graphql.auth;
 
 import graphql.ErrorClassification;
 import graphql.GraphQLError;
@@ -8,6 +8,8 @@ import graphql.schema.DataFetchingEnvironment;
 import java.util.List;
 import java.util.Map;
 
+/** Ported verbatim (besides package) from Floci's
+ * {@code services.appsync.graphql.auth.AppSyncFieldUnauthorizedException}. */
 public class AppSyncFieldUnauthorizedException extends RuntimeException implements GraphQLError {
 
     private final List<Object> path;

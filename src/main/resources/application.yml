@@ -579,6 +579,9 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      engine:
+        # url: http://floci-app-sync:3010   # set to skip container management
+        default-image: "floci/floci-app-sync:latest"
     s3vectors:
       enabled: true
     s3tables:

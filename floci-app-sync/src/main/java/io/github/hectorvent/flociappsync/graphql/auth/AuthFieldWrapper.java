@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql.auth;
+package io.github.hectorvent.flociappsync.graphql.auth;
 
 import graphql.schema.DataFetcher;
 import graphql.schema.FieldCoordinates;
@@ -10,14 +10,18 @@ import graphql.schema.GraphQLSchema;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+/**
+ * Adapted from Floci's {@code services.appsync.graphql.auth.AuthFieldWrapper}: takes
+ * {@link IamFieldAuthorizer} instead of {@code IamAuthValidator} (see that class for why).
+ */
 @ApplicationScoped
 public class AuthFieldWrapper {
 
-    private final IamAuthValidator iamAuthValidator;
+    private final IamFieldAuthorizer iamFieldAuthorizer;
 
     @Inject
-    public AuthFieldWrapper(IamAuthValidator iamAuthValidator) {
-        this.iamAuthValidator = iamAuthValidator;
+    public AuthFieldWrapper(IamFieldAuthorizer iamFieldAuthorizer) {
+        this.iamFieldAuthorizer = iamFieldAuthorizer;
     }
 
     public GraphQLSchema wrap(GraphQLSchema schema) {
@@ -40,7 +44,7 @@ public class AuthFieldWrapper {
                 if (existing instanceof AuthorizationDataFetcher) {
                     continue;
                 }
-                code.dataFetcher(coords, new AuthorizationDataFetcher(existing, typeName, fieldName, iamAuthValidator));
+                code.dataFetcher(coords, new AuthorizationDataFetcher(existing, typeName, fieldName, iamFieldAuthorizer));
             }
         }
         GraphQLCodeRegistry registry = code.build();

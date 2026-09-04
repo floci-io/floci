@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql.scalars;
+package io.github.hectorvent.flociappsync.graphql.scalars;
 
 import graphql.schema.GraphQLScalarType;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+/** Ported verbatim (besides package) from Floci's {@code services.appsync.graphql.scalars.AppSyncScalarRegistry}. */
 @ApplicationScoped
 public class AppSyncScalarRegistry {
     private final List<GraphQLScalarType> scalars;

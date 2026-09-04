@@ -10,7 +10,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
-import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
+import io.github.hectorvent.floci.services.floci.appsync.FlociAppSyncClient;
 import io.github.hectorvent.floci.services.appsync.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -48,7 +48,7 @@ public class AppSyncService {
     private final StorageBackend<String, ChannelNamespace> channelNamespaceStore;
     private final StorageBackend<String, SourceApiAssociation> mergedApiAssociationStore;
     private final RegionResolver regionResolver;
-    private final SchemaRegistry schemaRegistry;
+    private final FlociAppSyncClient flociAppSyncClient;
     private final SchemaCreationWorker schemaCreationWorker;
     private final Instance<RequestContext> requestContextInstance;
     private final ObjectMapper objectMapper;
@@ -57,7 +57,7 @@ public class AppSyncService {
 
     @Inject
     public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                          SchemaRegistry schemaRegistry, SchemaCreationWorker schemaCreationWorker,
+                          FlociAppSyncClient flociAppSyncClient, SchemaCreationWorker schemaCreationWorker,
                           Instance<RequestContext> requestContextInstance, ObjectMapper objectMapper,
                           AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
                           AccountAwareStorageBackend<String> schemaStore,
@@ -75,7 +75,7 @@ public class AppSyncService {
         this.channelNamespaceStore = storageFactory.create("appsync", "appsync-channelnamespaces.json", new TypeReference<>() {});
         this.mergedApiAssociationStore = storageFactory.create("appsync", "appsync-merged-api-associations.json", new TypeReference<>() {});
         this.regionResolver = regionResolver;
-        this.schemaRegistry = schemaRegistry;
+        this.flociAppSyncClient = flociAppSyncClient;
         this.schemaCreationWorker = schemaCreationWorker;
         this.requestContextInstance = requestContextInstance;
         this.objectMapper = objectMapper;
@@ -217,7 +217,11 @@ public class AppSyncService {
         apiStore.delete(apiId);
         schemaStore.delete(apiId);
         schemaStatusStore.delete(apiId);
-        schemaRegistry.remove(apiId);
+        // Don't wake the sidecar just to delete a schema it was never asked to compile —
+        // an API can be deleted before StartSchemaCreation ever ran.
+        if (flociAppSyncClient.isAvailable()) {
+            flociAppSyncClient.deleteSchema(apiId);
+        }
         deleteDataSourcesForApi(apiId);
         deleteResolversForApi(apiId);
         deleteFunctionsForApi(apiId);

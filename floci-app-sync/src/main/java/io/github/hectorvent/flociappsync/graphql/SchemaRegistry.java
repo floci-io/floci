@@ -1,11 +1,11 @@
-package io.github.hectorvent.floci.services.appsync.graphql;
+package io.github.hectorvent.flociappsync.graphql;
 
 import graphql.GraphQL;
 import graphql.execution.AsyncExecutionStrategy;
 import graphql.execution.AsyncSerialExecutionStrategy;
 import graphql.execution.SubscriptionExecutionStrategy;
 import graphql.schema.GraphQLSchema;
-import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthFieldWrapper;
+import io.github.hectorvent.flociappsync.graphql.auth.AuthFieldWrapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -13,16 +13,13 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
+/** Ported verbatim (besides package) from Floci's {@code services.appsync.graphql.SchemaRegistry}. */
 @ApplicationScoped
 public class SchemaRegistry {
     private final Map<String, GraphQLSchema> schemas = new ConcurrentHashMap<>();
     private final Map<String, GraphQL> engines = new ConcurrentHashMap<>();
     private final AppSyncSchemaParser appSyncSchemaParser;
     private final AuthFieldWrapper authFieldWrapper;
-
-    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser) {
-        this(appSyncSchemaParser, null);
-    }
 
     @Inject
     public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser, AuthFieldWrapper authFieldWrapper) {

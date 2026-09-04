@@ -135,9 +135,24 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 
 ## Schema Registry
 
-`StartSchemaCreation` validates the provided GraphQL SDL using [graphql-java](https://github.com/graphql-java/graphql-java). Invalid schemas are rejected asynchronously (status `FAILED` with details after `PROCESSING`). Valid schemas are registered in an in-memory `SchemaRegistry` and persisted to the schema store.
+Schema compilation and query execution run in the **floci-app-sync** sidecar (issue #2917),
+not in Floci's own process: [graphql-java](https://github.com/graphql-java/graphql-java) is a
+~3.8MB dependency used only by AppSync, so keeping it out of Floci's JVM/native image
+altogether — mirroring the [floci-duck](https://github.com/floci-io/floci-duck) sidecar
+pattern already used for Athena — avoids paying that cost in every build regardless of
+whether AppSync is ever used. `FlociAppSyncManager` lazily starts the sidecar container on
+first use; `floci.services.appsync.engine.url` points at an already-running instance instead
+(Docker Compose setups) and skips container management entirely.
 
-On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs from the schema store into `SchemaRegistry` so `POST /v1/apis/{apiId}/graphql` works across restarts (memory/persistent/hybrid/wal).
+`StartSchemaCreation` sends the SDL to the sidecar, which validates and compiles it. Invalid
+schemas are rejected asynchronously (status `FAILED` with details after `PROCESSING`). Valid
+schemas are registered in the sidecar's in-memory schema registry and persisted to Floci's own
+schema store.
+
+On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs
+from its schema store by resending them to the sidecar, so `POST /v1/apis/{apiId}/graphql`
+works across restarts (memory/persistent/hybrid/wal) even though the sidecar itself keeps no
+persistent state.
 
 The following **AWS scalar types** are pre-registered and available in any schema without requiring explicit `scalar` declarations:
 

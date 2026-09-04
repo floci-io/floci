@@ -1712,6 +1712,17 @@ public interface EmulatorConfig {
         /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
         @WithDefault("30")
         int schemaWorkerShutdownTimeoutSeconds();
+
+        /** The floci-app-sync sidecar that owns schema compilation and query execution (issue #2917). */
+        EngineConfig engine();
+
+        interface EngineConfig {
+            /** When set, Floci uses this URL and skips floci-app-sync container management. */
+            Optional<String> url();
+
+            @WithDefault("floci/floci-app-sync:latest")
+            String defaultImage();
+        }
     }
 
     interface BcmDataExportsServiceConfig {

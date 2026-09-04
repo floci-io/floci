@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
+import io.github.hectorvent.floci.services.floci.appsync.FlociAppSyncClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -29,7 +30,7 @@ public class SchemaCreationWorker {
 
     private static final Logger LOG = Logger.getLogger(SchemaCreationWorker.class);
 
-    private final SchemaRegistry schemaRegistry;
+    private final FlociAppSyncClient flociAppSyncClient;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     private final AccountAwareStorageBackend<String> schemaStore;
     private final EmulatorConfig config;
@@ -38,12 +39,12 @@ public class SchemaCreationWorker {
     private ExecutorService executor;
 
     @Inject
-    public SchemaCreationWorker(SchemaRegistry schemaRegistry,
+    public SchemaCreationWorker(FlociAppSyncClient flociAppSyncClient,
                                 AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
                                 AccountAwareStorageBackend<String> schemaStore,
                                 EmulatorConfig config,
                                 ObjectMapper objectMapper) {
-        this.schemaRegistry = schemaRegistry;
+        this.flociAppSyncClient = flociAppSyncClient;
         this.schemaStatusStore = schemaStatusStore;
         this.schemaStore = schemaStore;
         this.config = config;
@@ -85,7 +86,7 @@ public class SchemaCreationWorker {
 
     private void process(String apiId, String sdl, String accountId) {
         try {
-            schemaRegistry.register(apiId, sdl);
+            flociAppSyncClient.compileSchema(apiId, sdl);
             // Worker thread has no request context; write under the submitting account.
             schemaStore.putForAccount(accountId, apiId, sdl);
             markStatus(accountId, apiId, SchemaCreationStatusType.SUCCESS, null);
@@ -150,7 +151,7 @@ public class SchemaCreationWorker {
     }
 
     /**
-     * Rehydrates executable schemas from persisted SDL into {@link SchemaRegistry}
+     * Rehydrates executable schemas from persisted SDL into the floci-app-sync sidecar
      * after storage load / orphan recovery so GraphQL execute works across restarts.
      * Scans every account (startup has no request context); apiIds are globally unique.
      * Parse failures are logged and skipped.
@@ -165,7 +166,7 @@ public class SchemaCreationWorker {
                 continue;
             }
             try {
-                schemaRegistry.register(apiId, sdl);
+                flociAppSyncClient.compileSchema(apiId, sdl);
                 loaded++;
             } catch (RuntimeException e) {
                 skipped++;

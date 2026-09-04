@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql.scalars;
+package io.github.hectorvent.flociappsync.graphql.scalars;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,6 +20,7 @@ import java.time.format.DateTimeParseException;
 import java.util.Base64;
 import java.util.regex.Pattern;
 
+/** Ported verbatim (besides package) from Floci's {@code services.appsync.graphql.scalars.AppSyncScalars}. */
 public final class AppSyncScalars {
 
     private static final ObjectMapper SHARED_MAPPER = new ObjectMapper();
@@ -110,7 +111,7 @@ public final class AppSyncScalars {
 
     public static final GraphQLScalarType AWS_TIME = GraphQLScalarType.newScalar()
         .name("AWSTime")
-        .description("An ISO-8601 time string (HH:mm:ss)") 
+        .description("An ISO-8601 time string (HH:mm:ss)")
         .coercing(new Coercing<String, String>() {
             @Override
             public String serialize(Object dataFetcherResult) {

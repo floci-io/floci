@@ -17,10 +17,8 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -32,13 +30,6 @@ class IamAuthValidatorTest {
     private static final String DENY = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"appsync:GraphQL","Resource":"*"}]}
             """;
-    private static final String FIELD_DENY = """
-            {"Version":"2012-10-17","Statement":[
-              {"Effect":"Allow","Action":"appsync:GraphQL","Resource":"arn:aws:appsync:us-east-1:000000000000:apis/api-1/*"},
-              {"Effect":"Deny","Action":"appsync:GraphQL","Resource":"arn:aws:appsync:us-east-1:000000000000:apis/api-1/types/Query/fields/secret"}
-            ]}
-            """;
-
     @Mock
     IamService iamService;
 
@@ -90,13 +81,22 @@ class IamAuthValidatorTest {
         assertEquals("test", identity.get("user"));
     }
 
+    /**
+     * Field-level IAM authorization itself now happens in the floci-app-sync sidecar's
+     * {@code IamFieldAuthorizer} (issue #2917) — this only resolves the {@link CallerContext}
+     * that gets forwarded to it, so the sidecar can evaluate per-field ARNs without a
+     * callback into Floci.
+     */
     @Test
-    void fieldArnDenyDetected() {
-        when(iamService.resolveCallerContext("AKIAGOOD")).thenReturn(CallerContext.of(List.of(FIELD_DENY)));
-        String fieldArn = IamAuthValidator.fieldArn("us-east-1", "000000000000", "api-1", "Query", "secret");
-        assertTrue(validator.isFieldDenied("AKIAGOOD", fieldArn));
-        assertFalse(validator.isFieldDenied("AKIAGOOD",
-                IamAuthValidator.fieldArn("us-east-1", "000000000000", "api-1", "Query", "hello")));
-        assertFalse(validator.isFieldDenied("test", fieldArn));
+    void resolveCallerContextForSidecarReturnsResolvedContextForRealCaller() {
+        CallerContext expected = CallerContext.of(List.of(ALLOW));
+        when(iamService.resolveCallerContext("AKIAGOOD")).thenReturn(expected);
+
+        assertEquals(expected, validator.resolveCallerContextForSidecar("AKIAGOOD"));
+    }
+
+    @Test
+    void resolveCallerContextForSidecarReturnsNullForEmulatorAllowSentinel() {
+        assertEquals(null, validator.resolveCallerContextForSidecar("test"));
     }
 }

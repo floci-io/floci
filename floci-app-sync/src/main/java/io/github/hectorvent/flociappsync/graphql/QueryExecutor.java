@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql;
+package io.github.hectorvent.flociappsync.graphql;
 
 import graphql.ErrorType;
 import graphql.ExecutionInput;
@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/** Ported verbatim (besides package) from Floci's {@code services.appsync.graphql.QueryExecutor}. */
 @ApplicationScoped
 public class QueryExecutor {
 

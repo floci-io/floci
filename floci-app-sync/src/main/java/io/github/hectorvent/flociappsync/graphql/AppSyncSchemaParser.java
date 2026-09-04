@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql;
+package io.github.hectorvent.flociappsync.graphql;
 
 import graphql.GraphQLError;
 import graphql.language.SourceLocation;
@@ -9,8 +9,7 @@ import graphql.schema.idl.SchemaGenerator;
 import graphql.schema.idl.SchemaParser;
 import graphql.schema.idl.TypeDefinitionRegistry;
 import graphql.schema.idl.errors.SchemaProblem;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.appsync.graphql.scalars.AppSyncScalarRegistry;
+import io.github.hectorvent.flociappsync.graphql.scalars.AppSyncScalarRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -22,6 +21,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * Ported from Floci's {@code services.appsync.graphql.AppSyncSchemaParser}. Only change:
+ * throws {@link SchemaCompileException} instead of Floci's own (non-portable) {@code AwsException}.
+ */
 @ApplicationScoped
 public class AppSyncSchemaParser {
     private final AppSyncScalarRegistry scalarRegistry;
@@ -44,12 +47,10 @@ public class AppSyncSchemaParser {
             for (GraphQLError ge : e.getErrors()) {
                 codeErrors.add(toCodeErrorFromGraphQL("PARSER_ERROR", ge));
             }
-            throw new AwsException("BadRequestException",
-                    "Invalid schema: " + e.getMessage(), 400,
+            throw new SchemaCompileException("Invalid schema: " + e.getMessage(),
                     buildExtendedData(codeErrors));
         } catch (InvalidSyntaxException e) {
-            throw new AwsException("BadRequestException",
-                    "Invalid schema: " + e.getMessage(), 400,
+            throw new SchemaCompileException("Invalid schema: " + e.getMessage(),
                     buildExtendedData(List.of(toCodeError("PARSER_ERROR", e.getMessage(), 0, 0))));
         }
 
@@ -65,12 +66,10 @@ public class AppSyncSchemaParser {
             for (GraphQLError ge : e.getErrors()) {
                 codeErrors.add(toCodeErrorFromGraphQL("VALIDATION_ERROR", ge));
             }
-            throw new AwsException("BadRequestException",
-                    "Invalid schema: " + e.getMessage(), 400,
+            throw new SchemaCompileException("Invalid schema: " + e.getMessage(),
                     buildExtendedData(codeErrors));
         } catch (RuntimeException e) {
-            throw new AwsException("BadRequestException",
-                    "Invalid schema: " + e.getMessage(), 400);
+            throw new SchemaCompileException("Invalid schema: " + e.getMessage(), null);
         }
     }
 
@@ -84,8 +83,7 @@ public class AppSyncSchemaParser {
         while (matcher.find()) {
             String name = matcher.group(1);
             if (!AppSyncDirective.isKnown(name)) {
-                throw new AwsException("BadRequestException",
-                        "Unknown directive: @" + name, 400,
+                throw new SchemaCompileException("Unknown directive: @" + name,
                         buildExtendedData(List.of(
                                 toCodeError("VALIDATION_ERROR", "Unknown directive: @" + name, 0, 0))));
             }

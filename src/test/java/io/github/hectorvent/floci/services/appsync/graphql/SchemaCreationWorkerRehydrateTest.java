@@ -3,8 +3,8 @@ package io.github.hectorvent.floci.services.appsync.graphql;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.appsync.graphql.scalars.AppSyncScalarRegistry;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
+import io.github.hectorvent.floci.services.floci.appsync.FlociAppSyncClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -14,12 +14,18 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Schema compilation now happens in the floci-app-sync sidecar (issue #2917) — these tests
+ * verify {@code rehydrateSchemas} calls {@link FlociAppSyncClient#compileSchema} per persisted
+ * SDL rather than registering directly into an in-process {@code SchemaRegistry}.
+ */
 @ExtendWith(MockitoExtension.class)
 class SchemaCreationWorkerRehydrateTest {
 
@@ -29,26 +35,25 @@ class SchemaCreationWorkerRehydrateTest {
     AccountAwareStorageBackend<String> schemaStore;
     @Mock
     EmulatorConfig config;
+    @Mock
+    FlociAppSyncClient flociAppSyncClient;
 
-    private SchemaRegistry schemaRegistry;
     private SchemaCreationWorker worker;
 
     @BeforeEach
     void setUp() {
-        schemaRegistry = new SchemaRegistry(new AppSyncSchemaParser(new AppSyncScalarRegistry()));
         worker = new SchemaCreationWorker(
-                schemaRegistry, schemaStatusStore, schemaStore, config, new ObjectMapper());
+                flociAppSyncClient, schemaStatusStore, schemaStore, config, new ObjectMapper());
     }
 
     @Test
-    void rehydrateRegistersSdlFromSchemaStore() {
+    void rehydrateCompilesSdlFromSchemaStore() {
         when(schemaStore.scanAllAccountsAsMap())
                 .thenReturn(Map.of("api-1", "type Query { hello: String }"));
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("api-1").isPresent());
-        assertTrue(schemaRegistry.getGraphQL("api-1").isPresent());
+        verify(flociAppSyncClient).compileSchema("api-1", "type Query { hello: String }");
     }
 
     @Test
@@ -62,9 +67,8 @@ class SchemaCreationWorkerRehydrateTest {
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("default-api").isPresent());
-        assertTrue(schemaRegistry.getSchema("other-acct-api").isPresent());
-        assertTrue(schemaRegistry.getGraphQL("other-acct-api").isPresent());
+        verify(flociAppSyncClient).compileSchema(eq("default-api"), anyString());
+        verify(flociAppSyncClient).compileSchema(eq("other-acct-api"), anyString());
         verify(schemaStore, never()).keys();
         verify(schemaStore, never()).get(anyString());
     }
@@ -73,10 +77,12 @@ class SchemaCreationWorkerRehydrateTest {
     void rehydrateSkipsUnparseableSdl() {
         when(schemaStore.scanAllAccountsAsMap())
                 .thenReturn(Map.of("bad-api", "not valid sdl {{{"));
+        doThrow(new RuntimeException("boom")).when(flociAppSyncClient)
+                .compileSchema(eq("bad-api"), anyString());
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("bad-api").isEmpty());
+        verify(flociAppSyncClient).compileSchema(eq("bad-api"), anyString());
     }
 
     @Test
@@ -85,7 +91,6 @@ class SchemaCreationWorkerRehydrateTest {
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("empty").isEmpty());
-        verify(schemaStore, never()).put(anyString(), anyString());
+        verify(flociAppSyncClient, never()).compileSchema(anyString(), anyString());
     }
 }
