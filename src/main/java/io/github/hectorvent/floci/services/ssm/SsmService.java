@@ -331,6 +331,7 @@ public class SsmService implements ResourceProvider {
                     "Document " + name + " already exists.", 400);
         }
         SsmDocument document = new SsmDocument(name, content, documentType);
+        document.setOwner(regionResolver.getAccountId());
         documentStore.put(storageKey, document);
         return document;
     }
@@ -400,14 +401,34 @@ public class SsmService implements ResourceProvider {
 
         List<String> nameFilters = findFilterValues(filters, "Name");
         List<String> typeFilters = findFilterValues(filters, "DocumentType");
+        List<String> ownerFilters = findFilterValues(filters, "Owner");
 
         return docs.stream()
                 .filter(d -> nameFilters.isEmpty()
                         || nameFilters.contains(d.getName())
-                        || nameFilters.stream().anyMatch(n -> d.getName() != null && d.getName().startsWith(n)))
+                        || nameFilters.stream().anyMatch(n -> !n.isEmpty() && d.getName() != null && d.getName().startsWith(n)))
                 .filter(d -> typeFilters.isEmpty()
                         || typeFilters.stream().anyMatch(t -> t.equalsIgnoreCase(d.getDocumentType())))
+                .filter(d -> ownerFilters.isEmpty() || ownerFilters.stream().anyMatch(o -> matchesOwner(o, d.getOwner())))
                 .toList();
+    }
+
+    /**
+     * Every document visible through {@code documentStore} already belongs to the caller's
+     * account (it is an account-partitioned store), so "Self"/"Private"/"All" and the caller's own
+     * account id all match every visible document; "Amazon"/"Public"/"ThirdParty" match none, since
+     * no AWS-owned or other-account documents are ever visible here.
+     */
+    private boolean matchesOwner(String filterValue, String documentOwner) {
+        if ("Self".equalsIgnoreCase(filterValue) || "Private".equalsIgnoreCase(filterValue)
+                || "All".equalsIgnoreCase(filterValue)) {
+            return true;
+        }
+        if ("Amazon".equalsIgnoreCase(filterValue) || "Public".equalsIgnoreCase(filterValue)
+                || "ThirdParty".equalsIgnoreCase(filterValue)) {
+            return false;
+        }
+        return filterValue.equals(documentOwner);
     }
 
     private List<String> findFilterValues(Map<String, List<String>> filters, String targetKey) {
@@ -433,7 +454,40 @@ public class SsmService implements ResourceProvider {
             Map<String, List<String>> parameters,
             String scheduleExpression,
             String region) {
+        return createAssociation(name, associationName, documentVersion, instanceId, targets, parameters,
+                scheduleExpression, null, null, null, region);
+    }
+
+    public synchronized SsmAssociation createAssociation(
+            String name,
+            String associationName,
+            String documentVersion,
+            String instanceId,
+            List<SsmAssociation.Target> targets,
+            Map<String, List<String>> parameters,
+            String scheduleExpression,
+            String maxErrors,
+            String maxConcurrency,
+            String complianceSeverity,
+            String region) {
         getDocument(name, region);
+
+        if (instanceId != null && !instanceId.isBlank()) {
+            boolean duplicate = listAssociations(region).stream()
+                    .anyMatch(a -> Objects.equals(a.getName(), name) && Objects.equals(a.getInstanceId(), instanceId));
+            if (duplicate) {
+                throw new AwsException("AssociationAlreadyExists",
+                        "An association already exists for instance " + instanceId + " and document " + name + ".", 400);
+            }
+        } else if (targets != null && !targets.isEmpty()) {
+            boolean duplicate = listAssociations(region).stream()
+                    .anyMatch(a -> Objects.equals(a.getName(), name) && Objects.equals(a.getTargets(), targets));
+            if (duplicate) {
+                throw new AwsException("AssociationAlreadyExists",
+                        "An association already exists for document " + name + " with the given targets.", 400);
+            }
+        }
+
         String associationId = UUID.randomUUID().toString();
         Instant now = Instant.now();
 
@@ -446,6 +500,13 @@ public class SsmService implements ResourceProvider {
         association.setTargets(targets);
         association.setParameters(parameters);
         association.setScheduleExpression(scheduleExpression);
+        association.setMaxErrors(maxErrors);
+        association.setMaxConcurrency(maxConcurrency);
+        association.setComplianceSeverity(complianceSeverity);
+        association.setAssociationVersion("1");
+        // Real SSM starts an association at "Pending" and transitions it to "Success"/"Failed" once
+        // its execution engine runs it. This emulator has no execution engine, so it reports
+        // "Success" immediately rather than modeling a state that would never change on its own.
         association.setStatus(new SsmAssociation.AssociationStatus("Success", "Success", now, null));
         association.setOverview(new SsmAssociation.AssociationOverview("Success", "Success"));
         association.setCreatedDate(now);
@@ -457,9 +518,69 @@ public class SsmService implements ResourceProvider {
         return association;
     }
 
+    public synchronized SsmAssociation updateAssociation(
+            String associationId,
+            String associationName,
+            String documentVersion,
+            List<SsmAssociation.Target> targets,
+            Map<String, List<String>> parameters,
+            String scheduleExpression,
+            String maxErrors,
+            String maxConcurrency,
+            String complianceSeverity,
+            String region) {
+        String storageKey = regionKey(region, associationId);
+        SsmAssociation association = associationStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("AssociationDoesNotExist",
+                        "The specified association does not exist.", 400));
+
+        if (associationName != null) association.setAssociationName(associationName);
+        if (documentVersion != null) association.setDocumentVersion(documentVersion);
+        if (targets != null) association.setTargets(targets);
+        if (parameters != null) association.setParameters(parameters);
+        if (scheduleExpression != null) association.setScheduleExpression(scheduleExpression);
+        if (maxErrors != null) association.setMaxErrors(maxErrors);
+        if (maxConcurrency != null) association.setMaxConcurrency(maxConcurrency);
+        if (complianceSeverity != null) association.setComplianceSeverity(complianceSeverity);
+
+        long currentVersion = parseAssociationVersion(association.getAssociationVersion());
+        association.setAssociationVersion(String.valueOf(currentVersion + 1));
+
+        associationStore.put(storageKey, association);
+        LOG.infov("Updated association {0} in region {1}", associationId, region);
+        return association;
+    }
+
+    private static long parseAssociationVersion(String version) {
+        try {
+            return version == null ? 1 : Long.parseLong(version);
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
+
     public List<SsmAssociation> listAssociations(String region) {
+        return listAssociations(region, Map.of());
+    }
+
+    public List<SsmAssociation> listAssociations(String region, Map<String, List<String>> filters) {
         String prefix = regionKey(region, "");
-        return associationStore.scan(k -> k.startsWith(prefix));
+        List<SsmAssociation> associations = associationStore.scan(k -> k.startsWith(prefix));
+        if (filters == null || filters.isEmpty()) {
+            return associations;
+        }
+
+        List<String> instanceIdFilters = findFilterValues(filters, "InstanceId");
+        List<String> associationIdFilters = findFilterValues(filters, "AssociationId");
+        List<String> nameFilters = findFilterValues(filters, "Name");
+        List<String> associationNameFilters = findFilterValues(filters, "AssociationName");
+
+        return associations.stream()
+                .filter(a -> instanceIdFilters.isEmpty() || instanceIdFilters.contains(a.getInstanceId()))
+                .filter(a -> associationIdFilters.isEmpty() || associationIdFilters.contains(a.getAssociationId()))
+                .filter(a -> nameFilters.isEmpty() || nameFilters.contains(a.getName()))
+                .filter(a -> associationNameFilters.isEmpty() || associationNameFilters.contains(a.getAssociationName()))
+                .toList();
     }
 
     public SsmAssociation describeAssociation(String associationId, String name, String instanceId, String region) {
@@ -476,8 +597,8 @@ public class SsmService implements ResourceProvider {
                     .orElseThrow(() -> new AwsException("AssociationDoesNotExist",
                             "The specified association does not exist.", 400));
         }
-        throw new AwsException("AssociationDoesNotExist",
-                "The specified association does not exist.", 400);
+        throw new AwsException("ValidationException",
+                "Either AssociationId or both Name and InstanceId must be specified.", 400);
     }
 
     public synchronized void deleteAssociation(String associationId, String name, String instanceId, String region) {

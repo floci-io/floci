@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ssm.model;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -8,6 +7,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -57,6 +57,9 @@ public class SsmAssociation {
 
     @JsonProperty("MaxErrors")
     private String maxErrors;
+
+    @JsonProperty("AssociationVersion")
+    private String associationVersion;
 
     public SsmAssociation() {}
 
@@ -181,15 +184,6 @@ public class SsmAssociation {
         this.createdDate = createdDate;
     }
 
-    @JsonIgnore
-    public Instant getDate() {
-        return createdDate;
-    }
-
-    public void setDate(Instant date) {
-        this.createdDate = date;
-    }
-
     public Instant getLastExecutionDate() {
         return lastExecutionDate;
     }
@@ -220,6 +214,14 @@ public class SsmAssociation {
 
     public void setMaxErrors(String maxErrors) {
         this.maxErrors = maxErrors;
+    }
+
+    public String getAssociationVersion() {
+        return associationVersion;
+    }
+
+    public void setAssociationVersion(String associationVersion) {
+        this.associationVersion = associationVersion;
     }
 
     @RegisterForReflection
@@ -253,6 +255,18 @@ public class SsmAssociation {
 
         public void setValues(List<String> values) {
             this.values = values;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof Target target)) return false;
+            return Objects.equals(key, target.key) && Objects.equals(values, target.values);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(key, values);
         }
     }
 

@@ -481,6 +481,20 @@ class SsmServiceTest {
         List<SsmDocument> namedDocs = ssmService.listDocuments("us-east-1", Map.of("Name", List.of("Doc2")));
         assertEquals(1, namedDocs.size());
         assertEquals("Doc2", namedDocs.get(0).getName());
+
+        // Blank Name filter value must match nothing, not everything
+        List<SsmDocument> blankNameDocs = ssmService.listDocuments("us-east-1", Map.of("Name", List.of("")));
+        assertTrue(blankNameDocs.isEmpty());
+
+        // Owner=Self/All/the caller's account id match every visible document (all are self-owned)
+        List<SsmDocument> selfDocs = ssmService.listDocuments("us-east-1", Map.of("Owner", List.of("Self")));
+        assertEquals(2, selfDocs.size());
+        List<SsmDocument> allDocs = ssmService.listDocuments("us-east-1", Map.of("Owner", List.of("All")));
+        assertEquals(2, allDocs.size());
+
+        // Owner=Amazon/Public/another account id match none: no AWS-owned or cross-account documents
+        List<SsmDocument> amazonDocs = ssmService.listDocuments("us-east-1", Map.of("Owner", List.of("Amazon")));
+        assertTrue(amazonDocs.isEmpty());
     }
 
     @Test
@@ -546,6 +560,15 @@ class SsmServiceTest {
         List<SsmAssociation> westAssocs = ssmService.listAssociations(west);
         assertEquals(1, westAssocs.size());
         assertEquals("assoc-3", westAssocs.get(0).getAssociationName());
+
+        // Filter by InstanceId
+        List<SsmAssociation> filtered = ssmService.listAssociations(east, Map.of("InstanceId", List.of("i-111")));
+        assertEquals(1, filtered.size());
+        assertEquals("assoc-1", filtered.get(0).getAssociationName());
+
+        // Blank InstanceId filter value must match nothing, not everything
+        List<SsmAssociation> blankFiltered = ssmService.listAssociations(east, Map.of("InstanceId", List.of("")));
+        assertTrue(blankFiltered.isEmpty());
     }
 
     @Test
@@ -612,5 +635,78 @@ class SsmServiceTest {
         AwsException ex2 = assertThrows(AwsException.class, () ->
                 ssmService.describeAssociation(created2.getAssociationId(), null, null, region));
         assertEquals("AssociationDoesNotExist", ex2.getErrorCode());
+    }
+
+    @Test
+    void testCreateAssociation_MaxErrorsMaxConcurrencyComplianceSeverityRoundTrip() {
+        String region = "us-east-1";
+        ssmService.createDocument("MyDoc", "{}", "Command", region);
+
+        SsmAssociation assoc = ssmService.createAssociation(
+                "MyDoc", "my-assoc", null, "i-12345", null, null, null,
+                "10%", "50%", "CRITICAL", region);
+
+        assertEquals("1", assoc.getAssociationVersion());
+        assertEquals("10%", assoc.getMaxErrors());
+        assertEquals("50%", assoc.getMaxConcurrency());
+        assertEquals("CRITICAL", assoc.getComplianceSeverity());
+
+        SsmAssociation found = ssmService.describeAssociation(assoc.getAssociationId(), null, null, region);
+        assertEquals("10%", found.getMaxErrors());
+        assertEquals("50%", found.getMaxConcurrency());
+        assertEquals("CRITICAL", found.getComplianceSeverity());
+    }
+
+    @Test
+    void testCreateAssociation_DuplicateInstanceThrowsAssociationAlreadyExists() {
+        String region = "us-east-1";
+        ssmService.createDocument("MyDoc", "{}", "Command", region);
+        ssmService.createAssociation("MyDoc", "my-assoc", null, "i-12345", null, null, null, region);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.createAssociation("MyDoc", "my-assoc-2", null, "i-12345", null, null, null, region));
+        assertEquals("AssociationAlreadyExists", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testCreateAssociation_DuplicateTargetsThrowsAssociationAlreadyExists() {
+        String region = "us-east-1";
+        ssmService.createDocument("MyDoc", "{}", "Command", region);
+        List<SsmAssociation.Target> targets = List.of(new SsmAssociation.Target("tag:Env", List.of("prod")));
+        ssmService.createAssociation("MyDoc", "my-assoc", null, null, targets, null, null, region);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.createAssociation("MyDoc", "my-assoc-2", null, null,
+                        List.of(new SsmAssociation.Target("tag:Env", List.of("prod"))), null, null, region));
+        assertEquals("AssociationAlreadyExists", ex.getErrorCode());
+    }
+
+    @Test
+    void testUpdateAssociation_Success() {
+        String region = "us-east-1";
+        ssmService.createDocument("MyDoc", "{}", "Command", region);
+        SsmAssociation created = ssmService.createAssociation("MyDoc", "my-assoc", null, "i-12345", null, null, null, region);
+        assertEquals("1", created.getAssociationVersion());
+
+        SsmAssociation updated = ssmService.updateAssociation(
+                created.getAssociationId(), null, null, null, null,
+                "rate(1 hour)", "5", null, null, region);
+
+        assertEquals("rate(1 hour)", updated.getScheduleExpression());
+        assertEquals("5", updated.getMaxErrors());
+        assertEquals("2", updated.getAssociationVersion());
+
+        SsmAssociation found = ssmService.describeAssociation(created.getAssociationId(), null, null, region);
+        assertEquals("rate(1 hour)", found.getScheduleExpression());
+    }
+
+    @Test
+    void testUpdateAssociation_NotFound() {
+        String region = "us-east-1";
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.updateAssociation("non-existent-id", null, null, null, null, null, null, null, null, region));
+        assertEquals("AssociationDoesNotExist", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 }

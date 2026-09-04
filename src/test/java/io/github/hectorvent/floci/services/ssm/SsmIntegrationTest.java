@@ -486,10 +486,8 @@ class SsmIntegrationTest {
             .body("BaselineId", startsWith("pb-"));
     }
 
-    // ── Read-only list operations for resources not modeled (empty results) ──
-
     @Test
-    void listDocuments_returnsEmptyList() {
+    void listDocuments_unmatchedNameFilterReturnsEmptyList() {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListDocuments")
             .contentType(SSM_CONTENT_TYPE)
@@ -559,11 +557,17 @@ class SsmIntegrationTest {
     }
 
     @Test
-    void listAssociations_returnsEmptyList() {
+    void listAssociations_unmatchedInstanceFilterReturnsEmptyList() {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListAssociations")
             .contentType(SSM_CONTENT_TYPE)
-            .body("{}")
+            .body("""
+                {
+                    "AssociationFilterList": [
+                        {"key": "InstanceId", "value": "i-nonexistent-000"}
+                    ]
+                }
+                """)
         .when()
             .post("/")
         .then()
@@ -571,6 +575,8 @@ class SsmIntegrationTest {
             .body("Associations.size()", equalTo(0))
             .body("$", not(hasKey("NextToken")));
     }
+
+    // ── Read-only list operations for resources not modeled (empty results) ──
 
     @Test
     void describeMaintenanceWindows_returnsEmptyList() {

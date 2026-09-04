@@ -85,8 +85,8 @@ public class SsmJsonHandler {
             case "ListDocuments" -> handleListDocuments(request, region);
             // Associations
             case "CreateAssociation" -> handleCreateAssociation(request, region);
+            case "UpdateAssociation" -> handleUpdateAssociation(request, region);
             case "DescribeAssociation" -> handleDescribeAssociation(request, region);
-            case "GetAssociation" -> handleDescribeAssociation(request, region);
             case "DeleteAssociation" -> handleDeleteAssociation(request, region);
             case "ListAssociations" -> handleListAssociations(request, region);
             // Read-only list operations (resources not modeled: empty results)
@@ -585,6 +585,41 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
+    private List<SsmAssociation.Target> parseTargets(JsonNode request) {
+        if (!request.hasNonNull("Targets") || !request.path("Targets").isArray()) {
+            return null;
+        }
+        List<SsmAssociation.Target> targets = new ArrayList<>();
+        for (JsonNode t : request.path("Targets")) {
+            String key = t.path("Key").asText();
+            List<String> values = new ArrayList<>();
+            if (t.has("Values") && t.path("Values").isArray()) {
+                t.path("Values").forEach(v -> values.add(v.asText()));
+            }
+            targets.add(new SsmAssociation.Target(key, values));
+        }
+        return targets;
+    }
+
+    private Map<String, List<String>> parseParameters(JsonNode request) {
+        if (!request.hasNonNull("Parameters") || !request.path("Parameters").isObject()) {
+            return null;
+        }
+        Map<String, List<String>> parameters = new HashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = request.path("Parameters").fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            List<String> values = new ArrayList<>();
+            if (entry.getValue().isArray()) {
+                entry.getValue().forEach(v -> values.add(v.asText()));
+            } else if (entry.getValue().isTextual()) {
+                values.add(entry.getValue().asText());
+            }
+            parameters.put(entry.getKey(), values);
+        }
+        return parameters;
+    }
+
     private Response handleCreateAssociation(JsonNode request, String region) {
         JsonNode nameNode = request.path("Name");
         if (!nameNode.isTextual() || nameNode.asText().isBlank()) {
@@ -598,44 +633,71 @@ public class SsmJsonHandler {
         String documentVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
         String instanceId = request.hasNonNull("InstanceId") ? request.path("InstanceId").asText() : null;
         String scheduleExpression = request.hasNonNull("ScheduleExpression") ? request.path("ScheduleExpression").asText() : null;
+        String maxErrors = request.hasNonNull("MaxErrors") ? request.path("MaxErrors").asText() : null;
+        String maxConcurrency = request.hasNonNull("MaxConcurrency") ? request.path("MaxConcurrency").asText() : null;
+        String complianceSeverity = request.hasNonNull("ComplianceSeverity") ? request.path("ComplianceSeverity").asText() : null;
 
-        List<SsmAssociation.Target> targets = null;
-        if (request.hasNonNull("Targets") && request.path("Targets").isArray()) {
-            targets = new ArrayList<>();
-            for (JsonNode t : request.path("Targets")) {
-                String key = t.path("Key").asText();
-                List<String> values = new ArrayList<>();
-                if (t.has("Values") && t.path("Values").isArray()) {
-                    t.path("Values").forEach(v -> values.add(v.asText()));
-                }
-                targets.add(new SsmAssociation.Target(key, values));
-            }
-        }
+        List<SsmAssociation.Target> targets = parseTargets(request);
+        Map<String, List<String>> parameters = parseParameters(request);
 
-        Map<String, List<String>> parameters = null;
-        if (request.hasNonNull("Parameters") && request.path("Parameters").isObject()) {
-            parameters = new HashMap<>();
-            Iterator<Map.Entry<String, JsonNode>> fields = request.path("Parameters").fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> entry = fields.next();
-                List<String> values = new ArrayList<>();
-                if (entry.getValue().isArray()) {
-                    entry.getValue().forEach(v -> values.add(v.asText()));
-                } else if (entry.getValue().isTextual()) {
-                    values.add(entry.getValue().asText());
-                }
-                parameters.put(entry.getKey(), values);
-            }
+        boolean hasInstanceId = instanceId != null && !instanceId.isBlank();
+        boolean hasTargets = targets != null && !targets.isEmpty();
+        if (!hasInstanceId && !hasTargets) {
+            throw new AwsException("ValidationException",
+                    "Either InstanceId or Targets must be specified.", 400);
         }
 
         SsmAssociation assoc = ssmService.createAssociation(
-                name, associationName, documentVersion, instanceId, targets, parameters, scheduleExpression, region);
+                name, associationName, documentVersion, instanceId, targets, parameters, scheduleExpression,
+                maxErrors, maxConcurrency, complianceSeverity, region);
+
+        return Response.ok(associationDescriptionResponse(assoc)).build();
+    }
+
+    private Response handleUpdateAssociation(JsonNode request, String region) {
+        String associationId = request.hasNonNull("AssociationId") ? request.path("AssociationId").asText() : null;
+        if (associationId == null || associationId.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'associationId' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+
+        String associationName = request.hasNonNull("AssociationName") ? request.path("AssociationName").asText() : null;
+        String documentVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
+        String scheduleExpression = request.hasNonNull("ScheduleExpression") ? request.path("ScheduleExpression").asText() : null;
+        String maxErrors = request.hasNonNull("MaxErrors") ? request.path("MaxErrors").asText() : null;
+        String maxConcurrency = request.hasNonNull("MaxConcurrency") ? request.path("MaxConcurrency").asText() : null;
+        String complianceSeverity = request.hasNonNull("ComplianceSeverity") ? request.path("ComplianceSeverity").asText() : null;
+        List<SsmAssociation.Target> targets = parseTargets(request);
+        Map<String, List<String>> parameters = parseParameters(request);
+
+        SsmAssociation assoc = ssmService.updateAssociation(
+                associationId, associationName, documentVersion, targets, parameters, scheduleExpression,
+                maxErrors, maxConcurrency, complianceSeverity, region);
 
         return Response.ok(associationDescriptionResponse(assoc)).build();
     }
 
     private Response handleListAssociations(JsonNode request, String region) {
-        List<SsmAssociation> associations = ssmService.listAssociations(region);
+        Map<String, List<String>> filters = new HashMap<>();
+        if (request.has("AssociationFilterList") && request.path("AssociationFilterList").isArray()) {
+            for (JsonNode f : request.path("AssociationFilterList")) {
+                String key = f.has("key") ? f.path("key").asText("") : f.path("Key").asText("");
+                List<String> values = new ArrayList<>();
+                if (f.has("value")) {
+                    values.add(f.path("value").asText());
+                } else if (f.has("Value")) {
+                    values.add(f.path("Value").asText());
+                } else if (f.has("Values") && f.path("Values").isArray()) {
+                    f.path("Values").forEach(v -> values.add(v.asText()));
+                }
+                if (!key.isEmpty() && !values.isEmpty()) {
+                    filters.computeIfAbsent(key, k -> new ArrayList<>()).addAll(values);
+                }
+            }
+        }
+
+        List<SsmAssociation> associations = ssmService.listAssociations(region, filters);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode associationsArray = objectMapper.createArrayNode();
@@ -678,6 +740,21 @@ public class SsmJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private ArrayNode targetsToArray(List<SsmAssociation.Target> targets) {
+        ArrayNode targetsArray = objectMapper.createArrayNode();
+        for (SsmAssociation.Target t : targets) {
+            ObjectNode targetNode = objectMapper.createObjectNode();
+            targetNode.put("Key", t.getKey());
+            ArrayNode valuesArray = objectMapper.createArrayNode();
+            if (t.getValues() != null) {
+                t.getValues().forEach(valuesArray::add);
+            }
+            targetNode.set("Values", valuesArray);
+            targetsArray.add(targetNode);
+        }
+        return targetsArray;
+    }
+
     private ObjectNode associationSummaryToNode(SsmAssociation assoc) {
         ObjectNode node = objectMapper.createObjectNode();
         if (assoc.getAssociationId() != null) {
@@ -689,6 +766,9 @@ public class SsmJsonHandler {
         if (assoc.getAssociationName() != null) {
             node.put("AssociationName", assoc.getAssociationName());
         }
+        if (assoc.getAssociationVersion() != null) {
+            node.put("AssociationVersion", assoc.getAssociationVersion());
+        }
         if (assoc.getDocumentVersion() != null) {
             node.put("DocumentVersion", assoc.getDocumentVersion());
         }
@@ -696,18 +776,7 @@ public class SsmJsonHandler {
             node.put("InstanceId", assoc.getInstanceId());
         }
         if (assoc.getTargets() != null) {
-            ArrayNode targetsArray = objectMapper.createArrayNode();
-            for (SsmAssociation.Target t : assoc.getTargets()) {
-                ObjectNode targetNode = objectMapper.createObjectNode();
-                targetNode.put("Key", t.getKey());
-                ArrayNode valuesArray = objectMapper.createArrayNode();
-                if (t.getValues() != null) {
-                    t.getValues().forEach(valuesArray::add);
-                }
-                targetNode.set("Values", valuesArray);
-                targetsArray.add(targetNode);
-            }
-            node.set("Targets", targetsArray);
+            node.set("Targets", targetsToArray(assoc.getTargets()));
         }
         if (assoc.getOverview() != null) {
             ObjectNode overviewNode = objectMapper.createObjectNode();
@@ -743,19 +812,11 @@ public class SsmJsonHandler {
         if (assoc.getInstanceId() != null) {
             desc.put("InstanceId", assoc.getInstanceId());
         }
+        if (assoc.getAssociationVersion() != null) {
+            desc.put("AssociationVersion", assoc.getAssociationVersion());
+        }
         if (assoc.getTargets() != null) {
-            ArrayNode targetsArray = objectMapper.createArrayNode();
-            for (SsmAssociation.Target t : assoc.getTargets()) {
-                ObjectNode targetNode = objectMapper.createObjectNode();
-                targetNode.put("Key", t.getKey());
-                ArrayNode valuesArray = objectMapper.createArrayNode();
-                if (t.getValues() != null) {
-                    t.getValues().forEach(valuesArray::add);
-                }
-                targetNode.set("Values", valuesArray);
-                targetsArray.add(targetNode);
-            }
-            desc.set("Targets", targetsArray);
+            desc.set("Targets", targetsToArray(assoc.getTargets()));
         }
         if (assoc.getParameters() != null) {
             ObjectNode paramsNode = objectMapper.createObjectNode();

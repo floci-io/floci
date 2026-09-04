@@ -30,7 +30,8 @@ class SsmAssociationIntegrationTest {
             .contentType(SSM_CONTENT_TYPE)
             .body("""
                 {
-                    "Name": "no-such-doc"
+                    "Name": "no-such-doc",
+                    "InstanceId": "i-1234567890abcdef0"
                 }
                 """)
         .when()
@@ -129,20 +130,23 @@ class SsmAssociationIntegrationTest {
             .statusCode(200)
             .body("AssociationDescription.AssociationId", equalTo(associationId));
 
-        // Get association by AssociationId
+        // Update association
         given()
-            .header("X-Amz-Target", "AmazonSSM.GetAssociation")
+            .header("X-Amz-Target", "AmazonSSM.UpdateAssociation")
             .contentType(SSM_CONTENT_TYPE)
             .body(String.format("""
                 {
-                    "AssociationId": "%s"
+                    "AssociationId": "%s",
+                    "ScheduleExpression": "rate(1 hour)"
                 }
                 """, associationId))
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("AssociationDescription.AssociationId", equalTo(associationId));
+            .body("AssociationDescription.AssociationId", equalTo(associationId))
+            .body("AssociationDescription.ScheduleExpression", equalTo("rate(1 hour)"))
+            .body("AssociationDescription.AssociationVersion", equalTo("2"));
 
         // Describe association by Name and InstanceId
         given()
@@ -203,5 +207,53 @@ class SsmAssociationIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("AssociationDoesNotExist"));
+    }
+
+    @Test
+    @Order(4)
+    void createAssociation_Duplicate() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "dup-assoc-doc",
+                    "DocumentType": "Command",
+                    "Content": "{\\"schemaVersion\\":\\"2.2\\",\\"mainSteps\\":[]}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateAssociation")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "dup-assoc-doc",
+                    "InstanceId": "i-dupdupdupdupdup1"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateAssociation")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "dup-assoc-doc",
+                    "InstanceId": "i-dupdupdupdupdup1"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("AssociationAlreadyExists"));
     }
 }
