@@ -7,8 +7,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * Applies a DynamoDB ProjectionExpression to a result item, returning a new
@@ -23,17 +26,28 @@ final class ProjectionEvaluator {
     /**
      * Returns a new ObjectNode containing only the paths named in the expression.
      * Resolves #alias references via exprAttrNames. Handles dot-path and [n] list index segments.
+     * Paths sharing a prefix merge into one reconstructed structure; projected list indices
+     * compact to ascending source order, the way DynamoDB reconstructs projected items.
      */
     static ObjectNode project(JsonNode item, String projectionExpression, JsonNode exprAttrNames) {
         if (item == null || projectionExpression == null || projectionExpression.isBlank()) {
             return (ObjectNode) item;
         }
         validateExpression(projectionExpression);
-        ObjectNode result = MAPPER.createObjectNode();
+        PathTrie root = new PathTrie();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
             List<String> segments = resolvePath(rawPath.trim(), exprAttrNames);
             if (segments.isEmpty()) continue;
-            copyPath(item, result, segments, 0);
+            root.insert(segments);
+        }
+        ObjectNode result = MAPPER.createObjectNode();
+        for (Map.Entry<String, PathTrie> entry : root.names.entrySet()) {
+            JsonNode child = item.get(entry.getKey());
+            if (child == null) continue;
+            JsonNode projected = projectValue(child, entry.getValue());
+            if (projected != null) {
+                result.set(entry.getKey(), projected);
+            }
         }
         return result;
     }
@@ -140,61 +154,83 @@ final class ProjectionEvaluator {
 
     // ── Tree walking ──
 
-    private static void copyPath(JsonNode src, ObjectNode dest, List<String> segments, int idx) {
-        if (idx >= segments.size()) return;
-        String seg = segments.get(idx);
+    /**
+     * Merged view of every projected path. Map-name children and list-index children are
+     * kept separately; index children stay sorted so a projected list compacts to
+     * ascending source order. A node marked terminal ends a path and copies the whole
+     * subtree it points at.
+     */
+    private static final class PathTrie {
+        private boolean terminal;
+        private final Map<String, PathTrie> names = new LinkedHashMap<>();
+        private final TreeMap<Integer, PathTrie> indices = new TreeMap<>();
 
-        if (seg.matches("\\[\\d+\\]")) {
-            // List index at root level — handled by the caller
-            return;
+        void insert(List<String> segments) {
+            PathTrie node = this;
+            for (String seg : segments) {
+                if (seg.startsWith("[")) {
+                    int idx = Integer.parseInt(seg.substring(1, seg.length() - 1));
+                    node = node.indices.computeIfAbsent(idx, k -> new PathTrie());
+                } else {
+                    node = node.names.computeIfAbsent(seg, k -> new PathTrie());
+                }
+            }
+            node.terminal = true;
         }
+    }
 
-        JsonNode child = src.get(seg);
-        if (child == null) return;
+    /**
+     * Projects a typed attribute value through a trie node. Returns null when nothing
+     * under this value matches, so the caller can drop the branch entirely.
+     */
+    private static JsonNode projectValue(JsonNode src, PathTrie node) {
+        if (node.terminal) {
+            return src.deepCopy();
+        }
+        if (!node.indices.isEmpty() && src.has("L")) {
+            JsonNode list = src.get("L");
+            ArrayNode projectedList = MAPPER.createArrayNode();
+            for (Map.Entry<Integer, PathTrie> entry : node.indices.entrySet()) {
+                int idx = entry.getKey();
+                if (idx < 0 || idx >= list.size()) continue;
+                JsonNode projected = projectValue(list.get(idx), entry.getValue());
+                if (projected != null) {
+                    projectedList.add(projected);
+                }
+            }
+            if (projectedList.isEmpty()) {
+                return null;
+            }
+            ObjectNode wrapper = MAPPER.createObjectNode();
+            wrapper.set("L", projectedList);
+            return wrapper;
+        }
+        if (!node.names.isEmpty() && src.has("M")) {
+            JsonNode projectedMap = projectMapEntries(src.get("M"), node);
+            if (projectedMap == null) {
+                return null;
+            }
+            ObjectNode wrapper = MAPPER.createObjectNode();
+            wrapper.set("M", projectedMap);
+            return wrapper;
+        }
+        if (!node.names.isEmpty() && src.isObject()) {
+            // Defensive fallback for plain (non-DynamoDB-typed) nested objects.
+            return projectMapEntries(src, node);
+        }
+        return null;
+    }
 
-        if (idx == segments.size() - 1) {
-            // Leaf: deep-copy to avoid placing a live source reference into the
-            // destination, which could be mutated by a subsequent sibling path.
-            dest.set(seg, child.deepCopy());
-        } else {
-            String nextSeg = segments.get(idx + 1);
-            if (nextSeg.matches("\\[\\d+\\]")) {
-                // Next is a list index — extract just that element.
-                // Reuse existing wrapper if already projected (same fix as the M branch).
-                int listIdx = Integer.parseInt(nextSeg.substring(1, nextSeg.length() - 1));
-                JsonNode listNode = child.has("L") ? child.get("L") : child;
-                if (listNode.isArray() && listIdx < listNode.size() && !dest.has(seg)) {
-                    JsonNode element = listNode.get(listIdx);
-                    // Build {"L": [element]} wrapper
-                    ObjectNode wrapper = MAPPER.createObjectNode();
-                    ArrayNode newList = MAPPER.createArrayNode();
-                    newList.add(element);
-                    wrapper.set("L", newList);
-                    dest.set(seg, wrapper);
-                }
-            } else if (child.has("M")) {
-                // Nested map — reuse existing projected map if present
-                ObjectNode existing = dest.has(seg) && dest.get(seg).has("M")
-                        ? (ObjectNode) dest.get(seg).get("M") : null;
-                ObjectNode nestedDest = existing != null ? existing : MAPPER.createObjectNode();
-                copyPath(child.get("M"), nestedDest, segments, idx + 1);
-                if (existing == null) {
-                    ObjectNode wrapper = MAPPER.createObjectNode();
-                    wrapper.set("M", nestedDest);
-                    dest.set(seg, wrapper);
-                }
-            } else if (child.isObject()) {
-                // Reuse existing nested object if present
-                ObjectNode existing = dest.has(seg) && dest.get(seg).isObject()
-                        ? (ObjectNode) dest.get(seg) : null;
-                ObjectNode nestedDest = existing != null ? existing : MAPPER.createObjectNode();
-                copyPath(child, nestedDest, segments, idx + 1);
-                if (existing == null) {
-                    dest.set(seg, nestedDest);
-                }
-            } else {
-                dest.set(seg, child);
+    private static ObjectNode projectMapEntries(JsonNode map, PathTrie node) {
+        ObjectNode projectedMap = MAPPER.createObjectNode();
+        for (Map.Entry<String, PathTrie> entry : node.names.entrySet()) {
+            JsonNode child = map.get(entry.getKey());
+            if (child == null) continue;
+            JsonNode projected = projectValue(child, entry.getValue());
+            if (projected != null) {
+                projectedMap.set(entry.getKey(), projected);
             }
         }
+        return projectedMap.isEmpty() ? null : projectedMap;
     }
 }
