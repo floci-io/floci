@@ -203,14 +203,20 @@ public final class RuleSqlEvaluator {
 
     /**
      * The ordering operators convert both operands to a number: numbers as they are, strings
-     * when they look like a number, anything else is Undefined.
+     * when they look like a number, anything else is Undefined. A string whose exponent is
+     * beyond what a BigDecimal can hold looks like a number but is not one either.
      */
     private BigDecimal decimal(JsonNode value) {
         if (value.isNumber()) {
             return value.decimalValue();
         }
         if (value.isTextual() && NUMERIC_STRING.matcher(value.textValue()).matches()) {
-            return new BigDecimal(value.textValue());
+            try {
+                return new BigDecimal(value.textValue());
+            } catch (NumberFormatException e) {
+                LOG.debugv("Numeric string {0} is out of range and evaluates as Undefined", value.textValue());
+                return null;
+            }
         }
         return null;
     }

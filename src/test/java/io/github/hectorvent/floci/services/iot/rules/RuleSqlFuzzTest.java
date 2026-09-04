@@ -52,6 +52,7 @@ class RuleSqlFuzzTest {
             bytes("{\"state\":{\"reported\":{\"temperature\":31}},\"size\":11,\"weight\":-3,\"active\":false}"),
             bytes("{\"a\":{\"b\":[1,{\"c\":null}]},\"n\":null,\"level\":1e400,\"big\":99999999999999999999999}"),
             bytes("{\"a\":[],\"b\":{},\"c\":\"\",\"level\":\"3\",\"active\":\"TRUE\"}"),
+            bytes("{\"size\":\"1e-2147483648\",\"weight\":\"1e99999999999\",\"level\":\"9e9999999999\",\"temperature\":\"-1e-2147483649\"}"),
             bytes("[1,2,3]"),
             bytes("plain text"),
             bytes(""),

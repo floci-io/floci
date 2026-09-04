@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
@@ -195,6 +196,16 @@ class RuleSqlEvaluatorTest {
         assertTrue(evaluate("SELECT * FROM 'a/b' WHERE level > 1", "a/b",
                 "{\"level\":99999999999999999999999}").isPresent());
         assertTrue(evaluate("SELECT * FROM 'a/b' WHERE level = 3", "a/b", "{\"level\":3.0}").isPresent());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1e-2147483648", "1e99999999999", "-1e-99999999999", "9e9999999999"})
+    void treatsANumericStringWhoseExponentOverflowsAsUndefined(String value) {
+        String payload = "{\"level\":\"" + value + "\"}";
+
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level > 1", "a/b", payload).isPresent());
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level < 1", "a/b", payload).isPresent());
+        assertFalse(evaluate("SELECT * FROM 'a/b' WHERE level >= '1e5'", "a/b", payload).isPresent());
     }
 
     @Test
