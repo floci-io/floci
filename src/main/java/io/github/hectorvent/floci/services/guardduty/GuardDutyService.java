@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.guardduty.model.AdminAccount;
+import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.Detector;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
@@ -72,6 +73,7 @@ public class GuardDutyService {
 
     private final StorageBackend<String, Detector> detectorStore;
     private final StorageBackend<String, AdminAccount> adminAccountStore;
+    private final StorageBackend<String, MemberAccount> memberStore;
 
     @Inject
     public GuardDutyService(StorageFactory storageFactory) {
@@ -84,14 +86,27 @@ public class GuardDutyService {
                         "guardduty",
                         "guardduty-admin-accounts.json",
                         new TypeReference<Map<String, AdminAccount>>() {
+                        }),
+                storageFactory.create(
+                        "guardduty",
+                        "guardduty-members.json",
+                        new TypeReference<Map<String, MemberAccount>>() {
                         }));
     }
 
     GuardDutyService(
             StorageBackend<String, Detector> detectorStore,
             StorageBackend<String, AdminAccount> adminAccountStore) {
+        this(detectorStore, adminAccountStore, new io.github.hectorvent.floci.core.storage.InMemoryStorage<>());
+    }
+
+    GuardDutyService(
+            StorageBackend<String, Detector> detectorStore,
+            StorageBackend<String, AdminAccount> adminAccountStore,
+            StorageBackend<String, MemberAccount> memberStore) {
         this.detectorStore = detectorStore;
         this.adminAccountStore = adminAccountStore;
+        this.memberStore = memberStore;
     }
 
     public synchronized Detector createDetector(String region, String accountId, JsonNode request) {
@@ -227,6 +242,76 @@ public class GuardDutyService {
         return new Page<>(accounts.subList(offset, end), responseToken);
     }
 
+    public synchronized void createMembers(String region, String detectorId, JsonNode request) {
+        Detector detector = getDetector(region, detectorId);
+        JsonNode details = request.get("accountDetails");
+        if (details == null || !details.isArray() || details.size() < 1 || details.size() > 50) {
+            throw badRequest("accountDetails must contain between 1 and 50 accounts.");
+        }
+        String now = java.time.Instant.now().toString();
+        for (JsonNode detail : details) {
+            String accountId = requireText(detail, "accountId");
+            if (!ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
+                throw badRequest("accountId must be a 12-digit account ID.");
+            }
+            String email = requireText(detail, "email");
+            if (!validMemberEmail(email)) {
+                throw badRequest("email must be a valid GuardDuty member email address.");
+            }
+            String key = region + "::" + detectorId + "::" + accountId;
+            MemberAccount existing = memberStore.get(key).orElse(null);
+            memberStore.put(key, new MemberAccount(
+                    accountId,
+                    email,
+                    "Enabled",
+                    accountIdFromServiceRole(detector.getServiceRole()),
+                    detectorId,
+                    existing == null ? now : existing.invitedAt(),
+                    now));
+        }
+    }
+
+    public Page<MemberAccount> listMembers(String region, String detectorId, String maxResults,
+                                           String nextToken, String onlyAssociated) {
+        Detector detector = getDetector(region, detectorId);
+        int limit = parseMaxResults(maxResults);
+        if (onlyAssociated != null && !onlyAssociated.equalsIgnoreCase("true")
+                && !onlyAssociated.equalsIgnoreCase("false")) {
+            throw badRequest("onlyAssociated must be true or false.");
+        }
+        String prefix = region + "::" + detectorId + "::";
+        List<MemberAccount> members = memberStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(member -> !"true".equalsIgnoreCase(onlyAssociated)
+                        || isAssociatedRelationship(member.relationshipStatus()))
+                .sorted(Comparator.comparing(MemberAccount::accountId)).toList();
+        int offset = decodeOffset(nextToken, members.size());
+        int end = Math.min(members.size(), offset + limit);
+        return new Page<>(members.subList(offset, end), end < members.size() ? encodeOffset(end) : null);
+    }
+
+    public List<MemberAccount> listMembers(String region, String detectorId) {
+        return listMembers(region, detectorId, null, null, null).items();
+    }
+
+    private static boolean isAssociatedRelationship(String status) {
+        return "Enabled".equals(status) || "Invited".equals(status) || "EmailVerificationInProgress".equals(status);
+    }
+
+    private static boolean validMemberEmail(String email) {
+        if (email == null || email.length() < 6 || email.length() > 64 || !email.chars().allMatch(ch -> ch < 128)) {
+            return false;
+        }
+        int at = email.indexOf('@');
+        if (at <= 0 || at != email.lastIndexOf('@') || at == email.length() - 1) return false;
+        String local = email.substring(0, at);
+        String domain = email.substring(at + 1);
+        if (local.startsWith(".") || local.matches(".*[\\s\"'()<>\\[\\]:,\\\\|%&].*")) return false;
+        if (!domain.matches("[A-Za-z0-9.-]+") || !domain.contains(".")
+                || domain.startsWith(".") || domain.endsWith(".") || domain.startsWith("-") || domain.endsWith("-")) {
+            return false;
+        }
+        return true;
+    }
     public Map<String, String> listTags(String arn) {
         Detector detector = detectorFromArn(arn);
         return detector.getTags() == null ? Map.of() : detector.getTags();
@@ -534,6 +619,13 @@ public class GuardDutyService {
     private static AwsException badRequest(String message) {
         return new AwsException("BadRequestException", message, 400);
     }
+
+    private static String accountIdFromServiceRole(String serviceRole) {
+        if (serviceRole == null) return "000000000000";
+        String[] parts = serviceRole.split(":", 6);
+        return parts.length > 4 && ACCOUNT_ID_PATTERN.matcher(parts[4]).matches() ? parts[4] : "000000000000";
+    }
+
 
     public record Page<T>(List<T> items, String nextToken) {
         public Page {
