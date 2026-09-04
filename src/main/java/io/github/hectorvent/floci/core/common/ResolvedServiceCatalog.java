@@ -32,6 +32,8 @@ import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
+import io.github.hectorvent.floci.services.macie2.MacieController;
+import io.github.hectorvent.floci.services.securityadmin.SecurityAdminController;
 import io.github.hectorvent.floci.services.aps.ApsController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
 import io.github.hectorvent.floci.services.rum.RumController;
@@ -407,6 +409,9 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("SWBExternalService."), Set.of("sso"), Set.of(), Set.of()),
+                descriptor("macie2", "macie2", config.services().macie2().enabled(), true,
+                        "macie2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("macie2"), Set.of(), Set.of(MacieController.class, SecurityAdminController.class)),
                 descriptor("autoscaling", "autoscaling", config.services().autoscaling().enabled(), true,
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -545,7 +550,7 @@ public class ResolvedServiceCatalog {
                         storageMode(config.storage().services().guardduty().mode(), config.storage().mode()),
                         config.storage().services().guardduty().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class)),
+                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class, SecurityAdminController.class)),
                 descriptor("route53resolver", "route53resolver", config.services().route53resolver().enabled(), true,
                         "route53resolver", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
