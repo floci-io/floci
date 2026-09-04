@@ -32,7 +32,7 @@ import java.util.Set;
  * operand    := path | literal | call
  * call       := topic '(' [integer] ')' | (startswith | endswith) '(' operand ',' operand ')'
  * path       := identifier ('.' identifier)*
- * literal    := string | number | TRUE | FALSE | NULL
+ * literal    := 'string' | "string" | number | TRUE | FALSE | NULL
  * </pre>
  *
  * Keywords and function names are case insensitive, field names are case sensitive, and anything
@@ -226,6 +226,10 @@ public final class RuleSqlParser {
     }
 
     private Expr call(Token name) {
+        String function = name.text().toLowerCase(Locale.ROOT);
+        if (!TOPIC.equals(function) && !STRING_PREDICATES.contains(function)) {
+            throw fail("Unsupported function", name);
+        }
         expectSymbol("(");
         List<Expr> arguments = new ArrayList<>();
         if (!peekIsSymbol(")")) {
@@ -235,11 +239,8 @@ public final class RuleSqlParser {
             }
         }
         expectSymbol(")");
-        String function = name.text().toLowerCase(Locale.ROOT);
         if (TOPIC.equals(function)) {
             validateTopicArguments(arguments, name);
-        } else if (!STRING_PREDICATES.contains(function)) {
-            throw fail("Unsupported function", name);
         } else if (arguments.size() != 2) {
             throw fail("Function " + name.text() + " takes two arguments", name);
         }
@@ -311,7 +312,7 @@ public final class RuleSqlParser {
             char c = sql.charAt(i);
             if (Character.isWhitespace(c)) {
                 i++;
-            } else if (c == '\'') {
+            } else if (c == '\'' || c == '"') {
                 i = readString(sql, i, tokens);
             } else if (isNumberStart(sql, i)) {
                 i = readNumber(sql, i, tokens);
@@ -330,23 +331,25 @@ public final class RuleSqlParser {
         return Character.isDigit(c) || (c == '-' && i + 1 < sql.length() && Character.isDigit(sql.charAt(i + 1)));
     }
 
+    /** A string in single or double quotes, as AWS's own examples use both; the quote is doubled to escape it. */
     private static int readString(String sql, int start, List<Token> tokens) {
+        char quote = sql.charAt(start);
         StringBuilder value = new StringBuilder();
         int i = start + 1;
         while (i < sql.length()) {
             char c = sql.charAt(i);
-            if (c != '\'') {
+            if (c != quote) {
                 value.append(c);
                 i++;
-            } else if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
-                value.append('\'');
+            } else if (i + 1 < sql.length() && sql.charAt(i + 1) == quote) {
+                value.append(quote);
                 i += 2;
             } else {
                 tokens.add(new Token(Kind.STRING, value.toString(), start));
                 return i + 1;
             }
         }
-        throw new RuleSqlParseException("Unterminated string literal", "'", start);
+        throw new RuleSqlParseException("Unterminated string literal", String.valueOf(quote), start);
     }
 
     private static int readNumber(String sql, int start, List<Token> tokens) {

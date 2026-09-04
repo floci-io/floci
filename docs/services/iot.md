@@ -174,7 +174,7 @@ comparison := '=' | '<>' | '!=' | '<' | '<=' | '>' | '>='
 operand    := path | literal | call
 call       := topic() | topic(<segment>) | startswith(operand, operand) | endswith(operand, operand)
 path       := identifier ('.' identifier)*
-literal    := 'string' | number | TRUE | FALSE | NULL
+literal    := 'string' | "string" | number | TRUE | FALSE | NULL
 ```
 
 Semantics:
@@ -187,15 +187,25 @@ Semantics:
   over it. `SELECT *, topic() as topic` on a payload that already has a `topic` field therefore
   yields the MQTT topic, which is what AWS does.
 - A select item whose value is undefined is left out of the document.
-- A missing field, an out of range topic segment, and an operand of the wrong type are `Undefined`,
-  as in AWS. Any comparison with `Undefined` is undefined, `AND`, `OR` and `NOT` propagate it as
-  three-valued logic, and a rule fires only when its `WHERE` is true. `endswith(clientToken, 'x')`
+- A missing field, an out of range topic segment, and a function argument that cannot be converted
+  are `Undefined`, as in AWS. It spreads: a comparison, `AND`, `OR` or `NOT` with an undefined
+  operand is undefined, and a rule fires only when its `WHERE` is true. `endswith(clientToken, 'x')`
   therefore does not fire when the payload has no `clientToken`, and neither does
   `clientToken <> 'x'`.
-- Equality holds between two strings, two numbers or two booleans. Ordering comparisons are numeric.
-  Any other pair of types is `Undefined`. Numbers are compared exactly, so a value wider than a
-  double still orders correctly, but a payload number too large for a double is `Undefined`: its
-  value is already lost before the rule sees it.
+- JSON `null` is a value, not `Undefined`: it equals only `NULL`, so `clientToken <> 'x'` is true
+  when the field is null and undefined when it is missing.
+- `=` and `<>` compare two numbers by value and anything else by type and value, so operands of
+  different types are simply not equal: `level = '3'` is false and `level <> '3'` is true when
+  `level` is the number 3. These follow the operator tables in the AWS IoT SQL reference.
+- `<`, `<=`, `>` and `>=` convert both operands to a number. A string converts when it looks like
+  one (`'10' > 9` is true); any other operand makes the comparison undefined. Numbers are compared
+  exactly, so a value wider than a double still orders correctly, but a payload number too large
+  for a double is `Undefined`: its value is already lost before the rule sees it.
+- `AND`, `OR` and `NOT` take booleans or the strings `'true'` and `'false'` in any case. Any other
+  operand makes the result undefined.
+- `startswith` and `endswith` convert numbers, booleans, arrays and objects to their string form
+  first. A `null` or undefined argument makes the result undefined.
+- String literals use single or double quotes, doubled to escape the quote itself.
 - A statement that selects only `*` forwards the published bytes unchanged, so the payload does not
   have to be JSON when there is no `WHERE`. Any other statement needs a JSON object: a payload that
   is not one is logged at DEBUG and the rule does not fire.
