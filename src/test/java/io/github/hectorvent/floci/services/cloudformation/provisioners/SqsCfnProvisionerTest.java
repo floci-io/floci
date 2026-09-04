@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -14,12 +15,16 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -64,6 +69,13 @@ class SqsCfnProvisionerTest {
             return resolved != null && resolved.isTextual() ? resolved.asText() : resolved.toString();
         });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+    }
+
+    /** The update path: the same engine plus the physical id the previous provision assigned. */
+    private ProvisionContext updateCtx(String priorPhysicalId) {
+        ProvisionContext create = ctx();
+        return new ProvisionContext(create.engine(), create.region(), create.accountId(),
+                create.stackName(), priorPhysicalId);
     }
 
     private StackResource resource(String type, String logicalId) {
@@ -194,6 +206,96 @@ class SqsCfnProvisionerTest {
         ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
         verify(sqs).createQueue(eq(queueName), captor.capture(), eq("us-east-1"));
         return captor.getValue();
+    }
+
+    @Test
+    void anUnnamedQueueKeepsItsNameAcrossUpdates() {
+        // QueueName is createOnly in the registry schema. The physical id is the queue URL, so the
+        // prior name is read from the QueueName attribute recorded at create time, not derived
+        // from the id; generating a fresh name would create a second queue and orphan the first.
+        when(sqs.createQueue(anyString(), any(), eq("us-east-1")))
+                .thenAnswer(inv -> new Queue(inv.getArgument(0), "http://q/" + inv.getArgument(0)));
+        StackResource created = resource("AWS::SQS::Queue", "MyQueue");
+        provisioner.provision(created, mapper.createObjectNode(), ctx());
+        String generatedName = created.getAttributes().get("QueueName");
+        String queueUrl = created.getPhysicalId();
+
+        StackResource updated = resource("AWS::SQS::Queue", "MyQueue");
+        updated.setAttributes(new HashMap<>(created.getAttributes()));
+        provisioner.provision(updated, mapper.createObjectNode(), updateCtx(queueUrl));
+
+        assertEquals(queueUrl, updated.getPhysicalId());
+        assertEquals(generatedName, updated.getAttributes().get("QueueName"));
+        verify(sqs, times(1)).createQueue(anyString(), any(), anyString());
+    }
+
+    @Test
+    void anUpdateReconcilesAttributesInsteadOfRecreating() {
+        // SqsService.createQueue on an existing name answers QueueAlreadyExists when any attribute
+        // differs, so a changed VisibilityTimeout must go through SetQueueAttributes, the registry
+        // schema's update handler. FifoQueue is createOnly and must not be sent there.
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "orders.fifo")));
+        ObjectNode props = mapper.createObjectNode()
+                .put("QueueName", "orders.fifo")
+                .put("FifoQueue", true)
+                .put("VisibilityTimeout", 45);
+
+        provisioner.provision(r, props, updateCtx("http://localhost:4566/000000000000/orders.fifo"));
+
+        verify(sqs, never()).createQueue(anyString(), any(), anyString());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).setQueueAttributes(eq("http://localhost:4566/000000000000/orders.fifo"),
+                captor.capture(), eq("us-east-1"));
+        assertEquals("45", captor.getValue().get("VisibilityTimeout"));
+        assertFalse(captor.getValue().containsKey("FifoQueue"), "FifoQueue is createOnly");
+        assertEquals("http://localhost:4566/000000000000/orders.fifo", r.getPhysicalId());
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:orders.fifo", r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void flippingFifoQueueIsAReplacingUpdate() {
+        // FifoQueue is createOnly too: a prior plain name cannot serve a queue that is now FIFO, so
+        // the update derives a fresh .fifo name and creates, as a replacing update should.
+        when(sqs.createQueue(anyString(), any(), eq("us-east-1")))
+                .thenAnswer(inv -> new Queue(inv.getArgument(0), "http://q/" + inv.getArgument(0)));
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "my-stack-MyQueue-0123456789ab")));
+        ObjectNode props = mapper.createObjectNode().put("FifoQueue", true);
+
+        provisioner.provision(r, props, updateCtx("http://q/my-stack-MyQueue-0123456789ab"));
+
+        String queueName = r.getAttributes().get("QueueName");
+        assertTrue(queueName.endsWith(".fifo"), "expected a fresh FIFO name but was: " + queueName);
+        verify(sqs).createQueue(eq(queueName), any(), eq("us-east-1"));
+        verify(sqs, never()).setQueueAttributes(anyString(), any(), anyString());
+    }
+
+    @Test
+    void flippingFifoQueueOnANamedQueueIsRefused() {
+        // FifoQueue is createOnly and encoded in the name. An explicitly named queue keeps its name,
+        // so a changed FifoQueue would need a replacement under the same name, which CloudFormation
+        // refuses for a custom-named resource. The update must fail rather than reconcile every
+        // other attribute and report success with the queue still in its old mode.
+        StackResource r = resource("AWS::SQS::Queue", "Orders");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "orders")));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders").put("FifoQueue", true);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, updateCtx("http://q/orders")));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(sqs, never()).createQueue(anyString(), any(), anyString());
+        verify(sqs, never()).setQueueAttributes(anyString(), any(), anyString());
+    }
+
+    @Test
+    void aQueuePolicyKeepsItsIdAcrossUpdates() {
+        StackResource r = resource("AWS::SQS::QueuePolicy", "MyPolicy");
+        provisioner.provision(r, mapper.createObjectNode(), updateCtx("queue-policy-1a2b3c4d"));
+        assertEquals("queue-policy-1a2b3c4d", r.getPhysicalId());
+        verifyNoInteractions(sqs);
     }
 
     @Test

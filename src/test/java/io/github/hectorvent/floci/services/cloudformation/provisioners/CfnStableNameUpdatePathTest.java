@@ -6,7 +6,12 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.scheduler.SchedulerService;
+import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Queue;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
@@ -14,6 +19,8 @@ import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -193,6 +200,95 @@ class CfnStableNameUpdatePathTest {
                 any(), any(), anyString());
         verify(pipes, never()).createPipe(anyString(), any(), any(), any(), any(), any(), any(),
                 any(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void schedulerUpdateReconcilesTheGroupItAlreadyOwnsInsteadOfRecreatingIt() {
+        SchedulerService scheduler = mock(SchedulerService.class);
+        when(scheduler.createScheduleGroup(anyString(), any(), anyString())).thenAnswer(inv -> {
+            String name = inv.getArgument(0);
+            return new ScheduleGroup(name, "arn:aws:scheduler:us-east-1:000000000000:schedule-group/" + name,
+                    "ACTIVE", Instant.now(), Instant.now());
+        });
+        when(scheduler.getScheduleGroup(anyString(), anyString())).thenAnswer(inv -> {
+            String name = inv.getArgument(0);
+            return new ScheduleGroup(name, "arn:aws:scheduler:us-east-1:000000000000:schedule-group/" + name,
+                    "ACTIVE", Instant.now(), Instant.now());
+        });
+        SchedulerScheduleGroupCfnProvisioner provisioner = new SchedulerScheduleGroupCfnProvisioner(scheduler);
+        JsonNode props = mapper.createObjectNode();
+
+        StackResource created = resource("AWS::Scheduler::ScheduleGroup", "Group");
+        provisioner.provision(created, props, ctx(null));
+        String generatedName = created.getPhysicalId();
+
+        StackResource updated = resource("AWS::Scheduler::ScheduleGroup", "Group");
+        provisioner.provision(updated, props, ctx(generatedName));
+
+        assertEquals(generatedName, updated.getPhysicalId(), "the generated name must stay stable");
+        // createScheduleGroup answers ConflictException for a name that exists. Exactly one create.
+        verify(scheduler, times(1)).createScheduleGroup(eq(generatedName), any(), anyString());
+    }
+
+    @Test
+    void sqsUpdateReconcilesTheQueueItAlreadyOwnsInsteadOfRecreatingIt() {
+        SqsService sqs = mock(SqsService.class);
+        when(sqs.createQueue(anyString(), any(), anyString()))
+                .thenAnswer(inv -> new Queue(inv.getArgument(0), "http://q/" + inv.getArgument(0)));
+        SqsCfnProvisioner provisioner = new SqsCfnProvisioner(sqs);
+        JsonNode props = mapper.createObjectNode().put("VisibilityTimeout", 45);
+
+        StackResource created = resource("AWS::SQS::Queue", "Queue");
+        provisioner.provision(created, props, ctx(null));
+        String queueUrl = created.getPhysicalId();
+        String generatedName = created.getAttributes().get("QueueName");
+
+        // The physical id is the URL, so the prior name travels in the attributes the engine
+        // hands back to provision on an update.
+        StackResource updated = resource("AWS::SQS::Queue", "Queue");
+        updated.setAttributes(new HashMap<>(created.getAttributes()));
+        provisioner.provision(updated, props, ctx(queueUrl));
+
+        assertEquals(queueUrl, updated.getPhysicalId(), "the queue URL must stay stable");
+        assertEquals(generatedName, updated.getAttributes().get("QueueName"));
+        // createQueue on an existing name answers QueueAlreadyExists once an attribute differs, so
+        // the update goes through SetQueueAttributes. Exactly one create.
+        verify(sqs, times(1)).createQueue(eq(generatedName), any(), anyString());
+        verify(sqs).setQueueAttributes(eq(queueUrl), any(), anyString());
+    }
+
+    @Test
+    void microvmImageUpdateGoesThroughUpdateImageInsteadOfRecreatingIt() {
+        LambdaMicrovmsService microvms = mock(LambdaMicrovmsService.class);
+        when(microvms.createImage(anyString(), anyString(), anyString(), any(), any(), any(), any()))
+                .thenAnswer(inv -> microvmImage(inv.getArgument(2)));
+        when(microvms.updateImage(anyString(), anyString(), any(), any(), any(), any()))
+                .thenAnswer(inv -> microvmImage(inv.getArgument(1)));
+        LambdaMicrovmsCfnProvisioner provisioner = new LambdaMicrovmsCfnProvisioner(microvms);
+        JsonNode props = mapper.createObjectNode()
+                .put("BaseImageArn", "arn:aws:lambda:us-east-1::base-image:nodejs")
+                .put("BuildRoleArn", "arn:aws:iam::000000000000:role/build");
+
+        StackResource created = resource("AWS::Lambda::MicrovmImage", "Image");
+        provisioner.provision(created, props, ctx(null));
+        String generatedName = created.getPhysicalId();
+
+        StackResource updated = resource("AWS::Lambda::MicrovmImage", "Image");
+        provisioner.provision(updated, props, ctx(generatedName));
+
+        assertEquals(generatedName, updated.getPhysicalId(), "the generated name must stay stable");
+        // createImage on an existing image silently mints a new version rather than rejecting, so
+        // here the assertion is that the update went to the schema's update handler instead.
+        verify(microvms, times(1)).createImage(anyString(), anyString(), eq(generatedName), any(), any(), any(), any());
+        verify(microvms).updateImage(eq("us-east-1"), eq(generatedName), any(), any(), any(), any());
+    }
+
+    private static LambdaMicrovmsService.MicrovmImage microvmImage(String name) {
+        LambdaMicrovmsService.MicrovmImage image = new LambdaMicrovmsService.MicrovmImage();
+        image.name = name;
+        image.imageArn = "arn:aws:lambda:us-east-1:000000000000:microvm-image:" + name;
+        image.latestActiveImageVersion = "1.0";
+        return image;
     }
 
     @Test

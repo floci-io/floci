@@ -177,4 +177,19 @@ class ProvisionContextTest {
                 "a replacing update derives a different name and must still create");
     }
 
+
+    @Test
+    void staleTagKeysListsTheCurrentKeysTheTemplateDropped() {
+        Map<String, String> current = new java.util.LinkedHashMap<>();
+        current.put("Keep", "same");
+        current.put("Old", "value");
+        current.put("Gone", "too");
+
+        assertEquals(List.of("Old", "Gone"),
+                ProvisionContext.staleTagKeys(current, Map.of("Keep", "same", "New", "added")));
+        assertEquals(List.of(), ProvisionContext.staleTagKeys(null, Map.of("Keep", "same")),
+                "no stored tags means nothing to untag");
+        assertEquals(List.of("Keep", "Old", "Gone"), ProvisionContext.staleTagKeys(current, Map.of()),
+                "a template with no Tags leaves the resource untagged");
+    }
 }
