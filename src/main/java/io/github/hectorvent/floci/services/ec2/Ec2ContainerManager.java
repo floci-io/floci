@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Mount;
@@ -44,6 +45,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiPredicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
@@ -89,6 +91,35 @@ public class Ec2ContainerManager {
      *  decompression-budget permit and before it starts decompressing, so tests can observe and
      *  serialize concurrent decompressions deterministically. Always null in production. */
     static volatile Runnable userDataDecompressionTestHook;
+
+    /**
+     * Label identifying the Floci process that created an EC2 instance container, by its API
+     * port. {@link #reconcileOrphanedContainers} lists on the existing {@code io.floci.service=ec2}
+     * identity label (see {@link ContainerStorageHelper#resourceIdentityLabels}) and then keeps
+     * only containers carrying <em>this</em> process's owner port: several emulators can share one
+     * Docker daemon, and an unscoped sweep would reap a sibling's live instances.
+     * {@code floci_namespace} is the documented scoping mechanism for that, but it is absent
+     * unless a resource namespace is configured, so it cannot scope the default configuration.
+     * Containers created before this label existed carry no owner and are therefore never swept.
+     */
+    static final String LABEL_OWNER_PORT = "floci_owner_port";
+
+    /**
+     * Identity of the Floci deployment that owns a container, for scoping the startup sweep.
+     * The API port alone collides when two independently namespaced Flocis share a Docker daemon
+     * on the same internal port, and each would then reap the other's live containers. Composing
+     * the documented resource namespace in front of it separates exactly those deployments; an
+     * unnamespaced single Floci keeps the bare port it already stamped.
+     */
+    private String ownerIdentity() {
+        String ns = config.docker() == null || config.docker().resourceNamespace() == null
+                ? "" : config.docker().resourceNamespace().orElse("");
+        return ns.isBlank() ? String.valueOf(config.port()) : ns + "/" + config.port();
+    }
+    static final String LABEL_SERVICE = "io.floci.service";
+    static final String SERVICE_VALUE = "ec2";
+    static final String LABEL_RESOURCE_ID = "io.floci.resource-id";
+    static final String LABEL_REGION = "io.floci.region";
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
@@ -344,6 +375,9 @@ public class Ec2ContainerManager {
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "ec2", instanceId, regionResolver.getAccountId(), region))
+                // Which Floci owns this container, so the startup reconciler cannot reap a
+                // sibling emulator's live instances off a shared daemon. See LABEL_OWNER_PORT.
+                .withLabels(Map.of(LABEL_OWNER_PORT, ownerIdentity()))
                 // EC2 instances expose IMDS on 169.254.169.254. Floci needs network administration
                 // privileges in the local container to attach that link-local address.
                 .withPrivileged(true)
@@ -575,6 +609,62 @@ public class Ec2ContainerManager {
 
     boolean isContainerRunning(String containerId) {
         return containerId != null && !containerId.isBlank() && lifecycleManager.isContainerRunning(containerId);
+    }
+
+    /**
+     * Removes EC2 instance containers this Floci left behind on a previous run.
+     *
+     * <p>{@link #terminate} removes the container asynchronously after flipping the record to
+     * {@code shutting-down}, and {@code launch} persists the container id only once Docker has
+     * created it. A process killed across either edge — SIGKILL, OOM, {@code docker kill} — leaves
+     * a container on the daemon that no surviving record refers to, so nothing on the next run
+     * would ever collect it. {@code Ec2Service.stopManagedContainers} only covers the graceful
+     * ShutdownEvent path, and {@code restoreMetadataRegistration} deliberately skips records in
+     * {@code terminated}/{@code shutting-down}, so neither reaches these.
+     *
+     * <p><strong>Stopped instances are not orphans.</strong> Floci stops every running container
+     * on shutdown and keeps the id so StartInstances can revive it; those records come back as
+     * {@code stopped} and {@code stillDeclared} keeps them. Only containers with no surviving
+     * record, or whose record is already terminated/shutting-down, are removed.
+     *
+     * @param stillDeclared answers whether (region, instanceId) is still a live instance record
+     * @return the number of containers removed
+     */
+    public int reconcileOrphanedContainers(BiPredicate<String, String> stillDeclared) {
+        if (!config.services().ec2().reconcileContainersOnStartup()) {
+            return 0;
+        }
+        String owner = ownerIdentity();
+        int removed = 0;
+        try {
+            List<Container> containers = dockerClient.listContainersCmd()
+                    .withShowAll(true)
+                    .withLabelFilter(Map.of(LABEL_SERVICE, SERVICE_VALUE))
+                    .exec();
+            for (Container container : containers) {
+                Map<String, String> labels = container.getLabels() == null ? Map.of() : container.getLabels();
+                if (!owner.equals(labels.get(LABEL_OWNER_PORT))) {
+                    continue;
+                }
+                String instanceId = labels.get(LABEL_RESOURCE_ID);
+                String region = labels.get(LABEL_REGION);
+                if (instanceId != null && !instanceId.isBlank()
+                        && region != null && !region.isBlank()
+                        && stillDeclared.test(region, instanceId)) {
+                    continue;
+                }
+                lifecycleManager.removeIfExists(container.getId());
+                removed++;
+                LOG.infov("Reconciled orphaned EC2 container {0} (instance {1}) left by a previous run",
+                        container.getId(), String.valueOf(instanceId));
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not reconcile orphaned EC2 containers: {0}", e.getMessage());
+        }
+        if (removed > 0) {
+            LOG.infov("Removed {0} orphaned EC2 container(s)", String.valueOf(removed));
+        }
+        return removed;
     }
 
     boolean restoreMetadataRegistration(Instance instance) {

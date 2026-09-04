@@ -2041,6 +2041,18 @@ public interface EmulatorConfig {
          */
         Optional<Boolean> containerIpsRoutable();
 
+        /**
+         * When true, Floci removes on startup any EC2 instance container left on the Docker
+         * daemon by a previous run of <em>this same</em> Floci (matched by the
+         * {@code floci_owner_port} label) whose instance record did not survive the restart, or
+         * came back already terminated. Stopped instances are never swept — their containers are
+         * exactly what StartInstances revives.
+         *
+         * Env var: FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
+
         /** Port on the Floci host for the IMDS HTTP server (169.254.169.254 equivalent). */
         @WithDefault("9169")
         int imdsPort();

@@ -10,6 +10,8 @@ import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.command.ListContainersCmd;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -35,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -956,7 +959,137 @@ class Ec2ContainerManagerTest {
                 regionResolver,
                 mock(ContainerNetworkReachability.class));
         return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
-                portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
+                portAllocator, portForwardManager, config, new CopyOnWriteArrayList<>());
+    }
+
+    // ── startup reconciliation of EC2 containers orphaned by a previous run ──────
+
+    @Test
+    void launchStampsTheOwnerPortLabelOnTheInstanceContainer() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        when(harness.config.port()).thenReturn(4680);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.12");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        Instance instance = instance("i-owned");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        // Without this label the reconciler cannot tell one emulator's containers from another's
+        // on a shared Docker daemon, so it could only ever be unsafe or a no-op.
+        verify(harness.builder).withLabels(Map.of(Ec2ContainerManager.LABEL_OWNER_PORT, "4680"));
+    }
+
+    @Test
+    void reconcileOrphanedContainersRemovesOnlyThisProcessesUnrecordedContainers() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        stubContainerListing(harness.dockerClient,
+                labelled("c-orphan", "4680", "us-east-1", "i-orphan"),
+                labelled("c-live", "4680", "us-east-1", "i-live"),
+                labelled("c-sibling", "4620", "us-east-1", "i-sibling"));
+
+        // Only i-live still has a record. i-sibling belongs to the Floci on :4620 sharing this
+        // daemon and must not be touched, however orphaned it looks from here.
+        int removed = harness.manager.reconcileOrphanedContainers(
+                (region, instanceId) -> "i-live".equals(instanceId));
+
+        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
+        verify(harness.lifecycleManager, never()).removeIfExists("c-live");
+        verify(harness.lifecycleManager).removeIfExists("c-orphan");
+        assertEquals(1, removed);
+    }
+
+    @Test
+    void reconcileOrphanedContainersLeavesStoppedInstancesAlone() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        stubContainerListing(harness.dockerClient, labelled("c-stopped", "4680", "us-east-1", "i-stopped"));
+
+        // Floci stops every running container on shutdown and keeps the id; the record comes
+        // back as `stopped`, which stillDeclared answers true for. Sweeping these would break
+        // stop/start across a restart.
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> true);
+
+        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        assertEquals(0, removed);
+    }
+
+    @Test
+    void reconcileOrphanedContainersIgnoresContainersPredatingTheOwnerLabel() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        Container unowned = mock(Container.class);
+        when(unowned.getLabels()).thenReturn(Map.of(
+                Ec2ContainerManager.LABEL_SERVICE, Ec2ContainerManager.SERVICE_VALUE,
+                Ec2ContainerManager.LABEL_REGION, "us-east-1",
+                Ec2ContainerManager.LABEL_RESOURCE_ID, "i-legacy"));
+        stubContainerListing(harness.dockerClient, unowned);
+
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
+
+        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        assertEquals(0, removed);
+    }
+
+    @Test
+    void reconcileOrphanedContainersSparesAnotherNamespacesContainerOnTheSamePort() {
+        // Two Flocis can share a daemon on the same internal port and are separated only by the
+        // resource namespace. Keying ownership on the port alone made each reap the other's live
+        // containers; the owner label carries the namespace so a sibling's container is not ours.
+        LaunchHarness harness = reconcileHarness(true, 4566, "alpha");
+        stubContainerListing(harness.dockerClient,
+                labelled("c-ours", "alpha/4566", "us-east-1", "i-ours"),
+                labelled("c-sibling", "beta/4566", "us-east-1", "i-sibling"));
+
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
+
+        assertEquals(1, removed);
+        verify(harness.lifecycleManager).removeIfExists("c-ours");
+        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
+    }
+
+    @Test
+    void reconcileOrphanedContainersDoesNothingWhenDisabled() {
+        LaunchHarness harness = reconcileHarness(false, 4680);
+
+        assertEquals(0, harness.manager.reconcileOrphanedContainers((region, instanceId) -> false));
+
+        verify(harness.dockerClient, never()).listContainersCmd();
+    }
+
+    private static Container labelled(String containerId, String ownerPort, String region, String instanceId) {
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(containerId);
+        when(container.getLabels()).thenReturn(Map.of(
+                Ec2ContainerManager.LABEL_SERVICE, Ec2ContainerManager.SERVICE_VALUE,
+                Ec2ContainerManager.LABEL_OWNER_PORT, ownerPort,
+                Ec2ContainerManager.LABEL_REGION, region,
+                Ec2ContainerManager.LABEL_RESOURCE_ID, instanceId));
+        return container;
+    }
+
+    private static void stubContainerListing(DockerClient dockerClient, Container... containers) {
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        when(listCmd.exec()).thenReturn(new ArrayList<>(Arrays.asList(containers)));
+    }
+
+    private static LaunchHarness reconcileHarness(boolean reconcileEnabled, int ownerPort) {
+        LaunchHarness harness = launchHarness();
+        when(harness.config.port()).thenReturn(ownerPort);
+        when(harness.config.services().ec2().reconcileContainersOnStartup()).thenReturn(reconcileEnabled);
+        return harness;
+    }
+
+    private static LaunchHarness reconcileHarness(boolean reconcileEnabled, int ownerPort, String namespace) {
+        LaunchHarness harness = reconcileHarness(reconcileEnabled, ownerPort);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(docker.resourceNamespace()).thenReturn(Optional.ofNullable(namespace));
+        when(harness.config.docker()).thenReturn(docker);
+        return harness;
     }
 
     /**
@@ -1007,6 +1140,7 @@ class Ec2ContainerManagerTest {
                                  ContainerBuilder.Builder builder,
                                  PortAllocator portAllocator,
                                  Ec2PortForwardManager portForwardManager,
+                                 EmulatorConfig config,
                                  List<String[]> executedCommands) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();

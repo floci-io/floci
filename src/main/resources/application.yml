@@ -429,6 +429,10 @@ floci:
     ec2:
       enabled: true
       imds-port: 9169
+      # Sweep EC2 containers left on the daemon by a previous run that died mid-launch or
+      # mid-terminate (SIGKILL, OOM, docker kill), which no surviving record refers to.
+      # Scoped to this deployment's own containers; stopped instances are never swept.
+      reconcile-containers-on-startup: true
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
       publish-security-group-ports: true
