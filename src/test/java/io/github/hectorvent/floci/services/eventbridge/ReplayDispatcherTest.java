@@ -37,15 +37,15 @@ class ReplayDispatcherTest {
     void cancellationIsScopedToReplayArnWhenNamesRepeat() throws InterruptedException {
         Replay first = replay("arn:aws:events:us-east-1:111111111111:replay/shared");
         Replay second = replay("arn:aws:events:us-west-2:222222222222:replay/shared");
-        CountDownLatch firstEventsStarted = new CountDownLatch(2);
+        CountDownLatch firstEventStarted = new CountDownLatch(1);
         CountDownLatch releaseEvents = new CountDownLatch(1);
         CountDownLatch terminalStates = new CountDownLatch(2);
         Map<String, ReplayState> terminalStateByArn = new ConcurrentHashMap<>();
 
-        dispatch(first, firstEventsStarted, releaseEvents, terminalStates, terminalStateByArn);
-        dispatch(second, firstEventsStarted, releaseEvents, terminalStates, terminalStateByArn);
+        dispatch(first, firstEventStarted, releaseEvents, terminalStates, terminalStateByArn);
+        dispatch(second, firstEventStarted, releaseEvents, terminalStates, terminalStateByArn);
 
-        assertTrue(firstEventsStarted.await(5, TimeUnit.SECONDS));
+        assertTrue(firstEventStarted.await(5, TimeUnit.SECONDS));
         assertTrue(dispatcher.requestCancel(first.getReplayArn()));
         releaseEvents.countDown();
 
@@ -55,7 +55,7 @@ class ReplayDispatcherTest {
     }
 
     private void dispatch(Replay replay,
-                          CountDownLatch eventsStarted,
+                          CountDownLatch firstEventStarted,
                           CountDownLatch releaseEvents,
                           CountDownLatch terminalStates,
                           Map<String, ReplayState> terminalStateByArn) {
@@ -63,7 +63,7 @@ class ReplayDispatcherTest {
                 replay,
                 List.of(archivedEvent(), archivedEvent()),
                 events -> {
-                    eventsStarted.countDown();
+                    firstEventStarted.countDown();
                     await(releaseEvents);
                 },
                 (ignoredName, state) -> {
