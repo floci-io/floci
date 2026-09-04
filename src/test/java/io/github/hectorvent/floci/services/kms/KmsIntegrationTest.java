@@ -1015,6 +1015,9 @@ class KmsIntegrationTest {
             "ECC_NIST_P384, SIGN_VERIFY, SigningAlgorithms, ECDSA_SHA_384",
             "ECC_NIST_P521, SIGN_VERIFY, SigningAlgorithms, ECDSA_SHA_512",
             "ECC_SECG_P256K1, SIGN_VERIFY, SigningAlgorithms, ECDSA_SHA_256",
+            "ML_DSA_44, SIGN_VERIFY, SigningAlgorithms, ML_DSA_SHAKE_256",
+            "ML_DSA_65, SIGN_VERIFY, SigningAlgorithms, ML_DSA_SHAKE_256",
+            "ML_DSA_87, SIGN_VERIFY, SigningAlgorithms, ML_DSA_SHAKE_256",
             "HMAC_224, GENERATE_VERIFY_MAC, MacAlgorithms, HMAC_SHA_224",
             "HMAC_256, GENERATE_VERIFY_MAC, MacAlgorithms, HMAC_SHA_256",
             "HMAC_384, GENERATE_VERIFY_MAC, MacAlgorithms, HMAC_SHA_384",
@@ -1112,17 +1115,17 @@ class KmsIntegrationTest {
             "SM2, KEY_AGREEMENT, 400",
 
             "ML_DSA_44, ENCRYPT_DECRYPT, 400", // Not implemented
-            "ML_DSA_44, SIGN_VERIFY, 400",
+            "ML_DSA_44, SIGN_VERIFY, 200",
             "ML_DSA_44, GENERATE_VERIFY_MAC, 400",
             "ML_DSA_44, KEY_AGREEMENT, 400",
 
             "ML_DSA_65, ENCRYPT_DECRYPT, 400",
-            "ML_DSA_65, SIGN_VERIFY, 400",
+            "ML_DSA_65, SIGN_VERIFY, 200",
             "ML_DSA_65, GENERATE_VERIFY_MAC, 400",
             "ML_DSA_65, KEY_AGREEMENT, 400",
 
             "ML_DSA_87, ENCRYPT_DECRYPT, 400",
-            "ML_DSA_87, SIGN_VERIFY, 400",
+            "ML_DSA_87, SIGN_VERIFY, 200",
             "ML_DSA_87, GENERATE_VERIFY_MAC, 400",
             "ML_DSA_87, KEY_AGREEMENT, 400"
     })
@@ -1497,6 +1500,78 @@ class KmsIntegrationTest {
                     .then().statusCode(200)
                     .body("SignatureValid", equalTo(true));
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "ML_DSA_44, 1334, 2420",
+            "ML_DSA_65, 1974, 3309",
+            "ML_DSA_87, 2614, 4627"
+    })
+    void mlDsaKeysCreateSignAndVerify(String keySpec, int publicKeyBytes, int signatureBytes) {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"%s\"}".formatted(keySpec))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.KeySpec", equalTo(keySpec))
+                .body("KeyMetadata.SigningAlgorithms", equalTo(List.of("ML_DSA_SHAKE_256")))
+                .extract().path("KeyMetadata.KeyId");
+
+        String publicKey = given()
+                .header("X-Amz-Target", "TrentService.GetPublicKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeySpec", equalTo(keySpec))
+                .body("SigningAlgorithms", equalTo(List.of("ML_DSA_SHAKE_256")))
+                .extract().path("PublicKey");
+        assertEquals(publicKeyBytes, Base64.getDecoder().decode(publicKey).length);
+
+        String message = Base64.getEncoder().encodeToString("message".getBytes(StandardCharsets.UTF_8));
+        String signature = given()
+                .header("X-Amz-Target", "TrentService.Sign")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"SigningAlgorithm\":\"ML_DSA_SHAKE_256\"}"
+                        .formatted(keyId, message))
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("Signature");
+        assertEquals(signatureBytes, Base64.getDecoder().decode(signature).length);
+
+        given()
+                .header("X-Amz-Target", "TrentService.Verify")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"ML_DSA_SHAKE_256\"}"
+                        .formatted(keyId, message, signature))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("SignatureValid", equalTo(true));
+    }
+
+    @Test
+    void mlDsaRejectsDigestMessageType() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ML_DSA_44\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.Sign")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"MessageType\":\"DIGEST\",\"SigningAlgorithm\":\"ML_DSA_SHAKE_256\"}"
+                        .formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Message type DIGEST is incompatible with key spec ML_DSA_44."));
     }
 
     @ParameterizedTest

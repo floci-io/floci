@@ -1,6 +1,8 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.CreateKeyResponse;
@@ -8,8 +10,11 @@ import software.amazon.awssdk.services.kms.model.DisabledException;
 import software.amazon.awssdk.services.kms.model.EncryptionAlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.GetKeyPolicyResponse;
 import software.amazon.awssdk.services.kms.model.IncorrectKeyException;
+import software.amazon.awssdk.services.kms.model.KeySpec;
+import software.amazon.awssdk.services.kms.model.KeyUsageType;
 import software.amazon.awssdk.services.kms.model.KmsInvalidStateException;
 import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
+import software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -207,6 +212,43 @@ class KmsFeaturesTest {
         assertThat(resp.keyMetadata().encryptionAlgorithms()).isEmpty();
 
         kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = KeySpec.class, names = {"ML_DSA_44", "ML_DSA_65", "ML_DSA_87"})
+    @Order(43)
+    void mlDsaCreateGetPublicKeySignAndVerifyThroughSdk(KeySpec keySpec) {
+        String keyId = kms.createKey(b -> b
+                .description("ml-dsa-sdk-" + keySpec)
+                .keyUsage(KeyUsageType.SIGN_VERIFY)
+                .keySpec(keySpec))
+                .keyMetadata().keyId();
+
+        try {
+            var publicKey = kms.getPublicKey(b -> b.keyId(keyId));
+            assertThat(publicKey.publicKey()).isNotNull();
+            assertThat(publicKey.keySpec()).isEqualTo(keySpec);
+            assertThat(publicKey.keyUsage()).isEqualTo(KeyUsageType.SIGN_VERIFY);
+            assertThat(publicKey.signingAlgorithms()).containsExactly(SigningAlgorithmSpec.ML_DSA_SHAKE_256);
+
+            SdkBytes message = SdkBytes.fromUtf8String("ml-dsa SDK compatibility");
+            var signed = kms.sign(b -> b
+                    .keyId(keyId)
+                    .message(message)
+                    .signingAlgorithm(SigningAlgorithmSpec.ML_DSA_SHAKE_256));
+            assertThat(signed.signature()).isNotNull();
+            assertThat(signed.signingAlgorithm()).isEqualTo(SigningAlgorithmSpec.ML_DSA_SHAKE_256);
+
+            var verified = kms.verify(b -> b
+                    .keyId(keyId)
+                    .message(message)
+                    .signature(signed.signature())
+                    .signingAlgorithm(SigningAlgorithmSpec.ML_DSA_SHAKE_256));
+            assertThat(verified.signatureValid()).isTrue();
+            assertThat(verified.signingAlgorithm()).isEqualTo(SigningAlgorithmSpec.ML_DSA_SHAKE_256);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
     }
 
     // ── Issue #1844: Decrypt enforces KeyId against the wrapping key ────────

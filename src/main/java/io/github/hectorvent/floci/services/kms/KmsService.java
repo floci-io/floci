@@ -214,6 +214,12 @@ public class KmsService implements ResourceProvider {
                     key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
                     key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
                 }
+                case ML_DSA -> {
+                    String algorithm = spec.name().replace('_', '-');
+                    var pair = KeyPairGenerator.getInstance(algorithm).generateKeyPair();
+                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
+                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
+                }
                 case ECC -> {
                     String curveName = spec.curveName();
 
@@ -945,6 +951,9 @@ public class KmsService implements ResourceProvider {
         if (ed25519) {
             validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
         }
+        if (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ML_DSA) {
+            validateMlDsaRequest(kmsKey.getKeySpec(), algorithm, messageType);
+        }
 
         try {
             PrivateKey privateKey = loadPrivateKey(kmsKey.getPrivateKeyEncoded(), kmsKey.getKeySpec());
@@ -992,6 +1001,9 @@ public class KmsService implements ResourceProvider {
         var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
         if (ed25519) {
             validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
+        }
+        if (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ML_DSA) {
+            validateMlDsaRequest(kmsKey.getKeySpec(), algorithm, messageType);
         }
 
         try {
@@ -1228,6 +1240,18 @@ public class KmsService implements ResourceProvider {
         }
     }
 
+    private static void validateMlDsaRequest(KmsKeySpec spec, String algorithm, KmsMessageType messageType) {
+        var signingAlgorithm = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
+        if (signingAlgorithm != KmsKeySpec.Algorithm.ML_DSA_SHAKE_256) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "Algorithm " + algorithm + " is incompatible with key spec " + spec.name() + ".", 400);
+        }
+        if (messageType != RAW) {
+            throw new AwsException("ValidationException",
+                    "Message type " + messageType + " is incompatible with key spec " + spec.name() + ".", 400);
+        }
+    }
+
     /**
      * Signs with an Ed25519 key.
      *
@@ -1410,6 +1434,7 @@ public class KmsService implements ResourceProvider {
         return KeyFactory.getInstance(switch (spec.getKeyType()) {
             case RSA -> "RSA";
             case ED25519 -> "Ed25519";
+            case ML_DSA -> "ML-DSA";
             default -> "EC";
         });
     }

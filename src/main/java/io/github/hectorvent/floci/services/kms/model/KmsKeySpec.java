@@ -136,7 +136,7 @@ public enum KmsKeySpec {
         ED25519_SHA_512("ED25519_SHA_512","Ed25519", KmsKeyUsage.SIGN_VERIFY),
         ED25519_PH_SHA_512("ED25519_PH_SHA_512", "Ed25519", KmsKeyUsage.SIGN_VERIFY),
         SM2_DSA("SM2DSA","", KmsKeyUsage.SIGN_VERIFY),
-        ML_DSA_SHAKE_256("ML_DSA_SHAKE_256","", KmsKeyUsage.SIGN_VERIFY),
+        ML_DSA_SHAKE_256("ML_DSA_SHAKE_256", "ML-DSA", KmsKeyUsage.SIGN_VERIFY),
         HMAC_SHA_224("HMAC_SHA_224",""),
         HMAC_SHA_256("HMAC_SHA_256",""),
         HMAC_SHA_384("HMAC_SHA_384",""),
