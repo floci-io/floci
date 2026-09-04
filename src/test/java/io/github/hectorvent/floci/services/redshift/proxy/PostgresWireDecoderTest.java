@@ -88,7 +88,10 @@ class PostgresWireDecoderTest {
         InputStream drip = new InputStream() {
             private int i = 0;
             @Override public int read() {
-                return i >= packet.length ? -1 : packet[i++] & 0xFF;
+                if (i >= packet.length) {
+                    return -1;
+                }
+                return packet[i++] & 0xFF;
             }
             @Override public int read(byte[] b, int off, int len) {
                 if (i >= packet.length) {
@@ -232,6 +235,76 @@ class PostgresWireDecoderTest {
         PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage(out);
         assertNotNull(msg);
         assertEquals('d', msg.type());
+        assertNull(msg.body());
+        assertEquals(1 + (long) totalLength, bytesWritten[0]);
+    }
+
+    @Test
+    void streamsSimpleQueryLargerThanLimitDirectlyToPassthroughOut() throws IOException {
+        int payloadSize = 17 * 1024 * 1024; // 17 MiB, exceeds MAX_MESSAGE_BYTES
+        int totalLength = 4 + payloadSize;
+        byte[] header = new byte[]{
+                'Q',
+                (byte) ((totalLength >> 24) & 0xFF),
+                (byte) ((totalLength >> 16) & 0xFF),
+                (byte) ((totalLength >> 8) & 0xFF),
+                (byte) (totalLength & 0xFF)
+        };
+
+        InputStream in = new InputStream() {
+            private int headerPos = 0;
+            private int bodyRemaining = payloadSize;
+
+            @Override
+            public int read() {
+                if (headerPos < header.length) {
+                    return header[headerPos++] & 0xFF;
+                }
+                if (bodyRemaining > 0) {
+                    bodyRemaining--;
+                    return 'A';
+                }
+                return -1;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) {
+                if (headerPos < header.length) {
+                    int toCopy = Math.min(len, header.length - headerPos);
+                    System.arraycopy(header, headerPos, b, off, toCopy);
+                    headerPos += toCopy;
+                    return toCopy;
+                }
+                if (bodyRemaining > 0) {
+                    int toProvide = Math.min(len, bodyRemaining);
+                    for (int i = 0; i < toProvide; i++) {
+                        b[off + i] = 'A';
+                    }
+                    bodyRemaining -= toProvide;
+                    return toProvide;
+                }
+                return -1;
+            }
+        };
+
+        long[] bytesWritten = new long[1];
+        OutputStream out = new OutputStream() {
+            @Override
+            public void write(int b) {
+                bytesWritten[0]++;
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                bytesWritten[0] += len;
+            }
+        };
+
+        PostgresWireDecoder decoder = new PostgresWireDecoder(in);
+        PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage(out);
+        assertNotNull(msg);
+        assertEquals('Q', msg.type());
+        assertFalse(msg.isQuery());
         assertNull(msg.body());
         assertEquals(1 + (long) totalLength, bytesWritten[0]);
     }

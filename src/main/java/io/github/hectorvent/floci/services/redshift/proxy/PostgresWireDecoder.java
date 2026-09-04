@@ -85,7 +85,7 @@ public class PostgresWireDecoder {
             throw new IOException("Invalid message length: " + length);
         }
 
-        if (type != 'Q' && passthroughOut != null) {
+        if (passthroughOut != null && (type != 'Q' || length > MAX_MESSAGE_BYTES)) {
             passthroughOut.write(typeByte);
             passthroughOut.write(lengthBytes);
             int remaining = length - 4;
@@ -155,12 +155,12 @@ public class PostgresWireDecoder {
     public record FrontendMessage(char type, byte[] body) {
 
         public boolean isQuery() {
-            return type == 'Q';
+            return type == 'Q' && body != null;
         }
 
         /** SQL text of a {@code 'Q'} (trailing NUL stripped), or {@code null} if this is not a {@code 'Q'}. */
         public String getSql() {
-            if (type != 'Q' || body == null || body.length == 0) {
+            if (!isQuery() || body == null || body.length == 0) {
                 return null;
             }
             int len = body.length;
@@ -172,7 +172,10 @@ public class PostgresWireDecoder {
 
         /** {@code type · length · body}: a byte-exact round-trip of the original frame. */
         public byte[] toPacketBytes() {
-            int bodyLen = (body != null) ? body.length : 0;
+            if (body == null) {
+                throw new IllegalStateException("Message body was streamed to passthrough output and not retained");
+            }
+            int bodyLen = body.length;
             int lengthField = 4 + bodyLen;
             byte[] packet = new byte[1 + 4 + bodyLen];
             packet[0] = (byte) type;

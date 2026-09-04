@@ -150,7 +150,7 @@ Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire pro
 - Emulation runs on the **Simple Query protocol** (`'Q'`) only. Extended Query protocol statements (`Parse`/`Bind`/`Execute`) pass through untouched, including anything a JDBC `PreparedStatement` sends, and, with the pgjdbc default `preferQueryMode=extended`, plain `Statement` calls too. Connect with `preferQueryMode=simple` to exercise the interceptor from JDBC.
 - The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
 - A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
-- A single Simple Query ('Q') message larger than 16 MiB is refused before its body is read; non-query traffic streams through with no size limit.
+- Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
 - `COPY ... FROM 's3://...'` and `UNLOAD (...) TO 's3://...'` are **not** yet emulated (planned).
 
 ## Out of Scope

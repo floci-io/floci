@@ -138,4 +138,40 @@ class RedshiftInterceptingBridgeTest {
         assertFalse(bridgeThread.isAlive(), "bridge did not stop after Terminate");
         assertEquals(-1, testClientEnd.getInputStream().read(), "bridge left the client socket open");
     }
+
+    @Test
+    void forwardsOversizedQueryWithoutClosingSockets() throws IOException {
+        startBridge();
+        int payloadSize = 17 * 1024 * 1024; // 17 MiB
+        int totalLength = 4 + payloadSize;
+        byte[] header = new byte[]{
+                'Q',
+                (byte) ((totalLength >> 24) & 0xFF),
+                (byte) ((totalLength >> 16) & 0xFF),
+                (byte) ((totalLength >> 8) & 0xFF),
+                (byte) (totalLength & 0xFF)
+        };
+
+        OutputStream clientOut = testClientEnd.getOutputStream();
+        clientOut.write(header);
+        byte[] chunk = new byte[8192];
+        for (int written = 0; written < payloadSize; written += chunk.length) {
+            int len = Math.min(chunk.length, payloadSize - written);
+            clientOut.write(chunk, 0, len);
+        }
+        clientOut.flush();
+
+        InputStream backendIn = testBackendEnd.getInputStream();
+        byte[] receivedHeader = backendIn.readNBytes(5);
+        assertEquals('Q', (char) receivedHeader[0]);
+        long remaining = payloadSize;
+        while (remaining > 0) {
+            int read = backendIn.read(chunk, 0, (int) Math.min(chunk.length, remaining));
+            assertTrue(read > 0);
+            remaining -= read;
+        }
+
+        assertTrue(bridgeThread.isAlive());
+        assertFalse(testClientEnd.isClosed());
+    }
 }
