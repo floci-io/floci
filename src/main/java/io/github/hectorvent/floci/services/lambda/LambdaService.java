@@ -1506,8 +1506,14 @@ public class LambdaService implements ResourceProvider {
     }
 
     private static List<String> validateArchitectures(Object value) {
-        if (!(value instanceof List<?> architectures)) {
+        if (value == null) {
             return null;
+        }
+        if (!(value instanceof List<?> architectures)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + value + "' at 'architectures' "
+                            + "failed to satisfy constraint: Member must be a list",
+                    400);
         }
         if (architectures.isEmpty()) {
             throw new AwsException("InvalidParameterValueException",
