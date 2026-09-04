@@ -148,6 +148,7 @@ notes:
   AWS::RDS::DBCluster: starts a real container
   AWS::CDK::Metadata: accepted; no-op
   AWS::IoT::DomainConfiguration: '`ServerCertificates` resolves to a JSON string'
+  AWS::IoT::Policy: 'deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached'
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
 
 # Trailing prose appended to a row after its type list, for behaviour that belongs to the service
