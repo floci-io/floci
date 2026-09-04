@@ -195,9 +195,13 @@ public class ElbV2DataPlane {
     private HttpServer startPortServer(int port) {
         if (isReservedByFloci(port)) {
             // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
+            // The emulator's own port cannot be handed over, so the two cases need different
+            // advice: freeing floci.tls.aws-https-port is only meaningful for the TLS proxy.
+            String remedy = port == config.port()
+                    ? "This is the emulator's own port, so it cannot be freed; give the listener a different port."
+                    : "Set floci.tls.aws-https-port=0 (or disable TLS) to free it.";
             LOG.warnv("ELBv2 listener port {0} is reserved by Floci itself; the listener is "
-                    + "registered but serves no traffic. Set floci.tls.aws-https-port=0 (or "
-                    + "disable TLS) to free it.", String.valueOf(port));
+                    + "registered but serves no traffic. {1}", String.valueOf(port), remedy);
             return null;
         }
         HttpServer server = vertx.createHttpServer(new HttpServerOptions()
