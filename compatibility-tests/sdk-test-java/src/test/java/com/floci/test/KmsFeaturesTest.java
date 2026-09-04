@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.kms.model.AlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.CreateKeyResponse;
 import software.amazon.awssdk.services.kms.model.DisabledException;
 import software.amazon.awssdk.services.kms.model.EncryptionAlgorithmSpec;
@@ -12,9 +13,21 @@ import software.amazon.awssdk.services.kms.model.InvalidKeyUsageException;
 import software.amazon.awssdk.services.kms.model.KeySpec;
 import software.amazon.awssdk.services.kms.model.KeyUsageType;
 import software.amazon.awssdk.services.kms.model.KmsInvalidStateException;
+import software.amazon.awssdk.services.kms.model.ExpirationModelType;
+import software.amazon.awssdk.services.kms.model.KeyState;
 import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
+import software.amazon.awssdk.services.kms.model.OriginType;
+import software.amazon.awssdk.services.kms.model.WrappingKeySpec;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.OAEPParameterSpec;
+import javax.crypto.spec.PSource;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
@@ -28,8 +41,9 @@ import static org.assertj.core.api.Assertions.*;
  *   #1844 — Decrypt enforces KeyId against the wrapping CMK (IncorrectKeyException)
  *   #1844 — ReEncrypt enforces SourceKeyId against the wrapping CMK (IncorrectKeyException)
  *   #3024: Encrypt/Decrypt apply real RSAES-OAEP for RSA keys
+ *   #1916: ImportKeyMaterial round trip on an Origin=EXTERNAL key
  */
-@DisplayName("KMS features (#258 #259 #269 #1844 #3024)")
+@DisplayName("KMS features (#258 #259 #269 #1844 #1916 #3024)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class KmsFeaturesTest {
 
@@ -466,5 +480,71 @@ class KmsFeaturesTest {
         } finally {
             kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
         }
+    }
+
+    @Test
+    @Order(80)
+    void importedKeyMaterialMakesAnExternalKeyUsable() throws Exception {
+        var keyId = kms.createKey(b -> b.origin(OriginType.EXTERNAL)).keyMetadata().keyId();
+
+        try {
+            assertThat(kms.describeKey(b -> b.keyId(keyId)).keyMetadata())
+                    .satisfies(metadata -> {
+                        assertThat(metadata.origin()).isEqualTo(OriginType.EXTERNAL);
+                        assertThat(metadata.keyState()).isEqualTo(KeyState.PENDING_IMPORT);
+                        assertThat(metadata.enabled()).isFalse();
+                    });
+
+            assertThatThrownBy(() -> kms.encrypt(b -> b
+                    .keyId(keyId)
+                    .plaintext(SdkBytes.fromString("secret payload", StandardCharsets.UTF_8))))
+                    .isInstanceOf(KmsInvalidStateException.class);
+
+            var parameters = kms.getParametersForImport(b -> b
+                    .keyId(keyId)
+                    .wrappingAlgorithm(AlgorithmSpec.RSAES_OAEP_SHA_256)
+                    .wrappingKeySpec(WrappingKeySpec.RSA_2048));
+
+            byte[] material = new byte[32];
+            Arrays.fill(material, (byte) 17);
+            SdkBytes wrapped = SdkBytes.fromByteArray(
+                    wrapWithRsaOaepSha256(parameters.publicKey().asByteArray(), material));
+
+            kms.importKeyMaterial(b -> b
+                    .keyId(keyId)
+                    .importToken(parameters.importToken())
+                    .encryptedKeyMaterial(wrapped)
+                    .expirationModel(ExpirationModelType.KEY_MATERIAL_DOES_NOT_EXPIRE));
+
+            assertThat(kms.describeKey(b -> b.keyId(keyId)).keyMetadata())
+                    .satisfies(metadata -> {
+                        assertThat(metadata.keyState()).isEqualTo(KeyState.ENABLED);
+                        assertThat(metadata.enabled()).isTrue();
+                        assertThat(metadata.expirationModel())
+                                .isEqualTo(ExpirationModelType.KEY_MATERIAL_DOES_NOT_EXPIRE);
+                    });
+
+            var ciphertext = kms.encrypt(b -> b
+                    .keyId(keyId)
+                    .plaintext(SdkBytes.fromString("secret payload", StandardCharsets.UTF_8)));
+            assertThat(kms.decrypt(b -> b.keyId(keyId).ciphertextBlob(ciphertext.ciphertextBlob()))
+                    .plaintext().asUtf8String()).isEqualTo("secret payload");
+
+            kms.deleteImportedKeyMaterial(b -> b.keyId(keyId));
+            assertThat(kms.describeKey(b -> b.keyId(keyId)).keyMetadata().keyState())
+                    .isEqualTo(KeyState.PENDING_IMPORT);
+        } finally {
+            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        }
+    }
+
+    /** Wraps material the way any KMS client does, so the round trip proves wire compatibility. */
+    private static byte[] wrapWithRsaOaepSha256(byte[] publicKeyDer, byte[] material) throws Exception {
+        PublicKey wrappingKey = KeyFactory.getInstance("RSA")
+                .generatePublic(new X509EncodedKeySpec(publicKeyDer));
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, wrappingKey, new OAEPParameterSpec("SHA-256", "MGF1",
+                new MGF1ParameterSpec("SHA-256"), PSource.PSpecified.DEFAULT));
+        return cipher.doFinal(material);
     }
 }

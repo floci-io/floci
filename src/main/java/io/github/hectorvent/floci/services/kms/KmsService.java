@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsGrant;
+import io.github.hectorvent.floci.services.kms.model.KmsImportParameters;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
@@ -71,6 +72,7 @@ import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
@@ -82,6 +84,16 @@ import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 public class KmsService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(KmsService.class);
+
+    private static final String AWS_KMS_ORIGIN = "AWS_KMS";
+    private static final String EXTERNAL_ORIGIN = "EXTERNAL";
+    private static final String PENDING_IMPORT = "PendingImport";
+    private static final String PENDING_DELETION = "PendingDeletion";
+    private static final String KEY_MATERIAL_EXPIRES = "KEY_MATERIAL_EXPIRES";
+    private static final String KEY_MATERIAL_DOES_NOT_EXPIRE = "KEY_MATERIAL_DOES_NOT_EXPIRE";
+    private static final Duration IMPORT_PARAMETERS_VALIDITY = Duration.ofHours(24);
+    private static final Duration MAX_KEY_MATERIAL_VALIDITY = Duration.ofDays(365);
+    private static final int IMPORT_TOKEN_BYTES = 32;
 
     private final StorageBackend<String, KmsKey> keyStore;
     private final StorageBackend<String, KmsAlias> aliasStore;
@@ -146,6 +158,11 @@ public class KmsService implements ResourceProvider {
     }
 
     public KmsKey createKey(String description, String keyUsage, String keySpec, String policy, Map<String, String> tags, String region) {
+        return createKey(description, keyUsage, keySpec, policy, tags, null, region);
+    }
+
+    public KmsKey createKey(String description, String keyUsage, String keySpec, String policy,
+                            Map<String, String> tags, String origin, String region) {
         String keyId = resolveKeyId(tags);
         if (keyStore.get(region + "::" + keyId).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Key already exists", 400);
@@ -168,11 +185,18 @@ public class KmsService implements ResourceProvider {
         key.setKeySpec(effectiveSpec);
         key.setPolicy(policy != null ? policy : buildDefaultKeyPolicy());
         key.getTags().putAll(ReservedTags.stripReservedTags(tags));
+        key.setOrigin(resolveOrigin(origin, effectiveSpec));
 
-        generateKeyMaterial(key);
+        if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
+            key.setKeyState(PENDING_IMPORT);
+            key.setEnabled(false);
+        } else {
+            generateKeyMaterial(key);
+        }
 
         keyStore.put(region + "::" + keyId, key);
-        LOG.infov("Created KMS key: {0} ({1}/{2}) in {3}", keyId, key.getKeyUsage(), key.getKeySpec(), region);
+        LOG.infov("Created KMS key: {0} ({1}/{2}, origin {3}) in {4}",
+                keyId, key.getKeyUsage(), key.getKeySpec(), key.getOrigin(), region);
         return key;
     }
 
@@ -268,14 +292,11 @@ public class KmsService implements ResourceProvider {
     }
 
     private static int hmacKeyByteLength(KmsKeySpec spec) {
-        return switch (spec) {
-            case HMAC_224 -> 28;
-            case HMAC_256 -> 32;
-            case HMAC_384 -> 48;
-            case HMAC_512 -> 64;
-            default -> throw new AwsException("InvalidCustomerMasterKeySpecException",
+        if (!isHmac(spec)) {
+            throw new AwsException("InvalidCustomerMasterKeySpecException",
                     "Unsupported HMAC key spec: " + spec, 400);
-        };
+        }
+        return spec.materialByteLength();
     }
 
     public KmsKey describeKey(String keyId, String region) {
@@ -595,11 +616,25 @@ public class KmsService implements ResourceProvider {
         keyStore.put(region + "::" + key.getKeyId(), key);
     }
 
+    /**
+     * A key whose material was never imported, or was deleted or expired while it sat pending
+     * deletion, has nothing to come back to: it returns to PendingImport rather than to a usable
+     * state that no cryptographic operation could actually serve.
+     */
     public void cancelKeyDeletion(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        key.setKeyState("Enabled");
+        if (lacksImportedKeyMaterial(key)) {
+            key.setKeyState(PENDING_IMPORT);
+            key.setEnabled(false);
+        } else {
+            key.setKeyState("Enabled");
+        }
         key.setDeletionDate(0);
         keyStore.put(region + "::" + key.getKeyId(), key);
+    }
+
+    private static boolean lacksImportedKeyMaterial(KmsKey key) {
+        return EXTERNAL_ORIGIN.equals(key.getOrigin()) && key.getPrivateKeyEncoded() == null;
     }
 
     public Map<String, Object> getKeyPolicy(String keyId, String region) {
@@ -674,10 +709,11 @@ public class KmsService implements ResourceProvider {
 
     public void enableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        if ("PendingDeletion".equals(key.getKeyState())) {
+        if (PENDING_DELETION.equals(key.getKeyState())) {
             throw new AwsException("KMSInvalidStateException",
                     "KMS key " + key.getKeyId() + " is pending deletion.", 400);
         }
+        requireImportedKeyMaterial(key, "EnableKey");
         key.setEnabled(true);
         key.setKeyState("Enabled");
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -686,6 +722,7 @@ public class KmsService implements ResourceProvider {
 
     public void disableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireImportedKeyMaterial(key, "DisableKey");
         key.setEnabled(false);
         key.setKeyState("Disabled");
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -710,12 +747,306 @@ public class KmsService implements ResourceProvider {
     }
 
     private void validateRotationSupported(KmsKey key) {
+        if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
+            throw new AwsException(
+                    "UnsupportedOperationException",
+                    "You cannot enable automatic rotation of imported key material.",
+                    400);
+        }
         if (KmsKeyUsage.ENCRYPT_DECRYPT != key.getKeyUsage()
                 || KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
             throw new AwsException(
                     "UnsupportedOperationException",
                     "You cannot perform this operation on a non-symmetric key or a key with non-ENCRYPT_DECRYPT key usage.",
                     400);
+        }
+    }
+
+    /** The wrapping parameters GetParametersForImport hands back to the caller. */
+    public record ImportParameters(String keyArn, String publicKeyEncoded, String importToken,
+                                   long parametersValidTo) {
+    }
+
+    public ImportParameters getParametersForImport(String keyId, String wrappingAlgorithm,
+                                                   String wrappingKeySpec, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        requireExternalOrigin(key, "GetParametersForImport");
+        requireNotPendingDeletion(key);
+        KmsKeyImport.validateWrappingAlgorithm(wrappingAlgorithm);
+
+        KmsKeyImport.WrappingKeyPair wrappingKeyPair = KmsKeyImport.generateWrappingKeyPair(wrappingKeySpec);
+        KmsImportParameters parameters = new KmsImportParameters();
+        parameters.setWrappingPrivateKeyEncoded(wrappingKeyPair.privateKeyEncoded());
+        parameters.setWrappingAlgorithm(wrappingAlgorithm);
+        parameters.setImportToken(newImportToken());
+        parameters.setParametersValidTo(Instant.now().plus(IMPORT_PARAMETERS_VALIDITY).getEpochSecond());
+        key.setImportParameters(parameters);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+
+        LOG.infov("Issued import parameters for KMS key {0} in {1} ({2}/{3})",
+                key.getKeyId(), region, wrappingAlgorithm, wrappingKeySpec);
+        return new ImportParameters(key.getArn(), wrappingKeyPair.publicKeyEncoded(),
+                parameters.getImportToken(), parameters.getParametersValidTo());
+    }
+
+    /**
+     * Unwraps and installs key material, which takes the key from PendingImport to Enabled. The
+     * import token is spent by the call that uses it, as it is on real KMS.
+     */
+    public KmsKey importKeyMaterial(String keyId, String importToken, byte[] encryptedKeyMaterial,
+                                    String expirationModel, Long validTo, String importType, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        requireExternalOrigin(key, "ImportKeyMaterial");
+        requireNotPendingDeletion(key);
+        validateImportType(importType, key);
+
+        KmsImportParameters parameters = requireCurrentImportToken(key);
+        if (!parameters.getImportToken().equals(importToken)) {
+            throw new AwsException("InvalidImportTokenException",
+                    "The import token is invalid or was not issued for this KMS key.", 400);
+        }
+        String effectiveExpirationModel = resolveExpirationModel(expirationModel, validTo);
+
+        byte[] material = KmsKeyImport.unwrap(parameters.getWrappingPrivateKeyEncoded(),
+                parameters.getWrappingAlgorithm(), encryptedKeyMaterial);
+        validateMaterialLength(key, material);
+        String keyMaterialId = keyMaterialId(key.getKeyId(), material);
+        requireSameMaterialAsFirstImport(key, keyMaterialId);
+
+        key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+        key.setKeyMaterialId(keyMaterialId);
+        key.setExpirationModel(effectiveExpirationModel);
+        key.setValidTo(KEY_MATERIAL_EXPIRES.equals(effectiveExpirationModel) ? validTo : 0L);
+        key.setKeyState("Enabled");
+        key.setEnabled(true);
+        key.setImportParameters(null);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+
+        LOG.infov("Imported key material into KMS key {0} in {1} ({2})",
+                key.getKeyId(), region, effectiveExpirationModel);
+        return key;
+    }
+
+    /**
+     * Deleting material from a key that is already pending deletion leaves the key state alone,
+     * as it does on AWS: PendingDeletion outranks the PendingImport this would otherwise set.
+     */
+    public KmsKey deleteImportedKeyMaterial(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        requireExternalOrigin(key, "DeleteImportedKeyMaterial");
+        clearImportedKeyMaterial(key);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Deleted imported key material for KMS key {0} in {1}", key.getKeyId(), region);
+        return key;
+    }
+
+    /**
+     * Real KMS deletes expired imported key material on its own schedule. With no scheduler here
+     * the check runs on the next read of the key instead, which is not observable from outside:
+     * nothing can reach a key without going through this path first.
+     */
+    private KmsKey expireImportedKeyMaterialIfDue(KmsKey key, String region) {
+        boolean expires = EXTERNAL_ORIGIN.equals(key.getOrigin())
+                && KEY_MATERIAL_EXPIRES.equals(key.getExpirationModel())
+                && key.getValidTo() > 0;
+        boolean holdsMaterial = !PENDING_IMPORT.equals(key.getKeyState())
+                && !PENDING_DELETION.equals(key.getKeyState());
+        if (!expires || !holdsMaterial || key.getValidTo() > Instant.now().getEpochSecond()) {
+            return key;
+        }
+        clearImportedKeyMaterial(key);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Imported key material for KMS key {0} in {1} expired; key is back in PendingImport",
+                key.getKeyId(), region);
+        return key;
+    }
+
+    /**
+     * Drops the material but keeps {@code keyMaterialId}: KMS still refuses different material on
+     * a later re-import, so what the key was originally given has to outlive the material itself.
+     */
+    private static void clearImportedKeyMaterial(KmsKey key) {
+        key.setPrivateKeyEncoded(null);
+        key.setExpirationModel(null);
+        key.setValidTo(0);
+        key.setImportParameters(null);
+        if (PENDING_DELETION.equals(key.getKeyState())) {
+            return;
+        }
+        key.setEnabled(false);
+        key.setKeyState(PENDING_IMPORT);
+    }
+
+    private String newImportToken() {
+        byte[] token = new byte[IMPORT_TOKEN_BYTES];
+        SECURE_RANDOM.nextBytes(token);
+        return Base64.getEncoder().encodeToString(token);
+    }
+
+    private static KmsImportParameters requireCurrentImportToken(KmsKey key) {
+        KmsImportParameters parameters = key.getImportParameters();
+        if (parameters == null) {
+            throw new AwsException("InvalidImportTokenException",
+                    "No import parameters are outstanding for this KMS key. "
+                            + "Call GetParametersForImport first.", 400);
+        }
+        if (parameters.getParametersValidTo() < Instant.now().getEpochSecond()) {
+            throw new AwsException("ExpiredImportTokenException",
+                    "The import token has expired. Call GetParametersForImport for new parameters.", 400);
+        }
+        return parameters;
+    }
+
+    private static String resolveExpirationModel(String expirationModel, Long validTo) {
+        String effective = (expirationModel == null || expirationModel.isBlank())
+                ? KEY_MATERIAL_EXPIRES : expirationModel;
+        switch (effective) {
+            case KEY_MATERIAL_EXPIRES -> {
+                if (validTo == null) {
+                    throw new AwsException("ValidationException",
+                            "ValidTo is required when ExpirationModel is KEY_MATERIAL_EXPIRES.", 400);
+                }
+                validateValidTo(validTo);
+            }
+            case KEY_MATERIAL_DOES_NOT_EXPIRE -> {
+                if (validTo != null) {
+                    throw new AwsException("ValidationException",
+                            "ValidTo must not be set when ExpirationModel is "
+                                    + "KEY_MATERIAL_DOES_NOT_EXPIRE.", 400);
+                }
+            }
+            default -> throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + expirationModel + "' at 'expirationModel' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: "
+                            + "[KEY_MATERIAL_EXPIRES, KEY_MATERIAL_DOES_NOT_EXPIRE]", 400);
+        }
+        return effective;
+    }
+
+    private static void validateValidTo(long validTo) {
+        long now = Instant.now().getEpochSecond();
+        if (validTo <= now) {
+            throw new AwsException("ValidationException",
+                    "ValidTo must be a future date and time.", 400);
+        }
+        if (validTo > now + MAX_KEY_MATERIAL_VALIDITY.toSeconds()) {
+            throw new AwsException("ValidationException",
+                    "ValidTo must be no more than 365 days from the request date.", 400);
+        }
+    }
+
+    /**
+     * Multi-material rotation, where a symmetric key holds several imported materials at once, is
+     * not emulated. NEW_KEY_MATERIAL on a key that already has material is refused outright rather
+     * than reported as material that fails to match.
+     */
+    private static void validateImportType(String importType, KmsKey key) {
+        if (importType == null || importType.isBlank()) {
+            return;
+        }
+        switch (importType) {
+            case "NEW_KEY_MATERIAL" -> {
+                if (key.getKeyMaterialId() != null) {
+                    throw new AwsException("UnsupportedOperationException",
+                            "Importing additional key material into a KMS key that already has key material "
+                                    + "is not supported. Reimport the existing key material instead.", 400);
+                }
+            }
+            case "EXISTING_KEY_MATERIAL" -> {
+                if (key.getKeyMaterialId() == null) {
+                    throw new AwsException("IncorrectKeyMaterialException",
+                            "No key material has ever been imported into this KMS key, so there is no "
+                                    + "existing key material to reimport.", 400);
+                }
+            }
+            default -> throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + importType + "' at 'importType' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: "
+                            + "[NEW_KEY_MATERIAL, EXISTING_KEY_MATERIAL]", 400);
+        }
+    }
+
+    private static void validateMaterialLength(KmsKey key, byte[] material) {
+        int expected = key.getKeySpec().materialByteLength();
+        if (material.length != expected) {
+            throw new AwsException("IncorrectKeyMaterialException",
+                    "Key material for key spec " + key.getKeySpec() + " must be " + expected
+                            + " bytes but was " + material.length + " bytes.", 400);
+        }
+    }
+
+    private static void requireSameMaterialAsFirstImport(KmsKey key, String keyMaterialId) {
+        if (key.getKeyMaterialId() != null && !key.getKeyMaterialId().equals(keyMaterialId)) {
+            throw new AwsException("IncorrectKeyMaterialException",
+                    "The key material does not match the key material that was previously imported "
+                            + "into this KMS key.", 400);
+        }
+    }
+
+    /**
+     * KMS derives a key material id from the KMS key id and the material itself. Deriving it the
+     * same way identifies imported material without keeping a second copy of it: a re-import only
+     * has to prove it carries the same bytes, never to have them read back.
+     */
+    private static String keyMaterialId(String keyId, byte[] material) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(keyId.getBytes(StandardCharsets.UTF_8));
+            digest.update(material);
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new AwsException("InternalFailure", "SHA-256 unavailable", 500);
+        }
+    }
+
+    private static String resolveOrigin(String origin, KmsKeySpec spec) {
+        String effective = (origin == null || origin.isBlank()) ? AWS_KMS_ORIGIN : origin;
+        return switch (effective) {
+            case AWS_KMS_ORIGIN -> effective;
+            case EXTERNAL_ORIGIN -> requireImportableSpec(spec);
+            case "AWS_CLOUDHSM", "EXTERNAL_KEY_STORE" -> throw new AwsException("UnsupportedOperationException",
+                    "Origin " + effective + " is not supported.", 400);
+            default -> throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + origin + "' at 'origin' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set: "
+                            + "[AWS_KMS, EXTERNAL, AWS_CLOUDHSM, EXTERNAL_KEY_STORE]", 400);
+        };
+    }
+
+    /**
+     * Imported material here is a raw byte string, which covers SYMMETRIC_DEFAULT and the HMAC
+     * specs. Real KMS also imports asymmetric material as a DER key pair; refusing it outright
+     * beats accepting a key that could never sign or decrypt anything.
+     */
+    private static String requireImportableSpec(KmsKeySpec spec) {
+        if (spec != KmsKeySpec.SYMMETRIC_DEFAULT && spec.getKeyType() != KmsKeySpec.KeyType.HMAC) {
+            throw new AwsException("UnsupportedOperationException",
+                    "Origin EXTERNAL is only supported for SYMMETRIC_DEFAULT and HMAC key specs, not "
+                            + spec + ".", 400);
+        }
+        return EXTERNAL_ORIGIN;
+    }
+
+    private static void requireExternalOrigin(KmsKey key, String operation) {
+        if (!EXTERNAL_ORIGIN.equals(key.getOrigin())) {
+            throw new AwsException("UnsupportedOperationException",
+                    operation + " is only supported for KMS keys with Origin EXTERNAL; key "
+                            + key.getKeyId() + " has origin " + key.getOrigin() + ".", 400);
+        }
+    }
+
+    private static void requireNotPendingDeletion(KmsKey key) {
+        if (PENDING_DELETION.equals(key.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    "KMS key " + key.getKeyId() + " is pending deletion.", 400);
+        }
+    }
+
+    private static void requireImportedKeyMaterial(KmsKey key, String operation) {
+        if (PENDING_IMPORT.equals(key.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    operation + " is not valid for KMS key " + key.getKeyId()
+                            + " because it has no key material. Its state is PendingImport.", 400);
         }
     }
 
@@ -1240,6 +1571,7 @@ public class KmsService implements ResourceProvider {
 
     private KmsKey validateMacOperationKey(String keyId, String algorithm, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
+        requireImportedKeyMaterial(kmsKey, "MAC operations");
         KmsKeySpec spec = kmsKey.getKeySpec();
         if (!isHmac(spec) || !KmsKeyUsage.GENERATE_VERIFY_MAC.equals(kmsKey.getKeyUsage())) {
             throw new AwsException("InvalidKeyUsageException",
@@ -1600,18 +1932,20 @@ public class KmsService implements ResourceProvider {
         }
 
         // Key id
-        return keyStore.get(region + "::" + id)
+        KmsKey key = keyStore.get(region + "::" + id)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
+        return expireImportedKeyMaterialIfDue(key, region);
     }
 
     private static void validateKeyIsUsableForCryptoOperations(KmsKey key) {
-        if ("PendingDeletion".equals(key.getKeyState())) {
+        if (PENDING_DELETION.equals(key.getKeyState())) {
             throw new AwsException(
                     "KMSInvalidStateException",
                     "KMS key " + key.getKeyId() + " is pending deletion.",
                     400
             );
         }
+        requireImportedKeyMaterial(key, "This operation");
         if (!key.isEnabled()) {
             throw new AwsException(
                     "DisabledException",

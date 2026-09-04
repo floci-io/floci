@@ -7,13 +7,22 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.OAEPParameterSpec;
+import javax.crypto.spec.PSource;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -1753,5 +1762,192 @@ class KmsIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .extract().path("KeyMetadata.KeyId");
+    }
+
+    @Test
+    void importKeyMaterialRoundTripEnablesAnExternalKey() throws Exception {
+        String keyId = createExternalSymmetricKey();
+
+        describeKey(keyId)
+                .body("KeyMetadata.Origin", equalTo("EXTERNAL"))
+                .body("KeyMetadata.KeyState", equalTo("PendingImport"))
+                .body("KeyMetadata.Enabled", equalTo(false));
+
+        given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\"}"
+                        .formatted(keyId, Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8))))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"));
+
+        var parameters = given()
+                .header("X-Amz-Target", "TrentService.GetParametersForImport")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_OAEP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}"
+                        .formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyId", startsWith("arn:aws:kms:"))
+                .body("PublicKey", notNullValue())
+                .body("ImportToken", notNullValue())
+                .body("ParametersValidTo", notNullValue())
+                .extract().jsonPath();
+
+        byte[] material = new byte[32];
+        Arrays.fill(material, (byte) 11);
+        String wrapped = Base64.getEncoder().encodeToString(
+                wrapWithRsaOaepSha256(parameters.getString("PublicKey"), material));
+
+        given()
+                .header("X-Amz-Target", "TrentService.ImportKeyMaterial")
+                .contentType(KMS_CONTENT_TYPE)
+                .body(("{\"KeyId\":\"%s\",\"ImportToken\":\"%s\",\"EncryptedKeyMaterial\":\"%s\","
+                        + "\"ExpirationModel\":\"KEY_MATERIAL_DOES_NOT_EXPIRE\"}")
+                        .formatted(keyId, parameters.getString("ImportToken"), wrapped))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyId", startsWith("arn:aws:kms:"))
+                .body("KeyMaterialId", matchesPattern("[a-f0-9]{64}"));
+
+        describeKey(keyId)
+                .body("KeyMetadata.KeyState", equalTo("Enabled"))
+                .body("KeyMetadata.Enabled", equalTo(true))
+                .body("KeyMetadata.Origin", equalTo("EXTERNAL"))
+                .body("KeyMetadata.ExpirationModel", equalTo("KEY_MATERIAL_DOES_NOT_EXPIRE"))
+                .body("KeyMetadata", not(hasKey("ValidTo")));
+
+        given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\"}"
+                        .formatted(keyId, Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8))))
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void deleteImportedKeyMaterialReturnsTheKeyToPendingImport() throws Exception {
+        String keyId = createExternalSymmetricKey();
+        importFreshMaterial(keyId);
+
+        given()
+                .header("X-Amz-Target", "TrentService.DeleteImportedKeyMaterial")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\"}".formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyId", startsWith("arn:aws:kms:"))
+                .body("KeyMaterialId", matchesPattern("[a-f0-9]{64}"));
+
+        describeKey(keyId)
+                .body("KeyMetadata.KeyState", equalTo("PendingImport"))
+                .body("KeyMetadata.Enabled", equalTo(false))
+                .body("KeyMetadata", not(hasKey("ExpirationModel")));
+    }
+
+    @Test
+    void describeKeyReportsAwsKmsOriginForAnOrdinaryKey() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        describeKey(keyId)
+                .body("KeyMetadata.Origin", equalTo("AWS_KMS"))
+                .body("KeyMetadata", not(hasKey("ExpirationModel")))
+                .body("KeyMetadata", not(hasKey("ValidTo")));
+    }
+
+    @Test
+    void importIsRejectedForAnAsymmetricKeySpec() {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Origin\":\"EXTERNAL\",\"KeyUsage\":\"ENCRYPT_DECRYPT\",\"KeySpec\":\"RSA_2048\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("UnsupportedOperationException"));
+    }
+
+    @Test
+    void aDeprecatedWrappingAlgorithmIsRejected() {
+        String keyId = createExternalSymmetricKey();
+
+        given()
+                .header("X-Amz-Target", "TrentService.GetParametersForImport")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_PKCS1_V1_5\",\"WrappingKeySpec\":\"RSA_2048\"}"
+                        .formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("UnsupportedOperationException"));
+    }
+
+    private String createExternalSymmetricKey() {
+        return given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Origin\":\"EXTERNAL\",\"Description\":\"external key\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+    }
+
+    private io.restassured.response.ValidatableResponse describeKey(String keyId) {
+        return given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\"}".formatted(keyId))
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    private void importFreshMaterial(String keyId) throws Exception {
+        var parameters = given()
+                .header("X-Amz-Target", "TrentService.GetParametersForImport")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_OAEP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}"
+                        .formatted(keyId))
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath();
+
+        byte[] material = new byte[32];
+        Arrays.fill(material, (byte) 3);
+        String wrapped = Base64.getEncoder().encodeToString(
+                wrapWithRsaOaepSha256(parameters.getString("PublicKey"), material));
+
+        given()
+                .header("X-Amz-Target", "TrentService.ImportKeyMaterial")
+                .contentType(KMS_CONTENT_TYPE)
+                .body(("{\"KeyId\":\"%s\",\"ImportToken\":\"%s\",\"EncryptedKeyMaterial\":\"%s\","
+                        + "\"ExpirationModel\":\"KEY_MATERIAL_DOES_NOT_EXPIRE\"}")
+                        .formatted(keyId, parameters.getString("ImportToken"), wrapped))
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    /**
+     * Wraps key material exactly as a caller would: the point of the round trip is that the
+     * emulator unwraps what a standard RSAES-OAEP-SHA-256 client produces, not a shape of its own.
+     */
+    private static byte[] wrapWithRsaOaepSha256(String publicKeyEncoded, byte[] material) throws Exception {
+        PublicKey wrappingKey = KeyFactory.getInstance("RSA")
+                .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyEncoded)));
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, wrappingKey, new OAEPParameterSpec("SHA-256", "MGF1",
+                new MGF1ParameterSpec("SHA-256"), PSource.PSpecified.DEFAULT));
+        return cipher.doFinal(material);
     }
 }

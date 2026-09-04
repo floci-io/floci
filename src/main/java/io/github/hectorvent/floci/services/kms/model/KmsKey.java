@@ -14,7 +14,12 @@ public class KmsKey {
     private String arn;
     private String description;
     private boolean enabled = true;
-    private String keyState = "Enabled"; // Enabled, Disabled, PendingDeletion
+    private String keyState = "Enabled"; // Enabled, Disabled, PendingDeletion, PendingImport
+    private String origin = "AWS_KMS";
+    private String expirationModel;
+    private long validTo;
+    private KmsImportParameters importParameters;
+    private String keyMaterialId;
     private KmsKeyUsage keyUsage = KmsKeyUsage.ENCRYPT_DECRYPT;
     private KmsKeySpec keySpec = KmsKeySpec.SYMMETRIC_DEFAULT;
     private long creationDate;
@@ -44,6 +49,23 @@ public class KmsKey {
 
     public String getKeyState() { return keyState; }
     public void setKeyState(String keyState) { this.keyState = keyState; }
+
+    public String getOrigin() { return origin; }
+    public void setOrigin(String origin) { this.origin = origin; }
+
+    public String getExpirationModel() { return expirationModel; }
+    public void setExpirationModel(String expirationModel) { this.expirationModel = expirationModel; }
+
+    public long getValidTo() { return validTo; }
+    public void setValidTo(long validTo) { this.validTo = validTo; }
+
+    public KmsImportParameters getImportParameters() { return importParameters; }
+    public void setImportParameters(KmsImportParameters importParameters) {
+        this.importParameters = importParameters;
+    }
+
+    public String getKeyMaterialId() { return keyMaterialId; }
+    public void setKeyMaterialId(String keyMaterialId) { this.keyMaterialId = keyMaterialId; }
 
     public KmsKeyUsage getKeyUsage() { return keyUsage; }
     public void setKeyUsage(KmsKeyUsage keyUsage) { this.keyUsage = keyUsage; }
