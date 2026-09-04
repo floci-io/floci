@@ -19,7 +19,7 @@ import static org.mockito.Mockito.mock;
 
 /**
  * Verifies that {@code putRecordForAccount} resolves, persists, and legacy-migrates against the SPECIFIED
- * account rather than the ambient/default one — so an out-of-request-scope producer (TTL sweep, CDC
+ * account rather than the ambient/default one, so an out-of-request-scope producer (TTL sweep, CDC
  * forwarding) never writes into another tenant's same-named stream and keeps working after an upgrade
  * from unprefixed (pre-multi-account) storage. Real {@link KinesisService} over in-memory account-aware
  * storage (no Vert.x → runs in the offline sandbox).

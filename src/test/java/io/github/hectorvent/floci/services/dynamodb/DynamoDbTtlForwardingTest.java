@@ -34,7 +34,7 @@ import static org.mockito.Mockito.when;
 /**
  * TTL sweep must forward a REMOVE per expired item to Kinesis (happy path) and must isolate
  * forwarding from Kinesis health: because forwarding is now enqueue-only (delivered/retried on a
- * background drain — see {@link KinesisStreamingForwarderTest}), a broken Kinesis cannot abort the
+ * background drain, see {@link KinesisStreamingForwarderTest}), a broken Kinesis cannot abort the
  * sweep, block persistence, or silently drop the change events. See issue #571.
  */
 class DynamoDbTtlForwardingTest {
