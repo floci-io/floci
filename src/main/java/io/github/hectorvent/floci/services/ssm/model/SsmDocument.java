@@ -5,7 +5,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -41,6 +43,9 @@ public class SsmDocument {
     @JsonProperty("PlatformTypes")
     private List<String> platformTypes = List.of("Windows", "Linux", "MacOS");
 
+    @JsonProperty("Versions")
+    private Map<String, String> versions = new LinkedHashMap<>();
+
     public SsmDocument() {}
 
     public SsmDocument(String name, String content, String documentType) {
@@ -49,6 +54,9 @@ public class SsmDocument {
         this.documentType = documentType;
         this.documentVersion = 1;
         this.createdDate = Instant.now();
+        if (content != null) {
+            this.versions.put("1", content);
+        }
     }
 
     public String getName() { return name; }
@@ -80,4 +88,22 @@ public class SsmDocument {
 
     public List<String> getPlatformTypes() { return platformTypes; }
     public void setPlatformTypes(List<String> platformTypes) { this.platformTypes = platformTypes; }
+
+    public Map<String, String> getVersions() {
+        if (versions == null) {
+            versions = new LinkedHashMap<>();
+        }
+        if (versions.isEmpty() && content != null) {
+            versions.put(String.valueOf(documentVersion > 0 ? documentVersion : 1), content);
+        }
+        return versions;
+    }
+
+    public void setVersions(Map<String, String> versions) {
+        this.versions = versions != null ? new LinkedHashMap<>(versions) : new LinkedHashMap<>();
+    }
+
+    public String getContentForVersion(String version) {
+        return getVersions().get(version);
+    }
 }

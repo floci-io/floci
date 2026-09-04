@@ -514,8 +514,18 @@ class SsmServiceTest {
                 new RegionResolver("us-east-1", "123456789012"));
 
         assertNull(legacyDoc.getOwner());
-        assertEquals(1, service.listDocuments("us-east-1", Map.of("Owner", List.of("Self"))).size());
-        assertEquals(1, service.listDocuments("us-east-1", Map.of("Owner", List.of("123456789012"))).size());
+        List<SsmDocument> selfDocs = service.listDocuments("us-east-1", Map.of("Owner", List.of("Self")));
+        assertEquals(1, selfDocs.size());
+        assertEquals("123456789012", selfDocs.get(0).getOwner());
+
+        List<SsmDocument> accountDocs = service.listDocuments("us-east-1", Map.of("Owner", List.of("123456789012")));
+        assertEquals(1, accountDocs.size());
+        assertEquals("123456789012", accountDocs.get(0).getOwner());
+
+        List<SsmDocument> unfilteredDocs = service.listDocuments("us-east-1", null);
+        assertEquals(1, unfilteredDocs.size());
+        assertEquals("123456789012", unfilteredDocs.get(0).getOwner());
+
         assertTrue(service.listDocuments("us-east-1", Map.of("Owner", List.of("999999999999"))).isEmpty());
     }
 
@@ -682,14 +692,29 @@ class SsmServiceTest {
     @Test
     void testCreateAssociation_ValidDocumentVersionSucceeds() {
         String region = "us-east-1";
-        ssmService.createDocument("MyDoc", "{}", "Command", region);
+        ssmService.createDocument("MyDoc", "{\"v\":1}", "Command", region);
 
         SsmAssociation assoc = ssmService.createAssociation(
                 "MyDoc", "my-assoc", "1", "i-12345", null, null, null, region);
         assertEquals("1", assoc.getDocumentVersion());
 
+        // Update document to version 2; prior version 1 content is retained in version history
+        ssmService.updateDocument("MyDoc", "{\"v\":2}", region);
+
+        SsmAssociation assocV1 = ssmService.createAssociation(
+                "MyDoc", "my-assoc-v1", "1", "i-11111", null, null, null, region);
+        assertEquals("1", assocV1.getDocumentVersion());
+
+        SsmAssociation assocV2 = ssmService.createAssociation(
+                "MyDoc", "my-assoc-v2", "2", "i-22222", null, null, null, region);
+        assertEquals("2", assocV2.getDocumentVersion());
+
+        SsmDocument doc = ssmService.getDocument("MyDoc", region);
+        assertEquals("{\"v\":1}", doc.getContentForVersion("1"));
+        assertEquals("{\"v\":2}", doc.getContentForVersion("2"));
+
         SsmAssociation latest = ssmService.createAssociation(
-                "MyDoc", "my-assoc-2", "$LATEST", "i-99999", null, null, null, region);
+                "MyDoc", "my-assoc-latest", "$LATEST", "i-99999", null, null, null, region);
         assertEquals("$LATEST", latest.getDocumentVersion());
     }
 

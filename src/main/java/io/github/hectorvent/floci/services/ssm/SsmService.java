@@ -319,9 +319,13 @@ public class SsmService implements ResourceProvider {
     // a document that does not exist.
 
     public SsmDocument getDocument(String name, String region) {
-        return documentStore.get(regionKey(region, name))
+        SsmDocument document = documentStore.get(regionKey(region, name))
                 .orElseThrow(() -> new AwsException("InvalidDocument",
                         "Document " + name + " does not exist.", 400));
+        if (document.getOwner() == null) {
+            document.setOwner(regionResolver.getAccountId());
+        }
+        return document;
     }
 
     public synchronized SsmDocument createDocument(String name, String content, String documentType, String region) {
@@ -346,8 +350,10 @@ public class SsmService implements ResourceProvider {
                     "The content of the association document matches another document. "
                             + "Change the content of the document and try again.", 400);
         }
+        long newVersion = document.getDocumentVersion() + 1;
         document.setContent(content);
-        document.setDocumentVersion(document.getDocumentVersion() + 1);
+        document.setDocumentVersion(newVersion);
+        document.getVersions().put(String.valueOf(newVersion), content);
         documentStore.put(storageKey, document);
         return document;
     }
@@ -395,6 +401,12 @@ public class SsmService implements ResourceProvider {
     public List<SsmDocument> listDocuments(String region, Map<String, List<String>> filters) {
         String prefix = regionKey(region, "");
         List<SsmDocument> docs = documentStore.scan(k -> k.startsWith(prefix));
+        String accountId = regionResolver.getAccountId();
+        for (SsmDocument d : docs) {
+            if (d.getOwner() == null) {
+                d.setOwner(accountId);
+            }
+        }
         if (filters == null || filters.isEmpty()) {
             return docs;
         }
@@ -403,7 +415,6 @@ public class SsmService implements ResourceProvider {
         List<String> typeFilters = findFilterValues(filters, "DocumentType");
         List<String> ownerFilters = findFilterValues(filters, "Owner");
         List<String> platformFilters = findFilterValues(filters, "PlatformTypes");
-        String accountId = regionResolver.getAccountId();
 
         return docs.stream()
                 .filter(d -> nameFilters.isEmpty()
@@ -425,8 +436,8 @@ public class SsmService implements ResourceProvider {
      * account id all match every visible document; "Amazon"/"Public"/"ThirdParty" match none, since
      * no AWS-owned or other-account documents are ever visible here. Documents created before the
      * {@code Owner} field existed persist with a null owner; since the store already guarantees the
-     * caller's own partition, such a document is treated as owned by the current caller rather than
-     * excluded from an explicit-account-id or "Self" filter it would otherwise legitimately match.
+     * caller's own partition, such a document is normalized to the current caller's account ID so
+     * that it both matches owner filters and serializes its effective owner in list responses.
      */
     private boolean matchesOwner(String filterValue, String documentOwner, String accountId) {
         if ("Self".equalsIgnoreCase(filterValue) || "Private".equalsIgnoreCase(filterValue)
@@ -454,26 +465,18 @@ public class SsmService implements ResourceProvider {
     }
 
     /**
-     * Rejects a {@code DocumentVersion} that could not possibly resolve on the target document.
-     * This store keeps only the document's current content (no version history), so a numeric
-     * version is accepted when it falls within the range that must have existed
-     * ({@code 1..documentVersion}); {@code $LATEST}/{@code $DEFAULT} always resolve to the current
-     * version. Anything else — non-numeric, zero, negative, or past the current version — can never
-     * resolve, matching AWS's {@code InvalidDocumentVersion} for the same requests.
+     * Rejects a {@code DocumentVersion} that cannot resolve on the target document.
+     * Stored document versions are retained across updates, so numeric versions are accepted
+     * when they exist in the document's version history; {@code $LATEST}/{@code $DEFAULT}
+     * always resolve to the current version. Non-existent versions or malformed inputs throw
+     * {@code InvalidDocumentVersion}, matching AWS SSM behavior.
      */
     private void validateDocumentVersion(SsmDocument document, String documentVersion) {
         if (documentVersion == null || documentVersion.isBlank()
                 || "$LATEST".equals(documentVersion) || "$DEFAULT".equals(documentVersion)) {
             return;
         }
-        long requested;
-        try {
-            requested = Long.parseLong(documentVersion);
-        } catch (NumberFormatException e) {
-            throw new AwsException("InvalidDocumentVersion",
-                    "The document version is not valid or does not exist.", 400);
-        }
-        if (requested < 1 || requested > document.getDocumentVersion()) {
+        if (!document.getVersions().containsKey(documentVersion)) {
             throw new AwsException("InvalidDocumentVersion",
                     "The document version is not valid or does not exist.", 400);
         }

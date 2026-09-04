@@ -256,4 +256,93 @@ class SsmAssociationIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("AssociationAlreadyExists"));
     }
+
+    @Test
+    @Order(5)
+    void createAssociation_DocumentVersionTargeting() {
+        String docName = "assoc-ver-doc";
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(String.format("""
+                {
+                    "Name": "%s",
+                    "DocumentType": "Command",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                }
+                """, docName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Update document to version 2
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(String.format("""
+                {
+                    "Name": "%s",
+                    "Content": "{\\"schemaVersion\\":\\"2.0\\"}"
+                }
+                """, docName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Target historical version 1: content was retained so association succeeds
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateAssociation")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(String.format("""
+                {
+                    "Name": "%s",
+                    "AssociationName": "historical-assoc",
+                    "DocumentVersion": "1",
+                    "InstanceId": "i-hist1111111111111"
+                }
+                """, docName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssociationDescription.DocumentVersion", equalTo("1"));
+
+        // Target version 2: succeeds
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateAssociation")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(String.format("""
+                {
+                    "Name": "%s",
+                    "AssociationName": "v2-assoc",
+                    "DocumentVersion": "2",
+                    "InstanceId": "i-hist2222222222222"
+                }
+                """, docName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssociationDescription.DocumentVersion", equalTo("2"));
+
+        // Non-existent version 99: throws InvalidDocumentVersion
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateAssociation")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(String.format("""
+                {
+                    "Name": "%s",
+                    "AssociationName": "invalid-assoc",
+                    "DocumentVersion": "99",
+                    "InstanceId": "i-hist9999999999999"
+                }
+                """, docName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidDocumentVersion"));
+    }
 }

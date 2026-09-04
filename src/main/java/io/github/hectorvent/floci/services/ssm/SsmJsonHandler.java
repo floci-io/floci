@@ -425,11 +425,25 @@ public class SsmJsonHandler {
         String name = requireDocumentNameOrArn(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
+        String requestedVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
+        String effectiveVersion = String.valueOf(document.getDocumentVersion());
+        String effectiveContent = document.getContent();
+
+        if (requestedVersion != null && !requestedVersion.isBlank()
+                && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
+            if (!document.getVersions().containsKey(requestedVersion)) {
+                throw new AwsException("InvalidDocumentVersion",
+                        "The document version is not valid or does not exist.", 400);
+            }
+            effectiveVersion = requestedVersion;
+            effectiveContent = document.getVersions().get(requestedVersion);
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Name", document.getName());
         response.put("DocumentType", document.getDocumentType());
-        response.put("DocumentVersion", String.valueOf(document.getDocumentVersion()));
-        response.put("Content", document.getContent());
+        response.put("DocumentVersion", effectiveVersion);
+        response.put("Content", effectiveContent);
         response.put("Status", document.getStatus());
         return Response.ok(response).build();
     }
@@ -1184,12 +1198,26 @@ public class SsmJsonHandler {
         String name = requireDocumentNameOrArn(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
+        String requestedVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
+        String effectiveVersion = String.valueOf(document.getDocumentVersion());
+        String effectiveContent = document.getContent();
+
+        if (requestedVersion != null && !requestedVersion.isBlank()
+                && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
+            if (!document.getVersions().containsKey(requestedVersion)) {
+                throw new AwsException("InvalidDocumentVersion",
+                        "The document version is not valid or does not exist.", 400);
+            }
+            effectiveVersion = requestedVersion;
+            effectiveContent = document.getVersions().get(requestedVersion);
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode documentNode = objectMapper.createObjectNode();
         documentNode.put("Name", document.getName());
         documentNode.put("DocumentType", document.getDocumentType());
-        documentNode.put("DocumentVersion", String.valueOf(document.getDocumentVersion()));
-        documentNode.put("Content", document.getContent());
+        documentNode.put("DocumentVersion", effectiveVersion);
+        documentNode.put("Content", effectiveContent);
         documentNode.put("Status", document.getStatus());
         if (document.getCreatedDate() != null) {
             documentNode.put("CreatedDate", document.getCreatedDate().toString());
