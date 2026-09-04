@@ -66,6 +66,18 @@ public class TlsProxyServer {
      */
     // Package-private for TlsProxyServerReservedPortTest, which needs to stage a failed bind.
     final Set<Integer> failedPorts = ConcurrentHashMap.newKeySet();
+    /**
+     * Notified with a port the proxy has just given up on. A listener that yielded while the bind
+     * was still unresolved has no other way to learn the port came free, and would otherwise stay
+     * registered with nothing serving it.
+     */
+    private final List<java.util.function.IntConsumer> portReleasedHandlers = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** Registers a callback invoked when a bind fails and the port stops being reserved. */
+    public void onPortReleased(java.util.function.IntConsumer handler) {
+        portReleasedHandlers.add(handler);
+        failedPorts.forEach(handler::accept);
+    }
     private NetClient client;
 
     @Inject
@@ -107,6 +119,7 @@ public class TlsProxyServer {
                             String.valueOf(port), ar.cause().getMessage());
                 } else {
                     failedPorts.add(port);
+                    portReleasedHandlers.forEach(h -> h.accept(port));
                     // The extra AWS-HTTPS port (443 by default) is privileged; binding it fails in
                     // unprivileged environments (e.g. CI/test). Non-fatal — HTTPS on that port is
                     // simply unavailable. Set floci.tls.aws-https-port=0 to skip the attempt.

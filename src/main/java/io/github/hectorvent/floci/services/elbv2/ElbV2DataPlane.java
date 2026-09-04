@@ -75,6 +75,8 @@ public class ElbV2DataPlane {
     ObjectMapper objectMapper;
 
     private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicBoolean releaseHandlerRegistered =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Integer, Map<String, String>> listenersByHostAndPort = new ConcurrentHashMap<>();
     private final Map<String, ListenerBinding> listenerBindings = new ConcurrentHashMap<>();
     private final Map<String, AtomicReference<List<CompiledRule>>> ruleChains = new ConcurrentHashMap<>();
@@ -192,7 +194,23 @@ public class ElbV2DataPlane {
         return tlsProxyServer.reservesPort(port);
     }
 
+    /**
+     * Binds any registered listener whose port the proxy has just released. Yielding a port whose
+     * bind had not resolved yet is the safe default, but if that bind then fails nothing else
+     * would ever retry the listener, leaving it registered with no data plane and the port free.
+     */
+    private void bindListenersWaitingOn(int port) {
+        if (listenersByHostAndPort.containsKey(port)) {
+            servers.computeIfAbsent(port, this::startPortServer);
+        }
+    }
+
     private HttpServer startPortServer(int port) {
+        // Registered on first use rather than at construction: the data plane is only live once a
+        // listener exists, and this keeps the proxy out of the mock-mode path entirely.
+        if (releaseHandlerRegistered.compareAndSet(false, true)) {
+            tlsProxyServer.onPortReleased(this::bindListenersWaitingOn);
+        }
         if (isReservedByFloci(port)) {
             // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
             // The emulator's own port cannot be handed over, so the two cases need different
