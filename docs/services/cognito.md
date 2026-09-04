@@ -96,9 +96,9 @@ always returns it.
 
 | Action | Description |
 |--------|-------------|
-| CreateUserPoolDomain | Creates a Cognito prefix domain, or a custom domain when `CustomDomainConfig.CertificateArn` is given. |
+| CreateUserPoolDomain | Creates a Cognito prefix domain, or a custom domain when `CustomDomainConfig.CertificateArn` is given. As on AWS, the certificate must exist in ACM in us-east-1 with status `ISSUED`; the domain is listed under the certificate's `InUseBy` until it is deleted. |
 | DescribeUserPoolDomain | Returns a domain's description, including `CloudFrontDistribution` for custom domains. |
-| UpdateUserPoolDomain | Replaces a custom domain's certificate or changes the managed login version in place. The domain keeps its `CloudFrontDistribution`. |
+| UpdateUserPoolDomain | Replaces a custom domain's certificate or changes the managed login version in place. The domain keeps its `CloudFrontDistribution`, and its `InUseBy` entry moves to the new certificate. |
 | DeleteUserPoolDomain | Deletes a domain from its user pool. |
 
 ### Log Delivery

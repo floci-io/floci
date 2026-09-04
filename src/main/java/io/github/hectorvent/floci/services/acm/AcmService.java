@@ -322,6 +322,37 @@ public class AcmService implements ResourceProvider {
         LOG.infov("Deleted certificate: {0}", certificateArn);
     }
 
+    // ============ InUseBy ============
+
+    /**
+     * Records {@code consumerArn} as a user of the certificate, so DeleteCertificate refuses with
+     * ResourceInUseException until it is released. Registering the same consumer twice is a no-op.
+     */
+    public void addInUseBy(String certificateArn, String consumerArn, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        if (!cert.getInUseBy().contains(consumerArn)) {
+            cert.getInUseBy().add(consumerArn);
+            store.put(regionKey(region, cert.extractCertificateId()), cert);
+        }
+    }
+
+    /** Releases {@code consumerArn}. A certificate that no longer exists has nothing to release. */
+    public void removeInUseBy(String certificateArn, String consumerArn, String region) {
+        Certificate cert;
+        try {
+            cert = getCertificateByArn(certificateArn, region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Certificate {0} is gone, nothing to release for {1}", certificateArn, consumerArn);
+            return;
+        }
+        if (cert.getInUseBy().remove(consumerArn)) {
+            store.put(regionKey(region, cert.extractCertificateId()), cert);
+        }
+    }
+
     // ============ ImportCertificate ============
 
     public Certificate importCertificate(String certificatePem, String privateKeyPem, String chainPem,

@@ -28,7 +28,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * {@code DescribeUserPoolDomain} reports rather than the literal {@code Domain.CloudFrontDistribution}
  * the stub arm would leave in the record, that rotating to a new certificate resource updates the
  * domain in place so the alias target survives, that a changed domain name replaces the domain, and
- * that deleting the stack removes the domain before the pool that owns it. A prefix domain, which
+ * that deleting the stack removes the domain before the pool that owns it and the certificate after
+ * the domain that uses it. A prefix domain, which
  * has no distribution of its own, resolves the attribute to an empty string rather than the literal.
  */
 @QuarkusTest
@@ -139,6 +140,7 @@ class CognitoCfnIntegrationTest {
         assertTrue(certificateArn.startsWith("arn:aws:acm:us-east-1:"),
                 "the certificate must be provisioned rather than stubbed: " + certificateArn);
         assertCertificateStatus(certificateArn, "ISSUED");
+        assertCertificateConsumers(certificateArn, 1);
 
         JsonNode description = describeDomain(DOMAIN);
         assertEquals(poolId, description.path("UserPoolId").asText());
@@ -159,6 +161,7 @@ class CognitoCfnIntegrationTest {
         assertEquals(aliasTarget, description.path("CloudFrontDistribution").asText(),
                 "a certificate change must keep the CloudFront distribution the alias record points at");
         assertCertificateIsGone(certificateArn);
+        assertCertificateConsumers(renewedCertificateArn, 1);
 
         // Domain is createOnly: a new name is a replacement, created before the old domain goes.
         cloudFormation(CUSTOM_STACK, "UpdateStack", customDomainTemplate(REPLACEMENT_DOMAIN, "RenewedCert"));
@@ -263,6 +266,13 @@ class CognitoCfnIntegrationTest {
             .then()
             .statusCode(200)
             .body("Certificate.Status", equalTo(status));
+    }
+
+    private static void assertCertificateConsumers(String certificateArn, int count) {
+        awsAction("CertificateManager", "DescribeCertificate", "{\"CertificateArn\": \"" + certificateArn + "\"}")
+            .then()
+            .statusCode(200)
+            .body("Certificate.InUseBy.size()", equalTo(count));
     }
 
     private static void assertCertificateIsGone(String certificateArn) {
