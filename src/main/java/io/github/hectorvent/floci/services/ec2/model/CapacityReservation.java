@@ -25,6 +25,7 @@ public class CapacityReservation {
     private String ownerId;
     private String capacityReservationArn;
     private String availabilityZone;
+    private String availabilityZoneId;
     private String instanceType;
     private String instancePlatform;
     private String tenancy = "default";
@@ -56,6 +57,8 @@ public class CapacityReservation {
 
     public String getAvailabilityZone() { return availabilityZone; }
     public void setAvailabilityZone(String availabilityZone) { this.availabilityZone = availabilityZone; }
+    public String getAvailabilityZoneId() { return availabilityZoneId; }
+    public void setAvailabilityZoneId(String availabilityZoneId) { this.availabilityZoneId = availabilityZoneId; }
 
     public String getInstanceType() { return instanceType; }
     public void setInstanceType(String instanceType) { this.instanceType = instanceType; }

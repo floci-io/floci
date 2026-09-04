@@ -476,12 +476,14 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | ModifyCapacityReservation | Updates `InstanceCount`, `EndDate`, `EndDateType` or `InstanceMatchCriteria` in place. |
 | CancelCapacityReservation | Marks a Capacity Reservation `cancelled` and its available count `0`, matching real AWS's retain-but-cancel behaviour rather than deleting the record. |
 
-`InstanceType` and `AvailabilityZone` are required, matching the AWS API; a request missing
-either is rejected with `MissingParameter`. `InstanceCount` defaults to `1`,
-`InstanceMatchCriteria` defaults to `open`, `Tenancy` defaults to `default` and `EndDateType`
-defaults to `unlimited`. Creation is synchronous: the reservation comes back `active` on the
-create response rather than passing through `payment-pending`/`assessing`. `DescribeCapacityReservations`
-supports the `availability-zone`, `capacity-reservation-id`, `instance-platform`,
+`InstanceType`, `InstancePlatform` and `InstanceCount` are required, matching the AWS API, and
+one of `AvailabilityZone` or `AvailabilityZoneId` must be given; a request missing any of
+these is rejected with `MissingParameter`. `InstanceCount` must be greater than `0` on create
+and on modify, otherwise `InvalidParameterValue`. `InstanceMatchCriteria` defaults to `open`,
+`Tenancy` defaults to `default` and `EndDateType` defaults to `unlimited`. Creation is
+synchronous: the reservation comes back `active` on the create response rather than passing
+through `payment-pending`/`assessing`. `DescribeCapacityReservations` supports the
+`availability-zone`, `end-date-type`, `instance-match-criteria`, `instance-platform`,
 `instance-type`, `state` and `tenancy` filters alongside the shared `tag:`, `tag-key` and
 `tag-value` filters.
 

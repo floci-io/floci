@@ -4794,19 +4794,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * the same synchronous-create simplification the other regional EC2 resources make.
      */
     public CapacityReservation createCapacityReservation(String region, String instanceType,
-            String instancePlatform, String availabilityZone, Integer instanceCount, String tenancy,
-            Boolean ebsOptimized, Boolean ephemeralStorage, String endDateType, java.time.Instant endDate,
-            String instanceMatchCriteria, String outpostArn, String placementGroupArn) {
+            String instancePlatform, String availabilityZone, String availabilityZoneId, Integer instanceCount,
+            String tenancy, Boolean ebsOptimized, Boolean ephemeralStorage, String endDateType,
+            java.time.Instant endDate, String instanceMatchCriteria, String outpostArn, String placementGroupArn) {
         ensureDefaultResources(region);
         if (instanceType == null || instanceType.isBlank()) {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter InstanceType.", 400);
         }
-        if (availabilityZone == null || availabilityZone.isBlank()) {
+        if (instancePlatform == null || instancePlatform.isBlank()) {
             throw new AwsException("MissingParameter",
-                    "The request must contain the parameter AvailabilityZone.", 400);
+                    "The request must contain the parameter InstancePlatform.", 400);
         }
-        int count = instanceCount != null ? instanceCount : 1;
+        if (instanceCount == null) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter InstanceCount.", 400);
+        }
+        if ((availabilityZone == null || availabilityZone.isBlank())
+                && (availabilityZoneId == null || availabilityZoneId.isBlank())) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter AvailabilityZone or AvailabilityZoneId.", 400);
+        }
+        int count = requirePositiveInstanceCount(instanceCount);
         CapacityReservation reservation = new CapacityReservation();
         reservation.setCapacityReservationId("cr-" + randomHex(17));
         reservation.setOwnerId(accountId);
@@ -4814,8 +4823,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         reservation.setCapacityReservationArn(
                 AwsArnUtils.Arn.of("ec2", region, accountId, "capacity-reservation/" + reservation.getCapacityReservationId()).toString());
         reservation.setAvailabilityZone(availabilityZone);
+        reservation.setAvailabilityZoneId(availabilityZoneId);
         reservation.setInstanceType(instanceType);
-        reservation.setInstancePlatform(instancePlatform != null ? instancePlatform : "Linux/UNIX");
+        reservation.setInstancePlatform(instancePlatform);
         reservation.setTenancy(tenancy != null ? tenancy : "default");
         reservation.setTotalInstanceCount(count);
         reservation.setAvailableInstanceCount(count);
@@ -4856,7 +4866,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         ensureDefaultResources(region);
         CapacityReservation reservation = getRequiredCapacityReservation(region, capacityReservationId);
         if (instanceCount != null) {
-            int delta = instanceCount - reservation.getTotalInstanceCount();
+            int delta = requirePositiveInstanceCount(instanceCount) - reservation.getTotalInstanceCount();
             reservation.setTotalInstanceCount(instanceCount);
             reservation.setAvailableInstanceCount(Math.max(0, reservation.getAvailableInstanceCount() + delta));
         }
@@ -4889,6 +4899,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         reservation.setState("cancelled");
         reservation.setAvailableInstanceCount(0);
         capacityReservations.put(key(region, capacityReservationId), reservation);
+    }
+
+    private int requirePositiveInstanceCount(int instanceCount) {
+        if (instanceCount <= 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + instanceCount + ") for parameter InstanceCount is invalid. "
+                            + "InstanceCount must be greater than 0.", 400);
+        }
+        return instanceCount;
     }
 
     private CapacityReservation getRequiredCapacityReservation(String region, String capacityReservationId) {
@@ -6139,12 +6158,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         if (resource instanceof CapacityReservation cr) {
             return switch (filterName) {
-                case "capacity-reservation-id" -> matchesValue(values, cr.getCapacityReservationId());
                 case "instance-type" -> matchesValue(values, cr.getInstanceType());
                 case "availability-zone" -> matchesValue(values, cr.getAvailabilityZone());
                 case "tenancy" -> matchesValue(values, cr.getTenancy());
                 case "state" -> matchesValue(values, cr.getState());
                 case "instance-platform" -> matchesValue(values, cr.getInstancePlatform());
+                case "instance-match-criteria" -> matchesValue(values, cr.getInstanceMatchCriteria());
+                case "end-date-type" -> matchesValue(values, cr.getEndDateType());
                 default -> true;
             };
         }

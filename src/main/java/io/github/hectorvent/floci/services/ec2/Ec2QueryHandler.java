@@ -3226,6 +3226,7 @@ public class Ec2QueryHandler {
                 p.getFirst("InstanceType"),
                 p.getFirst("InstancePlatform"),
                 p.getFirst("AvailabilityZone"),
+                p.getFirst("AvailabilityZoneId"),
                 intOrNull(p, "InstanceCount"),
                 p.getFirst("Tenancy"),
                 p.getFirst("EbsOptimized") != null ? Boolean.valueOf(p.getFirst("EbsOptimized")) : null,
@@ -3280,6 +3281,7 @@ public class Ec2QueryHandler {
                 .elem("capacityReservationId", reservation.getCapacityReservationId())
                 .elem("ownerId", reservation.getOwnerId())
                 .elem("capacityReservationArn", reservation.getCapacityReservationArn())
+                .elem("availabilityZoneId", reservation.getAvailabilityZoneId())
                 .elem("availabilityZone", reservation.getAvailabilityZone())
                 .elem("instanceType", reservation.getInstanceType())
                 .elem("instancePlatform", reservation.getInstancePlatform())

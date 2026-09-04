@@ -164,33 +164,93 @@ class Ec2CapacityReservationIntegrationTest {
 
     @Test
     @Order(6)
-    void createWithoutInstanceCountDefaultsToOne() {
-        String secondId = given()
+    void createWithoutInstanceCountIsRejected() {
+        given()
             .formParam("Action", "CreateCapacityReservation")
             .formParam("InstanceType", "t3.nano")
+            .formParam("InstancePlatform", "Linux/UNIX")
             .formParam("AvailabilityZone", "us-east-1b")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("CreateCapacityReservationResponse.capacityReservation.totalInstanceCount", equalTo("1"))
-            .body("CreateCapacityReservationResponse.capacityReservation.instanceMatchCriteria", equalTo("open"))
-            .extract().path("CreateCapacityReservationResponse.capacityReservation.capacityReservationId");
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"))
+            .body("Response.Errors.Error.Message", containsString("InstanceCount"));
+    }
+
+    @Test
+    @Order(7)
+    void nonPositiveInstanceCountIsRejectedOnCreateAndModify() {
+        given()
+            .formParam("Action", "CreateCapacityReservation")
+            .formParam("InstanceType", "t3.nano")
+            .formParam("InstancePlatform", "Linux/UNIX")
+            .formParam("AvailabilityZone", "us-east-1b")
+            .formParam("InstanceCount", "0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
 
         given()
-            .formParam("Action", "CancelCapacityReservation")
-            .formParam("CapacityReservationId", secondId)
+            .formParam("Action", "ModifyCapacityReservation")
+            .formParam("CapacityReservationId", capacityReservationId)
+            .formParam("InstanceCount", "-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+
+        given()
+            .formParam("Action", "DescribeCapacityReservations")
+            .formParam("CapacityReservationId.1", capacityReservationId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("CancelCapacityReservationResponse.return", equalTo("true"));
+            .body("DescribeCapacityReservationsResponse.capacityReservationSet.item.totalInstanceCount", equalTo("5"))
+            .body("DescribeCapacityReservationsResponse.capacityReservationSet.item.availableInstanceCount", equalTo("5"));
     }
 
     @Test
-    @Order(7)
+    @Order(8)
+    void createAcceptsAvailabilityZoneIdInsteadOfAvailabilityZone() {
+        given()
+            .formParam("Action", "CreateCapacityReservation")
+            .formParam("InstanceType", "t3.nano")
+            .formParam("InstancePlatform", "Linux/UNIX")
+            .formParam("AvailabilityZoneId", "use1-az2")
+            .formParam("InstanceCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateCapacityReservationResponse.capacityReservation.availabilityZoneId", equalTo("use1-az2"))
+            .body("CreateCapacityReservationResponse.capacityReservation.totalInstanceCount", equalTo("1"))
+            .body("CreateCapacityReservationResponse.capacityReservation.instanceMatchCriteria", equalTo("open"));
+
+        given()
+            .formParam("Action", "CreateCapacityReservation")
+            .formParam("InstanceType", "t3.nano")
+            .formParam("InstancePlatform", "Linux/UNIX")
+            .formParam("InstanceCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    @Test
+    @Order(9)
     void missingRequiredParameterIsRejected() {
         given()
             .formParam("Action", "CreateCapacityReservation")
@@ -204,7 +264,7 @@ class Ec2CapacityReservationIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(10)
     void cancelMarksTheReservationCancelledRatherThanDeletingIt() {
         given()
             .formParam("Action", "CancelCapacityReservation")
@@ -229,7 +289,7 @@ class Ec2CapacityReservationIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void describingAMissingReservationReturnsTheModelledError() {
         given()
             .formParam("Action", "DescribeCapacityReservations")
@@ -244,22 +304,12 @@ class Ec2CapacityReservationIntegrationTest {
     }
 
     /**
-     * lex00/floci#137: CreateCapacityReservation's own inline tag-specification parameter is the
-     * PLURAL "TagSpecifications.N.*", not the singular "TagSpecification.N.*" every other create
-     * action in this codebase uses - confirmed by capturing the real wire request a genuine
-     * hashicorp/terraform-provider-aws apply sends (TF_LOG=DEBUG), not by reading the docs alone.
-     * Order(1) above already exercises the singular spelling and would keep passing even if the
-     * plural one were never handled, which is exactly how this shipped unnoticed: the choudoufu
-     * corpus-autoscaling-complete/greenfield gauntlet unit caught it by reading
-     * DescribeCapacityReservations/DescribeTags directly against a real apply, with no terraform
-     * in the loop, and finding the tags simply absent right after create.
-     *
-     * <p>A separate, independent reservation and a follow-up Describe (not just the Create
-     * response's own echo) so this proves the tag is actually PERSISTED, not merely reflected in
-     * the same in-memory object the handler happens to still be holding.
+     * {@code parseTagsForResource} accepts both TagSpecification spellings for every action.
+     * Order(1) covers the singular form. This test covers the plural form and reads the tags
+     * back through Describe.
      */
     @Test
-    @Order(10)
+    @Order(12)
     void createHonoursThePluralTagSpecificationsParameter() {
         String id = given()
             .formParam("Action", "CreateCapacityReservation")
