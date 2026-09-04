@@ -814,7 +814,7 @@ public class KinesisService implements ResourceProvider {
 
     /**
      * Resolve for an out-of-request-scope PRODUCER (CDC forwarding, TTL sweep), migrating a legacy
-     * unprefixed stream into the account partition on write — mirroring the ambient {@code store.get()}
+     * unprefixed stream into the account partition on write, mirroring the ambient {@code store.get()}
      * fallback the producer used before account-scoping, so an installation with an existing CDC
      * destination and an unmigrated stream keeps forwarding after upgrade. Ownership is validated by the
      * stream's own accountId/ARN so one tenant cannot adopt another's unprefixed stream.

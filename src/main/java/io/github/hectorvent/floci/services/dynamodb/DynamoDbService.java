@@ -467,7 +467,7 @@ public class DynamoDbService implements ResourceProvider {
             streamService.deleteStream(canonicalTableName, region);
         }
         if (kinesisForwarder != null) {
-            // Discard any buffered CDC records and stop draining — the destination stream is gone.
+            // Discard any buffered CDC records and stop draining: the destination stream is gone.
             kinesisForwarder.onTableDeleted(regionResolver.getAccountId(), region, canonicalTableName);
         }
         LOG.infov("Deleted table: {0}", canonicalTableName);
@@ -476,7 +476,7 @@ public class DynamoDbService implements ResourceProvider {
     /**
      * Notify the CDC forwarder that a Kinesis streaming destination was disabled so it discards any
      * buffered records for it and stops draining. {@code tableName} must be the resolved (canonical)
-     * table name — the same value the forward path keys destination state on. No-op without a forwarder.
+     * table name, the same value the forward path keys destination state on. No-op without a forwarder.
      */
     public void onKinesisStreamingDestinationDisabled(String tableName, String streamArn, String region) {
         if (kinesisForwarder != null) {

@@ -26,9 +26,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Forwards DynamoDB change events to Kinesis with a <strong>bounded best-effort, in-process retry</strong>
- * delivery contract (NOT durable at-least-once — the buffer is in memory and lost on restart).
+ * delivery contract (NOT durable at-least-once: the buffer is in memory and lost on restart).
  *
- * <p>The write path only ENQUEUES (it never performs Kinesis I/O or blocks — a slow/dead destination can
+ * <p>The write path only ENQUEUES (it never performs Kinesis I/O or blocks: a slow/dead destination can
  * neither stall a DynamoDB write nor the TTL sweep). A per-destination single-flight drain, scheduled on a
  * small daemon pool, performs the actual {@code putRecord} outside the destination lock and:
  * <ul>
@@ -133,7 +133,7 @@ public class KinesisStreamingForwarder {
         };
     }
 
-    // ──────────────────────────── Enqueue (write path — never blocks, never throws) ────────────────────────────
+    // ──────────────────────────── Enqueue (write path: never blocks, never throws) ────────────────────────────
 
     public void forward(String eventName, JsonNode oldItem, JsonNode newItem,
                         TableDefinition table, String region, String ownerAccountId) {
@@ -214,7 +214,7 @@ public class KinesisStreamingForwarder {
                     return;
                 }
                 // Lease the head OUT of the queue for the duration of the send. A concurrent overflow
-                // eviction can then only drop a still-buffered record — never the one being delivered —
+                // eviction can then only drop a still-buffered record, never the one being delivered,
                 // and completion below reconciles exactly this leased record (no blind pollFirst).
                 head = st.queue.pollFirst();
             }
@@ -240,7 +240,7 @@ public class KinesisStreamingForwarder {
             synchronized (st) {
                 if (scheduledEpoch != st.epoch) {
                     // Torn down mid-send: the leased record is discarded along with the rest of the buffer.
-                    // The dispatched send may still complete — an inherent, harmless race for an in-memory
+                    // The dispatched send may still complete, an inherent and harmless race for an in-memory
                     // emulator (teardown stops all FUTURE sends; it cannot recall one already in flight).
                     return;
                 }
@@ -253,7 +253,7 @@ public class KinesisStreamingForwarder {
                 recordError(st, failure);
                 if (terminal) {
                     // The leased poison record is already out of the queue: drop it (do NOT wedge) and let
-                    // the records behind it flow. Its probe budget dies with it — the next record earns a fresh one.
+                    // the records behind it flow. Its probe budget dies with it: the next record earns a fresh one.
                     st.dropped++;
                     st.consecutiveFailedProbes = 0;
                     LOG.errorv(failure, "Dropped DynamoDB CDC record (terminal {0}) for stream {1}",
@@ -272,7 +272,7 @@ public class KinesisStreamingForwarder {
                     st.health = Health.GAVE_UP;
                     st.drainScheduled = false;
                     // Reset the budget so a later event starts a fresh episode: a transient outage must
-                    // not permanently wedge delivery — the next forward re-attempts and self-heals.
+                    // not permanently wedge delivery: the next forward re-attempts and self-heals.
                     st.consecutiveFailedProbes = 0;
                     LOG.errorv("CDC delivery gave up for stream {0} after {1} attempts; dropped {2} buffered "
                                     + "record(s). Last error: {3}",

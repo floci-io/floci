@@ -39,7 +39,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>{@code forward} is proven ENQUEUE-ONLY (no synchronous Kinesis I/O, never throws); the actual send,
  * retry, terminal-drop, give-up, overflow, FIFO, and lifecycle behaviour are exercised deterministically
- * by driving a manual {@link KinesisStreamingForwarder.Scheduler} step by step — no real timers, no sleeps
+ * by driving a manual {@link KinesisStreamingForwarder.Scheduler} step by step: no real timers, no sleeps
  * in the delivery assertions.
  */
 class KinesisStreamingForwarderTest {
@@ -158,7 +158,7 @@ class KinesisStreamingForwarderTest {
 
         assertDoesNotThrow(() -> forwarder.forward("INSERT", null, item("k1"), table, "us-east-1", ACCOUNT));
 
-        // The write path did no Kinesis I/O — the record is buffered, not delivered and not dropped.
+        // The write path did no Kinesis I/O: the record is buffered, not delivered and not dropped.
         verifyNoInteractions(kinesisService);
         DestinationForwardingStats s = onlyStat();
         assertEquals(1, s.queueDepth());
@@ -420,7 +420,7 @@ class KinesisStreamingForwarderTest {
         assertEquals(5L, s.overflowed());
         assertEquals(5L, s.dropped());
         assertEquals(burst + 1 - 5, s.forwarded());
-        // Every one of the burst+1 records is accounted for exactly once — no silent loss.
+        // Every one of the burst+1 records is accounted for exactly once: no silent loss.
         assertEquals(burst + 1, s.forwarded() + s.dropped());
         assertEquals(0, s.queueDepth());
     }
@@ -433,7 +433,7 @@ class KinesisStreamingForwarderTest {
         when(kinesisService.putRecordForAccount(anyString(), anyString(), any(byte[].class), anyString(), anyString()))
                 .thenReturn("seq");
 
-        // Executor down: scheduling the initial drain is rejected — but forward must not throw, and the
+        // Executor down: scheduling the initial drain is rejected, but forward must not throw, and the
         // record stays buffered (not dropped).
         assertDoesNotThrow(() -> f.forward("INSERT", null, item("k1"), table, "us-east-1", ACCOUNT));
         assertEquals(1, f.forwardingStats().get(0).queueDepth());
