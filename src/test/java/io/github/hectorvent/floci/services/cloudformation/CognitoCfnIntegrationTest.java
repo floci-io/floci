@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.github.hectorvent.floci.testing.RestAssuredJsonUtils.awsAction;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -21,14 +22,14 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Provisions an {@code AWS::Cognito::UserPoolDomain} through a CloudFormation stack, laid out the
- * way CDK emits a custom domain: a user pool, the domain with an ACM certificate, and a Route 53
- * alias record whose target is {@code Fn::GetAtt CloudFrontDistribution}. Asserts that the
- * attribute is the CloudFront name {@code DescribeUserPoolDomain} reports rather than the literal
- * {@code Domain.CloudFrontDistribution} the stub arm would leave in the record, that a certificate
- * change updates the domain in place so the alias target survives, that a changed domain name
- * replaces the domain, and that deleting the stack removes the domain before the pool that owns
- * it. A prefix domain, which has no distribution of its own, resolves the attribute to an empty
- * string rather than the literal.
+ * way CDK emits a custom domain: a user pool, an {@code AWS::CertificateManager::Certificate}, the
+ * domain referencing the certificate, and a Route 53 alias record whose target is
+ * {@code Fn::GetAtt CloudFrontDistribution}. Asserts that the attribute is the CloudFront name
+ * {@code DescribeUserPoolDomain} reports rather than the literal {@code Domain.CloudFrontDistribution}
+ * the stub arm would leave in the record, that rotating to a new certificate resource updates the
+ * domain in place so the alias target survives, that a changed domain name replaces the domain, and
+ * that deleting the stack removes the domain before the pool that owns it. A prefix domain, which
+ * has no distribution of its own, resolves the attribute to an empty string rather than the literal.
  */
 @QuarkusTest
 class CognitoCfnIntegrationTest {
@@ -40,12 +41,14 @@ class CognitoCfnIntegrationTest {
     private static final String DOMAIN = "auth.cognito-cfn-it.example.com";
     private static final String REPLACEMENT_DOMAIN = "login.cognito-cfn-it.example.com";
     private static final String PREFIX_DOMAIN = "cognito-cfn-it-prefix";
-    private static final String CERTIFICATE_ARN =
-            "arn:aws:acm:us-east-1:000000000000:certificate/11111111-1111-1111-1111-111111111111";
-    private static final String RENEWED_CERTIFICATE_ARN =
-            "arn:aws:acm:us-east-1:000000000000:certificate/22222222-2222-2222-2222-222222222222";
 
-    private static String customDomainTemplate(String domain, String certificateArn) {
+    /**
+     * The certificate carries the logical id so a rotation can add a new certificate resource and
+     * drop the old one, which is how a certificate is replaced without a moment where the domain
+     * points at a certificate that is being deleted. A wildcard name keeps a domain rename from
+     * replacing the certificate as well.
+     */
+    private static String customDomainTemplate(String domain, String certificateLogicalId) {
         return """
             {
               "Resources": {
@@ -53,12 +56,16 @@ class CognitoCfnIntegrationTest {
                   "Type": "AWS::Cognito::UserPool",
                   "Properties": {"UserPoolName": "cognito-cfn-it-pool"}
                 },
+                "%1$s": {
+                  "Type": "AWS::CertificateManager::Certificate",
+                  "Properties": {"DomainName": "*.cognito-cfn-it.example.com", "ValidationMethod": "DNS"}
+                },
                 "Domain": {
                   "Type": "AWS::Cognito::UserPoolDomain",
                   "Properties": {
-                    "Domain": "%s",
+                    "Domain": "%2$s",
                     "UserPoolId": {"Ref": "Pool"},
-                    "CustomDomainConfig": {"CertificateArn": "%s"},
+                    "CustomDomainConfig": {"CertificateArn": {"Fn::GetAtt": ["%1$s", "CertificateArn"]}},
                     "ManagedLoginVersion": 2
                   }
                 },
@@ -70,7 +77,7 @@ class CognitoCfnIntegrationTest {
                   "Type": "AWS::Route53::RecordSet",
                   "Properties": {
                     "HostedZoneId": {"Ref": "Zone"},
-                    "Name": "%s",
+                    "Name": "%2$s",
                     "Type": "A",
                     "AliasTarget": {
                       "DNSName": {"Fn::GetAtt": ["Domain", "CloudFrontDistribution"]},
@@ -82,10 +89,11 @@ class CognitoCfnIntegrationTest {
               "Outputs": {
                 "PoolId": {"Value": {"Ref": "Pool"}},
                 "DomainRef": {"Value": {"Ref": "Domain"}},
+                "CertArn": {"Value": {"Fn::GetAtt": ["%1$s", "CertificateArn"]}},
                 "AliasTarget": {"Value": {"Fn::GetAtt": ["Domain", "CloudFrontDistribution"]}}
               }
             }
-            """.formatted(domain, certificateArn, domain);
+            """.formatted(certificateLogicalId, domain);
     }
 
     private static final String PREFIX_DOMAIN_TEMPLATE = """
@@ -117,33 +125,43 @@ class CognitoCfnIntegrationTest {
     }
 
     @Test
-    void customDomainStackExposesTheCloudFrontNameUpdatesInPlaceReplacesOnRenameAndDeletesBeforeThePool()
+    void customDomainStackExposesTheCloudFrontNameRotatesTheCertificateReplacesOnRenameAndDeletesBeforeThePool()
             throws Exception {
-        cloudFormation(CUSTOM_STACK, "CreateStack", customDomainTemplate(DOMAIN, CERTIFICATE_ARN));
+        cloudFormation(CUSTOM_STACK, "CreateStack", customDomainTemplate(DOMAIN, "Cert"));
 
         String stacks = describeStacks(CUSTOM_STACK, "CREATE_COMPLETE");
         String poolId = outputValue(stacks, "PoolId");
         String aliasTarget = outputValue(stacks, "AliasTarget");
+        String certificateArn = outputValue(stacks, "CertArn");
         assertEquals(DOMAIN, outputValue(stacks, "DomainRef"));
         assertTrue(aliasTarget.endsWith(".cloudfront.net"),
                 "Fn::GetAtt CloudFrontDistribution must be a CloudFront name: " + aliasTarget);
+        assertTrue(certificateArn.startsWith("arn:aws:acm:us-east-1:"),
+                "the certificate must be provisioned rather than stubbed: " + certificateArn);
+        assertCertificateStatus(certificateArn, "ISSUED");
 
         JsonNode description = describeDomain(DOMAIN);
         assertEquals(poolId, description.path("UserPoolId").asText());
         assertEquals(aliasTarget, description.path("CloudFrontDistribution").asText());
-        assertEquals(CERTIFICATE_ARN, description.path("CustomDomainConfig").path("CertificateArn").asText());
+        assertEquals(certificateArn, description.path("CustomDomainConfig").path("CertificateArn").asText());
         assertEquals(2, description.path("ManagedLoginVersion").asInt());
 
-        cloudFormation(CUSTOM_STACK, "UpdateStack", customDomainTemplate(DOMAIN, RENEWED_CERTIFICATE_ARN));
+        // Rotation: a new certificate resource takes over and the old one leaves the template. The
+        // domain moves to the new certificate in place, and the old certificate is removed once
+        // nothing references it.
+        cloudFormation(CUSTOM_STACK, "UpdateStack", customDomainTemplate(DOMAIN, "RenewedCert"));
 
-        describeStacks(CUSTOM_STACK, "UPDATE_COMPLETE");
+        stacks = describeStacks(CUSTOM_STACK, "UPDATE_COMPLETE");
+        String renewedCertificateArn = outputValue(stacks, "CertArn");
+        assertNotEquals(certificateArn, renewedCertificateArn);
         description = describeDomain(DOMAIN);
-        assertEquals(RENEWED_CERTIFICATE_ARN, description.path("CustomDomainConfig").path("CertificateArn").asText());
+        assertEquals(renewedCertificateArn, description.path("CustomDomainConfig").path("CertificateArn").asText());
         assertEquals(aliasTarget, description.path("CloudFrontDistribution").asText(),
                 "a certificate change must keep the CloudFront distribution the alias record points at");
+        assertCertificateIsGone(certificateArn);
 
         // Domain is createOnly: a new name is a replacement, created before the old domain goes.
-        cloudFormation(CUSTOM_STACK, "UpdateStack", customDomainTemplate(REPLACEMENT_DOMAIN, RENEWED_CERTIFICATE_ARN));
+        cloudFormation(CUSTOM_STACK, "UpdateStack", customDomainTemplate(REPLACEMENT_DOMAIN, "RenewedCert"));
 
         stacks = describeStacks(CUSTOM_STACK, "UPDATE_COMPLETE");
         assertEquals(REPLACEMENT_DOMAIN, outputValue(stacks, "DomainRef"));
@@ -154,11 +172,13 @@ class CognitoCfnIntegrationTest {
         description = describeDomain(REPLACEMENT_DOMAIN);
         assertEquals(poolId, description.path("UserPoolId").asText());
         assertEquals(replacementTarget, description.path("CloudFrontDistribution").asText());
+        assertEquals(renewedCertificateArn, description.path("CustomDomainConfig").path("CertificateArn").asText());
 
         cloudFormation(CUSTOM_STACK, "DeleteStack", null);
         awaitStackDeleted(CUSTOM_STACK);
 
         assertDomainIsGone(REPLACEMENT_DOMAIN);
+        assertCertificateIsGone(renewedCertificateArn);
         cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
             .then()
             .body("__type", equalTo("ResourceNotFoundException"));
@@ -233,6 +253,20 @@ class CognitoCfnIntegrationTest {
 
     private static void assertDomainIsGone(String domain) {
         cognitoAction("DescribeUserPoolDomain", "{\"Domain\": \"" + domain + "\"}")
+            .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static void assertCertificateStatus(String certificateArn, String status) {
+        awsAction("CertificateManager", "DescribeCertificate", "{\"CertificateArn\": \"" + certificateArn + "\"}")
+            .then()
+            .statusCode(200)
+            .body("Certificate.Status", equalTo(status));
+    }
+
+    private static void assertCertificateIsGone(String certificateArn) {
+        awsAction("CertificateManager", "DescribeCertificate", "{\"CertificateArn\": \"" + certificateArn + "\"}")
             .then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
