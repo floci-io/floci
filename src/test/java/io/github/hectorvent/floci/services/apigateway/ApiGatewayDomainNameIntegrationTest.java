@@ -127,6 +127,31 @@ class ApiGatewayDomainNameIntegrationTest {
     }
 
     @Test
+    void endpointTypePatchPathMustNameTheCurrentType() {
+        String domain = "endpoint-path.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","regionalCertificateArn":"%s","endpointConfiguration":{"types":["REGIONAL"]}}
+                """.formatted(domain, CERTIFICATE_ARN));
+
+        // A path naming a type the domain does not have, or no type at all, is rejected as on AWS,
+        // and the domain is left as it was.
+        for (String path : List.of("/endpointConfiguration/types/EDGE", "/endpointConfiguration/types/FOO")) {
+            given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"" + path + "\",\"value\":\"EDGE\"}]}")
+            .when().patch("/domainnames/" + domain).then()
+                .statusCode(400)
+                .body("message", equalTo("Invalid patch path " + path
+                        + ": the path must name the domain's current endpoint type, REGIONAL"));
+        }
+        given().when().get("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("endpointConfiguration.types[0]", equalTo("REGIONAL"))
+            .body("distributionDomainName", nullValue());
+
+        deleteDomain(domain);
+    }
+
+    @Test
     void tagsAreReportedAndManagedThroughTheTagApi() {
         String domain = "tags.apigw-domain-it.example.com";
         String arn = "arn:aws:apigateway:us-east-1::/domainnames/" + domain;
@@ -189,6 +214,95 @@ class ApiGatewayDomainNameIntegrationTest {
         assertEquals(1, created.get(), "domain names are unique, so exactly one caller may create it");
         assertEquals(callers - 1, rejected.get());
         service.deleteDomainName(REGION, domain);
+    }
+
+    @Test
+    void creatingAMappingOnATakenBasePathIsAConflict() {
+        String domain = "conflict.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","regionalCertificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN));
+        String mapping = "{\"basePath\":\"v1\",\"restApiId\":\"abc123def4\",\"stage\":\"prod\"}";
+        given().contentType(ContentType.JSON).body(mapping)
+            .when().post("/domainnames/" + domain + "/basepathmappings").then().statusCode(201);
+
+        // AWS refuses a second mapping on the same base path rather than replacing the first.
+        given().contentType(ContentType.JSON).body(mapping)
+            .when().post("/domainnames/" + domain + "/basepathmappings").then()
+            .statusCode(409)
+            .body("message", equalTo("Base path already exists for this domain name"));
+
+        given().when().get("/domainnames/" + domain + "/basepathmappings/v1").then()
+            .statusCode(200)
+            .body("stage", equalTo("prod"));
+
+        deleteDomain(domain);
+    }
+
+    @Test
+    void concurrentMappingCreatesOnOneBasePathAdmitExactlyOne() throws Exception {
+        String domain = "mapping-race.apigw-domain-it.example.com";
+        service.createDomainName(REGION, Map.of("domainName", domain));
+        Outcome outcome = race(8, () -> service.createBasePathMapping(REGION, domain,
+                Map.of("basePath", "v1", "restApiId", "abc123def4", "stage", "prod")), "ConflictException");
+
+        assertEquals(1, outcome.succeeded(), "one base path holds one mapping, so exactly one caller may create it");
+        assertEquals(7, outcome.rejected());
+        service.deleteDomainName(REGION, domain);
+    }
+
+    @Test
+    void concurrentTagWritesOnOneDomainKeepEveryKey() throws Exception {
+        String domain = "tag-race.apigw-domain-it.example.com";
+        service.createDomainName(REGION, Map.of("domainName", domain));
+        AtomicInteger next = new AtomicInteger();
+        Outcome outcome = race(8, () -> {
+            String key = "key-" + next.getAndIncrement();
+            service.tagDomainName(REGION, domain, Map.of(key, "value"));
+        }, null);
+
+        assertEquals(8, outcome.succeeded());
+        Map<String, String> tags = service.getDomainNameTags(REGION, domain);
+        assertEquals(8, tags.size(), "a tag write must not lose a concurrent write: " + tags);
+        service.deleteDomainName(REGION, domain);
+    }
+
+    private record Outcome(int succeeded, int rejected) {
+    }
+
+    /** Runs the call from {@code callers} threads released together; a rejection must carry {@code rejectedCode}. */
+    private static Outcome race(int callers, ThrowingRunnable call, String rejectedCode) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(callers);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger succeeded = new AtomicInteger();
+        AtomicInteger rejected = new AtomicInteger();
+        try {
+            List<Future<?>> calls = new java.util.ArrayList<>();
+            for (int i = 0; i < callers; i++) {
+                calls.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        call.run();
+                        succeeded.incrementAndGet();
+                    } catch (AwsException e) {
+                        assertEquals(rejectedCode, e.getErrorCode());
+                        rejected.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> future : calls) {
+                future.get();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        return new Outcome(succeeded.get(), rejected.get());
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Exception;
     }
 
     private static io.restassured.response.ValidatableResponse createDomain(String body) {

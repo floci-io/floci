@@ -66,6 +66,12 @@ public class ApiGatewayService {
     private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
+    /**
+     * Guards every change to a custom domain or a base path mapping. The stores hand out live
+     * objects, so a patch or a tag write is a read-modify-write; two of them on one domain at the
+     * same time would drop one another's changes or corrupt the tag map. One lock for both kinds
+     * also keeps a mapping from being created under a domain that is being deleted at that moment.
+     */
     private final Object domainNameLock = new Object();
 
     // Constants
@@ -1367,14 +1373,22 @@ public class ApiGatewayService {
     }
 
     public void deleteDomainName(String region, String domainName) {
-        getDomainName(region, domainName);
-        domainStore.delete(domainKey(region, domainName));
-        // Delete associated mappings
-        String prefix = region + "::" + domainName + "::";
-        basePathMappingStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(basePathMappingStore::delete);
+        synchronized (domainNameLock) {
+            getDomainName(region, domainName);
+            domainStore.delete(domainKey(region, domainName));
+            // Delete associated mappings
+            String prefix = region + "::" + domainName + "::";
+            basePathMappingStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(basePathMappingStore::delete);
+        }
     }
 
     public CustomDomain updateDomainName(String region, String domainName, List<Map<String, String>> patchOperations) {
+        synchronized (domainNameLock) {
+            return applyDomainNamePatch(region, domainName, patchOperations);
+        }
+    }
+
+    private CustomDomain applyDomainNamePatch(String region, String domainName, List<Map<String, String>> patchOperations) {
         String domainKey = domainKey(region, domainName);
         CustomDomain domain = getDomainName(region, domainName);
         if (domain == null) {
@@ -1426,6 +1440,11 @@ public class ApiGatewayService {
                 newSecurityPolicy = value;
             } else if (path.startsWith("/endpointConfiguration/types/")) {
                 // The path names the type the domain has now; the value names the one it should get.
+                if (!path.equals("/endpointConfiguration/types/" + newEndpointConfigurationType)) {
+                    throw new AwsException("BadRequestException", "Invalid patch path " + path
+                            + ": the path must name the domain's current endpoint type, "
+                            + newEndpointConfigurationType, 400);
+                }
                 if (!"REGIONAL".equals(value) && !"EDGE".equals(value)) {
                     throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + value, 400);
                 }
@@ -1457,13 +1476,19 @@ public class ApiGatewayService {
     }
 
     public BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request) {
-        getDomainName(region, domainName);
         String basePath = canonicalBasePath((String) request.get("basePath"));
         String apiId = (String) request.get("restApiId");
         String stage = (String) request.get("stage");
 
         BasePathMapping mapping = new BasePathMapping(basePath, apiId, stage);
-        basePathMappingStore.put(mappingKey(region, domainName, basePath), mapping);
+        synchronized (domainNameLock) {
+            getDomainName(region, domainName);
+            String key = mappingKey(region, domainName, basePath);
+            if (basePathMappingStore.get(key).isPresent()) {
+                throw new AwsException("ConflictException", "Base path already exists for this domain name", 409);
+            }
+            basePathMappingStore.put(key, mapping);
+        }
         LOG.infov("Created mapping for {0} path={1} -> API {2}", domainName, basePath, apiId);
         return mapping;
     }
@@ -1496,9 +1521,11 @@ public class ApiGatewayService {
     }
 
     public void deleteBasePathMapping(String region, String domainName, String basePath) {
-        getBasePathMapping(region, domainName, basePath);
-        String path = (basePath == null || basePath.isEmpty() || "/" .equals(basePath)) ? "(none)" : basePath;
-        basePathMappingStore.delete(mappingKey(region, domainName, path));
+        synchronized (domainNameLock) {
+            getBasePathMapping(region, domainName, basePath);
+            String path = (basePath == null || basePath.isEmpty() || "/" .equals(basePath)) ? "(none)" : basePath;
+            basePathMappingStore.delete(mappingKey(region, domainName, path));
+        }
     }
 
     /**
@@ -1531,13 +1558,22 @@ public class ApiGatewayService {
      */
     public void deleteBasePathMappingRecord(String region, String domainName, String storedBasePath) {
         String key = mappingKey(region, domainName, storedBasePath == null ? "" : storedBasePath);
-        if (basePathMappingStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException", "Base path mapping not found", 404);
+        synchronized (domainNameLock) {
+            if (basePathMappingStore.get(key).isEmpty()) {
+                throw new AwsException("NotFoundException", "Base path mapping not found", 404);
+            }
+            basePathMappingStore.delete(key);
         }
-        basePathMappingStore.delete(key);
     }
 
     public BasePathMapping updateBasePathMapping(String region, String domainName, String basePath, List<Map<String, String>> patchOperations) {
+        synchronized (domainNameLock) {
+            return applyBasePathMappingPatch(region, domainName, basePath, patchOperations);
+        }
+    }
+
+    private BasePathMapping applyBasePathMappingPatch(String region, String domainName, String basePath,
+                                                      List<Map<String, String>> patchOperations) {
         String normalizedPath = (basePath == null || basePath.isEmpty() || "/".equals(basePath)) ? "(none)" : basePath;
 
         BasePathMapping mapping = getBasePathMapping(region, domainName, basePath);
@@ -1896,25 +1932,38 @@ public class ApiGatewayService {
     }
 
     public Map<String, String> getDomainNameTags(String region, String domainName) {
-        Map<String, String> tags = getDomainName(region, domainName).getTags();
-        return tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+        synchronized (domainNameLock) {
+            Map<String, String> tags = getDomainName(region, domainName).getTags();
+            return tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+        }
     }
 
+    /**
+     * Both tag writes replace the domain's tag map instead of changing it in place: the store hands
+     * out the live object, and a GetDomainName in flight on another thread may be iterating the map
+     * it was handed. The lock orders the writers; the fresh map keeps the readers safe.
+     */
     public void tagDomainName(String region, String domainName, Map<String, String> tags) {
         ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
-        CustomDomain domain = getDomainName(region, domainName);
-        if (domain.getTags() == null) {
-            domain.setTags(new LinkedHashMap<>());
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            Map<String, String> merged = domain.getTags() == null
+                    ? new LinkedHashMap<>() : new LinkedHashMap<>(domain.getTags());
+            merged.putAll(tags);
+            domain.setTags(merged);
+            domainStore.put(domainKey(region, domainName), domain);
         }
-        domain.getTags().putAll(tags);
-        domainStore.put(domainKey(region, domainName), domain);
     }
 
     public void untagDomainName(String region, String domainName, List<String> tagKeys) {
-        CustomDomain domain = getDomainName(region, domainName);
-        if (domain.getTags() != null) {
-            tagKeys.forEach(domain.getTags()::remove);
-            domainStore.put(domainKey(region, domainName), domain);
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            if (domain.getTags() != null) {
+                Map<String, String> remaining = new LinkedHashMap<>(domain.getTags());
+                tagKeys.forEach(remaining::remove);
+                domain.setTags(remaining);
+                domainStore.put(domainKey(region, domainName), domain);
+            }
         }
     }
 

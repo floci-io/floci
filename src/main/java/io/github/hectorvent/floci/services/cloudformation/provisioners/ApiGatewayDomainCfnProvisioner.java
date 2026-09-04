@@ -149,10 +149,13 @@ public class ApiGatewayDomainCfnProvisioner implements CfnResourceProvisioner {
                     "/endpointConfiguration/types/" + existing.getEndpointConfigurationType(),
                     desired.endpointType()));
         }
-        reconcileTags(existing, desired.tags(), region);
-        return operations.isEmpty()
+        // The patch carries the validation, so it goes first: a rejected update leaves the tags as
+        // they were instead of half-applying the template.
+        CustomDomain updated = operations.isEmpty()
                 ? existing
                 : apiGatewayService.updateDomainName(region, existing.getDomainName(), operations);
+        reconcileTags(updated, desired.tags(), region);
+        return updated;
     }
 
     /** Drives the domain's tags to the template's: a dropped key is untagged, an unchanged set is left alone. */

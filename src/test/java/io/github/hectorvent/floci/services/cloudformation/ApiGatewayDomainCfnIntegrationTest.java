@@ -53,7 +53,8 @@ class ApiGatewayDomainCfnIntegrationTest {
             "StageName": {"Type": "String"},
             "Domain": {"Type": "String"},
             "SecurityPolicy": {"Type": "String"},
-            "TagValue": {"Type": "String"}
+            "TagValue": {"Type": "String"},
+            "EndpointType": {"Type": "String", "Default": "REGIONAL"}
           },
           "Resources": {
             "Cert": {
@@ -64,7 +65,7 @@ class ApiGatewayDomainCfnIntegrationTest {
               "Type": "AWS::ApiGateway::DomainName",
               "Properties": {
                 "DomainName": {"Ref": "Domain"},
-                "EndpointConfiguration": {"Types": ["REGIONAL"]},
+                "EndpointConfiguration": {"Types": [{"Ref": "EndpointType"}]},
                 "RegionalCertificateArn": {"Ref": "Cert"},
                 "SecurityPolicy": {"Ref": "SecurityPolicy"},
                 "Tags": [{"Key": "stack", "Value": {"Ref": "TagValue"}}]
@@ -174,6 +175,32 @@ class ApiGatewayDomainCfnIntegrationTest {
         getMapping(DOMAIN, "v1").statusCode(200).body("stage", equalTo("dev"));
         invokeThroughDomain(DOMAIN, "/v1/items");
 
+        // Moving to EDGE is also in place: the domain keeps its identity and regional name, and the
+        // distribution attributes a DNS alias for an edge domain points at appear.
+        cloudFormation(STACK, "UpdateStack", TEMPLATE,
+                parameters(apiId, "dev", DOMAIN, "TLS_1_0", "updated", "EDGE"));
+
+        stacks = describeStacks(STACK, "UPDATE_COMPLETE");
+        assertEquals(DOMAIN, outputValue(stacks, "DomainRef"));
+        assertEquals(regionalDomainName, outputValue(stacks, "RegionalDomainName"));
+        String distribution = outputValue(stacks, "DistributionDomainName");
+        assertTrue(distribution.endsWith(".cloudfront.net"), "an edge domain has a distribution: " + distribution);
+        assertEquals("Z2FDTNDATAQYW2", outputValue(stacks, "DistributionHostedZoneId"));
+        getDomain(DOMAIN).statusCode(200)
+              .body("endpointConfiguration.types[0]", equalTo("EDGE"))
+              .body("distributionDomainName", equalTo(distribution));
+        invokeThroughDomain(DOMAIN, "/v1/items");
+
+        // And back: a regional domain has no distribution, so the attributes empty again.
+        cloudFormation(STACK, "UpdateStack", TEMPLATE, parameters(apiId, "dev", DOMAIN, "TLS_1_0", "updated"));
+
+        stacks = describeStacks(STACK, "UPDATE_COMPLETE");
+        assertEquals("", outputValue(stacks, "DistributionDomainName"));
+        assertEquals("", outputValue(stacks, "DistributionHostedZoneId"));
+        getDomain(DOMAIN).statusCode(200)
+              .body("endpointConfiguration.types[0]", equalTo("REGIONAL"))
+              .body("distributionDomainName", nullValue());
+
         // DomainName is createOnly: a new name is a replacement, created before the old domain goes,
         // and the mapping follows it because its DomainName is createOnly too.
         cloudFormation(STACK, "UpdateStack", TEMPLATE, parameters(apiId, "dev", RENAMED_DOMAIN, "TLS_1_0", "updated"));
@@ -222,8 +249,13 @@ class ApiGatewayDomainCfnIntegrationTest {
 
     private static Map<String, String> parameters(String apiId, String stage, String domain,
                                                   String securityPolicy, String tagValue) {
+        return parameters(apiId, stage, domain, securityPolicy, tagValue, "REGIONAL");
+    }
+
+    private static Map<String, String> parameters(String apiId, String stage, String domain,
+                                                  String securityPolicy, String tagValue, String endpointType) {
         return Map.of("ApiId", apiId, "StageName", stage, "Domain", domain,
-                "SecurityPolicy", securityPolicy, "TagValue", tagValue);
+                "SecurityPolicy", securityPolicy, "TagValue", tagValue, "EndpointType", endpointType);
     }
 
     private static void cloudFormation(String stack, String action, String templateBody,

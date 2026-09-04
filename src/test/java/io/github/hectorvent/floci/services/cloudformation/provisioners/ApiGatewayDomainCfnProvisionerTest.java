@@ -297,6 +297,37 @@ class ApiGatewayDomainCfnProvisionerTest {
     }
 
     @Test
+    void updateWhosePriorDomainIsGoneUnderANewNameCreatesWithoutDeleting() {
+        when(apiGateway.getDomainName(REGION, "old.example.com")).thenThrow(NOT_FOUND);
+        when(apiGateway.createDomainName(eq(REGION), anyMap())).thenReturn(regionalDomain(DOMAIN));
+        StackResource r = resource(DOMAIN_TYPE, "old.example.com");
+
+        provisioner.provision(r, domainProps(CERTIFICATE_ARN, "TLS_1_2"), ctx("old.example.com"));
+
+        verify(apiGateway).createDomainName(eq(REGION), anyMap());
+        verify(apiGateway, never()).deleteDomainName(any(), any());
+        assertEquals(DOMAIN, r.getPhysicalId());
+    }
+
+    @Test
+    void updateThatFailsValidationLeavesTagsUntouched() {
+        // The patch carries the validation, so it runs first: a rejected update must not have
+        // already rewritten the domain's tags.
+        CustomDomain existing = regionalDomain(DOMAIN);
+        when(apiGateway.getDomainName(REGION, DOMAIN)).thenReturn(existing);
+        when(apiGateway.updateDomainName(eq(REGION), eq(DOMAIN), anyList()))
+                .thenThrow(new AwsException("BadRequestException", "Invalid value for endpoint type: PRIVATE", 400));
+        ObjectNode props = domainProps(CERTIFICATE_ARN, "TLS_1_2");
+        props.putObject("EndpointConfiguration").putArray("Types").add("PRIVATE");
+        props.withArray("Tags").addObject().put("Key", "team").put("Value", "api");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(DOMAIN_TYPE, DOMAIN), props, ctx(DOMAIN)));
+
+        verify(apiGateway, never()).tagDomainName(any(), any(), anyMap());
+        verify(apiGateway, never()).untagDomainName(any(), any(), anyList());
+    }
+
+    @Test
     void replacementToleratesAPriorDomainThatIsAlreadyGone() {
         when(apiGateway.getDomainName(REGION, "old.example.com")).thenReturn(regionalDomain("old.example.com"));
         when(apiGateway.createDomainName(eq(REGION), anyMap())).thenReturn(regionalDomain(DOMAIN));
@@ -415,6 +446,19 @@ class ApiGatewayDomainCfnProvisionerTest {
                 Map.of("basePath", "v1", "restApiId", API_ID, "stage", "prod"));
         verify(apiGateway, never()).deleteBasePathMapping(any(), any(), any());
         assertEquals("api.example.com|v1", r.getPhysicalId());
+    }
+
+    @Test
+    void mappingUpdateWhosePriorIsGoneUnderANewIdCreatesWithoutDeleting() {
+        when(apiGateway.getBasePathMapping(REGION, DOMAIN, "v1")).thenThrow(NOT_FOUND);
+        StackResource r = resource(MAPPING_TYPE, "api.example.com|v1");
+
+        provisioner.provision(r, mappingProps("v2", API_ID, "prod"), ctx("api.example.com|v1"));
+
+        verify(apiGateway).createBasePathMapping(REGION, DOMAIN,
+                Map.of("basePath", "v2", "restApiId", API_ID, "stage", "prod"));
+        verify(apiGateway, never()).deleteBasePathMapping(any(), any(), any());
+        assertEquals("api.example.com|v2", r.getPhysicalId());
     }
 
     @Test
