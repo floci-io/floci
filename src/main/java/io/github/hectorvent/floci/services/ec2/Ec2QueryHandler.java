@@ -166,6 +166,7 @@ public class Ec2QueryHandler {
                 case "DescribeImages" -> handleDescribeImages(params, region);
                 case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
+                case "CreateSnapshot" -> handleCreateSnapshot(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
                 // Tags
                 case "CreateTags" -> handleCreateTags(params, region);
@@ -2782,6 +2783,17 @@ public class Ec2QueryHandler {
             xml.start("item").raw(snapshotXml(snapshot)).end("item");
         }
         xml.end("snapshotSet").end("DescribeSnapshotsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateSnapshot(MultivaluedMap<String, String> p, String region) {
+        Snapshot snapshot = service.createSnapshot(region, p.getFirst("VolumeId"), p.getFirst("Description"),
+                parseTagsForResource(p, "snapshot"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateSnapshotResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .raw(snapshotXml(snapshot))
+                .end("CreateSnapshotResponse");
         return xmlResponse(xml.build());
     }
 

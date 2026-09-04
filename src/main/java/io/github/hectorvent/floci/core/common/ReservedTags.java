@@ -11,6 +11,7 @@ public final class ReservedTags {
 
     public static final String RESERVED_PREFIX = "floci:";
     public static final String OVERRIDE_ID_KEY = RESERVED_PREFIX + "override-id";
+    public static final String OVERRIDE_START_TIME_KEY = RESERVED_PREFIX + "override-start-time";
     public static final String OVERRIDE_COGNITO_CLIENT_ID_KEY = RESERVED_PREFIX + "override-cognito-client-id";
     public static final String OVERRIDE_COGNITO_CLIENT_SECRET_KEY = RESERVED_PREFIX + "override-cognito-client-secret";
 

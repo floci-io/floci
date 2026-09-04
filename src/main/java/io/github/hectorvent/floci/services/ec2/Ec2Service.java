@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -29,6 +30,7 @@ import org.jboss.logging.Logger;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -132,6 +134,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN =
             Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
+    private static final Pattern SNAPSHOT_ID_PATTERN = Pattern.compile("^snap-[0-9a-f]{8}([0-9a-f]{9})?$");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
     private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
@@ -4088,6 +4091,58 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
+    public Snapshot createSnapshot(String region, String volumeId, String description, List<Tag> requestedTags) {
+        if (volumeId == null || volumeId.isBlank()) {
+            throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
+        }
+        Volume volume = getRequiredVolume(region, volumeId);
+        Map<String, String> tagsByKey = new LinkedHashMap<>();
+        if (requestedTags != null) {
+            requestedTags.forEach(tag -> tagsByKey.put(tag.getKey(), tag.getValue()));
+        }
+
+        String snapshotId = ReservedTags.extractOverrideKeyId(tagsByKey);
+        if (snapshotId == null) {
+            snapshotId = "snap-" + randomHex(17);
+        } else if (!SNAPSHOT_ID_PATTERN.matcher(snapshotId).matches()) {
+            throw new AwsException("InvalidParameterValue", "Invalid snapshot ID '" + snapshotId + "'.", 400);
+        }
+        if (snapshots.get(key(region, snapshotId)).isPresent()) {
+            throw new AwsException("InvalidParameterValue", "Snapshot ID '" + snapshotId + "' already exists.", 400);
+        }
+
+        Instant startTime = Instant.now();
+        String overrideStartTime = tagsByKey.get(ReservedTags.OVERRIDE_START_TIME_KEY);
+        if (overrideStartTime != null) {
+            try {
+                startTime = Instant.parse(overrideStartTime);
+            } catch (DateTimeParseException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "Override snapshot start time must be an ISO-8601 instant.", 400);
+            }
+        }
+
+        List<Tag> visibleTags = requestedTags == null ? new ArrayList<>() : requestedTags.stream()
+                .filter(tag -> tag.getKey() == null || !tag.getKey().startsWith(ReservedTags.RESERVED_PREFIX))
+                .map(tag -> new Tag(tag.getKey(), tag.getValue()))
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotId(snapshotId);
+        snapshot.setVolumeId(volumeId);
+        snapshot.setVolumeSize(volume.getSize());
+        snapshot.setOwnerId(callerAccountId());
+        snapshot.setState("completed");
+        snapshot.setDescription(description);
+        snapshot.setStartTime(startTime);
+        snapshot.setEncrypted(volume.isEncrypted());
+        snapshot.setRegion(region);
+        snapshot.setTags(visibleTags);
+        snapshots.put(key(region, snapshotId), snapshot);
+        tags.put(snapshotId, new ArrayList<>(visibleTags));
+        return snapshot;
+    }
+
     // ─── Launch Templates ─────────────────────────────────────────────────────
 
     public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
@@ -4439,7 +4494,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         EbsBlockDevice ebs = mapping.getEbs();
         Snapshot snapshot = new Snapshot();
         snapshot.setSnapshotId(snapshotId);
-        snapshot.setOwnerId(accountId);
+        snapshot.setOwnerId(callerAccountId());
         snapshot.setState("completed");
         snapshot.setDescription("Created by RegisterImage for " + image.getName());
         snapshot.setStartTime(Instant.now());
@@ -4463,10 +4518,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private boolean matchesSnapshotOwners(Snapshot snapshot, List<String> ownerIds) {
         if (ownerIds == null || ownerIds.isEmpty()) {
-            return accountId.equals(snapshot.getOwnerId());
+            return callerAccountId().equals(snapshot.getOwnerId());
         }
         return ownerIds.contains(snapshot.getOwnerId())
-                || ownerIds.contains("self") && accountId.equals(snapshot.getOwnerId());
+                || ownerIds.contains("self") && callerAccountId().equals(snapshot.getOwnerId());
     }
 
     private boolean matchesSnapshotFilter(Snapshot snapshot, String name, List<String> values) {
@@ -4523,8 +4578,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         for (String resourceId : resourceIds) {
             withTopologyLockIfNeeded(region, resourceId, () -> {
                 synchronized (lockFor(key(region, resourceId))) {
+                    List<Tag> visibleTags = resourceId.startsWith("snap-")
+                            ? tagList.stream()
+                                    .filter(tag -> tag.getKey() == null
+                                            || !tag.getKey().startsWith(ReservedTags.RESERVED_PREFIX))
+                                    .toList()
+                            : tagList;
                     List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElse(List.of()));
-                    for (Tag tag : tagList) {
+                    for (Tag tag : visibleTags) {
                         existing.removeIf(t -> t.getKey().equals(tag.getKey()));
                         existing.add(tag);
                     }
@@ -4600,6 +4661,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); return; }
         Address address = addresses.get(storeKey).orElse(null);
         if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); return; }
+        Snapshot snapshot = snapshots.get(storeKey).orElse(null);
+        if (snapshot != null) { snapshot.setTags(new ArrayList<>(tagList)); snapshots.put(storeKey, snapshot); return; }
         ManagedPrefixList prefixList = managedPrefixLists.get(storeKey).orElse(null);
         if (prefixList != null) {
             prefixList.setTags(new ArrayList<>(tagList));
@@ -4703,6 +4766,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         if (resourceId.startsWith("nat-")) {
             return "natgateway";
+        }
+        if (resourceId.startsWith("snap-")) {
+            return "snapshot";
         }
         if (resourceId.startsWith("pl-")) {
             return "prefix-list";
