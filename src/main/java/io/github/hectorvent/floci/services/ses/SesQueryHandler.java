@@ -272,7 +272,7 @@ public class SesQueryHandler {
     }
 
     private Response handleUpdateAccountSendingEnabled(MultivaluedMap<String, String> params, String region) {
-        boolean enabled = parseOptionalBoolean(params, "Enabled", false);
+        boolean enabled = parseXsdBoolean(params, "Enabled");
         sesService.setAccountSendingEnabled(region, enabled);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("UpdateAccountSendingEnabled", AwsNamespaces.SES)).build();
     }
@@ -359,14 +359,14 @@ public class SesQueryHandler {
 
     private Response handleSetIdentityFeedbackForwardingEnabled(MultivaluedMap<String, String> params, String region) {
         String identityValue = getParam(params, "Identity");
-        boolean enabled = parseRequiredBoolean(params, "ForwardingEnabled");
+        boolean enabled = parseXsdBoolean(params, "ForwardingEnabled");
         sesService.setFeedbackForwardingEnabled(identityValue, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityFeedbackForwardingEnabled", AwsNamespaces.SES)).build();
     }
 
     private Response handleSetIdentityDkimEnabled(MultivaluedMap<String, String> params, String region) {
         String identityValue = getParam(params, "Identity");
-        boolean enabled = parseRequiredBoolean(params, "DkimEnabled");
+        boolean enabled = parseXsdBoolean(params, "DkimEnabled");
         sesService.setDkimAttributes(identityValue, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityDkimEnabled", AwsNamespaces.SES)).build();
     }
@@ -385,7 +385,7 @@ public class SesQueryHandler {
     private Response handleSetIdentityHeadersInNotificationsEnabled(MultivaluedMap<String, String> params, String region) {
         String identityValue = getParam(params, "Identity");
         String notificationType = getParam(params, "NotificationType");
-        boolean enabled = parseRequiredBoolean(params, "Enabled");
+        boolean enabled = parseXsdBoolean(params, "Enabled");
         sesService.setHeadersInNotificationsEnabled(identityValue, notificationType, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityHeadersInNotificationsEnabled", AwsNamespaces.SES)).build();
     }
@@ -402,28 +402,26 @@ public class SesQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityMailFromDomain", AwsNamespaces.SES)).build();
     }
 
-    private static boolean parseRequiredBoolean(MultivaluedMap<String, String> params, String name) {
+    /**
+     * Strict xsd 1.1 boolean parse for Query-protocol boolean members: only {@code true},
+     * {@code false}, {@code 1}, and {@code 0} are accepted, case-sensitively, and anything else
+     * is the probed {@code MalformedInput} error. An absent member takes the AWS default of
+     * {@code false}; a present-but-empty value is the probed "missing value" error.
+     */
+    private static boolean parseXsdBoolean(MultivaluedMap<String, String> params, String name) {
         String raw = params.getFirst(name);
         if (raw == null) {
-            throw new AwsException("InvalidParameterValue", name + " is required.", 400);
+            return false;
         }
-        if (!"true".equalsIgnoreCase(raw) && !"false".equalsIgnoreCase(raw)) {
-            throw new AwsException("InvalidParameterValue",
-                    name + " must be \"true\" or \"false\".", 400);
+        if (raw.isEmpty()) {
+            throw new AwsException("MalformedInput", "missing value for boolean type", 400);
         }
-        return Boolean.parseBoolean(raw);
-    }
-
-    private static boolean parseOptionalBoolean(MultivaluedMap<String, String> params, String name, boolean defaultValue) {
-        String raw = params.getFirst(name);
-        if (raw == null || raw.isBlank()) {
-            return defaultValue;
-        }
-        if (!"true".equalsIgnoreCase(raw) && !"false".equalsIgnoreCase(raw)) {
-            throw new AwsException("InvalidParameterValue",
-                    name + " must be \"true\" or \"false\".", 400);
-        }
-        return Boolean.parseBoolean(raw);
+        return switch (raw) {
+            case "true", "1" -> true;
+            case "false", "0" -> false;
+            default -> throw new AwsException("MalformedInput",
+                    "boolean must follow xsd1.1 definition", 400);
+        };
     }
 
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
@@ -890,7 +888,7 @@ public class SesQueryHandler {
     private Response handleUpdateConfigurationSetSendingEnabled(MultivaluedMap<String, String> params,
                                                                 String region) {
         String configSet = requireParam(params, "ConfigurationSetName");
-        boolean enabled = parseRequiredBoolean(params, "Enabled");
+        boolean enabled = parseXsdBoolean(params, "Enabled");
         sesService.setConfigurationSetSendingEnabled(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetSendingEnabled", AwsNamespaces.SES)).build();
@@ -925,7 +923,7 @@ public class SesQueryHandler {
     private Response handleUpdateConfigurationSetReputationMetricsEnabled(MultivaluedMap<String, String> params,
                                                                           String region) {
         String configSet = requireParam(params, "ConfigurationSetName");
-        boolean enabled = parseRequiredBoolean(params, "Enabled");
+        boolean enabled = parseXsdBoolean(params, "Enabled");
         sesService.setConfigurationSetReputationOptions(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetReputationMetricsEnabled", AwsNamespaces.SES)).build();
@@ -1075,7 +1073,7 @@ public class SesQueryHandler {
     private EventDestination readEventDestination(MultivaluedMap<String, String> params, String prefix) {
         EventDestination dest = new EventDestination();
         dest.setName(getParam(params, prefix + ".Name"));
-        dest.setEnabled(parseOptionalBoolean(params, prefix + ".Enabled", false));
+        dest.setEnabled(parseXsdBoolean(params, prefix + ".Enabled"));
         List<String> rawTypes = extractMembers(params, prefix + ".MatchingEventTypes");
         List<String> normalizedTypes = new ArrayList<>(rawTypes.size());
         for (String t : rawTypes) {
