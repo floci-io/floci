@@ -892,18 +892,18 @@ public class Ec2QueryHandler {
                     break;
                 }
                 hasOverride = true;
-                launches.add(fleetLaunch(template, launchTemplateId, launchTemplateName, version,
+                launches.add(fleetLaunch(region, template, launchTemplateId, launchTemplateName, version,
                         instanceType, imageId, subnetId, availabilityZone, fleetInstanceTags));
             }
             if (!hasOverride) {
-                launches.add(fleetLaunch(template, launchTemplateId, launchTemplateName, version,
+                launches.add(fleetLaunch(region, template, launchTemplateId, launchTemplateName, version,
                         null, null, null, null, fleetInstanceTags));
             }
         }
         return launches;
     }
 
-    private FleetLaunch fleetLaunch(LaunchTemplateData template, String launchTemplateId,
+    private FleetLaunch fleetLaunch(String region, LaunchTemplateData template, String launchTemplateId,
                                     String launchTemplateName, String version,
                                     String overrideInstanceType, String overrideImageId,
                                     String overrideSubnetId, String overrideAvailabilityZone,
@@ -924,6 +924,8 @@ public class Ec2QueryHandler {
         String subnetId = firstNonBlank(overrideSubnetId, templateSubnetId);
         String templateAvailabilityZone = template.getPlacement() != null
                 ? template.getPlacement().getAvailabilityZone() : null;
+        String availabilityZone = resolveFleetAvailabilityZone(
+                region, templateSubnetId, templateAvailabilityZone, overrideSubnetId, overrideAvailabilityZone);
         return new FleetLaunch(
                 launchTemplateId,
                 launchTemplateName,
@@ -931,12 +933,39 @@ public class Ec2QueryHandler {
                 firstNonBlank(overrideInstanceType, template.getInstanceType()),
                 firstNonBlank(overrideImageId, template.getImageId()),
                 subnetId,
-                firstNonBlank(overrideAvailabilityZone, templateAvailabilityZone),
+                availabilityZone,
                 template.getKeyName(),
                 template.getUserData(),
                 service.iamInstanceProfileArn(template),
                 template.effectiveSecurityGroupIds(),
                 new ArrayList<>(tags.values()));
+    }
+
+    /**
+     * Resolves the placement represented by one CreateFleet launch override.
+     *
+     * <p>A subnet supplied by an override replaces the subnet inherited from the launch template.
+     * Its availability zone therefore also replaces a template placement zone when the override
+     * does not carry an explicit zone. Passing the template zone through in that case creates a
+     * valid subnet-only AWS override that is incorrectly rejected as a subnet/AZ mismatch. Resolve
+     * the subnet here so both the launch request and the response describe the same placement.</p>
+     */
+    private String resolveFleetAvailabilityZone(String region, String templateSubnetId,
+                                                String templateAvailabilityZone, String overrideSubnetId,
+                                                String overrideAvailabilityZone) {
+        if (isSet(overrideAvailabilityZone)) {
+            return overrideAvailabilityZone;
+        }
+        if (isSet(overrideSubnetId)) {
+            return service.requireSubnet(region, overrideSubnetId).getAvailabilityZone();
+        }
+        if (isSet(templateAvailabilityZone)) {
+            return templateAvailabilityZone;
+        }
+        if (isSet(templateSubnetId)) {
+            return service.requireSubnet(region, templateSubnetId).getAvailabilityZone();
+        }
+        return null;
     }
 
     private String fleetConfigBase(MultivaluedMap<String, String> p, int index) {

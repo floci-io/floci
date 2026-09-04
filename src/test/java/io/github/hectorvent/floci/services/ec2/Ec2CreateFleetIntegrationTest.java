@@ -86,6 +86,36 @@ class Ec2CreateFleetIntegrationTest {
 
     @Test
     @Order(3)
+    void createFleetSubnetOverrideDerivesAvailabilityZoneInsteadOfInheritingTemplateZone() {
+        String placementLaunchTemplateId = createLaunchTemplateWithAvailabilityZone();
+
+        given()
+                .formParam("Action", "CreateFleet")
+                .formParam("Type", "instant")
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId",
+                        placementLaunchTemplateId)
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", CONTRACT_IMAGE_ID)
+                .formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", "subnet-default-us-east-1-b")
+                .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
+                .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("CreateFleetResponse.fleetInstanceSet.item.availabilityZone", equalTo("us-east-1b"))
+                .body("CreateFleetResponse.fleetInstanceSet.item.subnetId",
+                        equalTo("subnet-default-us-east-1-b"))
+                .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.overrides.subnetId",
+                        equalTo("subnet-default-us-east-1-b"))
+                .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.overrides.availabilityZone",
+                        equalTo("us-east-1b"));
+    }
+
+    @Test
+    @Order(4)
     void createFleetRollsBackEarlierLaunchesWhenLaterLaunchFails() {
         given()
                 .formParam("Action", "CreateFleet")
@@ -121,7 +151,7 @@ class Ec2CreateFleetIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void createFleetLaunchesInstanceAndReturnsFleetShape() {
         if (launchTemplateId == null) {
             launchTemplateId = createLaunchTemplate();
@@ -161,6 +191,22 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateName", "create-fleet-contract")
                 .formParam("LaunchTemplateData.ImageId", CONTRACT_IMAGE_ID)
                 .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+    }
+
+    private static String createLaunchTemplateWithAvailabilityZone() {
+        return given()
+                .formParam("Action", "CreateLaunchTemplate")
+                .formParam("LaunchTemplateName", "create-fleet-placement-contract")
+                .formParam("LaunchTemplateData.ImageId", CONTRACT_IMAGE_ID)
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateData.Placement.AvailabilityZone", "us-east-1a")
                 .header("Authorization", AUTH_HEADER)
                 .when()
                 .post("/")
