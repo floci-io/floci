@@ -310,9 +310,9 @@ class IotPolicyCfnProvisionerTest {
 
         InOrder inOrder = inOrder(iot);
         inOrder.verify(iot, calls(1)).createPolicyVersion("device-policy", changed, true, REGION);
-        inOrder.verify(iot).deleteOldestPolicyVersion("device-policy", REGION);
+        inOrder.verify(iot).makeRoomForPolicyVersion("device-policy", REGION);
         inOrder.verify(iot, calls(1)).createPolicyVersion("device-policy", changed, true, REGION);
-        verify(iot, times(1)).deleteOldestPolicyVersion(anyString(), anyString());
+        verify(iot, times(1)).makeRoomForPolicyVersion(anyString(), anyString());
         verify(iot, never()).deletePolicyVersion(anyString(), anyString(), anyString());
         assertEquals(ARN, r.getAttributes().get("Arn"));
         assertEquals("device-policy", r.getAttributes().get("Id"));
@@ -330,7 +330,7 @@ class IotPolicyCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("device-policy")));
 
         assertEquals("InternalFailureException", e.getErrorCode());
-        verify(iot, never()).deleteOldestPolicyVersion(anyString(), anyString());
+        verify(iot, never()).makeRoomForPolicyVersion(anyString(), anyString());
     }
 
     @Test
@@ -346,7 +346,7 @@ class IotPolicyCfnProvisionerTest {
 
         provisioner.provision(r, props("device-policy", mapper.readTree(changed), null), ctx("device-policy"));
 
-        verify(iot, times(2)).deleteOldestPolicyVersion("device-policy", REGION);
+        verify(iot, times(2)).makeRoomForPolicyVersion("device-policy", REGION);
         verify(iot, times(3)).createPolicyVersion("device-policy", changed, true, REGION);
         assertEquals(ARN, r.getAttributes().get("Arn"));
     }
@@ -363,7 +363,7 @@ class IotPolicyCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("device-policy")));
 
         assertEquals("VersionsLimitExceededException", e.getErrorCode());
-        verify(iot, times(IotService.MAX_POLICY_VERSIONS - 1)).deleteOldestPolicyVersion("device-policy", REGION);
+        verify(iot, times(IotService.MAX_POLICY_VERSIONS - 1)).makeRoomForPolicyVersion("device-policy", REGION);
         verify(iot, times(IotService.MAX_POLICY_VERSIONS)).createPolicyVersion("device-policy", changed, true, REGION);
     }
 }
