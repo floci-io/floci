@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
@@ -20,10 +21,12 @@ import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AcmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayAccountCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkAclCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
@@ -133,6 +136,7 @@ final class CfnProvisionerFixture {
         private KinesisService kinesisService;
         private CloudWatchMetricsService cloudWatchMetricsService;
         private AutoScalingService autoScalingService;
+        private AcmService acmService;
         private FirehoseService firehoseService;
         private DocDbService docDbService;
         private CloudFrontService cloudFrontService;
@@ -203,6 +207,9 @@ final class CfnProvisionerFixture {
             if (pipesService != null) {
                 discovered.add(new PipesCfnProvisioner(pipesService));
             }
+            if (cognitoService != null) {
+                discovered.add(new CognitoCfnProvisioner(cognitoService));
+            }
             if (firehoseService != null) {
                 discovered.add(new FirehoseCfnProvisioner(firehoseService));
             }
@@ -226,6 +233,9 @@ final class CfnProvisionerFixture {
             }
             if (autoScalingService != null) {
                 discovered.add(new AutoScalingLifecycleHookCfnProvisioner(autoScalingService));
+            }
+            if (acmService != null) {
+                discovered.add(new AcmCfnProvisioner(acmService));
             }
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
@@ -418,6 +428,11 @@ final class CfnProvisionerFixture {
 
         public Builder autoScaling(AutoScalingService v) {
             this.autoScalingService = v;
+            return this;
+        }
+
+        public Builder acm(AcmService v) {
+            this.acmService = v;
             return this;
         }
 

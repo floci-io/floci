@@ -22,6 +22,8 @@ import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Base64;
@@ -1256,6 +1258,53 @@ class KmsServiceTest {
         byte[] rawSig = kmsService.sign(key.getKeyId(), message,
                 "RSASSA_PKCS1_V1_5_SHA_256", KmsMessageType.RAW, REGION);
         assertArrayEquals(rawSig, digestSig);
+    }
+
+    @Test
+    void signWithDigestMessageTypePssVerifiesWithExternalVerifier() throws Exception {
+        KmsKey key = kmsService.createKey("rsa pss digest key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        byte[] message = "floci kms pss round-trip".getBytes(StandardCharsets.UTF_8);
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(message);
+
+        byte[] sig = kmsService.sign(key.getKeyId(), digest,
+                "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION);
+
+        // floci's own Verify round-trips, against the digest and against the raw message.
+        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+                "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION));
+        assertTrue(kmsService.verify(key.getKeyId(), message, sig,
+                "RSASSA_PSS_SHA_256", KmsMessageType.RAW, REGION));
+
+        // External verifier with the PSS parameters AWS documents for RSASSA_PSS_SHA_256.
+        byte[] der = Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded());
+        PublicKey pub = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
+        Signature verifier = Signature.getInstance("RSASSA-PSS");
+        verifier.setParameter(new PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1));
+        verifier.initVerify(pub);
+        verifier.update(message);
+        assertTrue(verifier.verify(sig), "DIGEST PSS signature must verify as real RSASSA-PSS");
+    }
+
+    @Test
+    void signWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.sign(key.getKeyId(), "sign me".getBytes(StandardCharsets.UTF_8), "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+    }
+
+    @Test
+    void verifyWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        var message = "sign me".getBytes(StandardCharsets.UTF_8);
+        var sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.verify(key.getKeyId(), message, sig, "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
     }
 
     @Test

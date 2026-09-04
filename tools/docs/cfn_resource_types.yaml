@@ -35,6 +35,7 @@ order:
   - AWS::CodeBuild
   - AWS::Batch
   - AWS::Cognito
+  - AWS::CertificateManager
   - AWS::Events
   - AWS::Scheduler
   - AWS::Pipes
@@ -98,6 +99,7 @@ service_labels:
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
   AWS::CDK: CDK
+  AWS::CertificateManager: ACM
   AWS::CloudFormation: CloudFormation
   AWS::CloudFront: CloudFront
   AWS::CloudWatch: CloudWatch

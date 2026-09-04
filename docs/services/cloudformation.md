@@ -79,7 +79,8 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool`, `UserPoolClient` |
+| Cognito | `UserPool`, `UserPoolClient`, `UserPoolDomain` |
+| ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
 | Pipes | `Pipe` |

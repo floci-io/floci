@@ -144,6 +144,9 @@ public class ElastiCacheService implements ResourceProvider {
         // resolved with the other validations, before a port is taken or a container started
         ReplicationGroupSettings resolvedSettings =
                 settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), request.region()));
+        if (request.cacheParameterGroupName() != null && !request.cacheParameterGroupName().isBlank()) {
+            requireParameterGroup(request.cacheParameterGroupName());
+        }
         if (groups.get(groupId).isPresent()) {
             throw new AwsException("ReplicationGroupAlreadyExistsFault",
                     "Replication group " + groupId + " already exists.", 400);
@@ -1143,9 +1146,20 @@ public class ElastiCacheService implements ResourceProvider {
                 throw new AwsException("CacheParameterGroupNotFound",
                         "CacheParameterGroupnot found: " + name, 404);
             }
+            if (isParameterGroupInUse(name)) {
+                throw new AwsException("InvalidCacheParameterGroupState",
+                        "One or more cache clusters are still members of this parameter group "
+                                + name + ", so the group cannot be deleted.", 400);
+            }
             parameterGroups.delete(name);
         }
         LOG.infov("Deleted cache parameter group {0}", name);
+    }
+
+    /** Whether a stored replication group still references the parameter group by that name. */
+    private boolean isParameterGroupInUse(String name) {
+        return groups.scan(key -> true).stream()
+                .anyMatch(group -> name.equals(group.getCacheParameterGroupName()));
     }
 
     @Override

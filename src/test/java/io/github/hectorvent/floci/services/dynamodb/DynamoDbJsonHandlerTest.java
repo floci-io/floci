@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -332,5 +333,136 @@ class DynamoDbJsonHandlerTest {
 
         assertEquals("None", reasons.get(0).get("Code").asText());
         assertNull(reasons.get(0).get("Message"), "non failed item must not have a Message field");
+    }
+
+    // PutResourcePolicy/GetResourcePolicy/DeleteResourcePolicy previously fell through to the
+    // default 400 UnknownOperationException branch, which blocks the Terraform provider's
+    // aws_dynamodb_resource_policy resource at apply time.
+    @Test
+    void putGetDeleteResourcePolicyRoundTrips() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"AllowDummyRoleAccess\","
+                + "\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::222222222222:role/DummyRole\"},"
+                + "\"Action\":\"dynamodb:GetItem\",\"Resource\":\"" + tableArn + "\"}]}";
+
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", tableArn);
+        putRequest.put("Policy", policy);
+
+        Response putResponse = handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+        assertEquals(200, putResponse.getStatus());
+        JsonNode putBody = mapper.convertValue(putResponse.getEntity(), JsonNode.class);
+        assertTrue(putBody.has("RevisionId"), "PutResourcePolicy must return a RevisionId");
+        String revisionId = putBody.get("RevisionId").asText();
+        assertFalse(revisionId.isBlank());
+
+        ObjectNode getRequest = mapper.createObjectNode();
+        getRequest.put("ResourceArn", tableArn);
+
+        Response getResponse = handler.handle("GetResourcePolicy", getRequest, "eu-west-1");
+        assertEquals(200, getResponse.getStatus());
+        JsonNode getBody = mapper.convertValue(getResponse.getEntity(), JsonNode.class);
+        assertEquals(policy, getBody.get("Policy").asText());
+        assertEquals(revisionId, getBody.get("RevisionId").asText());
+
+        ObjectNode deleteRequest = mapper.createObjectNode();
+        deleteRequest.put("ResourceArn", tableArn);
+
+        Response deleteResponse = handler.handle("DeleteResourcePolicy", deleteRequest, "eu-west-1");
+        assertEquals(200, deleteResponse.getStatus());
+        JsonNode deleteBody = mapper.convertValue(deleteResponse.getEntity(), JsonNode.class);
+        assertEquals(revisionId, deleteBody.get("RevisionId").asText());
+
+        // Policy is gone: GetResourcePolicy must fail now
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetResourcePolicy", getRequest, "eu-west-1"));
+        assertEquals("PolicyNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void putResourcePolicyRejectsAStaleExpectedRevisionId() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", tableArn);
+        putRequest.put("Policy", "{}");
+        handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+
+        putRequest.put("ExpectedRevisionId", "not-the-current-revision");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutResourcePolicy", putRequest, "eu-west-1"));
+        assertEquals("PolicyNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void putResourcePolicyRejectsInvalidResourceArn() {
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", "not-an-arn");
+        putRequest.put("Policy", "{}");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutResourcePolicy", putRequest, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    // A GSI created with an explicit OnDemandThroughput never had the value stored, so
+    // DescribeTable could not report it back; the Terraform provider then proposes replacing
+    // the GSI on every plan even though nothing drifted.
+    @Test
+    void createTableWithGsiOnDemandThroughputRoundTripsThroughDescribeTable() throws Exception {
+        ObjectNode createRequest = mapper.createObjectNode();
+        createRequest.put("TableName", "gsi-odt-table");
+        createRequest.put("BillingMode", "PAY_PER_REQUEST");
+
+        ArrayNode attrDefs = mapper.createArrayNode();
+        attrDefs.add(mapper.createObjectNode().put("AttributeName", "id").put("AttributeType", "S"));
+        attrDefs.add(mapper.createObjectNode().put("AttributeName", "title").put("AttributeType", "S"));
+        attrDefs.add(mapper.createObjectNode().put("AttributeName", "age").put("AttributeType", "S"));
+        createRequest.set("AttributeDefinitions", attrDefs);
+
+        ArrayNode keySchema = mapper.createArrayNode();
+        keySchema.add(mapper.createObjectNode().put("AttributeName", "id").put("KeyType", "HASH"));
+        createRequest.set("KeySchema", keySchema);
+
+        ObjectNode gsi = mapper.createObjectNode();
+        gsi.put("IndexName", "TitleIndex");
+        ArrayNode gsiKeySchema = mapper.createArrayNode();
+        gsiKeySchema.add(mapper.createObjectNode().put("AttributeName", "title").put("KeyType", "HASH"));
+        gsiKeySchema.add(mapper.createObjectNode().put("AttributeName", "age").put("KeyType", "RANGE"));
+        gsi.set("KeySchema", gsiKeySchema);
+        ObjectNode projection = mapper.createObjectNode();
+        projection.put("ProjectionType", "INCLUDE");
+        projection.set("NonKeyAttributes", mapper.createArrayNode().add("id"));
+        gsi.set("Projection", projection);
+        ObjectNode gsiOnDemand = mapper.createObjectNode();
+        gsiOnDemand.put("MaxReadRequestUnits", 1);
+        gsiOnDemand.put("MaxWriteRequestUnits", 1);
+        gsi.set("OnDemandThroughput", gsiOnDemand);
+        createRequest.set("GlobalSecondaryIndexes", mapper.createArrayNode().add(gsi));
+
+        Response createResponse = handler.handle("CreateTable", createRequest, "eu-west-1");
+        assertEquals(200, createResponse.getStatus());
+        JsonNode createBody = mapper.convertValue(createResponse.getEntity(), JsonNode.class);
+        JsonNode createdGsi = createBody.get("TableDescription").get("GlobalSecondaryIndexes").get(0);
+        assertTrue(createdGsi.has("OnDemandThroughput"),
+                "CreateTable response must echo the GSI's OnDemandThroughput");
+        assertEquals(1, createdGsi.get("OnDemandThroughput").get("MaxReadRequestUnits").asInt());
+        assertEquals(1, createdGsi.get("OnDemandThroughput").get("MaxWriteRequestUnits").asInt());
+
+        ObjectNode describeRequest = mapper.createObjectNode();
+        describeRequest.put("TableName", "gsi-odt-table");
+
+        Response describeResponse = handler.handle("DescribeTable", describeRequest, "eu-west-1");
+        assertEquals(200, describeResponse.getStatus());
+        JsonNode describeBody = mapper.convertValue(describeResponse.getEntity(), JsonNode.class);
+        JsonNode describedGsi = describeBody.get("Table").get("GlobalSecondaryIndexes").get(0);
+
+        assertTrue(describedGsi.has("OnDemandThroughput"),
+                "DescribeTable must report the GSI's OnDemandThroughput");
+        JsonNode odt = describedGsi.get("OnDemandThroughput");
+        assertEquals(1, odt.get("MaxReadRequestUnits").asInt());
+        assertEquals(1, odt.get("MaxWriteRequestUnits").asInt());
     }
 }

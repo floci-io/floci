@@ -53,9 +53,9 @@ final class SesServiceTestBuilder {
             new InMemoryStorage<>();
 
     private SmtpRelay smtpRelay = mock(SmtpRelay.class);
-    // Default null, matching the production null-Route53 case: SesService treats a null Route53Service
-    // as "DNS lookup disabled" for DKIM record checks. Tests that exercise the lookup opt in via
-    // route53Service(...).
+    // Default null, matching the production null-Route53 case: SesIdentityService treats a null
+    // Route53Service as "DNS lookup disabled" for DKIM record checks. Tests that exercise the lookup
+    // opt in via route53Service(...).
     private Route53Service route53Service = null;
     private ObjectMapper objectMapper = new ObjectMapper();
     private Clock clock = Clock.systemUTC();
@@ -116,7 +116,7 @@ final class SesServiceTestBuilder {
 
     SesService build() {
         return new SesService(
-                identityStore,
+                new SesIdentityService(identityStore, route53Service, clock),
                 new SesSentEmailService(emailStore),
                 new SesAccountService(accountSettingsStore, accountVdmStore, accountDetailsStore),
                 new SesTemplateService(templateStore),
@@ -129,8 +129,6 @@ final class SesServiceTestBuilder {
                 new SesCvetService(cvetStore),
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
                 smtpRelay,
-                objectMapper,
-                route53Service,
-                clock);
+                objectMapper);
     }
 }

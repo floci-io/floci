@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -266,6 +267,75 @@ class ElastiCacheParameterGroupIntegrationTest {
         .then()
             .statusCode(404)
             .body(containsString("CacheParameterGroupnot found: absent-pg"));
+    }
+
+    @Test
+    @Order(4)
+    void aReplicationGroupCannotReferenceAnUnknownParameterGroup() {
+        // The lookup runs with the other validations, before any container is started, so the
+        // refusal carries the parameter group's own not-found rather than a provisioning failure.
+        query("CreateReplicationGroup")
+                .formParam("ReplicationGroupId", "pg-absent-rg")
+                .formParam("ReplicationGroupDescription", "references a missing group")
+                .formParam("CacheParameterGroupName", "absent-pg")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("<Code>CacheParameterGroupNotFound</Code>"))
+            .body(containsString("CacheParameterGroup absent-pg not found."));
+
+        query("DescribeReplicationGroups")
+                .formParam("ReplicationGroupId", "pg-absent-rg")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(4)
+    void aParameterGroupInUseByAReplicationGroupCannotBeDeleted() {
+        // The replication group is a real one behind a container, so this case needs Docker
+        // where the rest of the class does not.
+        Assumptions.assumeTrue(ElastiCacheIntegrationTest.isDockerAvailable(),
+                "Docker daemon must be available to create a replication group");
+        String replicationGroupId = "pg-in-use-rg";
+        query("CreateReplicationGroup")
+                .formParam("ReplicationGroupId", replicationGroupId)
+                .formParam("ReplicationGroupDescription", "holds the parameter group in use")
+                .formParam("CacheParameterGroupName", GROUP)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        try {
+            query("DeleteCacheParameterGroup")
+                    .formParam("CacheParameterGroupName", GROUP)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidCacheParameterGroupState</Code>"))
+                .body(containsString("One or more cache clusters are still members of this parameter group "
+                        + GROUP + ", so the group cannot be deleted."));
+
+            query("DescribeCacheParameterGroups")
+                    .formParam("CacheParameterGroupName", GROUP)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<CacheParameterGroupName>" + GROUP + "</CacheParameterGroupName>"));
+        } finally {
+            query("DeleteReplicationGroup")
+                    .formParam("ReplicationGroupId", replicationGroupId)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
     }
 
     @Test

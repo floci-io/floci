@@ -17,8 +17,6 @@ quarkus:
       max-body-size: ${floci.protocols.max-request-size}M
   datasource:
     active: false
-  security:
-     security-providers: BC
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
@@ -67,12 +65,6 @@ quarkus:
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$Default
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV
-      - --initialize-at-run-time=org.bouncycastle.crypto.prng.SP800SecureRandom
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.rsa.KeyPairGeneratorSpi
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.x509.CertificateFactory
-      - --initialize-at-run-time=io.github.hectorvent.floci.core.common.BouncyCastleInitializer
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource

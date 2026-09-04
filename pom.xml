@@ -275,6 +275,20 @@
             <groupId>io.apicurio</groupId>
             <artifactId>apicurio-registry-schema-util-protobuf</artifactId>
             <version>${apicurio.version}</version>
+            <exclusions>
+                <!-- Glue schema-registry protobuf validation. Wire's schema parser drags in
+                     KotlinPoet, which exists to generate Kotlin source and pulls kotlin-reflect
+                     behind it. Floci only parses and canonicalizes .proto schemas. ICU4J comes
+                     along the same path and is only used by Wire's code generator too. -->
+                <exclusion>
+                    <groupId>com.squareup</groupId>
+                    <artifactId>kotlinpoet-jvm</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.ibm.icu</groupId>
+                    <artifactId>icu4j</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Testing -->

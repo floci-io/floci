@@ -187,6 +187,9 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
                 .buildFromEncoded();
         LOG.debugv("Execute API host routing: {0}{1} -> {2}", host, originalPath, newUri.getRawPath());
         routeContext.routeToHttpApi(region);
+        // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
+        // signed: the virtual-host path, not the /execute-api/... form this rewrite produces.
+        routeContext.recordSignedRequestPath(originalPath);
         requestContext.setRequestUri(newUri);
     }
 
