@@ -60,6 +60,64 @@ class SsmDocumentLifecycleIntegrationTest {
 
     @Test
     @Order(2)
+    void listDocuments() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListDocuments")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentIdentifiers.find { it.Name == 'floci-test-doc' }.Name", equalTo("floci-test-doc"))
+            .body("DocumentIdentifiers.find { it.Name == 'floci-test-doc' }.DocumentType", equalTo("Command"))
+            .body("DocumentIdentifiers.find { it.Name == 'floci-test-doc' }.DocumentVersion", equalTo("1"))
+            .body("DocumentIdentifiers.find { it.Name == 'floci-test-doc' }.PlatformTypes", hasItems("Windows", "Linux", "MacOS"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListDocuments")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": [
+                        {
+                            "Key": "Name",
+                            "Values": ["floci-test-doc"]
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentIdentifiers.Name", hasItem("floci-test-doc"))
+            .body("DocumentIdentifiers.find { it.Name == 'floci-test-doc' }.DocumentType", equalTo("Command"))
+            .body("DocumentIdentifiers.find { it.Name == 'floci-test-doc' }.DocumentVersion", equalTo("1"))
+            .body("DocumentIdentifiers.find { it.Name == 'floci-test-doc' }.PlatformTypes", hasItems("Windows", "Linux", "MacOS"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListDocuments")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Filters": [
+                        {
+                            "Key": "Name",
+                            "Values": ["non-matching-doc"]
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentIdentifiers", empty());
+    }
+
+    @Test
+    @Order(3)
     void deleteDocument() {
         given()
             .header("X-Amz-Target", "AmazonSSM.DeleteDocument")
@@ -73,10 +131,20 @@ class SsmDocumentLifecycleIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListDocuments")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DocumentIdentifiers.findAll { it.Name == 'floci-test-doc' }", empty());
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     void describeMissingDocument() {
         given()
             .header("X-Amz-Target", "AmazonSSM.DescribeDocument")
@@ -94,7 +162,7 @@ class SsmDocumentLifecycleIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void createDocumentRejectsNonStringName() {
         given()
             .header("X-Amz-Target", "AmazonSSM.CreateDocument")
