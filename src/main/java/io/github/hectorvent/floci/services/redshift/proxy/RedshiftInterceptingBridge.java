@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -28,9 +27,6 @@ public class RedshiftInterceptingBridge {
 
     private static final Logger LOG = Logger.getLogger(RedshiftInterceptingBridge.class);
 
-    /** Read timeout on the client socket so a stalled client cannot pin the connection forever. */
-    private static final int CLIENT_READ_TIMEOUT_MS = 10_000;
-
     private final Socket client;
     private final Socket backend;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -42,8 +38,6 @@ public class RedshiftInterceptingBridge {
 
     public void run() {
         try {
-            client.setSoTimeout(CLIENT_READ_TIMEOUT_MS);
-
             InputStream clientIn = client.getInputStream();
             OutputStream backendOut = backend.getOutputStream();
 
@@ -51,16 +45,7 @@ public class RedshiftInterceptingBridge {
 
             PostgresWireDecoder decoder = new PostgresWireDecoder(clientIn);
             while (true) {
-                PostgresWireDecoder.FrontendMessage msg;
-                try {
-                    msg = decoder.nextMessage();
-                } catch (SocketTimeoutException e) {
-                    if (decoder.isBetweenMessages()) {
-                        continue; // client idle between queries: keep waiting
-                    }
-                    LOG.warnv("Client socket timed out mid-message: {0}", e.getMessage());
-                    break;
-                }
+                PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage();
                 if (msg == null) {
                     break; // client EOF
                 }

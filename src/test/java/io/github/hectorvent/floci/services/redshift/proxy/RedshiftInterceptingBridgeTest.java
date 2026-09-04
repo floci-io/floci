@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -15,6 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RedshiftInterceptingBridgeTest {
+
+    private static final Logger LOG = Logger.getLogger(RedshiftInterceptingBridgeTest.class);
 
     private ServerSocket clientListener;
     private ServerSocket backendListener;
@@ -38,19 +41,23 @@ class RedshiftInterceptingBridgeTest {
     }
 
     @AfterEach
-    void tearDown() throws IOException {
+    void tearDown() {
         for (Socket s : new Socket[]{testClientEnd, bridgeClientEnd, bridgeBackendEnd, testBackendEnd}) {
             if (s != null && !s.isClosed()) {
                 try {
                     s.close();
-                } catch (IOException ignored) {
-                    // Ignored in test cleanup
+                } catch (IOException e) {
+                    LOG.debugv(e, "Error closing socket during test cleanup");
                 }
             }
         }
         for (ServerSocket ss : new ServerSocket[]{clientListener, backendListener}) {
             if (ss != null && !ss.isClosed()) {
-                ss.close();
+                try {
+                    ss.close();
+                } catch (IOException e) {
+                    LOG.debugv(e, "Error closing server socket during test cleanup");
+                }
             }
         }
     }

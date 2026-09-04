@@ -12,7 +12,7 @@ import java.util.Objects;
  * <p>Every frontend message is {@code type(1 byte) · length(int32, includes itself) · body(length-4)}.
  * This decoder turns that stream into {@link FrontendMessage} records for
  * {@link RedshiftInterceptingBridge}, which forwards each message opaque except a Simple Query
- * ({@code 'Q'}) — that one is rewritten via {@link RedshiftSqlInterceptor} and re-encoded with
+ * ({@code 'Q'}): that one is rewritten via {@link RedshiftSqlInterceptor} and re-encoded with
  * {@link #encodeQuery(String)}.
  *
  * <p>The DDL path never reads the backend socket directly, so this decoder does no shared-heap
@@ -32,7 +32,7 @@ public class PostgresWireDecoder {
     }
 
     /**
-     * {@code true} when the decoder is at a clean boundary between messages — before the first
+     * {@code true} when the decoder is at a clean boundary between messages: before the first
      * byte of a message and after a full message has been returned; {@code false} once a type
      * byte has been consumed. Lets the bridge tell "client idle between queries" from "client
      * stalled mid-message" when a read times out.
@@ -130,7 +130,7 @@ public class PostgresWireDecoder {
             return new String(body, 0, len, StandardCharsets.UTF_8);
         }
 
-        /** {@code type · length · body} — a byte-exact round-trip of the original frame. */
+        /** {@code type · length · body}: a byte-exact round-trip of the original frame. */
         public byte[] toPacketBytes() {
             int bodyLen = (body != null) ? body.length : 0;
             int lengthField = 4 + bodyLen;

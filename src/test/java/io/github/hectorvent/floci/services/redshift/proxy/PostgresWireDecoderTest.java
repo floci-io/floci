@@ -90,7 +90,9 @@ class PostgresWireDecoderTest {
                 return i >= packet.length ? -1 : packet[i++] & 0xFF;
             }
             @Override public int read(byte[] b, int off, int len) {
-                if (i >= packet.length) return -1;
+                if (i >= packet.length) {
+                    return -1;
+                }
                 int n = Math.min(Math.min(len, 2), packet.length - i);
                 System.arraycopy(packet, i, b, off, n);
                 i += n;
