@@ -221,12 +221,19 @@ jobs:
     needs: build-native
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    # The suites run against the arm64 image only. What they check is
+    # arch-neutral, and running all eight on both arches (16 jobs per PR) left
+    # them queued for the shared runner pools for longer than they take to run.
+    # The amd64 image is still built above so both published arches are proven
+    # to link and package, and one amd64 suite stays: sdk-test-python carries
+    # the Firehose compression delivery test that proves the x86_64 snappy JNI
+    # library survived the native build (the resource that can go missing per
+    # platform, see the build-native comment).
     strategy:
       fail-fast: false
       matrix:
         arch:
           - arm64
-          - amd64
         test:
           - sdk-test-node
           - sdk-test-python
@@ -240,6 +247,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
           - arch: amd64
+            test: sdk-test-python
             runner: ubuntu-latest
 
     steps:
@@ -352,7 +360,7 @@ jobs:
         if: always() && steps.tests.outcome != 'skipped'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: compat-results-${{ matrix.test }}
+          name: compat-results-${{ matrix.arch }}-${{ matrix.test }}
           path: test-results/
           if-no-files-found: warn
 
