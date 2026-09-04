@@ -711,6 +711,7 @@ public interface EmulatorConfig {
         ServiceCatalogServiceConfig servicecatalog();
         SsoAdminServiceConfig ssoadmin();
         Macie2ServiceConfig macie2();
+        AccessAnalyzerServiceConfig accessanalyzer();
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
@@ -740,6 +741,11 @@ public interface EmulatorConfig {
     }
 
     interface Macie2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface AccessAnalyzerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
