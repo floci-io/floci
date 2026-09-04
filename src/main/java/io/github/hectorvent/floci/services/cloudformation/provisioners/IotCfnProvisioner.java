@@ -117,10 +117,10 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * A policy holds at most five versions. When the service refuses a sixth, this does what the
-     * AWS handler does: the oldest version is deleted, in one step on the service's side, and the
-     * new one is created again. Unlike that handler it tries more than once, because a version
-     * created by another client between the delete and the retry would otherwise fail the stack
-     * update; it gives up after as many attempts as a policy has versions.
+     * AWS handler does: the oldest version goes, in one step on the service's side, and the new one
+     * is created again. Unlike that handler it tries more than once, because a version created by
+     * another client between the delete and the retry would otherwise fail the stack update; it
+     * gives up after as many attempts as a policy has versions.
      */
     private void createDefaultVersion(String name, String document, String region) {
         for (int attempt = 1; ; attempt++) {
@@ -132,8 +132,10 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
                         || attempt >= IotService.MAX_POLICY_VERSIONS) {
                     throw e;
                 }
+                LOG.debugv("Policy {0} is at its version limit, deleting the oldest version before the new default: {1}",
+                        name, e.getMessage());
             }
-            iotService.deleteOldestPolicyVersion(name, region);
+            iotService.makeRoomForPolicyVersion(name, region);
         }
     }
 

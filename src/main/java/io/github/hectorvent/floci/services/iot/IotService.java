@@ -67,8 +67,8 @@ public class IotService {
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
     public static final int MAX_POLICY_VERSIONS = 5;
 
-    /** One lock for every policy version write, so the cap check and the append cannot interleave. */
-    private final Object policyVersionLock = new Object();
+    /** One lock for every policy version write and the policy delete, so a cap check, an append and a delete cannot interleave. */
+    private final Object policyWriteLock = new Object();
 
     private final StorageBackend<String, Thing> thingStore;
     private final StorageBackend<String, IotCertificate> certificateStore;
@@ -377,20 +377,22 @@ public class IotService {
     }
 
     public void deletePolicy(String policyName, String region) {
-        getPolicy(policyName, region);
-        if (!policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()).isEmpty()) {
-            throw new AwsException("InvalidRequestException", "Cannot delete attached policy", 400);
+        synchronized (policyWriteLock) {
+            getPolicy(policyName, region);
+            if (!policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()).isEmpty()) {
+                throw new AwsException("InvalidRequestException", "Cannot delete attached policy", 400);
+            }
+            policyStore.delete(policyKey(region, policyName));
+            policyAttachmentStore.delete(policyAttachmentKey(region, policyName));
         }
-        policyStore.delete(policyKey(region, policyName));
-        policyAttachmentStore.delete(policyAttachmentKey(region, policyName));
     }
 
     public IotPolicy.PolicyVersion createPolicyVersion(String policyName, String policyDocument, boolean setAsDefault, String region) {
-        synchronized (policyVersionLock) {
+        synchronized (policyWriteLock) {
             IotPolicy policy = getPolicy(policyName, region);
             if (policy.getVersions().size() >= MAX_POLICY_VERSIONS) {
-                throw new AwsException("VersionsLimitExceededException",
-                        "The number of policy versions exceeds the limit", 409);
+                throw new AwsException("VersionsLimitExceededException", "The policy " + policyName
+                        + " already has the maximum number of versions (" + MAX_POLICY_VERSIONS + ")", 409);
             }
             int next = policy.getVersions().stream()
                     .map(IotPolicy.PolicyVersion::getVersionId)
@@ -428,7 +430,7 @@ public class IotService {
     }
 
     public void setDefaultPolicyVersion(String policyName, String versionId, String region) {
-        synchronized (policyVersionLock) {
+        synchronized (policyWriteLock) {
             IotPolicy policy = getPolicy(policyName, region);
             IotPolicy.PolicyVersion version = getPolicyVersion(policyName, versionId, region);
             policy.setDefaultVersionId(versionId);
@@ -438,7 +440,7 @@ public class IotService {
     }
 
     public void deletePolicyVersion(String policyName, String versionId, String region) {
-        synchronized (policyVersionLock) {
+        synchronized (policyWriteLock) {
             IotPolicy policy = getPolicy(policyName, region);
             if (versionId.equals(policy.getDefaultVersionId())) {
                 throw new AwsException("InvalidRequestException", "Cannot delete default policy version", 400);
@@ -455,22 +457,27 @@ public class IotService {
     }
 
     /**
-     * Deletes the oldest version so a new one fits under the cap, as the AWS CloudFormation handler
-     * does once the service refuses a sixth. A default version cannot be deleted, so when the oldest
-     * is the default the newest becomes the default first. One step under the version lock, so
-     * nothing else can move the selection in between.
+     * Deletes the oldest versions until one more fits under the cap, which is what the AWS
+     * CloudFormation handler means to do once the service refuses a sixth (it sorts version ids as
+     * text, so past nine it picks another one). A policy persisted before the cap can hold more
+     * than five, so this deletes as many as it takes. A default version cannot be deleted, so when
+     * the oldest is the default the newest becomes the default first. One step under the policy
+     * write lock, so nothing else can move the selection in between.
      */
-    public void deleteOldestPolicyVersion(String policyName, String region) {
-        synchronized (policyVersionLock) {
+    public void makeRoomForPolicyVersion(String policyName, String region) {
+        synchronized (policyWriteLock) {
             IotPolicy policy = getPolicy(policyName, region);
-            List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
-                    .sorted(Comparator.comparingInt(version -> Integer.parseInt(version.getVersionId())))
-                    .toList();
-            String oldest = versions.get(0).getVersionId();
-            if (oldest.equals(policy.getDefaultVersionId())) {
-                setDefaultPolicyVersion(policyName, versions.get(versions.size() - 1).getVersionId(), region);
+            while (policy.getVersions().size() >= MAX_POLICY_VERSIONS) {
+                List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
+                        .sorted(Comparator.comparingInt(version -> Integer.parseInt(version.getVersionId())))
+                        .toList();
+                String oldest = versions.get(0).getVersionId();
+                if (oldest.equals(policy.getDefaultVersionId())) {
+                    setDefaultPolicyVersion(policyName, versions.get(versions.size() - 1).getVersionId(), region);
+                }
+                deletePolicyVersion(policyName, oldest, region);
+                policy = getPolicy(policyName, region);
             }
-            deletePolicyVersion(policyName, oldest, region);
         }
     }
 
