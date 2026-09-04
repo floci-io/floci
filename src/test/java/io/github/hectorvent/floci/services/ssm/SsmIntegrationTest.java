@@ -493,7 +493,13 @@ class SsmIntegrationTest {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListDocuments")
             .contentType(SSM_CONTENT_TYPE)
-            .body("{}")
+            .body("""
+                {
+                    "Filters": [
+                        {"Key": "Name", "Values": ["non-existent-doc-xyz-123"]}
+                    ]
+                }
+                """)
         .when()
             .post("/")
         .then()
