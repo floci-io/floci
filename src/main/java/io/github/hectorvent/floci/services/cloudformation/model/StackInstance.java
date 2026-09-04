@@ -18,6 +18,7 @@ public class StackInstance {
     /** Last operation status (SUCCEEDED, FAILED, ...) reported under StackInstanceStatus.DetailedStatus. */
     private String detailedStatus = "SUCCEEDED";
     private String statusReason;
+    private String organizationalUnitId;
 
     public String getStackSetId() { return stackSetId; }
     public void setStackSetId(String stackSetId) { this.stackSetId = stackSetId; }
@@ -37,4 +38,6 @@ public class StackInstance {
     public void setDetailedStatus(String detailedStatus) { this.detailedStatus = detailedStatus; }
     public String getStatusReason() { return statusReason; }
     public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
+    public String getOrganizationalUnitId() { return organizationalUnitId; }
+    public void setOrganizationalUnitId(String organizationalUnitId) { this.organizationalUnitId = organizationalUnitId; }
 }
