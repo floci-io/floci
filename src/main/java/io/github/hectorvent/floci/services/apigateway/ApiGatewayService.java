@@ -66,6 +66,7 @@ public class ApiGatewayService {
     private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
+    private final Object domainNameLock = new Object();
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
@@ -1286,20 +1287,22 @@ public class ApiGatewayService {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
 
-        // AWS enforces global uniqueness of custom domain names across all regions
-        boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
-        if (exists) {
-            throw new AwsException("BadRequestException",
-                    "The domain name you provided already exists.", 400);
-        }
-
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(domainName);
         domain.setCertificateName((String) request.get("certificateName"));
         domain.setCertificateArn((String) request.get("certificateArn"));
+        domain.setRegionalCertificateName((String) request.get("regionalCertificateName"));
+        domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
         domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
         domain.setEndpointConfigurationType(endpointTypeOf(request));
+        if ("EDGE".equals(domain.getEndpointConfigurationType())) {
+            // An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
+            // distribution's name in the fixed CloudFront hosted zone AWS documents for every region.
+            domain.setDistributionDomainName(
+                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + ".cloudfront.net");
+            domain.setDistributionHostedZoneId("Z2FDTNDATAQYW2");
+        }
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
         domain.setDomainNameStatus("AVAILABLE");
@@ -1309,7 +1312,16 @@ public class ApiGatewayService {
             domain.setTags(copied);
         }
 
-        domainStore.put(domainKey(region, domainName), domain);
+        // AWS enforces global uniqueness of custom domain names across all regions. The check and
+        // the store are one step, so two concurrent creates of one name cannot both succeed.
+        synchronized (domainNameLock) {
+            boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
+            if (exists) {
+                throw new AwsException("BadRequestException",
+                        "The domain name you provided already exists.", 400);
+            }
+            domainStore.put(domainKey(region, domainName), domain);
+        }
         LOG.infov("Created custom domain {0} in {1}", domainName, region);
         return domain;
     }
@@ -1386,7 +1398,7 @@ public class ApiGatewayService {
                 // Check if value is required for the specific path
                 if ("/certificateName".equals(path) || "/certificateArn".equals(path)
                     || "/regionalCertificateName".equals(path) || "/regionalCertificateArn".equals(path)
-                    || "/securityPolicy".equals(path) || "/endpointConfiguration/types/REGIONAL".equals(path)) {
+                    || "/securityPolicy".equals(path) || path.startsWith("/endpointConfiguration/types/")) {
                     throw new AwsException("BadRequestException", "Value is required for path: " + path, 400);
                 }
             }
@@ -1401,7 +1413,8 @@ public class ApiGatewayService {
                 newRegionalCertificateArn = value;
             } else if ("/securityPolicy".equals(path)) {
                 newSecurityPolicy = value;
-            } else if ("/endpointConfiguration/types/REGIONAL".equals(path)) {
+            } else if (path.startsWith("/endpointConfiguration/types/")) {
+                // The path names the type the domain has now; the value names the one it should get.
                 if (!"REGIONAL".equals(value) && !"EDGE".equals(value)) {
                     throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + value, 400);
                 }
@@ -1869,6 +1882,29 @@ public class ApiGatewayService {
         RestApi api = getRestApi(region, apiId);
         tagKeys.forEach(api.getTags()::remove);
         apiStore.put(apiKey(region, apiId), api);
+    }
+
+    public Map<String, String> getDomainNameTags(String region, String domainName) {
+        Map<String, String> tags = getDomainName(region, domainName).getTags();
+        return tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+    }
+
+    public void tagDomainName(String region, String domainName, Map<String, String> tags) {
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
+        CustomDomain domain = getDomainName(region, domainName);
+        if (domain.getTags() == null) {
+            domain.setTags(new LinkedHashMap<>());
+        }
+        domain.getTags().putAll(tags);
+        domainStore.put(domainKey(region, domainName), domain);
+    }
+
+    public void untagDomainName(String region, String domainName, List<String> tagKeys) {
+        CustomDomain domain = getDomainName(region, domainName);
+        if (domain.getTags() != null) {
+            tagKeys.forEach(domain.getTags()::remove);
+            domainStore.put(domainKey(region, domainName), domain);
+        }
     }
 
     // ──────────────────────────── OpenAPI Import ────────────────────────────
