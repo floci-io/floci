@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.iot.model.Thing;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -103,7 +104,7 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.reusesPriorEntity(name)) {
             IotPolicy policy = iotService.getPolicy(name, region);
             if (!document.equals(policy.getPolicyDocument())) {
-                iotService.createPolicyVersion(name, document, true, region);
+                createDefaultVersion(name, document, region);
             }
             reconcileTags(policy.getPolicyArn(), tags);
             recordPolicy(r, name, policy.getPolicyArn());
@@ -113,6 +114,31 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
         recordPolicy(r, name, policy.getPolicyArn());
         finishCreate(r, ctx, () -> applyTags(policy.getPolicyArn(), tags));
         deletePrior(r, ctx);
+    }
+
+    /**
+     * A policy holds at most five versions. When the service refuses a sixth, this does what the
+     * AWS handler does: the oldest version is deleted and the new one is created again. A default
+     * version cannot be deleted, so when the oldest is still the default the newest becomes the
+     * default first.
+     */
+    private void createDefaultVersion(String name, String document, String region) {
+        try {
+            iotService.createPolicyVersion(name, document, true, region);
+        } catch (AwsException e) {
+            if (!"VersionsLimitExceededException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            List<IotPolicy.PolicyVersion> versions = iotService.listPolicyVersions(name, region).stream()
+                    .sorted(Comparator.comparingInt(version -> Integer.parseInt(version.getVersionId())))
+                    .toList();
+            String oldest = versions.get(0).getVersionId();
+            if (oldest.equals(iotService.getPolicy(name, region).getDefaultVersionId())) {
+                iotService.setDefaultPolicyVersion(name, versions.get(versions.size() - 1).getVersionId(), region);
+            }
+            iotService.deletePolicyVersion(name, oldest, region);
+            iotService.createPolicyVersion(name, document, true, region);
+        }
     }
 
     /**
@@ -241,7 +267,7 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Removes the entity a replacement supersedes. As in CloudFormation's update cleanup, a failure
      * does not fail the update: the stack already points at the new entity, so the prior one is
-     * left behind, for instance a policy that is still attached to a certificate.
+     * left behind with a warning in the log.
      */
     private void deletePrior(StackResource r, ProvisionContext ctx) {
         if (!ctx.isUpdate()) {

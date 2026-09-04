@@ -6,7 +6,10 @@ import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -182,6 +185,27 @@ class IotCfnIntegrationTest {
             .body("ruleArn", equalTo(ruleArn))
             .body("rule.sql", equalTo("SELECT * FROM 'iot-cfn-it/+/telemetry/v2'"));
         assertTagValue(ruleArn, "v2");
+
+        // Four more document changes. The service refuses a sixth version, so the stack deletes
+        // the oldest one first, as the AWS handler does, and the policy keeps five versions.
+        for (String action : List.of("iot:Subscribe", "iot:Receive", "iot:GetThingShadow", "iot:UpdateThingShadow")) {
+            cloudFormation("UpdateStack", template("SN-2", action, "iot-cfn-it/+/telemetry/v2", "v2"));
+            describeStacks("UPDATE_COMPLETE");
+        }
+        given()
+        .when()
+            .get("/policies/" + POLICY + "/version")
+        .then()
+            .statusCode(200)
+            .body("policyVersions.versionId", contains("2", "3", "4", "5", "6"))
+            .body("policyVersions.find { it.isDefaultVersion }.versionId", equalTo("6"));
+        given()
+        .when()
+            .get("/policies/" + POLICY)
+        .then()
+            .statusCode(200)
+            .body("defaultVersionId", equalTo("6"))
+            .body("policyDocument", containsString("iot:UpdateThingShadow"));
 
         cloudFormation("DeleteStack", null);
         awaitStackDeleted();
