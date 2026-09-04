@@ -210,6 +210,9 @@ public class CognitoIdentityJsonHandler {
         if (value == null || value.isNull()) {
             return null;
         }
+        if (!value.isBoolean()) {
+            throw new AwsException("SerializationException", field + " must be a boolean.", 400);
+        }
         return value.asBoolean();
     }
 

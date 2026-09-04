@@ -451,4 +451,17 @@ class CognitoIdentityIntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    @Order(18)
+    void createIdentityPoolRejectsNonBooleanAllowUnauthenticatedIdentities() {
+        action("CreateIdentityPool")
+            .body("{\"IdentityPoolName\": \"wrong type\", \"AllowUnauthenticatedIdentities\": \"true\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("AllowUnauthenticatedIdentities must be a boolean."));
+    }
 }
