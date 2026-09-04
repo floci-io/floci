@@ -29,6 +29,24 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
                 "The XML you provided was not well-formed or did not validate against our published schema", 400);
     }
 
+    /**
+     * AWS reports a {@code Days} value outside the tier-specific allowed range this way: the XML
+     * is well-formed, but the value is semantically invalid. Minimums are tier-specific (90 for
+     * ARCHIVE_ACCESS, 180 for DEEP_ARCHIVE_ACCESS) and both are capped at 730. The response
+     * carries {@code ArgumentName} and {@code ArgumentValue} so the SDK can surface which input
+     * was rejected, matching the real S3 error shape.
+     */
+    private static AwsException daysOutOfRange(String accessTier, int days) {
+        int min = "DEEP_ARCHIVE_ACCESS".equals(accessTier) ? 180 : 90;
+        String message = days < min
+                ? "Days must be at least " + min + " for AccessTier " + accessTier + "."
+                : "Days must be at most 730 for AccessTier " + accessTier + ".";
+        Map<String, Object> detail = new java.util.LinkedHashMap<>();
+        detail.put("ArgumentName", "Tiering.Days");
+        detail.put("ArgumentValue", String.valueOf(days));
+        return new AwsException("InvalidArgument", message, 400, detail);
+    }
+
     static S3IntelligentTieringConfiguration parse(String xml) {
         if (xml == null || xml.isBlank() || !ROOT.equals(XmlParser.rootElementName(xml))) {
             throw malformed();
@@ -127,7 +145,8 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
 
     /**
      * Serializes the {@code index}-th {@code Tiering} entry. Each tiering is an access tier and a
-     * positive day count, and both are required.
+     * positive day count, and both are required. Days must also fall in the tier-specific range
+     * AWS enforces: 90-730 for ARCHIVE_ACCESS and 180-730 for DEEP_ARCHIVE_ACCESS.
      */
     private static String tieringXml(String xml, int index) {
         List<Map<String, String>> entries = XmlParser.extractGroups(xml, "Tiering");
@@ -143,13 +162,21 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
         if (days == null || !days.matches("\\d+")) {
             throw malformed();
         }
+        int dayCount;
         try {
-            if (Integer.parseInt(days) < 1) {
-                throw malformed();
-            }
+            dayCount = Integer.parseInt(days);
         } catch (NumberFormatException e) {
             // Values above Integer.MAX_VALUE match the regex but overflow parseInt.
             throw malformed();
+        }
+        if (dayCount < 1) {
+            throw malformed();
+        }
+        // Beyond well-formedness, AWS enforces a tier-specific range. A value outside it is
+        // semantically invalid, not malformed, so AWS answers InvalidArgument.
+        int min = "DEEP_ARCHIVE_ACCESS".equals(accessTier) ? 180 : 90;
+        if (dayCount < min || dayCount > 730) {
+            throw daysOutOfRange(accessTier, dayCount);
         }
         return new XmlBuilder()
                 .elem("AccessTier", accessTier)

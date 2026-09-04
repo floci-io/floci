@@ -331,4 +331,81 @@ class S3IntelligentTieringConfigurationIntegrationTest {
         .then()
             .statusCode(204);
     }
+
+    @Test
+    @Order(15)
+    void outOfRangeDaysReturnsInvalidArgumentWithArgumentNameAndValue() {
+        given()
+        .when()
+            .put("/" + BUCKET)
+        .then()
+            .statusCode(200);
+
+        // ARCHIVE_ACCESS requires at least 90 days; AWS answers InvalidArgument with ArgumentName
+        // and ArgumentValue so the SDK can surface which input was rejected.
+        given()
+            .body("""
+                    <IntelligentTieringConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Id>TooFewDays</Id>
+                        <Status>Enabled</Status>
+                        <Tiering>
+                            <AccessTier>ARCHIVE_ACCESS</AccessTier>
+                            <Days>1</Days>
+                        </Tiering>
+                    </IntelligentTieringConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?intelligent-tiering&id=TooFewDays")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"))
+            .body(containsString("<ArgumentName>Tiering.Days</ArgumentName>"))
+            .body(containsString("<ArgumentValue>1</ArgumentValue>"));
+
+        // DEEP_ARCHIVE_ACCESS requires at least 180 days; 90 is valid for ARCHIVE_ACCESS but not here.
+        given()
+            .body("""
+                    <IntelligentTieringConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Id>TooFewDays</Id>
+                        <Status>Enabled</Status>
+                        <Tiering>
+                            <AccessTier>DEEP_ARCHIVE_ACCESS</AccessTier>
+                            <Days>90</Days>
+                        </Tiering>
+                    </IntelligentTieringConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?intelligent-tiering&id=TooFewDays")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"))
+            .body(containsString("<ArgumentName>Tiering.Days</ArgumentName>"))
+            .body(containsString("<ArgumentValue>90</ArgumentValue>"));
+
+        // Both tiers are capped at 730 days.
+        given()
+            .body("""
+                    <IntelligentTieringConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Id>TooManyDays</Id>
+                        <Status>Enabled</Status>
+                        <Tiering>
+                            <AccessTier>ARCHIVE_ACCESS</AccessTier>
+                            <Days>731</Days>
+                        </Tiering>
+                    </IntelligentTieringConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?intelligent-tiering&id=TooManyDays")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"))
+            .body(containsString("<ArgumentName>Tiering.Days</ArgumentName>"))
+            .body(containsString("<ArgumentValue>731</ArgumentValue>"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET)
+        .then()
+            .statusCode(204);
+    }
 }

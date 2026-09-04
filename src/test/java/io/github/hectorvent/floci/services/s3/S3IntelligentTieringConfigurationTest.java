@@ -157,6 +157,83 @@ class S3IntelligentTieringConfigurationTest {
     }
 
     @Test
+    void rejectsArchiveAccessDaysBelowMinimum() {
+        // ARCHIVE_ACCESS requires at least 90 days; AWS answers InvalidArgument, not MalformedXML.
+        AwsException e = assertThrows(AwsException.class,
+                () -> S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("ARCHIVE_ACCESS", 89))));
+        assertEquals("InvalidArgument", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("Tiering.Days", e.getExtendedData().get("ArgumentName"));
+        assertEquals("89", e.getExtendedData().get("ArgumentValue"));
+    }
+
+    @Test
+    void rejectsDeepArchiveAccessDaysBelowMinimum() {
+        // DEEP_ARCHIVE_ACCESS requires at least 180 days; 90 is valid for ARCHIVE_ACCESS but not here.
+        AwsException e = assertThrows(AwsException.class,
+                () -> S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("DEEP_ARCHIVE_ACCESS", 90))));
+        assertEquals("InvalidArgument", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("Tiering.Days", e.getExtendedData().get("ArgumentName"));
+        assertEquals("90", e.getExtendedData().get("ArgumentValue"));
+    }
+
+    @Test
+    void rejectsDaysAboveMaximum() {
+        // Both tiers are capped at 730 days.
+        AwsException archive = assertThrows(AwsException.class,
+                () -> S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("ARCHIVE_ACCESS", 731))));
+        assertEquals("InvalidArgument", archive.getErrorCode());
+        assertEquals(400, archive.getHttpStatus());
+        assertEquals("Tiering.Days", archive.getExtendedData().get("ArgumentName"));
+        assertEquals("731", archive.getExtendedData().get("ArgumentValue"));
+
+        AwsException deep = assertThrows(AwsException.class,
+                () -> S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("DEEP_ARCHIVE_ACCESS", 731))));
+        assertEquals("InvalidArgument", deep.getErrorCode());
+        assertEquals(400, deep.getHttpStatus());
+        assertEquals("Tiering.Days", deep.getExtendedData().get("ArgumentName"));
+        assertEquals("731", deep.getExtendedData().get("ArgumentValue"));
+    }
+
+    @Test
+    void acceptsDaysAtTierBoundaries() {
+        // The minimum and maximum are inclusive.
+        assertEquals("<Id>a</Id><Status>Enabled</Status>"
+                        + "<Tiering><AccessTier>ARCHIVE_ACCESS</AccessTier><Days>90</Days></Tiering>",
+                S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("ARCHIVE_ACCESS", 90))).innerXml());
+        assertEquals("<Id>a</Id><Status>Enabled</Status>"
+                        + "<Tiering><AccessTier>ARCHIVE_ACCESS</AccessTier><Days>730</Days></Tiering>",
+                S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("ARCHIVE_ACCESS", 730))).innerXml());
+        assertEquals("<Id>a</Id><Status>Enabled</Status>"
+                        + "<Tiering><AccessTier>DEEP_ARCHIVE_ACCESS</AccessTier><Days>180</Days></Tiering>",
+                S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("DEEP_ARCHIVE_ACCESS", 180))).innerXml());
+        assertEquals("<Id>a</Id><Status>Enabled</Status>"
+                        + "<Tiering><AccessTier>DEEP_ARCHIVE_ACCESS</AccessTier><Days>730</Days></Tiering>",
+                S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>" + tiering("DEEP_ARCHIVE_ACCESS", 730))).innerXml());
+    }
+
+    @Test
+    void rejectsOutOfRangeDaysInOneOfSeveralTierings() {
+        // A valid tiering followed by an out-of-range one must still be rejected.
+        AwsException e = assertThrows(AwsException.class,
+                () -> S3IntelligentTieringConfiguration.parse(body(
+                        "<Id>a</Id><Status>Enabled</Status>"
+                                + tiering("ARCHIVE_ACCESS", 90)
+                                + tiering("DEEP_ARCHIVE_ACCESS", 179))));
+        assertEquals("InvalidArgument", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
     void rejectsFiltersThatAreNotExactlyOnePredicate() {
         String suffix = "<Status>Enabled</Status>" + tiering("ARCHIVE_ACCESS", 90);
         String bothPrefixAndTag = "<Id>a</Id><Filter><Prefix>logs/</Prefix>"
