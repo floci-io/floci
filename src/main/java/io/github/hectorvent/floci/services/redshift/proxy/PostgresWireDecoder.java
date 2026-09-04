@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
@@ -49,6 +50,22 @@ public class PostgresWireDecoder {
      * @throws IOException  on an I/O error, a length below 4, or a length above {@link #MAX_MESSAGE_BYTES}.
      */
     public FrontendMessage nextMessage() throws IOException {
+        return nextMessage(null);
+    }
+
+    /**
+     * Read the next frontend message.
+     *
+     * <p>When {@code passthroughOut} is non-null and the incoming message is not a Simple Query
+     * ({@code 'Q'}), its frame is streamed directly to {@code passthroughOut} without heap buffering
+     * or size caps, preserving transparent passthrough for large messages such as {@code CopyData}.
+     *
+     * @param passthroughOut destination for opaque non-query frames, or {@code null} to buffer
+     * @return the message, or {@code null} on a clean end-of-stream between messages.
+     * @throws EOFException if EOF is hit inside the length field or body.
+     * @throws IOException  on an I/O error, a length below 4, or a length above {@link #MAX_MESSAGE_BYTES}.
+     */
+    public FrontendMessage nextMessage(OutputStream passthroughOut) throws IOException {
         betweenMessages = true;
 
         int typeByte = in.read();
@@ -67,6 +84,29 @@ public class PostgresWireDecoder {
         if (length < 4) {
             throw new IOException("Invalid message length: " + length);
         }
+
+        if (type != 'Q' && passthroughOut != null) {
+            passthroughOut.write(typeByte);
+            passthroughOut.write(lengthBytes);
+            int remaining = length - 4;
+            if (remaining > 0) {
+                byte[] buf = new byte[Math.min(remaining, 8192)];
+                while (remaining > 0) {
+                    int toRead = Math.min(remaining, buf.length);
+                    int read = in.read(buf, 0, toRead);
+                    if (read == -1) {
+                        throw new EOFException("Unexpected EOF (expected " + (length - 4)
+                                + " bytes, got " + (length - 4 - remaining) + ")");
+                    }
+                    passthroughOut.write(buf, 0, read);
+                    remaining -= read;
+                }
+            }
+            passthroughOut.flush();
+            betweenMessages = true;
+            return new FrontendMessage(type, null);
+        }
+
         if (length > MAX_MESSAGE_BYTES) {
             throw new IOException("Refusing PostgreSQL message of " + length
                     + " bytes (limit " + MAX_MESSAGE_BYTES + ")");

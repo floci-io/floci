@@ -45,14 +45,12 @@ public class RedshiftInterceptingBridge {
 
             PostgresWireDecoder decoder = new PostgresWireDecoder(clientIn);
             while (true) {
-                PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage();
+                PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage(backendOut);
                 if (msg == null) {
                     break; // client EOF
                 }
 
                 if (!msg.isQuery()) {
-                    backendOut.write(msg.toPacketBytes());
-                    backendOut.flush();
                     if (msg.type() == 'X') { // Terminate
                         break;
                     }
