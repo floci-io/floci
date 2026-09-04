@@ -553,8 +553,6 @@ public class KinesisService implements ResourceProvider {
     private PutRecordResult putRecordInternal(String accountId, String streamName, byte[] data,
                                               String partitionKey, String region) {
         String key = regionKey(region, streamName);
-        KinesisStream stream = resolveStreamForAccountMigrating(accountId, streamName, region);
-        validateRecordSize(stream, data, partitionKey);
         putRecordBeforeLockHook.run();
 
         // Serialize shard selection, sequence allocation, append and persistence per stream so
@@ -565,11 +563,16 @@ public class KinesisService implements ResourceProvider {
         // reintroducing the append race. Cross-account same-named streams therefore share one monitor
         // (over-coarse but safe).
         synchronized (lockFor(key)) {
-            // Re-resolve under the lock. deleteStream holds this same monitor, so a stream deleted
-            // between the resolve above and here is now absent from the store. Appending to and
-            // persisting the stale pre-delete instance would resurrect a deleted stream, so bind to
-            // the instance currently in the store and fail like any missing stream if it is gone.
+            // Resolve under the lock, not before it. Resolving a legacy unprefixed stream MIGRATES it,
+            // which is a write: the explicit-account path moves it into the account partition behind an
+            // ownership predicate, while AccountAwareStorageBackend.get adopts it into the request
+            // account with no ownership check and no synchronization. Resolved outside this monitor,
+            // an ambient producer and the owner's producer could migrate the same stream concurrently
+            // and fork it across partitions. deleteStream holds this same monitor too, so a stream
+            // deleted before we get here is absent and this fails like any other missing stream rather
+            // than appending to a stale instance and resurrecting it.
             KinesisStream current = resolveStreamForAccountMigrating(accountId, streamName, region);
+            validateRecordSize(current, data, partitionKey);
             KinesisShard shard = selectShard(current, partitionKey);
             String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());
             putRecordAppendHook.run();
