@@ -558,4 +558,44 @@ class IotServiceTest {
         }
         assertEquals(5, service.listPolicyVersions("raced", REGION).size());
     }
+
+    @Test
+    void deletingTheOldestVersionRemovesTheNumericallySmallestIdAndKeepsTheDefault() {
+        service.createPolicy("pruned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 10; v++) {
+            if (service.listPolicyVersions("pruned", REGION).size() == IotService.MAX_POLICY_VERSIONS) {
+                service.deleteOldestPolicyVersion("pruned", REGION);
+            }
+            service.createPolicyVersion("pruned", "{\"v\":" + v + "}", true, REGION);
+        }
+        assertEquals(List.of(6, 7, 8, 9, 10), versionIds("pruned"));
+
+        // Sorted as text, "10" would come before "6"; the oldest version is the numerically smallest id.
+        service.deleteOldestPolicyVersion("pruned", REGION);
+
+        assertEquals(List.of(7, 8, 9, 10), versionIds("pruned"));
+        assertEquals("10", service.getPolicy("pruned", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void deletingTheOldestVersionMovesTheDefaultToTheNewestWhenTheOldestIsTheDefault() {
+        service.createPolicy("pinned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            service.createPolicyVersion("pinned", "{\"v\":" + v + "}", false, REGION);
+        }
+        assertEquals("1", service.getPolicy("pinned", REGION).getDefaultVersionId());
+
+        service.deleteOldestPolicyVersion("pinned", REGION);
+
+        assertEquals(List.of(2, 3, 4, 5), versionIds("pinned"));
+        assertEquals("5", service.getPolicy("pinned", REGION).getDefaultVersionId());
+        assertEquals("{\"v\":5}", service.getPolicy("pinned", REGION).getPolicyDocument());
+    }
+
+    private List<Integer> versionIds(String policyName) {
+        return service.listPolicyVersions(policyName, REGION).stream()
+                .map(version -> Integer.parseInt(version.getVersionId()))
+                .sorted()
+                .toList();
+    }
 }

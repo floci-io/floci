@@ -13,7 +13,6 @@ import io.github.hectorvent.floci.services.iot.model.Thing;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -118,10 +117,10 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * A policy holds at most five versions. When the service refuses a sixth, this does what the
-     * AWS handler does: the oldest version is deleted and the new one is created again. Unlike that
-     * handler it tries more than once, because a version created by another client between the
-     * delete and the retry would otherwise fail the stack update; it gives up after as many
-     * attempts as a policy has versions.
+     * AWS handler does: the oldest version is deleted, in one step on the service's side, and the
+     * new one is created again. Unlike that handler it tries more than once, because a version
+     * created by another client between the delete and the retry would otherwise fail the stack
+     * update; it gives up after as many attempts as a policy has versions.
      */
     private void createDefaultVersion(String name, String document, String region) {
         for (int attempt = 1; ; attempt++) {
@@ -134,20 +133,8 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
                     throw e;
                 }
             }
-            deleteOldestVersion(name, region);
+            iotService.deleteOldestPolicyVersion(name, region);
         }
-    }
-
-    /** A default version cannot be deleted, so when the oldest is the default the newest becomes the default first. */
-    private void deleteOldestVersion(String name, String region) {
-        List<IotPolicy.PolicyVersion> versions = iotService.listPolicyVersions(name, region).stream()
-                .sorted(Comparator.comparingInt(version -> Integer.parseInt(version.getVersionId())))
-                .toList();
-        String oldest = versions.get(0).getVersionId();
-        if (oldest.equals(iotService.getPolicy(name, region).getDefaultVersionId())) {
-            iotService.setDefaultPolicyVersion(name, versions.get(versions.size() - 1).getVersionId(), region);
-        }
-        iotService.deletePolicyVersion(name, oldest, region);
     }
 
     /**
