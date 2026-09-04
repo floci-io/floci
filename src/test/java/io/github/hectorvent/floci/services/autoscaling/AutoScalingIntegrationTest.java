@@ -896,6 +896,23 @@ class AutoScalingIntegrationTest {
     // aws_autoscaling_schedule's whole lifecycle. Found crossing
     // terraform-aws-modules/terraform-aws-autoscaling's "complete" example.
     @Test
+    @Order(41)
+    void putScheduledActionRejectsMalformedStartTime() {
+        given()
+                .formParam("Action", "PutScheduledUpdateGroupAction")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScheduledActionName", "bad-start")
+                .formParam("StartTime", "not-a-timestamp")
+                .formParam("DesiredCapacity", "1")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>ValidationError</Code>"));
+    }
+
+    @Test
     @Order(34)
     void putDescribeAndDeleteScheduledAction() {
         given()

@@ -306,7 +306,8 @@ public class AutoScalingService {
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
-        scheduledActions.entrySet().removeIf(e -> name.equals(e.getValue().getAutoScalingGroupName()));
+        scheduledActions.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
+                && name.equals(e.getValue().getAutoScalingGroupName()));
         warmPools.remove(warmPoolKey(region, name));
     }
 

@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 
 @ApplicationScoped
@@ -1316,8 +1317,8 @@ public class AutoScalingQueryHandler {
         service.putScheduledUpdateGroupAction(region,
                 p.getFirst("AutoScalingGroupName"),
                 p.getFirst("ScheduledActionName"),
-                parseInstant(p.getFirst("StartTime")),
-                parseInstant(p.getFirst("EndTime")),
+                parseInstant("StartTime", p.getFirst("StartTime")),
+                parseInstant("EndTime", p.getFirst("EndTime")),
                 p.getFirst("Recurrence"),
                 p.getFirst("TimeZone"),
                 nullableIntParam(p, "MinSize"),
@@ -1369,12 +1370,13 @@ public class AutoScalingQueryHandler {
         return ok(xml.build());
     }
 
-    private Instant parseInstant(String value) {
+    private Instant parseInstant(String name, String value) {
         if (value == null || value.isBlank()) { return null; }
         try {
             return Instant.parse(value);
-        } catch (Exception e) {
-            return null;
+        } catch (DateTimeParseException e) {
+            throw new AwsException("ValidationError",
+                    name + " '" + value + "' is not a valid ISO 8601 timestamp.", 400);
         }
     }
 

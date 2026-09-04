@@ -885,10 +885,16 @@ class AutoScalingServiceTest {
         service.putScheduledUpdateGroupAction(REGION, "test-asg", "morning",
                 null, null, "0 7 * * 1-5", null, 0, 1, 1);
         service.putWarmPool(REGION, "test-asg", null, 1, "Stopped", false);
+        service.createAutoScalingGroup("eu-west-1", "test-asg", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("eu-west-1a"), List.of("subnet-12345678"), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of());
+        service.putScheduledUpdateGroupAction("eu-west-1", "test-asg", "morning",
+                null, null, "0 7 * * 1-5", null, 0, 1, 1);
 
         service.deleteAutoScalingGroup(REGION, "test-asg", true);
 
         assertEquals(List.of(), service.describeScheduledActions(REGION, "test-asg", List.of()));
         assertThrows(AwsException.class, () -> service.describeWarmPool(REGION, "test-asg"));
+        assertEquals(1, service.describeScheduledActions("eu-west-1", "test-asg", List.of()).size());
     }
 }
