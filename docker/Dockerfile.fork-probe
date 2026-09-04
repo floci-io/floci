@@ -1,0 +1,22 @@
+# Clean workload image for the ECS task-role credential contract.  The multi-architecture digest
+# is immutable; Docker selects the requested linux/amd64 or linux/arm64 manifest at build time.
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+COPY docker/fork-runtime-requirements.txt /usr/share/fork-probe/requirements.txt
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: \
+        -r /usr/share/fork-probe/requirements.txt \
+    && useradd --system --uid 1001 --gid 0 --home-dir /nonexistent \
+        --shell /usr/sbin/nologin forkprobe \
+    && mkdir -p /opt/fork-probe \
+    && chown -R 1001:0 /opt/fork-probe /usr/share/fork-probe
+
+COPY --chown=1001:0 tools/fork-ecs-probe.py /opt/fork-ecs-probe.py
+RUN chmod 0755 /opt/fork-ecs-probe.py
+
+# No AWS_* credentials, profile, config, endpoint, or authorization token is baked into this
+# image.  ECS injects only the task's relative container-credentials URI at launch time.
+USER 1001:0
+ENTRYPOINT ["python3", "/opt/fork-ecs-probe.py"]

@@ -110,6 +110,18 @@ public class IamActionRegistry {
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
+        // ECS is JSON 1.1 only: the controller dispatches from X-Amz-Target, so a query
+        // parameter must not be able to replace the operation IAM authorizes. Without this
+        // priority an attacker could send `?Action=DescribeServices` with an UpdateService
+        // target (or vice versa) and get the policy for the wrong operation.
+        if ("ecs".equals(credentialScope)) {
+            String target = ctx.getHeaderString("X-Amz-Target");
+            if (target != null && target.contains(".")) {
+                String operationName = target.substring(target.lastIndexOf('.') + 1);
+                return credentialScope + ":" + operationName;
+            }
+        }
+
         // Query-protocol: Action param → service:Action.
         // AWS SDKs send Query-protocol calls (IAM, STS, EC2, SQS, SNS, ...) as
         // POST with Action=... in the application/x-www-form-urlencoded body,

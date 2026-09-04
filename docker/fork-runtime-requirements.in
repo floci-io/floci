@@ -1,0 +1,3 @@
+# Runtime utilities retained from docker/Dockerfile, pinned for the reviewed fork.
+awscli==1.46.1
+boto3==1.43.88

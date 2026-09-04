@@ -1,0 +1,170 @@
+name: Publish reviewed Floci fork
+
+on:
+  push:
+    branches: [feature/DEV-1483-local-ecs-task-role-credentials]
+    paths: [.github/workflows/publish-reviewed-fork.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reviewed-floci-fork-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'MEJOR-Technologies/floci' &&
+      github.ref == 'refs/heads/feature/DEV-1483-local-ecs-task-role-credentials' &&
+      github.event_name == 'push' && !github.event.deleted
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Replaced only after independent source review and runtime acceptance.
+      SOURCE_SHA: 68ad71a16946feeb33951d010a48cdb36a03a9a2
+      IMAGE: ghcr.io/mejor-technologies/floci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Verify reviewed source and record build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          git ls-files --error-unmatch docker/Dockerfile.fork docker/Dockerfile.fork-probe docker/fork-runtime-requirements.txt tools/fork-image-smoke.sh tools/fork-ecs-smoke.sh tools/fork-ecs-smoke.py tools/fork-ecs-probe.py
+          mkdir -p evidence
+          git log -1 --format='%H %ct' > evidence/source.txt
+          sha256sum docker/Dockerfile.fork docker/Dockerfile.fork-probe docker/fork-runtime-requirements.txt pom.xml .dockerignore .mvn/wrapper/maven-wrapper.properties docker/entrypoint.sh docker/localstack-parity.sh tools/fork-image-smoke.sh tools/fork-ecs-smoke.sh tools/fork-ecs-smoke.py tools/fork-ecs-probe.py > evidence/recipe.sha256
+          cp docker/Dockerfile.fork docker/fork-runtime-requirements.txt evidence/
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          printf 'TAG=chris-fork-%s-%s-%s\n' "$SOURCE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          printf 'workflow_sha=%s\nrunner_image=%s\nrunner_image_version=%s\n' "$GITHUB_SHA" "${ImageOS:-unknown}" "${ImageVersion:-unknown}" > evidence/execution.txt
+      - uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4
+        with:
+          version: v29.7.2
+          daemon-config: |
+            {"features":{"containerd-snapshotter":true}}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          version: v0.36.1
+          driver-opts: image=moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+      - name: Run credential regression gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version > evidence/docker-version.txt
+          docker buildx version > evidence/buildx-version.txt
+          docker run --rm -v "$PWD:/work" -w /work \
+            eclipse-temurin@sha256:534968c051301957beae735e7ba1db54d99ddecf08746d3b9d4f318cc132dbc3 \
+            sh -ec 'sed -i -E "s@https?://([a-z.]*archive.ubuntu.com/ubuntu/?|security.ubuntu.com/ubuntu/?|ports.ubuntu.com/ubuntu-ports/?)@https://snapshot.ubuntu.com/ubuntu/20260904T000000Z/@g" /etc/apt/sources.list.d/ubuntu.sources; apt-get update; apt-get install -y --no-install-recommends unzip; command -v unzip; exec ./mvnw -B -Dtest=IamEnforcementFilterTest,ContainerBuilderTest,ContainerLifecycleManagerNetworkTest,EcsContainerManagerAwsBaselineTest,EcsContainerManagerLifecycleTest,EcsServiceTeardownTest,EcsServiceTaskOwnershipTest,EcsTaskRoleCredentialsServerTest,EcsTaskRoleCredentialsTest,AssumeRoleTrustPolicyIntegrationTest,IamServiceTest,ResourceArnBuilderTest,NativeImageRuntimeInitializationTest,RdsSigV4ValidatorTest,SigV4ValidatorTest,MemoryDbServiceTest,PreSignedUrlFilterTest,S3RequestAuthorizationParserTest,S3ServiceTest,S3EcsAuthTest,ExecuteApiSigV4AuthorizerTest test'
+          cp target/surefire-reports/TEST-*.xml evidence/
+          test -z "$(git status --porcelain --untracked-files=all -- . ':!evidence')"
+      - name: Build both platforms without publication
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: docker/Dockerfile.fork
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/floci-reviewed.tar
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          build-args: |
+            VERSION=${{ env.TAG }}
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/MEJOR-Technologies/floci
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.TAG }}
+            org.opencontainers.image.description=Temporary reviewed Floci fork, not an official upstream release
+          provenance: mode=max,version=v0.2
+          sbom: generator=docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
+      - name: Test exact OCI artifact on both platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker load -i "$RUNNER_TEMP/floci-reviewed.tar"
+          socket=$(docker context inspect "$(docker context show)" --format '{{.Endpoints.docker.Host}}')
+          [[ "$socket" == unix:///* ]]
+          socket=${socket#unix://}
+          bash tools/fork-image-smoke.sh "$IMAGE:$TAG" amd64 | tee evidence/smoke-amd64.txt
+          bash tools/fork-image-smoke.sh "$IMAGE:$TAG" arm64 | tee evidence/smoke-arm64.txt
+          bash tools/fork-ecs-smoke.sh "$IMAGE:$TAG" --platform amd64 --docker-socket "$socket" 2> >(tee evidence/ecs-runtime-amd64-diagnostics.txt >&2) | tee evidence/ecs-runtime-amd64.txt
+          bash tools/fork-ecs-smoke.sh "$IMAGE:$TAG" --platform arm64 --docker-socket "$socket" 2> >(tee evidence/ecs-runtime-arm64-diagnostics.txt >&2) | tee evidence/ecs-runtime-arm64.txt
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push tested artifact and verify attestations
+        env:
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          docker push "$IMAGE:$TAG"
+          docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' > evidence/manifest.json
+          test "$(jq -r '.digest' evidence/manifest.json)" = "$EXPECTED_DIGEST"
+          docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" --raw > evidence/index.json
+          jq -e '([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort) == ["amd64","arm64"]' evidence/index.json
+          docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" --format '{{json .Provenance}}' > evidence/provenance.json
+          docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" --format '{{json .SBOM}}' > evidence/sbom.json
+          jq -e '."linux/amd64".SLSA and ."linux/arm64".SLSA' evidence/provenance.json
+          jq -e --arg sha "$SOURCE_SHA" 'all(.[]; .SLSA.metadata."https://mobyproject.org/buildkit@v1#metadata".vcs.revision == $sha)' evidence/provenance.json
+          jq -e '."linux/amd64".SPDX and ."linux/arm64".SPDX' evidence/sbom.json
+          jq -n --arg source "$SOURCE_SHA" --arg image "$IMAGE@$EXPECTED_DIGEST" \
+            --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{source:$source,image:$image,run:$run,byte_identical_reproducibility_claimed:false}' > evidence/result.json
+          printf 'Image: %s@%s\nSource: %s\n' "$IMAGE" "$EXPECTED_DIGEST" "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        if: always()
+        with:
+          name: floci-fork-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+  anonymous-pull:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    env:
+      IMAGE: ghcr.io/mejor-technologies/floci
+      DIGEST: ${{ needs.publish.outputs.digest }}
+    steps:
+      # The classic image store cannot retain both architectures under one index digest.
+      # Match the publication daemon's containerd store without logging into any registry.
+      - uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4
+        with:
+          version: v29.7.2
+          daemon-config: |
+            {"features":{"containerd-snapshotter":true}}
+      - name: Require public anonymous pulls for both architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          socket=$(docker context inspect "$(docker context show)" --format '{{.Endpoints.docker.Host}}')
+          anonymous_config=$(mktemp -d)
+          test ! -e "$anonymous_config/config.json"
+          unset DOCKER_AUTH_CONFIG REGISTRY_AUTH_FILE
+          for arch in amd64 arm64; do
+            docker --config "$anonymous_config" --host "$socket" pull --platform "linux/$arch" "$IMAGE@$DIGEST"
+          done
+          test ! -e "$anonymous_config/config.json"
+          printf 'Verified anonymous linux/amd64 and linux/arm64 pulls: %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

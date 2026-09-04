@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Core IAM business logic — users, groups, roles, policies, access keys, instance profiles.
@@ -61,6 +62,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
+    /** Reserved shape lets revoked ECS keys fail closed without retaining unbounded tombstones. */
+    private static final Pattern ECS_TASK_ACCESS_KEY_PATTERN =
+            Pattern.compile("^ASIAECS[A-Z0-9]{13}$");
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -113,6 +117,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, AccessKey> accessKeys;
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
+    /**
+     * ECS task-role sessions are deliberately process-local. A task container cannot survive a
+     * Floci restart, so persisting its credentials would leave a bearer credential with no owning
+     * task. The access-key and path indexes are kept separately to make both SigV4 authentication
+     * and the AWS container-credentials endpoint exact and O(1). A task may have a bounded set of
+     * overlapping generations while a running SDK drains an in-flight request: {@code byTask} and
+     * {@code byPath} always identify the newest generation, while {@code byAccessKey} retains each
+     * unexpired generation until its advertised expiry (or explicit task revocation).
+     */
+    private final Map<String, SessionCredential> ecsTaskSessionsByAccessKey = new ConcurrentHashMap<>();
+    private final Map<String, SessionCredential> ecsTaskSessionsByPath = new ConcurrentHashMap<>();
+    private final Map<String, SessionCredential> ecsTaskSessionsByTask = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, SessionCredential>> ecsTaskSessionGenerationsByTask =
+            new ConcurrentHashMap<>();
     /**
      * Holds at most one entry per account under {@link #ACCOUNT_ALIAS_KEY} — an account alias is a
      * single value, and the store is already account-namespaced, so no further keying is needed.
@@ -1812,14 +1830,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // Internal helpers
     // =========================================================================
 
-    /** Returns the secret for an active access key or an unexpired temporary session. */
+    /** Legacy lookup for static and STS keys. ECS credentials always require the token-aware overload. */
     public Optional<String> findSecretKey(String accessKeyId) {
-        return activeAccessKeySecret(accessKeyId)
-                .or(() -> currentSession(accessKeyId).map(SessionCredential::getSecretAccessKey));
+        if (isEcsTaskRoleCredential(accessKeyId)) {
+            return Optional.empty();
+        }
+        Optional<String> fromAccessKey = activeAccessKeySecret(accessKeyId);
+        if (fromAccessKey.isPresent()) {
+            return fromAccessKey;
+        }
+        return currentSession(accessKeyId).map(SessionCredential::getSecretAccessKey);
     }
 
     /** Returns a temporary session secret only when the issued session token also matches. */
     public Optional<String> findSecretKey(String accessKeyId, String sessionToken) {
+        Optional<SessionCredential> ecsSession = resolveEcsTaskRoleSession(accessKeyId)
+                .filter(session -> hasMatchingSessionToken(session, sessionToken));
+        if (ecsSession.isPresent()) {
+            return Optional.ofNullable(ecsSession.get().getSecretAccessKey());
+        }
+        if (isEcsTaskRoleCredential(accessKeyId)) {
+            return Optional.empty();
+        }
         return activeAccessKeySecret(accessKeyId).or(() -> currentSession(accessKeyId)
                 .filter(session -> hasMatchingSessionToken(session, sessionToken))
                 .map(SessionCredential::getSecretAccessKey));
@@ -1836,6 +1868,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * {@link #findSecretKey(String, String)} resolves the secret and matches the token in one step.
      */
     public Optional<String> findSessionToken(String accessKeyId) {
+        if (isEcsTaskRoleCredential(accessKeyId)) {
+            return resolveEcsTaskRoleSession(accessKeyId)
+                    .map(SessionCredential::getSessionToken)
+                    .filter(token -> !token.isBlank());
+        }
         return currentSession(accessKeyId)
                 .map(SessionCredential::getSessionToken)
                 .filter(token -> !token.isBlank());
@@ -1889,6 +1926,267 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
     // IAM Enforcement — session tracking and policy collection
     // =========================================================================
+
+    /**
+     * Registers a process-local ECS task-role session. Unlike STS sessions, this credential is
+     * owned by one exact task and must never enter the configured persistent IAM session store.
+     */
+    public synchronized void registerEcsTaskRoleSession(String taskArn, String accountId,
+                                                         String accessKeyId, String secretAccessKey,
+                                                         String sessionToken, String roleArn,
+                                                         Instant expiration, String credentialPath) {
+        if (taskArn == null || taskArn.isBlank()) {
+            throw new IllegalArgumentException("ECS task ARN must not be blank");
+        }
+        if (accountId == null || accountId.isBlank()) {
+            throw new IllegalArgumentException("ECS task account ID must not be blank");
+        }
+        if (accessKeyId == null || accessKeyId.isBlank()
+                || secretAccessKey == null || secretAccessKey.isBlank()
+                || sessionToken == null || sessionToken.isBlank()) {
+            throw new IllegalArgumentException("ECS task credentials must not be blank");
+        }
+        if (!ECS_TASK_ACCESS_KEY_PATTERN.matcher(accessKeyId).matches()) {
+            throw new IllegalArgumentException("ECS task access key has an invalid shape");
+        }
+        if (roleArn == null || roleArn.isBlank()) {
+            throw new IllegalArgumentException("ECS task role ARN must not be blank");
+        }
+        if (expiration == null || !expiration.isAfter(Instant.now())) {
+            throw new IllegalArgumentException("ECS task credential expiration must be in the future");
+        }
+        if (credentialPath == null || credentialPath.isBlank()) {
+            throw new IllegalArgumentException("ECS credential path must not be blank");
+        }
+        if (!credentialPath.matches("^/v2/credentials/[A-Za-z0-9_-]{32,128}$")) {
+            throw new IllegalArgumentException("ECS credential path is invalid");
+        }
+        try {
+            AwsArnUtils.Arn task = AwsArnUtils.parse(taskArn);
+            AwsArnUtils.Arn role = AwsArnUtils.parse(roleArn);
+            if (!"ecs".equals(task.service())
+                    || !task.resource().matches("^task/(?:[^/]+/)?[^/]+$")
+                    || !"iam".equals(role.service()) || !role.resource().startsWith("role/")
+                    || !accountId.matches("\\d{12}") || !accountId.equals(task.accountId())
+                    || !accountId.equals(role.accountId())) {
+                throw new IllegalArgumentException("ECS task and role accounts must match");
+            }
+            String roleName = role.resource().substring(role.resource().lastIndexOf('/') + 1);
+            Optional<IamRole> exactRole = roleName.isBlank()
+                    ? Optional.empty()
+                    : findRole(accountId, roleName);
+            if (exactRole.isEmpty() || !roleArn.equals(exactRole.get().getArn())) {
+                throw new IllegalArgumentException("ECS task role does not exist");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("ECS task role identity is invalid", e);
+        }
+
+        // Rotation deliberately overlaps generations. Validate every collision before touching
+        // the current task generation so a rejected replacement cannot revoke a still-valid key.
+        purgeExpiredEcsTaskSessions();
+        SessionCredential accessCollision = ecsTaskSessionsByAccessKey.get(accessKeyId);
+        if (accessCollision != null) {
+            throw new IllegalArgumentException("ECS access key is already issued");
+        }
+        SessionCredential pathCollision = ecsTaskSessionsByPath.get(credentialPath);
+        if (pathCollision != null && !taskArn.equals(pathCollision.getTaskArn())) {
+            throw new IllegalArgumentException("ECS credential path is already issued");
+        }
+        if (pathCollision == null) {
+            SessionCredential indexedPathCollision = resolveEcsTaskRoleSessionByPath(credentialPath).orElse(null);
+            if (indexedPathCollision != null && !taskArn.equals(indexedPathCollision.getTaskArn())) {
+                throw new IllegalArgumentException("ECS credential path is already issued");
+            }
+        }
+
+        Instant now = Instant.now();
+        SessionCredential session = new SessionCredential(accessKeyId, secretAccessKey, sessionToken,
+                roleArn, expiration, null, accountId);
+        session.setEcsTaskRole(true);
+        session.setTaskArn(taskArn);
+        session.setCredentialPath(credentialPath);
+        session.setLastUpdated(now);
+        session.setRevoked(false);
+
+        SessionCredential prior = ecsTaskSessionsByTask.get(taskArn);
+        if (prior != null && !credentialPath.equals(prior.getCredentialPath())) {
+            // A non-stable re-issue gets a new metadata path. The previous path is no longer the
+            // task's latest endpoint, but its access key remains valid until that generation's
+            // advertised expiry so an in-flight request can drain safely.
+            ecsTaskSessionsByPath.remove(prior.getCredentialPath(), prior);
+        }
+        ecsTaskSessionsByTask.put(taskArn, session);
+        ecsTaskSessionsByAccessKey.put(accessKeyId, session);
+        ecsTaskSessionGenerationsByTask
+                .computeIfAbsent(taskArn, ignored -> new ConcurrentHashMap<>())
+                .put(accessKeyId, session);
+        ecsTaskSessionsByPath.put(credentialPath, session);
+    }
+
+    /** Returns the active process-local ECS session addressed by its relative URI path. */
+    public synchronized Optional<SessionCredential> resolveEcsTaskRoleSessionByPath(String credentialPath) {
+        if (credentialPath == null || credentialPath.isBlank()) {
+            return Optional.empty();
+        }
+        purgeExpiredEcsTaskSessions();
+        SessionCredential session = ecsTaskSessionsByPath.get(credentialPath);
+        if (session == null) {
+            return Optional.empty();
+        }
+        if (!isActiveEcsTaskSession(session)) {
+            revokeEcsTaskSession(session);
+            return Optional.empty();
+        }
+        return Optional.of(session);
+    }
+
+    /** Returns the active process-local ECS session for SigV4 account and IAM resolution. */
+    public synchronized Optional<SessionCredential> resolveEcsTaskRoleSession(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+        purgeExpiredEcsTaskSessions();
+        SessionCredential session = ecsTaskSessionsByAccessKey.get(accessKeyId);
+        if (session == null) {
+            return Optional.empty();
+        }
+        if (!isActiveEcsTaskSession(session)) {
+            revokeEcsTaskSession(session);
+            return Optional.empty();
+        }
+        return Optional.of(session);
+    }
+
+    /** True for active keys or the reserved ECS shape (including expired/revoked keys). */
+    public synchronized boolean isEcsTaskRoleCredential(String accessKeyId) {
+        return accessKeyId != null
+                && (ecsTaskSessionsByAccessKey.containsKey(accessKeyId)
+                || ECS_TASK_ACCESS_KEY_PATTERN.matcher(accessKeyId).matches());
+    }
+
+    /** Collision check for newly minted credentials without weakening revoked-key recognition. */
+    public synchronized boolean isCredentialAccessKeyInUse(String accessKeyId) {
+        purgeExpiredEcsTaskSessions();
+        if (accessKeyId == null || ecsTaskSessionsByAccessKey.containsKey(accessKeyId)) {
+            return accessKeyId != null;
+        }
+        boolean persistentAccessKey = accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
+                ? aware.scanAllAccountsAsMap().containsKey(accessKeyId)
+                : accessKeys.get(accessKeyId).isPresent();
+        return persistentAccessKey || findSessionAnyAccount(accessKeyId).isPresent();
+    }
+
+    /**
+     * Validates the mandatory ECS session token. The comparison is constant-time so the endpoint
+     * cannot be used as a token oracle by callers that already know a task access key.
+     */
+    public synchronized boolean validateEcsTaskRoleSessionToken(String accessKeyId, String presentedToken) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return false;
+        }
+        purgeExpiredEcsTaskSessions();
+        SessionCredential session = ecsTaskSessionsByAccessKey.get(accessKeyId);
+        if (session == null || !isActiveEcsTaskSession(session)
+                || presentedToken == null || presentedToken.isBlank()) {
+            return false;
+        }
+        return java.security.MessageDigest.isEqual(
+                session.getSessionToken().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                presentedToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** Revokes every ECS generation owned by an exact task. */
+    public synchronized void revokeEcsTaskRoleSession(String taskArn) {
+        if (taskArn == null || taskArn.isBlank()) {
+            return;
+        }
+        Map<String, SessionCredential> generations = ecsTaskSessionGenerationsByTask.get(taskArn);
+        if (generations != null) {
+            for (SessionCredential session : List.copyOf(generations.values())) {
+                revokeEcsTaskSession(session);
+            }
+            ecsTaskSessionGenerationsByTask.remove(taskArn, generations);
+        } else {
+            SessionCredential session = ecsTaskSessionsByTask.get(taskArn);
+            if (session != null) {
+                revokeEcsTaskSession(session);
+            }
+        }
+        ecsTaskSessionsByTask.remove(taskArn);
+    }
+
+    /**
+     * Revokes an externally-selected generation. Revoking the task's current generation is a
+     * task-level authorization decision, so all overlapping generations are invalidated; an old
+     * generation can be retired independently without interrupting the current one.
+     */
+    public synchronized void revokeEcsTaskRoleSession(String taskArn, String accessKeyId) {
+        purgeExpiredEcsTaskSessions();
+        SessionCredential session = accessKeyId == null ? null : ecsTaskSessionsByAccessKey.get(accessKeyId);
+        if (session != null && (taskArn == null || taskArn.equals(session.getTaskArn()))) {
+            String ownerTask = session.getTaskArn();
+            SessionCredential current = ownerTask == null ? null : ecsTaskSessionsByTask.get(ownerTask);
+            if (current == session) {
+                revokeEcsTaskRoleSession(ownerTask);
+            } else {
+                revokeEcsTaskRoleSessionGeneration(ownerTask, accessKeyId);
+            }
+        }
+    }
+
+    /** Revokes exactly one ECS generation, including an expired-generation cleanup. */
+    public synchronized void revokeEcsTaskRoleSessionGeneration(String taskArn, String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return;
+        }
+        SessionCredential session = ecsTaskSessionsByAccessKey.get(accessKeyId);
+        if (session != null && (taskArn == null || taskArn.equals(session.getTaskArn()))) {
+            revokeEcsTaskSession(session);
+        }
+    }
+
+    private boolean isActiveEcsTaskSession(SessionCredential session) {
+        return session != null && session.isEcsTaskRole() && !session.isRevoked()
+                && session.getExpiration() != null && session.getExpiration().isAfter(Instant.now())
+                && ecsTaskSessionsByAccessKey.get(session.getAccessKeyId()) == session;
+    }
+
+    private void revokeEcsTaskSession(SessionCredential session) {
+        if (session == null) {
+            return;
+        }
+        session.setRevoked(true);
+        String accessKeyId = session.getAccessKeyId();
+        if (accessKeyId != null) {
+            ecsTaskSessionsByAccessKey.remove(accessKeyId, session);
+        }
+        if (session.getCredentialPath() != null) {
+            ecsTaskSessionsByPath.remove(session.getCredentialPath(), session);
+        }
+        if (session.getTaskArn() != null) {
+            ecsTaskSessionsByTask.remove(session.getTaskArn(), session);
+            Map<String, SessionCredential> generations = ecsTaskSessionGenerationsByTask
+                    .get(session.getTaskArn());
+            if (generations != null) {
+                generations.remove(accessKeyId, session);
+                if (generations.isEmpty()) {
+                    ecsTaskSessionGenerationsByTask.remove(session.getTaskArn(), generations);
+                }
+            }
+        }
+    }
+
+    /** Removes expired/revoked ECS generations without retaining unbounded tombstones. */
+    private void purgeExpiredEcsTaskSessions() {
+        Instant now = Instant.now();
+        for (SessionCredential session : List.copyOf(ecsTaskSessionsByAccessKey.values())) {
+            if (session == null || session.isRevoked() || session.getExpiration() == null
+                    || !session.getExpiration().isAfter(now)) {
+                revokeEcsTaskSession(session);
+            }
+        }
+    }
 
     /**
      * Stores an assumed-role session so the enforcement filter can resolve its policies.
@@ -2037,6 +2335,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
+        Optional<SessionCredential> ecsSession = resolveEcsTaskRoleSession(accessKeyId);
+        if (ecsSession.isPresent()) {
+            String account = ecsSession.get().getOriginAccountId();
+            return account == null || account.isBlank() ? Optional.empty() : Optional.of(account);
+        }
+        if (isEcsTaskRoleCredential(accessKeyId)) {
+            return Optional.empty();
+        }
         if (!isTemporaryAccessKey(accessKeyId)) {
             if (accessKeyId == null || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
                 return Optional.empty();
@@ -2083,6 +2389,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
      */
     public CallerContext resolveCallerContext(String accessKeyId) {
+        // ECS task-role credentials are process-local and exact-task scoped. Never fall through to
+        // the historical unknown-key bypass for one of these keys: a stopped, expired, or replaced
+        // task credential must become an implicit deny immediately.
+        if (isEcsTaskRoleCredential(accessKeyId)) {
+            Optional<SessionCredential> sessionOpt = resolveEcsTaskRoleSession(accessKeyId);
+            if (sessionOpt.isEmpty()) {
+                return CallerContext.of(List.of());
+            }
+            SessionCredential session = sessionOpt.get();
+            List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
+            if (identityPolicies == null) {
+                return CallerContext.of(List.of());
+            }
+            String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
+            return new CallerContext(identityPolicies, session.getSessionPolicyDocument(), boundaryDoc);
+        }
+
         // Check user access keys
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
@@ -2147,6 +2470,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return Optional.empty();
         }
 
+        Optional<SessionCredential> ecsSession = resolveEcsTaskRoleSession(accessKeyId);
+        if (ecsSession.isPresent()) {
+            return assumedRoleSessionArn(ecsSession.get());
+        }
+        if (isEcsTaskRoleCredential(accessKeyId)) {
+            return Optional.empty();
+        }
+
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
             String userName = akOpt.get().getUserName();
@@ -2161,12 +2492,27 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return Optional.empty();
             }
             String roleArn = session.getRoleArn();
-            String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-            String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
-            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());
+            return assumedRoleSessionArn(session);
         }
 
         return Optional.empty();
+    }
+
+    private Optional<String> assumedRoleSessionArn(SessionCredential session) {
+            String roleArn = session.getRoleArn();
+            if (roleArn == null || roleArn.isBlank()) {
+                return Optional.empty();
+            }
+            String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
+            String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+            String sessionName = "floci-session";
+            if (session.isEcsTaskRole() && session.getTaskArn() != null) {
+                String taskId = session.getTaskArn().substring(session.getTaskArn().lastIndexOf('/') + 1)
+                        .replaceAll("[^A-Za-z0-9+=,.@_-]", "-");
+                sessionName = "ecs-task-" + taskId;
+            }
+            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId,
+                    "assumed-role/" + roleName + "/" + sessionName).toString());
     }
 
     /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */

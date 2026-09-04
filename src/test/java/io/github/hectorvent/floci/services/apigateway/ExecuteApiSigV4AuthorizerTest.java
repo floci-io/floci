@@ -22,7 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -215,10 +218,96 @@ class ExecuteApiSigV4AuthorizerTest {
                         .failure());
     }
 
+    @Test
+    void ecsTaskRoleCredentialRequiresTheIssuedTokenOnHeaderSignedRequest() throws Exception {
+        String accessKeyId = ecsAccessKey("VALID");
+        String token = "ecs-token+/with-percent%";
+        ecsSession(accessKeyId, token, true);
+
+        Map<String, String> signed = signedHeadersWithToken(accessKeyId, token);
+        ExecuteApiSigV4Authorizer.Result accepted = authorizer.authorize(
+                "GET", headers(signed), uriInfo(PATH, null), null, null);
+        assertTrue(accepted.authorized(), String.valueOf(accepted.detail()));
+
+        Map<String, String> missing = ExecuteApiRequestSigner.signedHeaders(
+                "GET", PATH, Map.of(), HOST, null, accessKeyId, "ecs-secret", REGION, Instant.now());
+        assertEquals(ExecuteApiSigV4Authorizer.Failure.UNKNOWN_KEY,
+                authorizer.authorize("GET", headers(missing), uriInfo(PATH, null), null, null).failure());
+
+        Map<String, String> forged = signedHeadersWithToken(accessKeyId, "forged-token");
+        assertEquals(ExecuteApiSigV4Authorizer.Failure.UNKNOWN_KEY,
+                authorizer.authorize("GET", headers(forged), uriInfo(PATH, null), null, null).failure());
+        verify(iamService).findSecretKey(eq(accessKeyId), eq(token));
+        verify(iamService).findSecretKey(eq(accessKeyId), (String) isNull());
+    }
+
+    @Test
+    void ecsTaskRoleCredentialRejectsExpiredAndRevokedSessions() throws Exception {
+        String expiredKey = ecsAccessKey("EXPIRED");
+        String revokedKey = ecsAccessKey("REVOKED");
+        String token = "ecs-token";
+        ecsSession(expiredKey, token, false);
+        ecsSession(revokedKey, token, false);
+
+        for (String accessKeyId : new String[]{expiredKey, revokedKey}) {
+            Map<String, String> signed = signedHeadersWithToken(accessKeyId, token);
+            assertEquals(ExecuteApiSigV4Authorizer.Failure.UNKNOWN_KEY,
+                    authorizer.authorize("GET", headers(signed), uriInfo(PATH, null), null, null).failure());
+        }
+    }
+
+    @Test
+    void ecsPresignedTokenIsDecodedBeforeLookupAndCannotBeReplacedByUnsignedHeader() throws Exception {
+        String accessKeyId = ecsAccessKey("PRESIGNED");
+        String token = "ecs+token/with%percent";
+        ecsSession(accessKeyId, token, true);
+
+        String query = ExecuteApiRequestSigner.presignedQueryString(
+                "GET", PATH, HOST, accessKeyId, "ecs-secret", REGION,
+                Instant.now(), 900, token);
+        ExecuteApiSigV4Authorizer.Result accepted = authorizer.authorize(
+                "GET", headers(Map.of("X-Amz-Security-Token", "forged-header-token")),
+                uriInfo(PATH, query), null, null);
+        // The signed query token is authoritative for a presigned request; an unrelated unsigned
+        // header must not replace it.
+        assertTrue(accepted.authorized(), String.valueOf(accepted.detail()));
+
+        String forgedQuery = ExecuteApiRequestSigner.presignedQueryString(
+                "GET", PATH, HOST, accessKeyId, "ecs-secret", REGION,
+                Instant.now(), 900, "forged-query-token");
+        assertEquals(ExecuteApiSigV4Authorizer.Failure.UNKNOWN_KEY,
+                authorizer.authorize("GET", headers(Map.of()), uriInfo(PATH, forgedQuery), null, null)
+                        .failure());
+    }
+
     private void liveSession(String accessKeyId, String issuedToken) {
         when(iamService.findSecretKey(accessKeyId)).thenReturn(Optional.of("session-secret"));
         when(iamService.resolveAccountId(accessKeyId)).thenReturn(Optional.of("111122223333"));
         when(iamService.findSessionToken(accessKeyId)).thenReturn(Optional.ofNullable(issuedToken));
+    }
+
+    private void ecsSession(String accessKeyId, String issuedToken, boolean active) {
+        when(iamService.isEcsTaskRoleCredential(accessKeyId)).thenReturn(true);
+        when(iamService.findSecretKey(accessKeyId, issuedToken))
+                .thenReturn(active ? Optional.of("ecs-secret") : Optional.empty());
+        when(iamService.findSecretKey(accessKeyId, null))
+                .thenReturn(Optional.empty());
+        when(iamService.resolveAccountId(accessKeyId))
+                .thenReturn(active ? Optional.of("111122223333") : Optional.empty());
+        when(iamService.findSessionToken(accessKeyId))
+                .thenReturn(active ? Optional.ofNullable(issuedToken) : Optional.empty());
+    }
+
+    private static String ecsAccessKey(String suffix) {
+        return "ASIAECS" + suffix + "E".repeat(Math.max(0, 13 - suffix.length()));
+    }
+
+    private static Map<String, String> signedHeadersWithToken(String accessKeyId, String token)
+            throws Exception {
+        Map<String, String> signed = new java.util.LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
+                "GET", PATH, Map.of(), HOST, null, accessKeyId, "ecs-secret", REGION, Instant.now()));
+        signed.put("X-Amz-Security-Token", token);
+        return signed;
     }
 
     /**

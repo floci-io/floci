@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
+import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
@@ -69,6 +70,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private final EcsContainerManager containerManager;
     private final EcsLoadBalancerRegistrar lbRegistrar;
     private final StorageFactory storageFactory;
+    /** Optional process-local ECS task-role credential leases. */
+    private final EcsTaskRoleCredentials taskRoleCredentials;
     private final EcsEventPublisher eventPublisher;
     private final boolean dockerMode;
     private final String baseUrl;
@@ -115,14 +118,31 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
                       EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
-                      StorageFactory storageFactory, EcsEventPublisher eventPublisher) {
+                      StorageFactory storageFactory, EcsTaskRoleCredentials taskRoleCredentials,
+                      EcsEventPublisher eventPublisher) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
         this.baseUrl = config.effectiveBaseUrl();
         this.lbRegistrar = lbRegistrar;
         this.storageFactory = storageFactory;
+        this.taskRoleCredentials = taskRoleCredentials;
         this.eventPublisher = eventPublisher;
+    }
+
+    /** Compatibility constructor for callers that publish ECS lifecycle events. */
+    public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
+                      EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
+                      StorageFactory storageFactory, EcsEventPublisher eventPublisher) {
+        this(regionResolver, containerManager, config, lbRegistrar, storageFactory,
+                null, eventPublisher);
+    }
+
+    /** Compatibility constructor for callers that do not use optional ECS integrations. */
+    public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
+                      EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
+                      StorageFactory storageFactory) {
+        this(regionResolver, containerManager, config, lbRegistrar, storageFactory, null, null);
     }
 
     @PostConstruct
@@ -207,6 +227,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 continue;
             }
             try {
+                // Revoke before asking Docker to stop the container. This is deliberately kept
+                // at the service boundary as well as in the manager so shutdown remains safe if
+                // a custom/container-manager implementation does not know about task leases.
+                revokeTaskCredentials(taskArn);
                 containerManager.stopTask(claimed);
             } catch (Exception e) {
                 LOG.warnv("Failed to stop ECS task {0} on shutdown: {1}", taskArn, e.getMessage());
@@ -573,6 +597,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                     }
                 } catch (Exception e) {
                     LOG.errorv("Failed to start ECS task {0}: {1}", taskArn, e.getMessage());
+                    // The manager normally revokes a lease on its own failed-start path. Keep a
+                    // service-level fence for manager implementations that fail before returning
+                    // a handle (or for a custom manager used by an embedding application).
+                    revokeTaskCredentials(taskArn);
                     task.setLastStatus(TaskStatus.STOPPED.name());
                     task.setDesiredStatus(TaskStatus.STOPPED.name());
                     // A ResourceInitializationError is already AWS's exact stopped-reason wording
@@ -634,6 +662,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         if (dockerMode) {
             EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
             try {
+                // Make the endpoint unusable before a stop signal is sent. This covers a task
+                // whose Docker teardown is delayed or fails and keeps revocation keyed to the
+                // exact task ARN rather than to caller-controlled group/container names.
+                revokeTaskCredentials(task.getTaskArn());
                 exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
             } finally {
                 retainUnresolvedLogHandle(task.getTaskArn(), handle);
@@ -886,14 +918,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                                           String availabilityZoneRebalancing, boolean forceNewDeployment,
                                           String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
-
-        serviceName = extractServiceName(serviceName);
-
-        String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        EcsServiceModel svc = services.get(key);
+        EcsServiceModel svc = resolveService(cluster.getClusterName(), serviceName, region);
         if (svc == null) {
             throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
         }
+        String key = serviceKey(region, cluster.getClusterName(), svc.getServiceName());
         if ("INACTIVE".equals(svc.getStatus())) {
             throw new AwsException("ServiceNotActiveException",
                     "Service " + serviceName + " is not active.", 400);
@@ -1610,14 +1639,37 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
             return;
         }
 
-        // Inspect every container; abort if any are still running.
+        // Inspect every container before renewing a task-role lease. A null exit code alone is
+        // ambiguous (the legacy helper also uses it for inspection failures), so only the explicit
+        // tri-state result may authorize a renewal. Unknown state fails closed and leaves the
+        // handle for the next reconciliation tick.
         Map<String, Integer> exitCodes = new LinkedHashMap<>();
+        boolean liveContainer = false;
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
+            EcsContainerManager.ContainerRunningState runningState =
+                    containerManager.getContainerRunningState(entry.getValue());
+            if (runningState == EcsContainerManager.ContainerRunningState.UNKNOWN) {
+                return;
+            }
+            if (runningState == EcsContainerManager.ContainerRunningState.RUNNING) {
+                liveContainer = true;
+                continue;
+            }
             Integer code = containerManager.getExitCodeIfStopped(entry.getValue());
             if (code == null) {
                 return;
             }
             exitCodes.put(entry.getKey(), code);
+        }
+
+        if (liveContainer) {
+            // EcsTaskRoleCredentials serializes this owner tick with explicit StopTask/reconcile
+            // revocation. If stop wins, the task lease is gone; if refresh wins, stop revokes the
+            // newly-issued lease before Docker teardown proceeds.
+            if (taskRoleCredentials != null) {
+                taskRoleCredentials.refreshTaskIfNeeded(taskArn);
+            }
+            return;
         }
 
         // All containers have exited. Atomically claim the handle to avoid
@@ -1627,8 +1679,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
             return;
         }
 
+        // All containers have exited; revoke before removing them so no code in the final drain
+        // window can continue using the task's role credentials.
+        revokeTaskCredentials(taskArn);
+
         // Close log streams and remove the stopped Docker containers without re-inspecting.
-        containerManager.cleanupStoppedTask(claimed);
+        try {
+            containerManager.cleanupStoppedTask(claimed);
+        } finally {
+            retainUnresolvedLogHandle(taskArn, claimed);
+        }
 
         if (task.getContainers() != null) {
             task.getContainers().forEach(c -> {
@@ -1674,6 +1734,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         }
 
         try {
+            revokeTaskCredentials(taskArn);
             containerManager.stopTaskAndCollectExitCodes(claimed);
         } finally {
             // A task can be reported STOPPED even if Docker rejected both teardown attempts.
@@ -1683,8 +1744,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     }
 
     private void retainUnresolvedLogHandle(String taskArn, EcsTaskHandle handle) {
-        if (handle != null && handle.hasOpenLogStreams()) {
+        if (handle != null && (handle.hasOpenLogStreams() || handle.hasPendingNetworkCleanup())) {
             taskHandles.put(taskArn, handle);
+        }
+    }
+
+    private void revokeTaskCredentials(String taskArn) {
+        if (taskRoleCredentials != null) {
+            taskRoleCredentials.revokeTask(taskArn);
         }
     }
 
@@ -1936,11 +2003,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     }
 
     private EcsCluster resolveCluster(String clusterRef, String region) {
-        EcsCluster byName = clusters.get(clusterKey(region, clusterRef));
+        // ARN references must never alias a legacy resource whose literal name is that ARN.
+        EcsCluster byName = clusterRef.startsWith("arn:") ? null : clusters.get(clusterKey(region, clusterRef));
         if (byName != null) {
             return byName;
         }
-        return clusters.values().stream()
+        return clusters.entrySet().stream()
+                .filter(entry -> entry.getKey().startsWith(region + "::"))
+                .map(Map.Entry::getValue)
                 .filter(c -> c.getClusterArn().equals(clusterRef))
                 .findFirst().orElse(null);
     }
@@ -1991,10 +2061,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     }
 
     private EcsServiceModel resolveService(String clusterName, String serviceId, String region) {
-        EcsServiceModel svc = services.get(serviceKey(region, clusterName, serviceId));
+        EcsServiceModel svc = serviceId.startsWith("arn:") ? null
+                : services.get(serviceKey(region, clusterName, serviceId));
         if (svc != null) { return svc; }
-        return services.values().stream()
-                .filter(s -> s.getServiceArn().equals(serviceId) || s.getServiceName().equals(serviceId))
+        // Match the same cluster and region that IAM authorized. A global name fallback could
+        // return a different cluster's service when the authorized target does not exist.
+        String prefix = serviceKeyPrefix(region, clusterName);
+        return services.entrySet().stream()
+                .filter(entry -> entry.getKey().startsWith(prefix))
+                .map(Map.Entry::getValue)
+                .filter(s -> s.getServiceArn().equals(serviceId))
                 .findFirst().orElse(null);
     }
 

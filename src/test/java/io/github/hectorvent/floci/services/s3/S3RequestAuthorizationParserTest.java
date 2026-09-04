@@ -1,15 +1,23 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+
+import java.net.URI;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class S3RequestAuthorizationParserTest {
 
@@ -35,6 +43,34 @@ class S3RequestAuthorizationParserTest {
 
         assertTrue(authorization.signed());
         assertEquals("bad-key", authorization.accessKeyId());
+    }
+
+    @Test
+    void carriesPercentEncodedPresignedSessionToken() {
+        MultivaluedMap<String, String> query = presignedQuery("ASIAECS" + "A".repeat(13));
+        query.add("X-Amz-Security-Token", "token%2Bwith%2Fslash%25");
+
+        S3Service.RequestAuthorization authorization = parse(null, query);
+
+        assertEquals("token+with/slash%", authorization.sessionToken());
+    }
+
+    @Test
+    void carriesHeaderSessionTokenForHeaderSignedRequest() {
+        HttpHeaders headers = mock(HttpHeaders.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(headers.getHeaderString(anyString())).thenAnswer(invocation -> {
+            String name = invocation.getArgument(0);
+            return Map.of(
+                    "Authorization", authorizationHeader("ASIAECS" + "B".repeat(13)),
+                    "X-Amz-Security-Token", "header-token").get(name);
+        });
+        when(uriInfo.getQueryParameters()).thenReturn(query());
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566/test"));
+
+        S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parse(headers, uriInfo);
+
+        assertEquals("header-token", authorization.sessionToken());
     }
 
     @Test

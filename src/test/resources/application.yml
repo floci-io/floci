@@ -255,6 +255,10 @@ floci:
     ecs:
       enabled: true
       mock: true
+      task-role-credentials-enabled: false
+      task-role-credentials-port: 18080
+      task-role-credentials-ttl-seconds: 3600
+      task-role-credentials-refresh-window-seconds: 300
     appconfig:
       enabled: true
     appconfigdata:

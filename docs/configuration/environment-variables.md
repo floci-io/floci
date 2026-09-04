@@ -420,6 +420,10 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Provide temporary task-role credentials to Docker-backed ECS tasks |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` | `80` | Private link-local task credential listener port |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` | `3600` | Lifetime of each task-role credential session |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_REFRESH_WINDOW_SECONDS` | `300` | Refresh credentials this many seconds before expiry |
 
 ### EC2
 

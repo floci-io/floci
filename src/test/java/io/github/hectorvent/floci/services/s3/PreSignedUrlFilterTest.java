@@ -7,9 +7,13 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class PreSignedUrlFilterTest {
 
@@ -27,12 +31,37 @@ class PreSignedUrlFilterTest {
         return (String) method.invoke(filter, accessKeyId);
     }
 
+    private static String resolveSecretKey(PreSignedUrlFilter filter, String accessKeyId,
+                                           String sessionToken) throws Exception {
+        Method method = PreSignedUrlFilter.class.getDeclaredMethod(
+                "resolveSecretKey", String.class, String.class);
+        method.setAccessible(true);
+        return (String) method.invoke(filter, accessKeyId, sessionToken);
+    }
+
     @Test
     void resolveSecretKeyRejectsUnregisteredNumericAccessKeyId() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDUNRELATED", "unrelated-secret");
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
 
         assertNull(resolveSecretKey(filter, "123456789012"));
+    }
+
+    @Test
+    void resolveSecretKeyBindsEcsCredentialToTheIssuedToken() throws Exception {
+        IamService iamService = mock(IamService.class);
+        String accessKeyId = "ASIAECS" + "A".repeat(13);
+        when(iamService.isEcsTaskRoleCredential(accessKeyId)).thenReturn(true);
+        when(iamService.findSecretKey(accessKeyId, "token+with/slash"))
+                .thenReturn(Optional.of("ecs-secret"));
+        when(iamService.findSecretKey(accessKeyId, "forged-token"))
+                .thenReturn(Optional.empty());
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+
+        assertEquals("ecs-secret", resolveSecretKey(filter, accessKeyId, "token+with/slash"));
+        assertNull(resolveSecretKey(filter, accessKeyId, "forged-token"));
+        assertNull(resolveSecretKey(filter, accessKeyId, null));
+        verify(iamService).findSecretKey(accessKeyId, "token+with/slash");
     }
 
     private static MultivaluedMap<String, String> params() {

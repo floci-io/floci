@@ -1,18 +1,32 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RdsSigV4ValidatorTest {
+
+    private static final String ECS_ACCESS_KEY_ID = "ASIAECS" + "R".repeat(13);
+    private static final String ECS_SECRET_ACCESS_KEY = "ecs-rds-secret";
+    private static final String ECS_SESSION_TOKEN = "ecs-rds-session+token/==";
+    private static final String ECS_TASK_ARN =
+            "arn:aws:ecs:us-east-1:000000000000:task/default/rds-validator";
+    private static final String ECS_CREDENTIAL_PATH = "/v2/credentials/" + "R".repeat(48);
 
     @Test
     void validateAcceptsTokenSignedByStandardSigV4() throws Exception {
@@ -291,6 +305,66 @@ class RdsSigV4ValidatorTest {
     }
 
     @Test
+    void validateAcceptsTokenSignedWithActiveEcsTaskRoleAndIssuedSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = createEcsRdsToken(ECS_SESSION_TOKEN);
+
+        assertTrue(validator.validate(token, "admin"));
+    }
+
+    @Test
+    void rejectsOtherwiseValidEcsTokensSignedForAnotherService() throws Exception {
+        RdsSigV4Validator validator = new RdsSigV4Validator(ecsIamService(Instant.now().plusSeconds(3600)));
+        for (String service : java.util.List.of("sts", "s3", "elasticache", "memorydb")) {
+            assertFalse(validator.validate(createEcsRdsToken(ECS_SESSION_TOKEN, service), "admin"), service);
+        }
+    }
+
+    @Test
+    void validateRejectsEcsTaskRoleTokenWithoutSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = createEcsRdsToken(null);
+
+        assertFalse(validator.validate(token, "admin"));
+    }
+
+    @Test
+    void validateRejectsEcsTaskRoleTokenWithWrongSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = createEcsRdsToken("forged-session-token");
+
+        assertFalse(validator.validate(token, "admin"));
+    }
+
+    @Test
+    void validateRejectsExpiredEcsTaskRoleCredentialEvenWithIssuedSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        iamService.resolveEcsTaskRoleSession(ECS_ACCESS_KEY_ID).orElseThrow().setExpiration(Instant.EPOCH);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = createEcsRdsToken(ECS_SESSION_TOKEN);
+
+        assertFalse(validator.validate(token, "admin"));
+    }
+
+    @Test
+    void validateRejectsRevokedEcsTaskRoleCredentialEvenWithIssuedSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        iamService.revokeEcsTaskRoleSession(ECS_TASK_ARN, ECS_ACCESS_KEY_ID);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = createEcsRdsToken(ECS_SESSION_TOKEN);
+
+        assertFalse(validator.validate(token, "admin"));
+    }
+
+    @Test
     void validateRejectsStsTokenWithWrongSecret() throws Exception {
         String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
         IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, "correct-secret");
@@ -371,5 +445,85 @@ class RdsSigV4ValidatorTest {
         String sanitized = (String) sanitizeForLog.invoke(null, malicious);
 
         assertEquals("AKIDINJECTEDLINE", sanitized);
+    }
+
+    private static IamService ecsIamService(Instant expiration) {
+        try {
+            Constructor<IamService> constructor = IamService.class.getDeclaredConstructor(
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    RegionResolver.class
+            );
+            constructor.setAccessible(true);
+
+            StorageBackend<String, IamRole> roles = new InMemoryStorage<>();
+            IamService iamService = constructor.newInstance(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    roles,
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new RegionResolver("us-east-1", "000000000000")
+            );
+            IamRole role = iamService.createRole("rds-validator", "/", "{}", null, 0, null);
+            iamService.registerEcsTaskRoleSession(
+                    ECS_TASK_ARN,
+                    "000000000000",
+                    ECS_ACCESS_KEY_ID,
+                    ECS_SECRET_ACCESS_KEY,
+                    ECS_SESSION_TOKEN,
+                    role.getArn(),
+                    expiration,
+                    ECS_CREDENTIAL_PATH);
+            return iamService;
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to construct ECS IAM validator fixture", e);
+        }
+    }
+
+    private static String createEcsRdsToken(String sessionToken) throws Exception {
+        return createEcsRdsToken(sessionToken, "rds-db");
+    }
+
+    private static String createEcsRdsToken(String sessionToken, String service) throws Exception {
+        Method signer = SigV4TokenTestHelper.class.getDeclaredMethod(
+                "signToken",
+                String.class,
+                Integer.class,
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                Instant.class,
+                int.class,
+                Map.class,
+                Map.class);
+        signer.setAccessible(true);
+
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("Action", "connect");
+        params.put("DBUser", "admin");
+        if (sessionToken != null) {
+            params.put("X-Amz-Security-Token", sessionToken);
+        }
+        return (String) signer.invoke(
+                null,
+                "db.example.local",
+                Integer.valueOf(5432),
+                ECS_ACCESS_KEY_ID,
+                ECS_SECRET_ACCESS_KEY,
+                "us-east-1",
+                service,
+                Instant.now().minusSeconds(60),
+                900,
+                params,
+                Map.of("host", "db.example.local:5432"));
     }
 }

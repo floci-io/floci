@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
+import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import org.junit.jupiter.api.Test;
@@ -36,6 +37,59 @@ import static org.mockito.Mockito.when;
 class EcsServiceTeardownTest {
 
     private static final String REGION = "us-east-1";
+
+    @Test
+    void reconcilerRenewsOnlyConfirmedRunningTasksAndStopRevokesFirst() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false); // docker mode
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        when(containerManager.getContainerRunningState("docker-id"))
+                .thenReturn(EcsContainerManager.ContainerRunningState.RUNNING,
+                        EcsContainerManager.ContainerRunningState.UNKNOWN);
+        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenReturn(Map.of());
+        EcsTaskRoleCredentials credentials = mock(EcsTaskRoleCredentials.class);
+
+        EcsService service = new EcsService(
+                new RegionResolver(REGION, "000000000000"),
+                containerManager,
+                config,
+                mock(EcsLoadBalancerRegistrar.class),
+                new SingleUseStorageFactory(),
+                credentials,
+                mock(EcsEventPublisher.class));
+        service.initializeStorage();
+
+        ContainerDefinition cd = new ContainerDefinition();
+        cd.setName("app");
+        cd.setImage("nginx:alpine");
+        service.registerTaskDefinition("refresh-fam", List.of(cd), null, null, null,
+                null, null, List.of(), REGION);
+        var launched = service.runTask(null, "refresh-fam", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst();
+        // The real manager marks the task RUNNING; this mock only supplies the handle.
+        launched.setLastStatus("RUNNING");
+        String taskArn = launched.getTaskArn();
+
+        service.reconcile();
+        verify(credentials).refreshTaskIfNeeded(taskArn);
+
+        // Unknown Docker state is fail-closed: it must not authorize another renewal.
+        service.reconcile();
+        verify(credentials, times(1)).refreshTaskIfNeeded(taskArn);
+
+        service.stopTask(null, taskArn, null, REGION);
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(credentials, containerManager);
+        order.verify(credentials).revokeTask(taskArn);
+        order.verify(containerManager).stopTaskAndCollectExitCodes(handle);
+
+        // StopTask removes the handle; later reconciliation cannot renew the stopped task.
+        service.reconcile();
+        verify(credentials, times(1)).refreshTaskIfNeeded(taskArn);
+    }
 
     @Test
     void stopManagedContainersStopsEachRunningTaskOnce() {
@@ -76,20 +130,23 @@ class EcsServiceTeardownTest {
         verify(containerManager, times(1)).stopTask(handle);
     }
 
-    @Test
-    void stoppedTaskRetriesTeardownUntilItsRemainingLogStreamIsReleased() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void stoppedTaskRetriesTeardownUntilLogsAndNetworkAreReleased(boolean networkOnly) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false); // docker mode
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"),
-                Map.of("docker-id", mock(Closeable.class)));
+                networkOnly ? Map.of() : Map.of("docker-id", mock(Closeable.class)));
+        handle.setPendingNetworkCleanup(networkOnly);
         when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
         AtomicInteger teardownAttempts = new AtomicInteger();
         when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
             if (teardownAttempts.incrementAndGet() == 2) {
                 handle.removeLogStream("docker-id");
+                handle.setPendingNetworkCleanup(false);
             }
             return Map.of();
         });

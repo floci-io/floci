@@ -2,14 +2,19 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLDecoder;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -58,6 +63,8 @@ public class ResourceArnBuilder {
             case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "kms"            -> List.of(buildKmsArn(path, region, accountId));
+            case "sts"            -> List.of(buildStsArn(ctx));
+            case "ecs"            -> buildEcsArns(ctx, region, accountId);
             default               -> List.of("*");
         };
     }
@@ -328,6 +335,219 @@ public class ResourceArnBuilder {
         return AwsArnUtils.Arn.of("kms", region, accountId, "key/" + keyId).toString();
     }
 
+    // ── STS ───────────────────────────────────────────────────────────────────
+    private String buildStsArn(ContainerRequestContext ctx) {
+        String roleArn = firstFormParam(ctx, "RoleArn");
+        if (roleArn == null || roleArn.isBlank()) {
+            return "*";
+        }
+        roleArn = roleArn.trim();
+        try {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(roleArn);
+            if (!"iam".equals(parsed.service())
+                    || !parsed.region().isEmpty()
+                    || !parsed.accountId().matches("\\d{12}")
+                    || !parsed.resource().startsWith("role/")
+                    || parsed.resource().length() == "role/".length()) {
+                return "*";
+            }
+            return roleArn;
+        } catch (IllegalArgumentException e) {
+            return "*";
+        }
+    }
+
+    // ── ECS ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Builds service resources only for ECS operations whose request body identifies services.
+     * DescribeServices accepts a list and UpdateService accepts one service; every member must
+     * resolve or the request is rejected so a malformed mixed request cannot become an
+     * accidentally narrower authorization check.
+     */
+    private List<String> buildEcsArns(ContainerRequestContext ctx, String region, String accountId) {
+        String operation = ecsOperation(ctx);
+        if ("DescribeServices".equals(operation)) {
+            return buildEcsDescribeServiceArns(ctx, region, accountId);
+        }
+        if ("UpdateService".equals(operation)) {
+            return buildEcsUpdateServiceArns(ctx, region, accountId);
+        }
+        return List.of("*");
+    }
+
+    private List<String> buildEcsDescribeServiceArns(ContainerRequestContext ctx,
+                                                     String region, String accountId) {
+        JsonNode json = readJsonBody(ctx);
+        if (json == null || !json.isObject()) {
+            return invalidEcsRequest("DescribeServices request body must be a JSON object");
+        }
+        EcsClusterReference cluster = parseEcsCluster(json.get("cluster"), region, accountId);
+        JsonNode services = json.get("services");
+        if (cluster == null || services == null || !services.isArray() || services.isEmpty()) {
+            return invalidEcsRequest("DescribeServices requires a non-empty services array");
+        }
+
+        List<String> resources = new ArrayList<>();
+        for (JsonNode serviceNode : services) {
+            if (serviceNode == null || !serviceNode.isTextual()) {
+                return invalidEcsRequest("DescribeServices service identifiers must be strings");
+            }
+            EcsServiceReference service = parseEcsService(serviceNode.asText());
+            if (service == null || !matchesEcsCluster(service, cluster)) {
+                return invalidEcsRequest("DescribeServices contains an invalid or mismatched service identifier");
+            }
+            resources.add(service.fullArn() != null
+                    ? service.fullArn()
+                    : buildEcsServiceArn(cluster, service.name()));
+        }
+        return resources.isEmpty()
+                ? invalidEcsRequest("DescribeServices requires at least one service identifier")
+                : resources;
+    }
+
+    private List<String> buildEcsUpdateServiceArns(ContainerRequestContext ctx,
+                                                   String region, String accountId) {
+        JsonNode json = readJsonBody(ctx);
+        if (json == null || !json.isObject()) {
+            return invalidEcsRequest("UpdateService request body must be a JSON object");
+        }
+        EcsClusterReference cluster = parseEcsCluster(json.get("cluster"), region, accountId);
+        JsonNode serviceNode = json.get("service");
+        if (cluster == null || serviceNode == null || !serviceNode.isTextual()) {
+            return invalidEcsRequest("UpdateService requires a service identifier");
+        }
+        EcsServiceReference service = parseEcsService(serviceNode.asText());
+        if (service == null || !matchesEcsCluster(service, cluster)) {
+            return invalidEcsRequest("UpdateService contains an invalid or mismatched service identifier");
+        }
+        return List.of(service.fullArn() != null
+                ? service.fullArn()
+                : buildEcsServiceArn(cluster, service.name()));
+    }
+
+    private static List<String> invalidEcsRequest(String message) {
+        throw new AwsException("InvalidParameterException", message, 400);
+    }
+
+    private String ecsOperation(ContainerRequestContext ctx) {
+        String target = ctx.getHeaderString("X-Amz-Target");
+        if (target == null) {
+            return null;
+        }
+        target = target.trim();
+        int dot = target.lastIndexOf('.');
+        if (dot < 0 || dot == target.length() - 1) {
+            return null;
+        }
+        String operation = target.substring(dot + 1).trim();
+        return operation.isEmpty() ? null : operation;
+    }
+
+    private EcsClusterReference parseEcsCluster(JsonNode clusterNode,
+                                                 String region, String accountId) {
+        if (clusterNode == null || clusterNode.isNull()) {
+            return validEcsIdentity(region, accountId)
+                    ? new EcsClusterReference("aws", region, accountId, "default", false, false)
+                    : null;
+        }
+        if (!clusterNode.isTextual()) {
+            return null;
+        }
+        String raw = clusterNode.asText();
+        String value = raw.trim();
+        if (value.isEmpty() || !value.equals(raw)) {
+            return null;
+        }
+        if (!value.startsWith("arn:")) {
+            return validEcsName(value)
+                    && validEcsIdentity(region, accountId)
+                    ? new EcsClusterReference("aws", region, accountId, value, true, false)
+                    : null;
+        }
+        try {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(value);
+            String resource = parsed.resource();
+            String prefix = "cluster/";
+            if (!"ecs".equals(parsed.service()) || !validEcsIdentity(parsed.region(), parsed.accountId())
+                    || !resource.startsWith(prefix) || !validEcsName(resource.substring(prefix.length()))) {
+                return null;
+            }
+            return new EcsClusterReference(parsed.partition(), parsed.region(), parsed.accountId(),
+                    resource.substring(prefix.length()), true, true);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private EcsServiceReference parseEcsService(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String value = raw.trim();
+        if (value.isEmpty() || !value.equals(raw)) {
+            return null;
+        }
+        if (!value.startsWith("arn:")) {
+            return validEcsName(value) ? new EcsServiceReference(value, null, null, null, null, null) : null;
+        }
+        try {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(value);
+            String prefix = "service/";
+            String resource = parsed.resource();
+            if (!"ecs".equals(parsed.service()) || !validEcsIdentity(parsed.region(), parsed.accountId())
+                    || !resource.startsWith(prefix)) {
+                return null;
+            }
+            String[] parts = resource.substring(prefix.length()).split("/", -1);
+            if (parts.length != 2 || !validEcsName(parts[0]) || !validEcsName(parts[1])) {
+                return null;
+            }
+            return new EcsServiceReference(parts[1], value, parsed.partition(), parsed.region(),
+                    parsed.accountId(), parts[0]);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private boolean matchesEcsCluster(EcsServiceReference service, EcsClusterReference cluster) {
+        if (service.fullArn() == null) {
+            return true;
+        }
+        // An omitted cluster is AWS's default cluster. A full service ARN is still accepted when
+        // it names that default cluster, but a non-default ARN without an explicit cluster must
+        // fail closed because AWS requires the cluster parameter for that case.
+        if (!cluster.explicit()) {
+            return "default".equals(service.clusterName());
+        }
+        return cluster.name().equals(service.clusterName())
+                && (!cluster.fullArn() || (cluster.partition().equals(service.partition())
+                && cluster.region().equals(service.region())
+                && cluster.accountId().equals(service.accountId())));
+    }
+
+    private String buildEcsServiceArn(EcsClusterReference cluster, String serviceName) {
+        return new AwsArnUtils.Arn(cluster.partition(), "ecs", cluster.region(), cluster.accountId(),
+                "service/" + cluster.name() + "/" + serviceName).toString();
+    }
+
+    private static boolean validEcsIdentity(String region, String accountId) {
+        return region != null && !region.isBlank()
+                && accountId != null && accountId.matches("\\d{12}");
+    }
+
+    private static boolean validEcsName(String name) {
+        return name != null && name.matches("[A-Za-z0-9_-]{1,255}");
+    }
+
+    private record EcsClusterReference(String partition, String region, String accountId,
+                                       String name, boolean explicit, boolean fullArn) {
+    }
+
+    private record EcsServiceReference(String name, String fullArn, String partition, String region,
+                                       String accountId, String clusterName) {
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
     private JsonNode readJsonBody(ContainerRequestContext ctx) {
@@ -370,8 +590,52 @@ public class ResourceArnBuilder {
     }
 
     private String firstFormParam(ContainerRequestContext ctx, String name) {
-        // Form params are typically available as query params in REST-Assured / JAX-RS
         String v = ctx.getUriInfo().getQueryParameters().getFirst(name);
-        return v;
+        if (v != null) {
+            return v;
+        }
+        MediaType mediaType = ctx.getMediaType();
+        if (mediaType == null
+                || !"application".equalsIgnoreCase(mediaType.getType())
+                || !"x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype())) {
+            return null;
+        }
+        InputStream in = ctx.getEntityStream();
+        if (in == null) {
+            return null;
+        }
+        byte[] body;
+        try {
+            body = in.readAllBytes();
+        } catch (IOException e) {
+            return null;
+        }
+        ctx.setEntityStream(new ByteArrayInputStream(body));
+        Charset charset = resolveCharset(mediaType);
+        String form = new String(body, charset);
+        try {
+            for (String pair : form.split("&")) {
+                int eq = pair.indexOf('=');
+                String key = eq < 0 ? pair : pair.substring(0, eq);
+                if (name.equals(URLDecoder.decode(key, charset))) {
+                    return eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), charset);
+                }
+            }
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        return null;
+    }
+
+    private Charset resolveCharset(MediaType mediaType) {
+        String name = mediaType.getParameters().get("charset");
+        if (name == null || name.isBlank()) {
+            return StandardCharsets.UTF_8;
+        }
+        try {
+            return Charset.forName(name);
+        } catch (RuntimeException e) {
+            return StandardCharsets.UTF_8;
+        }
     }
 }

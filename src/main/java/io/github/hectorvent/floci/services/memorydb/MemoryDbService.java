@@ -407,7 +407,7 @@ public class MemoryDbService {
             return false;
         }
         return switch (user.getAuthMode()) {
-            case IAM -> sigV4Validator.validate(secret, clusterName, user.getName());
+            case IAM -> sigV4Validator.validate(secret, clusterName, user.getName(), "memorydb");
             case PASSWORD -> user.getPasswords() != null && user.getPasswords().contains(secret);
             case NO_PASSWORD -> true;
         };

@@ -11,13 +11,17 @@ import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -25,11 +29,13 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -90,6 +96,116 @@ class IamEnforcementFilterTest {
                 mock(CloudTrailService.class),
                 mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
                 catalog, scpProvider);
+    }
+
+    @Test
+    void ecsDescribeServicesUsesRealExactResourcePolicyAndChecksEveryMember() throws Exception {
+        assertEcsResourceDecision("DescribeServices",
+                "{\"cluster\":\"cluster-a\",\"services\":[\"allowed\",\"allowed-two\"]}", true);
+        assertEcsResourceDecision("DescribeServices",
+                "{\"cluster\":\"cluster-a\",\"services\":[\"allowed\",\"other\"]}", false);
+        assertEcsResourceDecision("DescribeServices",
+                "{\"cluster\":\"cluster-a\",\"services\":[\"other\",\"allowed\"]}", false);
+        assertEcsResourceDecision("DescribeServices",
+                "{\"cluster\":\"cluster-b\",\"services\":[\"allowed\"]}", false);
+        assertEcsResourceDecision("DescribeServices",
+                "{\"cluster\":\"cluster-a\",\"services\":[\"arn:aws:ecs:us-east-1:999988887777:service/cluster-a/allowed\"]}", false);
+        assertEcsResourceDecision("DescribeServices",
+                "{\"cluster\":\"cluster-a\",\"services\":[\"arn:aws:ecs:eu-west-1:222233334444:service/cluster-a/allowed\"]}", false);
+    }
+
+    @Test
+    void ecsUpdateServiceUsesRealExactResourcePolicy() throws Exception {
+        assertEcsResourceDecision("UpdateService",
+                "{\"cluster\":\"cluster-a\",\"service\":\"allowed\",\"desiredCount\":0}", true);
+        assertEcsResourceDecision("UpdateService",
+                "{\"cluster\":\"cluster-a\",\"service\":\"other\",\"desiredCount\":0}", false);
+    }
+
+    @Test
+    void ecsJsonTargetCannotBeOverriddenByQueryAction() throws Exception {
+        String policy = """
+                {\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
+                 \"Action\":\"ecs:DescribeServices\",
+                 \"Resource\":\"arn:aws:ecs:us-east-1:222233334444:service/cluster-a/allowed\"}]}
+                """;
+        assertEcsResourceDecision("UpdateService",
+                "{\"cluster\":\"cluster-a\",\"service\":\"allowed\",\"desiredCount\":3}",
+                false, policy, "DescribeServices");
+    }
+
+    private void assertEcsResourceDecision(String operation, String body, boolean allowed) throws Exception {
+        assertEcsResourceDecision(operation, body, allowed, null);
+    }
+
+    @Test
+    void malformedEcsRequestCannotBypassAnExplicitResourceDeny() throws Exception {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"ecs:DescribeServices","Resource":"*"},
+                  {"Effect":"Deny","Action":"ecs:DescribeServices",
+                   "Resource":"arn:aws:ecs:us-east-1:222233334444:service/cluster-a/allowed"}]}
+                """;
+        assertEcsResourceDecision("DescribeServices",
+                "{\"cluster\":\"cluster-a\",\"services\":[\"allowed\"]}", false, policy);
+        AwsException failure = assertThrows(AwsException.class, () -> assertEcsResourceDecision(
+                "DescribeServices", "{\"cluster\":\"cluster-a\",\"services\":[\"allowed\",null]}",
+                true, policy));
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+    }
+
+    private void assertEcsResourceDecision(String operation, String body, boolean allowed,
+                                           String policyOverride) throws Exception {
+        assertEcsResourceDecision(operation, body, allowed, policyOverride, null);
+    }
+
+    private void assertEcsResourceDecision(String operation, String body, boolean allowed,
+                                           String policyOverride, String queryAction) throws Exception {
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        UriInfo uri = mock(UriInfo.class);
+        when(ctx.getUriInfo()).thenReturn(uri);
+        when(uri.getPath()).thenReturn("/");
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        if (queryAction != null) {
+            query.add("Action", queryAction);
+        }
+        when(uri.getQueryParameters()).thenReturn(query);
+        when(ctx.getMethod()).thenReturn("POST");
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.1"));
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonEC2ContainerServiceV20141113." + operation);
+        when(ctx.getEntityStream()).thenReturn(new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        doAnswer(inv -> {
+            when(ctx.getEntityStream()).thenReturn(inv.getArgument(0, InputStream.class));
+            return null;
+        }).when(ctx).setEntityStream(any(InputStream.class));
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIAECSRESOURCE/20260904/us-east-1/ecs/aws4_request, "
+                + "SignedHeaders=host;x-amz-security-token, Signature=abc";
+        when(ctx.getHeaderString("Authorization")).thenReturn(auth);
+        when(ctx.getHeaderString("X-Amz-Security-Token")).thenReturn("unit-session-token");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIAECSRESOURCE");
+        when(iamService.isEcsTaskRoleCredential("ASIAECSRESOURCE")).thenReturn(true);
+        when(iamService.validateEcsTaskRoleSessionToken("ASIAECSRESOURCE", "unit-session-token")).thenReturn(true);
+        String policy = policyOverride != null ? policyOverride : """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Action":["ecs:DescribeServices","ecs:UpdateService"],
+                 "Resource":["arn:aws:ecs:us-east-1:222233334444:service/cluster-a/allowed",
+                             "arn:aws:ecs:us-east-1:222233334444:service/cluster-a/allowed-two"]}]}
+                """;
+        when(iamService.resolveCallerContext("ASIAECSRESOURCE")).thenReturn(CallerContext.of(List.of(policy)));
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("us-east-1");
+        evaluator = new IamPolicyEvaluator(new ObjectMapper());
+        actionRegistry = new IamActionRegistry();
+        arnBuilder = new ResourceArnBuilder(new ObjectMapper());
+        newFilter().filter(ctx);
+        if (allowed) {
+            verify(ctx, never()).abortWith(any(Response.class));
+        } else {
+            ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
+            verify(ctx).abortWith(response.capture());
+            assertEquals(403, response.getValue().getStatus());
+        }
+        assertEquals(body, new String(ctx.getEntityStream().readAllBytes(), StandardCharsets.UTF_8));
     }
 
     @Test
@@ -251,6 +367,56 @@ class IamEnforcementFilterTest {
         verify(iamService, never()).resolveCallerContext(any());
         verify(evaluator, never()).evaluate(any(), any(), any(), any(), any());
         verify(containerRequest, never()).abortWith(any());
+    }
+
+    @Test
+    void reservedEcsKeyWithMalformedScopeFailsClosed() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String accessKey = "ASIAECS" + "A".repeat(13);
+        String auth = "AWS4-HMAC-SHA256 Credential=" + accessKey + ", Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(iamService.isEcsTaskRoleCredential(accessKey)).thenReturn(true);
+
+        newFilter().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any(Response.class));
+    }
+
+    @Test
+    void presignedReservedEcsKeyWithoutSessionTokenFailsClosed() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        jakarta.ws.rs.core.UriInfo uriInfo = mock(jakarta.ws.rs.core.UriInfo.class);
+        String accessKey = "ASIAECS" + "A".repeat(13);
+        String credential = accessKey + "/20260902/us-east-1/s3/aws4_request";
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("X-Amz-Credential", credential);
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getQueryParameters()).thenReturn(query);
+        when(accountResolver.extractPresignedAccessKeyId(credential)).thenReturn(accessKey);
+        when(iamService.isEcsTaskRoleCredential(accessKey)).thenReturn(true);
+
+        newFilter().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any(Response.class));
+    }
+
+    @Test
+    void malformedAuthorizationCannotHidePresignedReservedEcsKey() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        jakarta.ws.rs.core.UriInfo uriInfo = mock(jakarta.ws.rs.core.UriInfo.class);
+        String accessKey = "ASIAECS" + "B".repeat(13);
+        String credential = accessKey + "/20260902/us-east-1/s3/aws4_request";
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("X-Amz-Credential", credential);
+        when(containerRequest.getHeaderString("Authorization")).thenReturn("malformed");
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getQueryParameters()).thenReturn(query);
+        when(accountResolver.extractPresignedAccessKeyId(credential)).thenReturn(accessKey);
+        when(iamService.isEcsTaskRoleCredential(accessKey)).thenReturn(true);
+
+        newFilter().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any(Response.class));
     }
 
     @Test

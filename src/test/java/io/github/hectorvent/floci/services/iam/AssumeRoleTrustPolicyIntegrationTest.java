@@ -42,14 +42,84 @@ class AssumeRoleTrustPolicyIntegrationTest {
     }
 
     private static void createRoleInB(String roleName) {
+        createRoleInB(roleName, TRUST_ALLOW_A);
+    }
+
+    private static void createRoleInB(String roleName, String trustPolicy) {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateRole")
             .formParam("RoleName", roleName)
-            .formParam("AssumeRolePolicyDocument", TRUST_ALLOW_A)
+            .formParam("AssumeRolePolicyDocument", trustPolicy)
             .header("Authorization", auth(ACCOUNT_B, "iam"))
         .when().post("/")
         .then().statusCode(200);
+    }
+
+    @Test
+    void callerIdentityPolicyUsesRequestedRoleArn() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String user = "assume-caller-" + suffix;
+        String allowedRole = "identity-allowed-" + suffix;
+        String deniedRole = "identity-denied-" + suffix;
+        String userArn = "arn:aws:iam::" + ACCOUNT_A + ":user/" + user;
+        String allowedRoleArn = "arn:aws:iam::" + ACCOUNT_B + ":role/" + allowedRole;
+        String trustUser = "{\"Version\":\"2012-10-17\",\"Statement\":[{"
+                + "\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"" + userArn + "\"},"
+                + "\"Action\":\"sts:AssumeRole\"}]}";
+        String identityPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{"
+                + "\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\","
+                + "\"Resource\":\"" + allowedRoleArn + "\"}]}";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", user)
+            .header("Authorization", auth(ACCOUNT_A, "iam"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "PutUserPolicy")
+            .formParam("UserName", user)
+            .formParam("PolicyName", "assume-exact-role")
+            .formParam("PolicyDocument", identityPolicy)
+            .header("Authorization", auth(ACCOUNT_A, "iam"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        String accessKey = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateAccessKey")
+            .formParam("UserName", user)
+            .header("Authorization", auth(ACCOUNT_A, "iam"))
+        .when().post("/")
+        .then().statusCode(200)
+        .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+
+        createRoleInB(allowedRole, trustUser);
+        createRoleInB(deniedRole, trustUser);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "AssumeRole")
+            .formParam("RoleArn", allowedRoleArn)
+            .formParam("RoleSessionName", "allowed")
+            .header("Authorization", auth(accessKey, "sts"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "AssumeRole")
+            .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT_B + ":role/" + deniedRole)
+            .formParam("RoleSessionName", "denied")
+            .header("Authorization", auth(accessKey, "sts"))
+        .when().post("/")
+        .then().statusCode(403)
+            .body(containsString("AccessDenied"));
     }
 
     @Test

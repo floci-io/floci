@@ -1,18 +1,32 @@
 package io.github.hectorvent.floci.services.elasticache.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SigV4ValidatorTest {
+
+    private static final String ECS_ACCESS_KEY_ID = "ASIAECS" + "C".repeat(13);
+    private static final String ECS_SECRET_ACCESS_KEY = "ecs-cache-secret";
+    private static final String ECS_SESSION_TOKEN = "ecs-cache-session+token/==";
+    private static final String ECS_TASK_ARN =
+            "arn:aws:ecs:us-east-1:000000000000:task/default/cache-validator";
+    private static final String ECS_CREDENTIAL_PATH = "/v2/credentials/" + "C".repeat(48);
 
     @Test
     void validateAcceptsTokenForMatchingReplicationGroup() throws Exception {
@@ -301,6 +315,71 @@ class SigV4ValidatorTest {
     }
 
     @Test
+    void validateAcceptsTokenSignedWithActiveEcsTaskRoleAndIssuedSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = createEcsElastiCacheToken(ECS_SESSION_TOKEN);
+
+        assertTrue(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
+    void bindsOtherwiseValidEcsTokensToTheServerSelectedService() throws Exception {
+        SigV4Validator validator = new SigV4Validator(ecsIamService(Instant.now().plusSeconds(3600)));
+        for (String service : java.util.List.of("sts", "s3", "rds-db", "memorydb")) {
+            assertFalse(validator.validate(createEcsElastiCacheToken(ECS_SESSION_TOKEN, service),
+                    "cache-cluster-01", "default"), service);
+        }
+        assertTrue(validator.validate(createEcsElastiCacheToken(ECS_SESSION_TOKEN, "memorydb"),
+                "cache-cluster-01", "default", "memorydb"));
+        assertFalse(validator.validate(createEcsElastiCacheToken(ECS_SESSION_TOKEN),
+                "cache-cluster-01", "default", "memorydb"));
+    }
+
+    @Test
+    void validateRejectsEcsTaskRoleTokenWithoutSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = createEcsElastiCacheToken(null);
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
+    void validateRejectsEcsTaskRoleTokenWithWrongSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = createEcsElastiCacheToken("forged-session-token");
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
+    void validateRejectsExpiredEcsTaskRoleCredentialEvenWithIssuedSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        iamService.resolveEcsTaskRoleSession(ECS_ACCESS_KEY_ID).orElseThrow().setExpiration(Instant.EPOCH);
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = createEcsElastiCacheToken(ECS_SESSION_TOKEN);
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
+    void validateRejectsRevokedEcsTaskRoleCredentialEvenWithIssuedSessionToken() throws Exception {
+        IamService iamService = ecsIamService(Instant.now().plusSeconds(3600));
+        iamService.revokeEcsTaskRoleSession(ECS_TASK_ARN, ECS_ACCESS_KEY_ID);
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = createEcsElastiCacheToken(ECS_SESSION_TOKEN);
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
     void sanitizeForLogStripsControlCharacters() throws Exception {
         // A forged accessKeyId containing CR/LF must not be able to inject fake log lines into
         // the debug logs this validator writes.
@@ -311,5 +390,85 @@ class SigV4ValidatorTest {
         String sanitized = (String) sanitizeForLog.invoke(null, malicious);
 
         assertEquals("AKIDINJECTEDLINE", sanitized);
+    }
+
+    private static IamService ecsIamService(Instant expiration) {
+        try {
+            Constructor<IamService> constructor = IamService.class.getDeclaredConstructor(
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    RegionResolver.class
+            );
+            constructor.setAccessible(true);
+
+            StorageBackend<String, IamRole> roles = new InMemoryStorage<>();
+            IamService iamService = constructor.newInstance(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    roles,
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new RegionResolver("us-east-1", "000000000000")
+            );
+            IamRole role = iamService.createRole("cache-validator", "/", "{}", null, 0, null);
+            iamService.registerEcsTaskRoleSession(
+                    ECS_TASK_ARN,
+                    "000000000000",
+                    ECS_ACCESS_KEY_ID,
+                    ECS_SECRET_ACCESS_KEY,
+                    ECS_SESSION_TOKEN,
+                    role.getArn(),
+                    expiration,
+                    ECS_CREDENTIAL_PATH);
+            return iamService;
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to construct ECS IAM validator fixture", e);
+        }
+    }
+
+    private static String createEcsElastiCacheToken(String sessionToken) throws Exception {
+        return createEcsElastiCacheToken(sessionToken, "elasticache");
+    }
+
+    private static String createEcsElastiCacheToken(String sessionToken, String service) throws Exception {
+        Method signer = SigV4TokenTestHelper.class.getDeclaredMethod(
+                "signToken",
+                String.class,
+                Integer.class,
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                Instant.class,
+                int.class,
+                Map.class,
+                Map.class);
+        signer.setAccessible(true);
+
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("Action", "connect");
+        params.put("User", "default");
+        if (sessionToken != null) {
+            params.put("X-Amz-Security-Token", sessionToken);
+        }
+        return (String) signer.invoke(
+                null,
+                "cache-cluster-01",
+                null,
+                ECS_ACCESS_KEY_ID,
+                ECS_SECRET_ACCESS_KEY,
+                "us-east-1",
+                service,
+                Instant.now().minusSeconds(60),
+                900,
+                params,
+                Map.of("host", "cache-cluster-01"));
     }
 }

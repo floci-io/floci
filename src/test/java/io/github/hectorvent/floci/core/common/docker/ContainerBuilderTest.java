@@ -125,6 +125,18 @@ class ContainerBuilderTest {
     }
 
     @Test
+    void withLinkLocalIpsRoundTripsIntoSpec() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withDockerNetwork(Optional.of("chris-dev-cloud"))
+                .withLinkLocalIp("169.254.170.3")
+                .build();
+
+        assertEquals(List.of("169.254.170.3"), spec.linkLocalIps());
+    }
+
+    @Test
     void imageRegistryBasePrefixesEveryContainerImage() {
         TestFixture fixture = new TestFixture();
         when(fixture.docker.imageRegistryBase()).thenReturn(Optional.of("ghcr.io/floci-io/mirror/"));

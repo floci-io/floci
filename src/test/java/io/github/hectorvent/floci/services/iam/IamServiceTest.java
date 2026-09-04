@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -53,6 +54,212 @@ class IamServiceTest {
                 new RegionResolver("us-east-1", "000000000000"),
                 seedDeployerPrincipal
         );
+    }
+
+    @Test
+    void ecsTaskRoleSessionIsTokenBoundTransientAndFailClosedAfterRevocation() {
+        IamRole role = iamService.createRole("TaskRole", "/", "{}", null, 0, null);
+        String taskArn = "arn:aws:ecs:us-east-1:000000000000:task/default/task-a";
+        String roleArn = role.getArn();
+        String accessKey = "ASIAECS" + "A".repeat(13);
+        String secret = "s".repeat(40);
+        String token = "t".repeat(200);
+        String path = "/v2/credentials/" + "P".repeat(48);
+
+        assertFalse(iamService.isCredentialAccessKeyInUse(accessKey));
+        iamService.registerEcsTaskRoleSession(taskArn, "000000000000", accessKey, secret, token,
+                roleArn, Instant.now().plusSeconds(3600), path);
+
+        assertTrue(iamService.isCredentialAccessKeyInUse(accessKey));
+        assertTrue(iamService.findSecretKey(accessKey).isEmpty());
+        assertEquals(Optional.of(token), iamService.findSessionToken(accessKey));
+        assertEquals(Optional.of(secret), iamService.findSecretKey(accessKey, token));
+        assertTrue(iamService.findSecretKey(accessKey, "wrong-token").isEmpty());
+        assertTrue(iamService.findSecretKey(accessKey, null).isEmpty());
+        assertTrue(iamService.findSecretKey(accessKey, "").isEmpty());
+        assertEquals(Optional.of("000000000000"), iamService.resolveAccountId(accessKey));
+        assertTrue(iamService.validateEcsTaskRoleSessionToken(accessKey, token));
+        assertFalse(iamService.validateEcsTaskRoleSessionToken(accessKey, "wrong-token"));
+        assertTrue(iamService.resolveCallerArn(accessKey).orElseThrow().contains("ecs-task-task-a"));
+        assertThrows(IllegalArgumentException.class, () -> iamService.registerEcsTaskRoleSession(
+                "arn:aws:ecs:us-east-1:000000000000:task/default/task-b",
+                "000000000000", "ASIAECS" + "B".repeat(13), secret, token,
+                "arn:aws:iam::000000000000:role/other/TaskRole",
+                Instant.now().plusSeconds(3600), "/v2/credentials/" + "Q".repeat(48)));
+
+        iamService.revokeEcsTaskRoleSession(taskArn, accessKey);
+
+        assertTrue(iamService.isEcsTaskRoleCredential(accessKey));
+        assertFalse(iamService.isCredentialAccessKeyInUse(accessKey));
+        assertTrue(iamService.findSecretKey(accessKey).isEmpty());
+        assertTrue(iamService.findSecretKey(accessKey, token).isEmpty());
+        assertTrue(iamService.findSessionToken(accessKey).isEmpty());
+        assertTrue(iamService.resolveAccountId(accessKey).isEmpty());
+        assertFalse(iamService.validateEcsTaskRoleSessionToken(accessKey, token));
+        assertNotNull(iamService.resolveCallerContext(accessKey));
+        assertTrue(iamService.resolveCallerContext(accessKey).identityPolicies().isEmpty());
+        assertTrue(iamService.resolveCallerArn(accessKey).isEmpty());
+    }
+
+    @Test
+    void expiredEcsSessionCannotResolveSecretOrTokenEvenWithIssuedToken() {
+        IamRole role = iamService.createRole("ExpiredTaskRole", "/", "{}", null, 0, null);
+        String key = "ASIAECS" + "E".repeat(13);
+        iamService.registerEcsTaskRoleSession(
+                "arn:aws:ecs:us-east-1:000000000000:task/default/expired",
+                "000000000000", key, "test-secret", "test-token", role.getArn(),
+                Instant.now().plusSeconds(3600), "/v2/credentials/" + "E".repeat(48));
+        iamService.resolveEcsTaskRoleSession(key).orElseThrow().setExpiration(Instant.EPOCH);
+
+        assertTrue(iamService.findSessionToken(key).isEmpty());
+        assertTrue(iamService.findSecretKey(key).isEmpty());
+        assertTrue(iamService.findSecretKey(key, "test-token").isEmpty());
+        assertFalse(iamService.validateEcsTaskRoleSessionToken(key, "test-token"));
+        assertTrue(iamService.isEcsTaskRoleCredential(key));
+    }
+
+    @Test
+    void ecsGenerationsOverlapUntilExpiryAndTaskRevocationClearsAll() {
+        IamRole role = iamService.createRole("OverlapRole", "/", "{}", null, 0, null);
+        String taskArn = "arn:aws:ecs:us-east-1:000000000000:task/default/overlap";
+        String path = "/v2/credentials/" + "O".repeat(48);
+        String firstKey = "ASIAECS" + "F".repeat(13);
+        String secondKey = "ASIAECS" + "S".repeat(13);
+        String firstToken = "first-token";
+        String secondToken = "second-token";
+
+        iamService.registerEcsTaskRoleSession(taskArn, "000000000000", firstKey,
+                "first-secret", firstToken, role.getArn(), Instant.now().plusSeconds(3600), path);
+        iamService.registerEcsTaskRoleSession(taskArn, "000000000000", secondKey,
+                "second-secret", secondToken, role.getArn(), Instant.now().plusSeconds(7200), path);
+
+        assertEquals(Optional.of(secondKey), iamService.resolveEcsTaskRoleSessionByPath(path)
+                .map(SessionCredential::getAccessKeyId));
+        assertEquals(Optional.of("first-secret"), iamService.findSecretKey(firstKey, firstToken));
+        assertEquals(Optional.of("second-secret"), iamService.findSecretKey(secondKey, secondToken));
+        assertTrue(iamService.findSecretKey(firstKey, null).isEmpty());
+        assertTrue(iamService.findSecretKey(firstKey, "wrong-token").isEmpty());
+
+        // Retiring an old generation must not interrupt the current generation or endpoint.
+        iamService.revokeEcsTaskRoleSession(taskArn, firstKey);
+        assertTrue(iamService.resolveEcsTaskRoleSession(firstKey).isEmpty());
+        assertEquals(Optional.of(secondKey), iamService.resolveEcsTaskRoleSessionByPath(path)
+                .map(SessionCredential::getAccessKeyId));
+
+        // Explicitly revoking the current generation is task-scoped and clears every overlap.
+        iamService.revokeEcsTaskRoleSession(taskArn, secondKey);
+        assertTrue(iamService.resolveEcsTaskRoleSession(firstKey).isEmpty());
+        assertTrue(iamService.resolveEcsTaskRoleSession(secondKey).isEmpty());
+        assertTrue(iamService.resolveEcsTaskRoleSessionByPath(path).isEmpty());
+        assertFalse(iamService.validateEcsTaskRoleSessionToken(secondKey, secondToken));
+    }
+
+    @Test
+    void taskRevocationClearsEveryActiveGenerationWithoutCrossTaskImpact() {
+        IamRole role = iamService.createRole("TaskRevokeOverlapRole", "/", "{}", null, 0, null);
+        String firstTask = "arn:aws:ecs:us-east-1:000000000000:task/default/revoke-overlap-a";
+        String secondTask = "arn:aws:ecs:us-east-1:000000000000:task/default/revoke-overlap-b";
+        String firstPath = "/v2/credentials/" + "T".repeat(48);
+        String secondPath = "/v2/credentials/" + "U".repeat(48);
+        String firstKey = "ASIAECS" + "1".repeat(13);
+        String latestKey = "ASIAECS" + "2".repeat(13);
+        String otherKey = "ASIAECS" + "3".repeat(13);
+        Instant expiry = Instant.now().plusSeconds(3600);
+
+        iamService.registerEcsTaskRoleSession(firstTask, "000000000000", firstKey,
+                "first-secret", "first-token", role.getArn(), expiry, firstPath);
+        iamService.registerEcsTaskRoleSession(firstTask, "000000000000", latestKey,
+                "latest-secret", "latest-token", role.getArn(), expiry, firstPath);
+        iamService.registerEcsTaskRoleSession(secondTask, "000000000000", otherKey,
+                "other-secret", "other-token", role.getArn(), expiry, secondPath);
+
+        assertEquals(Optional.of("first-secret"), iamService.findSecretKey(firstKey, "first-token"));
+        assertEquals(Optional.of("latest-secret"), iamService.findSecretKey(latestKey, "latest-token"));
+        assertEquals(Optional.of(latestKey), iamService.resolveEcsTaskRoleSessionByPath(firstPath)
+                .map(SessionCredential::getAccessKeyId));
+        assertEquals(Optional.of(otherKey), iamService.resolveEcsTaskRoleSessionByPath(secondPath)
+                .map(SessionCredential::getAccessKeyId));
+
+        // A task-level stop must revoke both active generations, while another task remains live.
+        iamService.revokeEcsTaskRoleSession(firstTask);
+        assertTrue(iamService.resolveEcsTaskRoleSession(firstKey).isEmpty());
+        assertTrue(iamService.resolveEcsTaskRoleSession(latestKey).isEmpty());
+        assertTrue(iamService.resolveEcsTaskRoleSessionByPath(firstPath).isEmpty());
+        assertTrue(iamService.findSecretKey(firstKey, "first-token").isEmpty());
+        assertTrue(iamService.findSecretKey(latestKey, "latest-token").isEmpty());
+        assertEquals(Optional.of(otherKey), iamService.resolveEcsTaskRoleSessionByPath(secondPath)
+                .map(SessionCredential::getAccessKeyId));
+
+        // Reissue two generations and verify revoking the latest access key has the same
+        // task-scoped effect; the other task's endpoint must remain untouched.
+        String reissuedKey = "ASIAECS" + "4".repeat(13);
+        String reissuedLatestKey = "ASIAECS" + "5".repeat(13);
+        iamService.registerEcsTaskRoleSession(firstTask, "000000000000", reissuedKey,
+                "reissued-secret", "reissued-token", role.getArn(), expiry, firstPath);
+        iamService.registerEcsTaskRoleSession(firstTask, "000000000000", reissuedLatestKey,
+                "reissued-latest-secret", "reissued-latest-token", role.getArn(), expiry, firstPath);
+
+        iamService.revokeEcsTaskRoleSession(firstTask, reissuedLatestKey);
+        assertTrue(iamService.resolveEcsTaskRoleSession(reissuedKey).isEmpty());
+        assertTrue(iamService.resolveEcsTaskRoleSession(reissuedLatestKey).isEmpty());
+        assertTrue(iamService.resolveEcsTaskRoleSessionByPath(firstPath).isEmpty());
+        assertEquals(Optional.of(otherKey), iamService.resolveEcsTaskRoleSessionByPath(secondPath)
+                .map(SessionCredential::getAccessKeyId));
+    }
+
+    @Test
+    void expiredGenerationIsPrunedWithoutRemovingLatestAndCanBeReissued() {
+        IamRole role = iamService.createRole("PruneRole", "/", "{}", null, 0, null);
+        String taskArn = "arn:aws:ecs:us-east-1:000000000000:task/default/prune";
+        String path = "/v2/credentials/" + "R".repeat(48);
+        String firstKey = "ASIAECS" + "P".repeat(13);
+        String latestKey = "ASIAECS" + "L".repeat(13);
+
+        iamService.registerEcsTaskRoleSession(taskArn, "000000000000", firstKey,
+                "first-secret", "first-token", role.getArn(), Instant.now().plusSeconds(3600), path);
+        iamService.registerEcsTaskRoleSession(taskArn, "000000000000", latestKey,
+                "latest-secret", "latest-token", role.getArn(), Instant.now().plusSeconds(7200), path);
+        iamService.resolveEcsTaskRoleSession(firstKey).orElseThrow().setExpiration(Instant.EPOCH);
+
+        assertTrue(iamService.resolveEcsTaskRoleSession(firstKey).isEmpty());
+        assertEquals(Optional.of(latestKey), iamService.resolveEcsTaskRoleSessionByPath(path)
+                .map(SessionCredential::getAccessKeyId));
+
+        // Expired generations do not cause an unbounded collision tombstone: the old ID can be
+        // accepted again only as a newly registered, separately token-bound session.
+        iamService.registerEcsTaskRoleSession(taskArn, "000000000000", firstKey,
+                "replacement-secret", "replacement-token", role.getArn(),
+                Instant.now().plusSeconds(3600), path);
+        assertEquals(Optional.of("replacement-secret"),
+                iamService.findSecretKey(firstKey, "replacement-token"));
+        assertTrue(iamService.findSecretKey(firstKey, "first-token").isEmpty());
+    }
+
+    @Test
+    void generationCollisionsFailBeforeReplacingOtherTaskOrCurrentGeneration() {
+        IamRole role = iamService.createRole("CollisionRole", "/", "{}", null, 0, null);
+        String firstTask = "arn:aws:ecs:us-east-1:000000000000:task/default/collision-a";
+        String secondTask = "arn:aws:ecs:us-east-1:000000000000:task/default/collision-b";
+        String firstPath = "/v2/credentials/" + "A".repeat(48);
+        String secondPath = "/v2/credentials/" + "B".repeat(48);
+        String firstKey = "ASIAECS" + "A".repeat(13);
+        String secondKey = "ASIAECS" + "B".repeat(13);
+        Instant expiry = Instant.now().plusSeconds(3600);
+
+        iamService.registerEcsTaskRoleSession(firstTask, "000000000000", firstKey,
+                "first-secret", "first-token", role.getArn(), expiry, firstPath);
+
+        assertThrows(IllegalArgumentException.class, () -> iamService.registerEcsTaskRoleSession(
+                secondTask, "000000000000", secondKey, "second-secret", "second-token",
+                role.getArn(), expiry, firstPath));
+        assertEquals(Optional.of(firstKey), iamService.resolveEcsTaskRoleSessionByPath(firstPath)
+                .map(SessionCredential::getAccessKeyId));
+
+        assertThrows(IllegalArgumentException.class, () -> iamService.registerEcsTaskRoleSession(
+                firstTask, "000000000000", firstKey, "replacement-secret", "replacement-token",
+                role.getArn(), expiry, secondPath));
+        assertEquals(Optional.of("first-secret"), iamService.findSecretKey(firstKey, "first-token"));
+        assertTrue(iamService.resolveEcsTaskRoleSessionByPath(secondPath).isEmpty());
     }
 
     // =========================================================================

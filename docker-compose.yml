@@ -33,6 +33,11 @@ services:
       floci_default:
         aliases:
           - localhost.floci.io
+        # AWS ECS's standard relative credential provider targets this private
+        # link-local metadata address. Task containers receive unique addresses
+        # in the same range (starting at .3).
+        link_local_ips:
+          - 169.254.170.2
 
 networks:
   floci_default:

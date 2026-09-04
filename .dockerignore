@@ -2,6 +2,8 @@
 !bin/awslocal
 !docker/entrypoint.sh
 !docker/localstack-parity.sh
+!docker/fork-runtime-requirements.txt
+!tools/fork-ecs-probe.py
 !pom.xml
 !src/**
 !target/*.so

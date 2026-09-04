@@ -1,0 +1,64 @@
+# Reviewed JVM fork. Package indexes are a dated, signature-checked Ubuntu snapshot.
+FROM eclipse-temurin:25-jdk-noble@sha256:534968c051301957beae735e7ba1db54d99ddecf08746d3b9d4f318cc132dbc3 AS build
+ARG SOURCE_DATE_EPOCH
+WORKDIR /build
+ADD --checksum=sha256:80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.16/apache-maven-3.9.16-bin.tar.gz /tmp/maven.tgz
+RUN echo '831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6  /tmp/maven.tgz' | sha512sum -c - \
+    && tar -xzf /tmp/maven.tgz -C /opt \
+    && rm /tmp/maven.tgz
+COPY pom.xml ./
+COPY src/ src/
+RUN test -n "$SOURCE_DATE_EPOCH" \
+    && /opt/apache-maven-3.9.16/bin/mvn -q -B -C -DskipTests \
+    -Dproject.build.outputTimestamp="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)" package \
+    && mkdir -p /build/build-inputs \
+    && cd /root/.m2/repository \
+    && find . -type f \( -name '*.jar' -o -name '*.pom' \) -print0 \
+    | sort -z | xargs -0 sha256sum > /build/build-inputs/maven-inputs.sha256
+
+FROM eclipse-temurin:25-jre-noble@sha256:b4c93a50fc67612798db73d68ca3b0ee4ebdd51736e59cca370e689b9797037e
+ARG SOURCE_DATE_EPOCH
+ARG VERSION
+ENV FLOCI_VERSION=${VERSION} \
+    FLOCI_STORAGE_PERSISTENT_PATH=/app/data \
+    AWS_DEFAULT_REGION=us-east-1 \
+    AWS_ACCESS_KEY_ID=test \
+    AWS_SECRET_ACCESS_KEY=test \
+    AWS_CONFIG_FILE=/etc/floci/aws/config
+COPY docker/fork-runtime-requirements.txt /usr/share/floci-build/runtime-requirements.txt
+RUN set -eu; \
+    sed -i -E 's@https?://([a-z.]*archive.ubuntu.com/ubuntu/?|security.ubuntu.com/ubuntu/?|ports.ubuntu.com/ubuntu-ports/?)@https://snapshot.ubuntu.com/ubuntu/20260904T000000Z/@g' /etc/apt/sources.list.d/ubuntu.sources; \
+    ! grep -E '^URIs:.*(archive.ubuntu.com|security.ubuntu.com|ports.ubuntu.com)' /etc/apt/sources.list.d/ubuntu.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget; \
+    dpkg-query -W > /usr/share/floci-build/debian-packages.txt; \
+    rm -rf /var/lib/apt/lists/*; \
+    pip3 install --no-cache-dir --break-system-packages --require-hashes --only-binary=:all: -r /usr/share/floci-build/runtime-requirements.txt; \
+    aws_bin="$(command -v aws)"; mv "$aws_bin" /usr/bin/aws.real; \
+    printf '#!/bin/sh\nexec /usr/bin/aws.real --endpoint-url=http://localhost:4566 "$@"\n' > /usr/bin/aws; \
+    chmod +x /usr/bin/aws; \
+    useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) gosu_sha=bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3 ;; \
+      arm64) gosu_sha=c3805a85d17f4454c23d7059bcb97e1ec1af272b90126e79ed002342de08389b ;; \
+      *) exit 1 ;; \
+    esac; \
+    wget -q -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/1.17/gosu-${arch}"; \
+    echo "$gosu_sha  /usr/local/bin/gosu" | sha256sum -c -; \
+    chmod +x /usr/local/bin/gosu
+WORKDIR /app
+RUN mkdir -p /app/data /etc/floci/aws \
+    && printf '[default]\nendpoint_url = http://localhost:4566\n' > /etc/floci/aws/config \
+    && chown 1001:root /app /app/data && chmod g+rwX /app
+COPY --from=build --chown=1001:root /build/target/quarkus-app/ quarkus-app/
+COPY --from=build /build/build-inputs/ /usr/share/floci-build/
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
+VOLUME /app/data
+EXPOSE 4566
+EXPOSE 6379-6399
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+    CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/quarkus-app/quarkus-run.jar"]

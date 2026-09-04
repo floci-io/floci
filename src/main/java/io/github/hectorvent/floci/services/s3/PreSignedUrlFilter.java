@@ -114,7 +114,11 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             }
 
             String accessKeyId = credParts[0];
-            String secretKey = resolveSecretKey(accessKeyId);
+            // ECS task-role credentials are token-bound.  The token rides in the presigned query
+            // (normally outside SignedHeaders), so resolve the secret with that exact value before
+            // verifying the URL signature; a bare ECS access key is deliberately not sufficient.
+            String sessionToken = S3RequestAuthorizationParser.sessionTokenFromQuery(queryParams);
+            String secretKey = resolveSecretKey(accessKeyId, sessionToken);
             if (secretKey == null) {
                 requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
                         "The AWS Access Key Id you provided does not exist in our records."));
@@ -215,11 +219,20 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     }
 
     private String resolveSecretKey(String accessKeyId) {
+        return resolveSecretKey(accessKeyId, null);
+    }
+
+    private String resolveSecretKey(String accessKeyId, String sessionToken) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return LEGACY_SECRET_KEY;
         }
         if (iamService != null) {
-            Optional<String> registered = iamService.findSecretKey(accessKeyId);
+            // Keep static IAM and STS behavior on the historical lookup.  ECS credentials are
+            // process-local bearer credentials and the IAM one-argument lookup rejects them;
+            // only the token-aware overload can resolve an active task session.
+            Optional<String> registered = iamService.isEcsTaskRoleCredential(accessKeyId)
+                    ? iamService.findSecretKey(accessKeyId, sessionToken)
+                    : iamService.findSecretKey(accessKeyId);
             if (registered.isPresent()) {
                 return registered.get();
             }

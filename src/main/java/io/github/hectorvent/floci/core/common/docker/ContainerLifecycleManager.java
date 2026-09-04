@@ -18,6 +18,7 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -158,8 +159,53 @@ public class ContainerLifecycleManager {
 
         CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
+        if (spec.hasNetworkConfiguration()) {
+            try {
+                attachNetworkBeforeStart(containerId, spec);
+            } catch (RuntimeException e) {
+                removeIfExists(containerId);
+                throw new IllegalStateException(
+                        "Failed to attach pre-start network configuration for container " + containerId, e);
+            }
+        }
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
+    }
+
+    /**
+     * Applies endpoint IPAM while the container is still in CREATED state. docker-java 3.7.1 does
+     * not expose Docker's {@code NetworkingConfig} on create, but it does expose the equivalent
+     * network-connect endpoint. Reconnecting before start keeps the metadata route race-free.
+     */
+    private void attachNetworkBeforeStart(String containerId, ContainerSpec spec) {
+        if (!spec.hasPortBindings()) {
+            dockerClient.disconnectFromNetworkCmd()
+                    .withContainerId(containerId)
+                    .withNetworkId(spec.networkMode())
+                    .exec();
+        }
+
+        LinkLocalIpam ipam = new LinkLocalIpam(spec.linkLocalIps());
+        ContainerNetwork endpoint = new ContainerNetwork().withIpamConfig(ipam);
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(spec.networkMode())
+                .withContainerNetwork(endpoint)
+                .exec();
+    }
+
+    /** Docker Engine supports LinkLocalIPs although docker-java 3.7.1 omits the model property. */
+    private static final class LinkLocalIpam extends ContainerNetwork.Ipam {
+        private final List<String> linkLocalIps;
+
+        private LinkLocalIpam(List<String> linkLocalIps) {
+            this.linkLocalIps = List.copyOf(linkLocalIps);
+        }
+
+        @JsonProperty("LinkLocalIPs")
+        public List<String> getLinkLocalIps() {
+            return linkLocalIps;
+        }
     }
 
     /**
@@ -173,7 +219,8 @@ public class ContainerLifecycleManager {
         startContainer(containerId);
         LOG.infov("Started container {0}", containerId);
 
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
+        if (spec.networkMode() != null && !spec.networkMode().isBlank()
+                && spec.hasPortBindings() && !spec.hasNetworkConfiguration()) {
             try {
                 dockerClient.connectToNetworkCmd()
                         .withContainerId(containerId)
@@ -836,7 +883,8 @@ public class ContainerLifecycleManager {
         // withNetworkMode() + port bindings suppresses port publishing on macOS Docker Desktop,
         // so containers with port bindings (e.g. ECR registry) connect to the network
         // after start via connectToNetworkCmd() instead.
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.hasPortBindings()) {
+        if (spec.networkMode() != null && !spec.networkMode().isBlank()
+                && !spec.hasPortBindings()) {
             hostConfig.withNetworkMode(spec.networkMode());
         }
 

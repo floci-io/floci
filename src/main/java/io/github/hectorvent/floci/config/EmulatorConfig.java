@@ -1543,6 +1543,26 @@ public interface EmulatorConfig {
 
         Optional<String> dockerNetwork();
 
+        /**
+         * When enabled, Docker-backed ECS tasks with a task role receive standard ECS container
+         * credentials through {@code AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}. The credential
+         * endpoint is served on the task metadata link-local address and is disabled by default.
+         */
+        @WithDefault("false")
+        boolean taskRoleCredentialsEnabled();
+
+        /** Port of the private ECS container-credentials listener. */
+        @WithDefault("80")
+        int taskRoleCredentialsPort();
+
+        /** Lifetime of a task-role credential session, in seconds. */
+        @WithDefault("3600")
+        int taskRoleCredentialsTtlSeconds();
+
+        /** Refresh window before expiry, in seconds. */
+        @WithDefault("300")
+        int taskRoleCredentialsRefreshWindowSeconds();
+
         @WithDefault("512")
         int defaultMemoryMb();
 

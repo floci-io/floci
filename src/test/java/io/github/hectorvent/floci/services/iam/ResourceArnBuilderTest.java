@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -60,6 +63,47 @@ class ResourceArnBuilderTest {
             when(ctx.getEntityStream()).thenReturn(newIn);
             return null;
         }).when(ctx).setEntityStream(any(InputStream.class));
+    }
+
+    private void setFormBody(String form) {
+        contextProperties.clear();
+        byte[] bytes = form.getBytes(StandardCharsets.UTF_8);
+        ByteArrayInputStream in = new ByteArrayInputStream(bytes);
+        when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+        when(ctx.getEntityStream()).thenReturn(in);
+        doAnswer(inv -> {
+            InputStream newIn = inv.getArgument(0);
+            when(ctx.getEntityStream()).thenReturn(newIn);
+            return null;
+        }).when(ctx).setEntityStream(any(InputStream.class));
+    }
+
+    private void setEcsTarget(String operation) {
+        when(ctx.getHeaderString("X-Amz-Target"))
+                .thenReturn("AmazonEC2ContainerServiceV20141113." + operation);
+    }
+
+    // ── STS ─────────────────────────────────────────────────────────────────────
+
+    @Test
+    void stsBuildsExactRoleArnFromFormBodyAndPreservesStream() throws IOException {
+        String form = "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A222222222222%3Arole%2Fapp%2Ftarget"
+                + "&RoleSessionName=test";
+        setFormBody(form);
+
+        String arn = builder.build("sts", ctx, "us-east-1", "111111111111");
+
+        assertEquals("arn:aws:iam::222222222222:role/app/target", arn);
+        assertEquals(form, new String(ctx.getEntityStream().readAllBytes(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void stsReturnsWildcardForMissingOrInvalidRoleArn() {
+        setFormBody("Action=GetCallerIdentity");
+        assertEquals("*", builder.build("sts", ctx, "us-east-1", "111111111111"));
+
+        setFormBody("Action=AssumeRole&RoleArn=arn%3Aaws%3As3%3A%3A%3Anot-a-role");
+        assertEquals("*", builder.build("sts", ctx, "us-east-1", "111111111111"));
     }
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
@@ -308,5 +352,104 @@ class ResourceArnBuilderTest {
         when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/my-function/invocations");
         String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function", arn);
+    }
+
+    // ── ECS ─────────────────────────────────────────────────────────────────────
+
+    @Test
+    void ecsDescribeServicesBuildsEveryShortNameInDefaultClusterAndPreservesBody() throws IOException {
+        String body = "{\"services\":[\"api\",\"worker\"]}";
+        setEcsTarget("DescribeServices");
+        setJsonBody(body);
+
+        List<String> resources = builder.buildResources("ecs", ctx, "us-east-1", "000000000000");
+
+        assertEquals(List.of(
+                "arn:aws:ecs:us-east-1:000000000000:service/default/api",
+                "arn:aws:ecs:us-east-1:000000000000:service/default/worker"), resources);
+        assertEquals(body, new String(ctx.getEntityStream().readAllBytes(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void ecsDescribeServicesUsesClusterArnAndPreservesExplicitForeignServiceArn() {
+        setEcsTarget("DescribeServices");
+        String clusterArn = "arn:aws:ecs:eu-west-1:222222222222:cluster/production";
+        setJsonBody("{\"cluster\":\"" + clusterArn + "\",\"services\":[\"billing\"]}");
+
+        assertEquals(List.of("arn:aws:ecs:eu-west-1:222222222222:service/production/billing"),
+                builder.buildResources("ecs", ctx, "us-east-1", "000000000000"));
+
+        String foreignArn = "arn:aws:ecs:eu-west-1:333333333333:service/production/foreign";
+        setJsonBody("{\"cluster\":\"production\",\"services\":[\"" + foreignArn + "\"]}");
+        assertEquals(List.of(foreignArn),
+                builder.buildResources("ecs", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void ecsFullServiceArnInDefaultClusterRemainsExact() {
+        setEcsTarget("DescribeServices");
+        String foreignDefaultArn = "arn:aws:ecs:eu-west-1:333333333333:service/default/foreign";
+        setJsonBody("{\"services\":[\"" + foreignDefaultArn + "\"]}");
+
+        assertEquals(List.of(foreignDefaultArn),
+                builder.buildResources("ecs", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void ecsUpdateServiceBuildsShortAndFullServiceReferences() {
+        setEcsTarget("UpdateService");
+        setJsonBody("{\"cluster\":\"blue\",\"service\":\"api\",\"desiredCount\":2}");
+        assertEquals(List.of("arn:aws:ecs:us-east-1:000000000000:service/blue/api"),
+                builder.buildResources("ecs", ctx, "us-east-1", "000000000000"));
+
+        String serviceArn = "arn:aws:ecs:eu-west-1:222222222222:service/production/api";
+        String clusterArn = "arn:aws:ecs:eu-west-1:222222222222:cluster/production";
+        setJsonBody("{\"cluster\":\"" + clusterArn + "\",\"service\":\"" + serviceArn + "\"}");
+        assertEquals(List.of(serviceArn),
+                builder.buildResources("ecs", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void ecsMalformedMixedAndMismatchedTargetsAreRejected() {
+        setEcsTarget("DescribeServices");
+        setJsonBody("{\"cluster\":\"blue\",\"services\":[\"api\",7]}");
+        assertEcsInvalidRequest();
+
+        setJsonBody("{\"cluster\":\"blue\",\"services\":[]}");
+        assertEcsInvalidRequest();
+
+        setJsonBody("{\"cluster\":\" blue\",\"services\":[\"api\"]}");
+        assertEcsInvalidRequest();
+
+        setJsonBody("{\"cluster\":\"blue\",\"services\":[\" api\"]}");
+        assertEcsInvalidRequest();
+
+        setJsonBody("{\"cluster\":\"blue\",\"services\":[\"arn:aws:ecs:us-east-1:000000000000:service/green/api\"]}");
+        assertEcsInvalidRequest();
+
+        setJsonBody("{\"cluster\":\"arn:aws:ecs:eu-west-1:222222222222:cluster/blue\",\"service\":\"arn:aws:ecs:eu-west-1:333333333333:service/blue/api\"}");
+        setEcsTarget("UpdateService");
+        assertEcsInvalidRequest();
+
+        setEcsTarget("DescribeServices");
+        setJsonBody("{\"services\":[\"arn:aws:ecs:us-east-1:000000000000:service/blue/api\"]}");
+        assertEcsInvalidRequest();
+    }
+
+    private void assertEcsInvalidRequest() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> builder.buildResources("ecs", ctx, "us-east-1", "000000000000"));
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void ecsUnsupportedOperationFallsBackToWildcardAndPreservesBody() throws IOException {
+        String body = "{\"cluster\":\"blue\"}";
+        setEcsTarget("ListClusters");
+        setJsonBody(body);
+
+        assertEquals(List.of("*"), builder.buildResources("ecs", ctx, "us-east-1", "000000000000"));
+        assertEquals(body, new String(ctx.getEntityStream().readAllBytes(), StandardCharsets.UTF_8));
     }
 }

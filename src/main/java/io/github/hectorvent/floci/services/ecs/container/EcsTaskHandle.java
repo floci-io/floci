@@ -13,6 +13,7 @@ public class EcsTaskHandle {
     private final String taskArn;
     private final Map<String, String> containerIds;   // containerName → dockerId
     private final Map<String, Closeable> logStreamsByContainerId;
+    private boolean pendingNetworkCleanup;
 
     public EcsTaskHandle(String taskArn, Map<String, String> containerIds,
                          Map<String, Closeable> logStreamsByContainerId) {
@@ -33,4 +34,7 @@ public class EcsTaskHandle {
     public boolean hasOpenLogStreams() {
         return !logStreamsByContainerId.isEmpty();
     }
+
+    public boolean hasPendingNetworkCleanup() { return pendingNetworkCleanup; }
+    public void setPendingNetworkCleanup(boolean pending) { pendingNetworkCleanup = pending; }
 }

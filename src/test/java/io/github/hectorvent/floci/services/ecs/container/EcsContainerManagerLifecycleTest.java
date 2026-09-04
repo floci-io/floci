@@ -19,6 +19,7 @@ import java.io.Closeable;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,6 +30,64 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EcsContainerManagerLifecycleTest {
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "running,RUNNING",
+            "exited,STOPPED",
+            "removed,STOPPED",
+            "unknown,UNKNOWN",
+            "failure,UNKNOWN"
+    })
+    void runningStateInspectionDistinguishesLiveStoppedAndUnknown(String state,
+                                                                    EcsContainerManager.ContainerRunningState expected) {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        DockerClient docker = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        var inspect = docker.inspectContainerCmd("docker-id");
+        switch (state) {
+            case "running" -> when(inspect.exec().getState().getRunning()).thenReturn(true);
+            case "exited" -> when(inspect.exec().getState().getRunning()).thenReturn(false);
+            case "unknown" -> when(inspect.exec().getState().getRunning()).thenReturn(null);
+            case "removed" -> when(inspect.exec()).thenThrow(new com.github.dockerjava.api.exception.NotFoundException("removed"));
+            case "failure" -> when(inspect.exec()).thenThrow(new IllegalStateException("daemon unavailable"));
+            default -> throw new IllegalArgumentException(state);
+        }
+
+        EcsContainerManager subject = manager(lifecycle);
+
+        assertEquals(expected, subject.getContainerRunningState("docker-id"));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"removed", "present", "unreachable"})
+    void releasesNetworkOnlyAfterExactDockerAbsence(String state) {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        DockerClient docker = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        var inspect = docker.inspectContainerCmd("docker-id");
+        if (state.equals("removed")) {
+            when(inspect.exec()).thenThrow(new com.github.dockerjava.api.exception.NotFoundException("removed"));
+        } else if (state.equals("unreachable")) {
+            when(inspect.exec()).thenThrow(new IllegalStateException("daemon unavailable"));
+        }
+        EcsTaskRoleCredentials credentials = mock(EcsTaskRoleCredentials.class);
+        EcsContainerManager subject = new EcsContainerManager(
+                mock(ContainerBuilder.class), lifecycle, mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class), mock(EmulatorConfig.class), mock(RegionResolver.class),
+                mock(LaunchedContainerAwsEnv.class), mock(SsmService.class), mock(SecretsManagerService.class),
+                mock(EcrRegistryManager.class), credentials);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        subject.cleanupStoppedTask(handle);
+        verify(credentials).revokeTask("task-arn");
+        if (state.equals("removed")) {
+            verify(credentials).releaseTaskNetwork("task-arn");
+            assertFalse(handle.hasPendingNetworkCleanup());
+        } else {
+            verify(credentials, never()).releaseTaskNetwork("task-arn");
+            assertTrue(handle.hasPendingNetworkCleanup());
+        }
+    }
 
     @Test
     void finalizesTaskLogStreamsAfterForceRemovingAContainerWhoseStopFails() {

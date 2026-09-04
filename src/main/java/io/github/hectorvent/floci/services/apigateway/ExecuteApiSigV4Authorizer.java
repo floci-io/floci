@@ -179,7 +179,7 @@ public class ExecuteApiSigV4Authorizer {
             return expiry;
         }
 
-        String secretKey = resolveSecretKey(scope.accessKeyId());
+        String secretKey = resolveSecretKey(scope.accessKeyId(), headers, queryParameters);
         if (secretKey == null) {
             LOG.debugv("execute-api request references unregistered access key={0}",
                     sanitizeForLog(scope.accessKeyId()));
@@ -261,10 +261,24 @@ public class ExecuteApiSigV4Authorizer {
      * {@link #checkSessionToken}.
      */
     private String resolveSecretKey(String accessKeyId) {
+        return resolveSecretKey(accessKeyId, null, null);
+    }
+
+    private String resolveSecretKey(String accessKeyId, HttpHeaders headers,
+                                    MultivaluedMap<String, String> queryParameters) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return LEGACY_SECRET_KEY;
         }
-        String secretKey = iamService.findSecretKey(accessKeyId).orElse(null);
+        if (iamService == null) {
+            return null;
+        }
+        // ECS task-role credentials are process-local bearer credentials.  Their secret is only
+        // resolvable through the token-aware IAM lookup; the one-argument lookup intentionally
+        // rejects ECS keys so an access key/secret pair cannot be replayed without its token.
+        String secretKey = iamService.isEcsTaskRoleCredential(accessKeyId)
+                ? iamService.findSecretKey(accessKeyId,
+                        presentedSessionToken(headers, queryParameters)).orElse(null)
+                : iamService.findSecretKey(accessKeyId).orElse(null);
         if (secretKey == null) {
             return null;
         }
@@ -301,7 +315,7 @@ public class ExecuteApiSigV4Authorizer {
         if (!IamService.isTemporaryAccessKey(accessKeyId)) {
             return null;
         }
-        String presented = queryParameters.getFirst(SECURITY_TOKEN);
+        String presented = presentedSessionToken(null, queryParameters);
         if (isBlank(presented) && headers != null) {
             presented = headers.getHeaderString(SECURITY_TOKEN);
         }
@@ -321,6 +335,25 @@ public class ExecuteApiSigV4Authorizer {
             return Result.rejected(Failure.UNKNOWN_KEY, "session token does not match the issued credential");
         }
         return null;
+    }
+
+    /**
+     * Reads the session token from the query or header in its decoded form.  JAX-RS normally
+     * decodes query values before exposing them, but keeping one decode helper here also covers
+     * direct/unit adapters that pass a raw percent-escaped token.  A literal {@code +} is retained
+     * as plus rather than being treated as form-encoded space.
+     */
+    private static String presentedSessionToken(HttpHeaders headers,
+                                                MultivaluedMap<String, String> queryParameters) {
+        String token = queryParameters == null ? null : queryParameters.getFirst(SECURITY_TOKEN);
+        if (!isBlank(token)) {
+            try {
+                return URLDecoder.decode(token.replace("+", "%2B"), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException ignored) {
+                return token;
+            }
+        }
+        return headers == null ? null : headers.getHeaderString(SECURITY_TOKEN);
     }
 
     /**

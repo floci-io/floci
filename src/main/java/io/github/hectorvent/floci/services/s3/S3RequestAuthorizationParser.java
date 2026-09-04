@@ -5,6 +5,8 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -12,6 +14,7 @@ import java.util.Set;
 final class S3RequestAuthorizationParser {
 
     private static final String SIGV4_ALGORITHM = "AWS4-HMAC-SHA256";
+    private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
     static final String AUTHORIZATION_QUERY_PARAMETERS_ERROR_CODE = "AuthorizationQueryParametersError";
     static final String AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE =
             "Query-string authentication version 4 requires the X-Amz-Algorithm, "
@@ -56,10 +59,24 @@ final class S3RequestAuthorizationParser {
     }
 
     static S3Service.RequestAuthorization parse(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        return parse(httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters());
+        String authorization = httpHeaders.getHeaderString("Authorization");
+        MultivaluedMap<String, String> queryParameters = uriInfo.getQueryParameters();
+        // Header-signed requests carry the token in a header.  For presigned requests the token
+        // belongs to the query string and is intentionally preferred over an unrelated header;
+        // this prevents an unsigned header from replacing the token covered by the URL signature.
+        String sessionToken = authorization != null && !authorization.isBlank()
+                ? httpHeaders.getHeaderString(SECURITY_TOKEN)
+                : sessionTokenFromQuery(queryParameters);
+        return parse(authorization, queryParameters, sessionToken);
     }
 
     static S3Service.RequestAuthorization parse(String authorization, MultivaluedMap<String, String> queryParameters) {
+        return parse(authorization, queryParameters, sessionTokenFromQuery(queryParameters));
+    }
+
+    private static S3Service.RequestAuthorization parse(String authorization,
+                                                        MultivaluedMap<String, String> queryParameters,
+                                                        String sessionToken) {
         if (authorization != null && !authorization.isBlank()) {
             String accessKeyId = extractAuthorizationHeaderAccessKeyId(authorization);
             if (accessKeyId == null) {
@@ -67,7 +84,7 @@ final class S3RequestAuthorizationParser {
                 String message = "The authorization header is malformed; the credential scope is invalid.";
                 throw new AwsException("AuthorizationHeaderMalformed", message, 400);
             }
-            return new S3Service.RequestAuthorization(true, accessKeyId);
+            return new S3Service.RequestAuthorization(true, accessKeyId, sessionToken);
         }
 
         if (queryParameters.containsKey("X-Amz-Algorithm")) {
@@ -77,7 +94,7 @@ final class S3RequestAuthorizationParser {
                         AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE,
                         AUTHORIZATION_QUERY_PARAMETERS_ERROR_STATUS);
             }
-            return new S3Service.RequestAuthorization(true, accessKeyId);
+            return new S3Service.RequestAuthorization(true, accessKeyId, sessionToken);
         }
 
         return S3Service.RequestAuthorization.unsigned();
@@ -113,6 +130,29 @@ final class S3RequestAuthorizationParser {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns the presigned session token in its decoded form.  JAX-RS normally supplies decoded
+     * query values, but unit callers and a few alternate request adapters hand us the raw escaped
+     * value.  Decode exactly one layer while preserving a literal {@code +}, which SigV4 encodes
+     * as {@code %2B} rather than as form-encoded space.
+     */
+    static String sessionTokenFromQuery(MultivaluedMap<String, String> queryParameters) {
+        if (queryParameters == null) {
+            return null;
+        }
+        String value = queryParameters.getFirst(SECURITY_TOKEN);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            // An already-decoded token can legally contain a literal '%' (and a raw malformed
+            // escape must fail token comparison, not abort request parsing with a 500).
+            return value;
+        }
     }
 
     private static Map<String, String> authorizationParameters(String parameters) {

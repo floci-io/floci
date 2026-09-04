@@ -127,6 +127,7 @@ public class ContainerBuilder {
         private String user;
         private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
+        private final List<String> linkLocalIps = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -241,6 +242,25 @@ public class ContainerBuilder {
          */
         public Builder withNetworkMode(String networkMode) {
             this.networkMode = networkMode;
+            return this;
+        }
+
+        /**
+         * Adds a link-local IPv4 address to the configured Docker network endpoint.
+         * Docker assigns the address during container creation, before the container starts.
+         */
+        public Builder withLinkLocalIp(String ip) {
+            if (ip != null && !ip.isBlank() && !linkLocalIps.contains(ip.trim())) {
+                linkLocalIps.add(ip.trim());
+            }
+            return this;
+        }
+
+        /** Adds link-local IPv4 addresses to the configured Docker network endpoint. */
+        public Builder withLinkLocalIps(List<String> ips) {
+            if (ips != null) {
+                ips.forEach(this::withLinkLocalIp);
+            }
             return this;
         }
 
@@ -452,7 +472,8 @@ public class ContainerBuilder {
                     List.copyOf(dnsServers),
                     workingDir,
                     user,
-                    List.copyOf(groupAdd)
+                    List.copyOf(groupAdd),
+                    List.copyOf(linkLocalIps)
             );
         }
     }

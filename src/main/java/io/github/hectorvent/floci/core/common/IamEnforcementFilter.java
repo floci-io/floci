@@ -54,6 +54,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** Extracts the credential-scope service name (e.g. "s3", "lambda"). */
     private static final Pattern SERVICE_PATTERN =
             Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
+    private static final Pattern RESERVED_ECS_KEY_IN_AUTH =
+            Pattern.compile("Credential=(ASIAECS[A-Z0-9]{13})(?:[/,\\s]|$)");
 
     /**
      * Implicit identity policy for the account-root principal: full access, bounded only by SCPs.
@@ -109,16 +111,44 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         String auth = ctx.getHeaderString("Authorization");
-        if (auth == null) {
-            return;
+        String presignedCredential = presignedCredential(ctx);
+        String headerAkid = accountResolver.extractAccessKeyId(auth);
+        if (headerAkid == null && auth != null) {
+            Matcher reserved = RESERVED_ECS_KEY_IN_AUTH.matcher(auth);
+            headerAkid = reserved.find() ? reserved.group(1) : null;
         }
-
-        String akid = accountResolver.extractAccessKeyId(auth);
+        String presignedAkid = accountResolver.extractPresignedAccessKeyId(presignedCredential);
+        String akid = headerAkid != null ? headerAkid : presignedAkid;
         if (akid == null || "test".equals(akid)) {
             return; // root bypass
         }
 
-        String rawScope = extractCredentialScope(auth);
+        boolean ecsTaskCredential = iamService.isEcsTaskRoleCredential(akid);
+        if (headerAkid != null && presignedAkid != null && !headerAkid.equals(presignedAkid)
+                && (ecsTaskCredential || iamService.isEcsTaskRoleCredential(presignedAkid))) {
+            ctx.abortWith(accessDeniedResponse(null, "sts", ctx.getMediaType()));
+            return;
+        }
+        // Preserve the historical no-Authorization bypass for non-ECS presigned requests. ECS
+        // credentials are the narrow exception: their reserved key shape must never bypass role
+        // enforcement merely because SigV4 moved the credential into the query string.
+        if (auth == null && !ecsTaskCredential) {
+            return;
+        }
+        String rawScope = headerAkid == null
+                ? extractPresignedCredentialScope(presignedCredential)
+                : extractCredentialScope(auth);
+        // ECS task-role credentials are bearer credentials issued for one exact task. Unlike
+        // legacy unknown keys (which intentionally bypass for compatibility), a known ECS key
+        // must carry its matching session token and a valid credential scope on every signed
+        // request. Validate before the legacy malformed-scope bypass so reserved/revoked ECS keys
+        // remain fail closed.
+        if (ecsTaskCredential && (rawScope == null
+                || !iamService.validateEcsTaskRoleSessionToken(akid, presentedSessionToken(ctx)))) {
+            String deniedScope = rawScope == null ? "sts" : catalog.canonicalCredentialScope(rawScope);
+            ctx.abortWith(accessDeniedResponse(null, deniedScope, ctx.getMediaType()));
+            return;
+        }
         if (rawScope == null) {
             return;
         }
@@ -200,6 +230,44 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 return;
             }
         }
+    }
+
+    private String presentedSessionToken(ContainerRequestContext ctx) {
+        String token = ctx.getHeaderString("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token;
+        }
+        try {
+            if (ctx.getUriInfo() != null && ctx.getUriInfo().getQueryParameters() != null) {
+                token = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Security-Token");
+                if (token == null) {
+                    token = ctx.getUriInfo().getQueryParameters().getFirst("x-amz-security-token");
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // A malformed query context is equivalent to a missing ECS token.
+        }
+        return token;
+    }
+
+    private String presignedCredential(ContainerRequestContext ctx) {
+        try {
+            return ctx.getUriInfo() == null || ctx.getUriInfo().getQueryParameters() == null
+                    ? null
+                    : ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static String extractPresignedCredentialScope(String credential) {
+        if (credential == null) {
+            return null;
+        }
+        String[] parts = credential.split("/", -1);
+        return parts.length == 5 && "aws4_request".equals(parts[4]) && !parts[3].isBlank()
+                ? parts[3]
+                : null;
     }
 
     /**

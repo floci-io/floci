@@ -174,7 +174,7 @@ class MemoryDbServiceTest {
 
     @Test
     void iamAuthDelegatesToSigV4Validator() {
-        when(sigV4Validator.validate(anyString(), anyString(), anyString())).thenReturn(true);
+        when(sigV4Validator.validate(anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.eq("memorydb"))).thenReturn(true);
 
         User userSpec = new User();
         userSpec.setName("iam-user");

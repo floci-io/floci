@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -21,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -37,6 +39,61 @@ class EcsServiceTaskOwnershipTest {
 
     private static final String REGION = "us-east-1";
     private static final String OTHER_REGION = "us-west-2";
+
+    @Test
+    void arnReferencesCannotAliasLegacyArnNamedResources() {
+        EcsService service = newMockModeService();
+        var cluster = service.createCluster("victim", REGION);
+        service.createCluster(cluster.getClusterArn(), REGION);
+        registerTaskDef(service);
+        var victim = service.createService("victim", "web", "own-fam", 0,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        var spoof = service.createService("victim", victim.getServiceArn(), "own-fam", 0,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        assertEquals(victim.getServiceArn(), service.describeServices(cluster.getClusterArn(),
+                List.of(victim.getServiceArn()), REGION).getFirst().getServiceArn());
+        service.updateService(cluster.getClusterArn(), victim.getServiceArn(), null, 1, null, REGION);
+        assertEquals(1, service.describeServices("victim", List.of("web"), REGION)
+                .getFirst().getDesiredCount());
+        assertEquals(0, spoof.getDesiredCount(), "ARN-named service must not receive the authorized update");
+    }
+
+    @Test
+    void serviceLookupNeverFallsBackToAnotherClusterOrRegion() {
+        EcsService service = newMockModeService();
+        service.createCluster("authorized", REGION);
+        service.createCluster("other", REGION);
+        var foreignRegionCluster = service.createCluster("other", OTHER_REGION);
+        registerTaskDef(service);
+        var foreign = service.createService("other", "same-name", "own-fam", 0,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        assertTrue(service.describeServices("authorized", List.of("same-name"), REGION).isEmpty());
+        assertTrue(service.describeServices("authorized", List.of(foreign.getServiceArn()), REGION).isEmpty());
+        assertTrue(service.describeServices("other", List.of("same-name"), OTHER_REGION).isEmpty());
+        assertThrows(AwsException.class, () -> service.describeServices(
+                foreignRegionCluster.getClusterArn(), List.of("same-name"), REGION));
+        assertEquals(foreign.getServiceArn(), service.describeServices("other",
+                List.of(foreign.getServiceArn()), REGION).getFirst().getServiceArn());
+    }
+
+    @Test
+    void updateServiceDoesNotStripForeignArnIntoAnAuthorizedLocalName() {
+        EcsService service = newMockModeService();
+        service.createCluster("authorized", REGION);
+        service.createCluster("other", REGION);
+        registerTaskDef(service);
+        var local = service.createService("authorized", "same-name", "own-fam", 0,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        var other = service.createService("other", "same-name", "own-fam", 0,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        assertThrows(AwsException.class, () -> service.updateService("authorized",
+                other.getServiceArn(), null, 3, null, REGION));
+        assertEquals(0, service.describeServices("authorized", List.of("same-name"), REGION)
+                .getFirst().getDesiredCount());
+        service.updateService("authorized", local.getServiceArn(), null, 1, null, REGION);
+        assertEquals(1, service.describeServices("authorized", List.of("same-name"), REGION)
+                .getFirst().getDesiredCount());
+    }
 
     @Test
     void spoofedGroupIsNotCountedTowardTheServiceAndIsNotStopped() {

@@ -11,6 +11,7 @@ public class SessionCredential {
 
     private String accessKeyId;
     private String secretAccessKey;
+    /** Session token returned by AWS STS/ECS; null for legacy sessions that predate token tracking. */
     private String sessionToken;
     private String roleArn;
     private Instant expiration;
@@ -23,6 +24,16 @@ public class SessionCredential {
     private String originAccountId;
     /** True when this session belongs to a Floci-launched Lambda container. */
     private boolean lambdaExecutionRole;
+    /** True when this session was minted for an ECS task-role credential endpoint. */
+    private boolean ecsTaskRole;
+    /** Exact ECS task ARN that owns this transient session. */
+    private String taskArn;
+    /** Opaque path component used by AWS_CONTAINER_CREDENTIALS_RELATIVE_URI. */
+    private String credentialPath;
+    /** Last issuance time used for AWS-compatible refresh metadata. */
+    private Instant lastUpdated;
+    /** Revocation tombstone for fail-closed ECS credential authentication. */
+    private boolean revoked;
 
     public SessionCredential() {}
 
@@ -93,4 +104,19 @@ public class SessionCredential {
 
     public boolean isLambdaExecutionRole() { return lambdaExecutionRole; }
     public void setLambdaExecutionRole(boolean lambdaExecutionRole) { this.lambdaExecutionRole = lambdaExecutionRole; }
+
+    public boolean isEcsTaskRole() { return ecsTaskRole; }
+    public void setEcsTaskRole(boolean ecsTaskRole) { this.ecsTaskRole = ecsTaskRole; }
+
+    public String getTaskArn() { return taskArn; }
+    public void setTaskArn(String taskArn) { this.taskArn = taskArn; }
+
+    public String getCredentialPath() { return credentialPath; }
+    public void setCredentialPath(String credentialPath) { this.credentialPath = credentialPath; }
+
+    public Instant getLastUpdated() { return lastUpdated; }
+    public void setLastUpdated(Instant lastUpdated) { this.lastUpdated = lastUpdated; }
+
+    public boolean isRevoked() { return revoked; }
+    public void setRevoked(boolean revoked) { this.revoked = revoked; }
 }

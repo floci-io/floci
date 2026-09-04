@@ -69,9 +69,20 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(S3Service.class);
 
-    record RequestAuthorization(boolean signed, String accessKeyId) {
+    /**
+     * Authentication material extracted from the request.  Temporary ECS task-role credentials
+     * are bearer credentials: unlike a static IAM key (or the legacy local {@code test} pair),
+     * their session token is part of the credential and must survive parsing all the way to the
+     * authorization check.  Keep the two-argument constructor for the package-private callers and
+     * older tests that only carry an access key.
+     */
+    record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
+        RequestAuthorization(boolean signed, String accessKeyId) {
+            this(signed, accessKeyId, null);
+        }
+
         static RequestAuthorization unsigned() {
-            return new RequestAuthorization(false, null);
+            return new RequestAuthorization(false, null, null);
         }
     }
 
@@ -770,7 +781,7 @@ public class S3Service implements Resettable, ResourceProvider {
         RequestAuthorization requestAuthorization = authorization != null
                 ? authorization
                 : RequestAuthorization.unsigned();
-        if (requestAuthorization.signed() && !isKnownAccessKey(requestAuthorization.accessKeyId())) {
+        if (requestAuthorization.signed() && !isKnownAccessKey(requestAuthorization)) {
             throw new AwsException("InvalidAccessKeyId",
                     "The AWS Access Key Id you provided does not exist in our records.", 403);
         }
@@ -796,7 +807,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
 
         if (requestAuthorization.signed()) {
-            if (isKnownAccessKey(requestAuthorization.accessKeyId())) {
+            if (isKnownAccessKey(requestAuthorization)) {
                 return;
             }
             throw new AwsException("InvalidAccessKeyId",
@@ -853,14 +864,26 @@ public class S3Service implements Resettable, ResourceProvider {
         return authorization == null || !authorization.signed();
     }
 
-    private boolean isKnownAccessKey(String accessKeyId) {
-        if (accessKeyId == null || accessKeyId.isBlank()) {
+    private boolean isKnownAccessKey(RequestAuthorization authorization) {
+        if (authorization == null || !authorization.signed()
+                || authorization.accessKeyId() == null || authorization.accessKeyId().isBlank()) {
             return false;
         }
+        String accessKeyId = authorization.accessKeyId();
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return true;
         }
-        return iamService != null && iamService.findSecretKey(accessKeyId).isPresent();
+        if (iamService == null) {
+            return false;
+        }
+        // ECS task-role credentials are process-local and token-bound.  The one-argument lookup
+        // intentionally rejects them (so a bare access key can never authenticate); use the
+        // token-aware overload only for the reserved ECS shape.  Keep the historical lookup for
+        // static IAM keys and STS sessions so existing callers remain compatible.
+        if (iamService.isEcsTaskRoleCredential(accessKeyId)) {
+            return iamService.findSecretKey(accessKeyId, authorization.sessionToken()).isPresent();
+        }
+        return iamService.findSecretKey(accessKeyId).isPresent();
     }
 
     private boolean publicBucketAclAllowsRead(Bucket bucket) {

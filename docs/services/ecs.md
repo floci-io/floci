@@ -36,6 +36,78 @@ own `RegisterTaskDefinition`) sees no drift. Neither changes how a local task ru
 every task on the host's own architecture, and a task's output stays with its Docker container
 rather than being routed to the configured log driver.
 
+### ECS task-role credentials
+
+Set `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED=true` to opt in to AWS-compatible task-role
+credentials for Docker-backed tasks whose task definition declares `taskRoleArn`. The feature is
+off by default. Each task receives the standard ECS relative credential variable, for example:
+
+```text
+AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/v2/credentials/<opaque-task-token>
+```
+
+The AWS SDK combines this path with the ECS container metadata address. Floci removes static,
+profile, full-URI, and authorization-token credential overrides for a task-role container and sets
+`AWS_EC2_METADATA_DISABLED=true`, so the relative container credential provider is the only
+credential source injected by Floci. Task images and application code must not contain their own
+credential files, credential environment defaults, or explicit SDK credentials, which can take
+precedence over any injected provider. The endpoint returns AWS-shaped temporary credentials and
+refreshes them inside `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_REFRESH_WINDOW_SECONDS`, retaining
+the same relative URI while rotating the access key and token. Individual credentials expire after
+`FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS`: expired keys are never accepted. Idle tasks
+do not depend on SDK traffic for renewal: Floci proactively renews credentials for confirmed
+running tasks, preserving the relative URI. Rotation publishes a new generation without shortening
+the previous generation's advertised expiration: requests already signed with a still-valid key
+remain authorized under the same role policy. This bounded overlap does not extend any key's TTL.
+Task stop or Floci restart revokes the endpoint and every credential generation owned by that task.
+The task role must already exist in the task's account and its trust policy must contain
+an unconditional `Allow` for the exact `ecs-tasks.amazonaws.com` service principal and
+`sts:AssumeRole`; an unknown role, a role trusted only by another service, an explicit matching
+`Deny`, or a conditioned statement fails the launch. The refresh window must be non-negative and
+strictly shorter than the TTL; invalid values fail closed rather than rotating on every metadata
+request.
+
+Running-task reconciliation renews credentials before expiry only after Docker confirms a live
+task container. An unknown or failed Docker inspection is not proof of liveness. If renewal is
+missed until after the credential TTL, the endpoint fails closed rather than reviving an expired
+lease from a metadata request. Keep the refresh window comfortably longer than the five-second
+reconciliation interval and expected Docker inspection latency.
+
+The listener binds to `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` (default `80`) and does not
+publish a host port. It is reachable only through the task container's private Docker network and
+link-local metadata route. Configure `FLOCI_SERVICES_ECS_DOCKER_NETWORK`, or the shared
+`FLOCI_SERVICES_DOCKER_NETWORK`, before enabling the feature. The standard `docker-compose.yml`
+claims `169.254.170.2` for Floci on its shared network; task allocations begin at `.3` so the
+metadata address is not reused. Keep the listener on port `80` for clients using the unmodified
+standard relative-URI provider; a custom port requires a client that explicitly targets that port.
+Expired or revoked credentials do not release a running container's network address. Addresses
+are released only after exact Docker container absence is verified; failed or unverifiable cleanup
+quarantines the allocation until cleanup can be retried.
+Reservations are process-local. After a failed launch or emulator shutdown, remove any orphaned
+task containers from the private network before restarting Floci; restarting is not a substitute
+for verified Docker cleanup.
+This provider requires Floci itself to run in a container that owns `169.254.170.2`; native Floci is
+not supported for this opt-in surface. A custom container setup must assign that address with
+Compose `link_local_ips` or Docker's `--link-local-ip` on the same network used by ECS tasks. If the
+address or listener port is unavailable, Floci startup fails closed before launching tasks rather
+than running with a broken credential endpoint.
+
+The opaque relative URI is a bearer capability, not authenticated task identity. Keep the Docker
+network trusted and private; do not log or share credential paths. A process that already knows
+another task's exact URI may retrieve that task's credentials while the lease is active. This
+local emulator does not provide an AWS-equivalent hostile-container or multi-tenant isolation
+boundary. Missing, incorrect, expired, and revoked ECS session tokens fail authentication on the
+direct RDS, ElastiCache, S3, and execute-api paths, independently of the global IAM filter.
+
+With IAM enforcement enabled, `DescribeServices` and `UpdateService` authorize the exact ECS
+service ARN. Short service names use the requested cluster, or `default` when omitted; full ARNs
+retain their identity. Every member of a `DescribeServices` request must be authorized. Invalid
+identifiers and mismatched cluster/service references are rejected rather than checked against a
+wildcard resource. IAM follows the JSON target operation even when a conflicting query action is
+present. Whitespace-padded identifiers are rejected, and ARN references cannot alias literal
+ARN-named resources. Service lookup does not fall back to another cluster or region. This does not
+claim resource-level IAM support for all other ECS operations.
+
 ### Tasks
 
 | Operation | Description |
@@ -206,6 +278,10 @@ unchanged.
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | *(unset)* | Docker network for task containers |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default memory (MB) when the task definition omits it |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Provide temporary task-role credentials to Docker-backed tasks |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` | `80` | Private link-local task credential listener port |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` | `3600` | Lifetime of each task-role credential session |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_REFRESH_WINDOW_SECONDS` | `300` | Refresh credentials this many seconds before expiry |
 
 ### EFS volume ownership
 
