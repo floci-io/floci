@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -46,8 +47,65 @@ public class CodeStore {
         return baseDir.resolve(sanitizeName(functionName));
     }
 
+    /**
+     * Where a published version's own copy of the code lives.
+     *
+     * <p>A sibling of the {@code $LATEST} directory rather than a child of it. Extraction replaces
+     * {@link #getCodePath}'s directory wholesale, so anything nested inside would be deleted on the
+     * next deploy, which is the very thing a version's copy exists to survive.
+     */
+    public Path getVersionCodePath(String accountId, String functionName, String version) {
+        return baseDir.resolve(sanitizeName(accountId))
+                .resolve(sanitizeName(functionName) + ".v" + sanitizeName(version));
+    }
+
+    /**
+     * Copies a function's current code into its own directory for {@code version}, replacing any
+     * directory already there. Returns null when there is nothing to copy, which is the case for
+     * image-backed and hot-reload functions.
+     */
+    public Path copyForVersion(String accountId, String functionName, String version, Path source)
+            throws IOException {
+        if (source == null || !Files.isDirectory(source)) {
+            return null;
+        }
+        Path target = getVersionCodePath(accountId, functionName, version);
+        deleteDirectory(target, functionName);
+        try (var walk = Files.walk(source)) {
+            for (Path from : walk.toList()) {
+                Path to = target.resolve(source.relativize(from).toString());
+                if (Files.isDirectory(from)) {
+                    Files.createDirectories(to);
+                } else {
+                    Files.createDirectories(to.getParent());
+                    Files.copy(from, to, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
+        return target;
+    }
+
+    /** Removes every published version's code directory for a function. */
+    public void deleteVersions(String accountId, String functionName) {
+        Path accountDir = baseDir.resolve(sanitizeName(accountId));
+        if (!Files.isDirectory(accountDir)) {
+            return;
+        }
+        String prefix = sanitizeName(functionName) + ".v";
+        try (var entries = Files.list(accountDir)) {
+            for (Path entry : entries.toList()) {
+                if (Files.isDirectory(entry) && entry.getFileName().toString().startsWith(prefix)) {
+                    deleteDirectory(entry, functionName);
+                }
+            }
+        } catch (IOException e) {
+            LOG.warnv("Failed to list version directories for {0}: {1}", functionName, e.getMessage());
+        }
+    }
+
     public void delete(String accountId, String functionName) {
         deleteDirectory(getCodePath(accountId, functionName), functionName);
+        deleteVersions(accountId, functionName);
     }
 
     /**
