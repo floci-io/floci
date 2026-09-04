@@ -186,6 +186,16 @@ class IotTest {
         assertThat(described.lastStatusChangeDate()).isNotNull();
         assertThat(described.tlsConfig().securityPolicy()).isEqualTo("IoTSecurityPolicy_TLS13_1_2_2022_10");
 
+        var enabled = iot.updateDomainConfiguration(UpdateDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .domainConfigurationStatus(DomainConfigurationStatus.ENABLED)
+                .build());
+        assertThat(enabled.domainConfigurationArn()).isEqualTo(created.domainConfigurationArn());
+        assertThat(iot.describeDomainConfiguration(DescribeDomainConfigurationRequest.builder()
+                .domainConfigurationName(name)
+                .build()).domainConfigurationStatus())
+                .isEqualTo(DomainConfigurationStatus.ENABLED);
+
         var tags = iot.listTagsForResource(ListTagsForResourceRequest.builder()
                 .resourceArn(created.domainConfigurationArn())
                 .build());

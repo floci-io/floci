@@ -118,7 +118,10 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
             return;
         }
         if ("ENABLED".equals(existing.getDomainConfigurationStatus())) {
-            domainConfigurationService.updateDomainConfiguration(physicalId, statusBody("DISABLED"), region);
+            // Already gone is fine here too: the disable only exists to make the delete possible.
+            CfnDeletes.safeDelete("domain configuration", physicalId,
+                    () -> domainConfigurationService.updateDomainConfiguration(physicalId, statusBody("DISABLED"), region),
+                    NOT_FOUND);
         }
         CfnDeletes.safeDelete("domain configuration", physicalId,
                 () -> domainConfigurationService.deleteDomainConfiguration(physicalId, region), NOT_FOUND);

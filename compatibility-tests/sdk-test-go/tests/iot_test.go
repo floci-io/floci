@@ -99,6 +99,17 @@ func TestIoT(t *testing.T) {
 		}
 		assert.Contains(t, names, name)
 
+		// Enabling an already ENABLED configuration is accepted and changes nothing.
+		enabled, err := svc.UpdateDomainConfiguration(ctx, &iot.UpdateDomainConfigurationInput{
+			DomainConfigurationName:   aws.String(name),
+			DomainConfigurationStatus: iottypes.DomainConfigurationStatusEnabled,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, aws.ToString(created.DomainConfigurationArn), aws.ToString(enabled.DomainConfigurationArn))
+		described, err = svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		require.NoError(t, err)
+		assert.Equal(t, iottypes.DomainConfigurationStatusEnabled, described.DomainConfigurationStatus)
+
 		tags, err := svc.ListTagsForResource(ctx, &iot.ListTagsForResourceInput{ResourceArn: created.DomainConfigurationArn})
 		require.NoError(t, err)
 		require.Len(t, tags.Tags, 1)

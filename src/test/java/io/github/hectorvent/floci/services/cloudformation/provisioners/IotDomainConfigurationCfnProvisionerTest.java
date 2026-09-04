@@ -531,6 +531,19 @@ class IotDomainConfigurationCfnProvisionerTest {
     }
 
     @Test
+    void deleteToleratesAConfigurationThatVanishesWhileBeingDisabled() {
+        // Seen ENABLED, then gone by the time the disable runs: already deleted is the outcome the
+        // stack wants, on the disable as much as on the delete itself.
+        when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "iot.example.com", "ENABLED"));
+        when(service.updateDomainConfiguration(eq(NAME), any(), eq(REGION)))
+                .thenThrow(new AwsException("ResourceNotFoundException", "gone", 404));
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(service).deleteDomainConfiguration(NAME, REGION);
+
+        assertDoesNotThrow(() -> provisioner.delete(TYPE, NAME, REGION));
+    }
+
+    @Test
     void deletePropagatesAFailureThatIsNotAlreadyGone() {
         when(service.describeDomainConfiguration(NAME, REGION)).thenReturn(stored(NAME, ARN, "iot.example.com", "DISABLED"));
         doThrow(new AwsException("InvalidRequestException", "refused", 400))
