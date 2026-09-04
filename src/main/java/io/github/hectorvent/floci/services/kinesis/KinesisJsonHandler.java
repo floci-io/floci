@@ -29,6 +29,10 @@ import java.util.Set;
 @ApplicationScoped
 public class KinesisJsonHandler {
 
+    private static final String EXPLICIT_HASH_KEY_FIELD = "ExplicitHashKey";
+    private static final String EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE =
+            "ExplicitHashKey must be a string.";
+
     private final KinesisService service;
     private final ObjectMapper objectMapper;
 
@@ -463,6 +467,21 @@ public class KinesisJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    // ExplicitHashKey is a string-shaped field in the AWS Kinesis JSON protocol. A JSON number
+    // such as 12345 is malformed input the real service rejects, so reject non-string nodes here
+    // rather than letting asText coerce them into an accepted decimal string. A missing or null
+    // node means the caller omitted the field and partition-key routing applies.
+    private String readExplicitHashKey(JsonNode record) {
+        JsonNode explicitHashKeyNode = record.path(EXPLICIT_HASH_KEY_FIELD);
+        if (explicitHashKeyNode.isMissingNode() || explicitHashKeyNode.isNull()) {
+            return null;
+        }
+        if (!explicitHashKeyNode.isTextual()) {
+            throw new AwsException("SerializationException", EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE, 400);
+        }
+        return explicitHashKeyNode.asText();
+    }
+
     private Response handlePutRecord(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
         JsonNode dataNode = request.path("Data");
@@ -478,7 +497,7 @@ public class KinesisJsonHandler {
             throw new AwsException("SerializationException", "Data is not valid base64.", 400);
         }
         String partitionKey = request.path("PartitionKey").asText();
-        String explicitHashKey = request.path("ExplicitHashKey").asText(null);
+        String explicitHashKey = readExplicitHashKey(request);
 
         KinesisService.PutRecordResult result = service.putRecordWithShardId(
                 streamName, data, partitionKey, explicitHashKey, region);
@@ -517,7 +536,7 @@ public class KinesisJsonHandler {
                 }
             }
             String partitionKey = node.path("PartitionKey").asText();
-            String explicitHashKey = node.path("ExplicitHashKey").asText(null);
+            String explicitHashKey = readExplicitHashKey(node);
             service.validateExplicitHashKey(explicitHashKey);
             service.validateRecordSize(stream, data, partitionKey);
             // Data that did not decode still travelled in the request, so it counts toward the

@@ -865,6 +865,7 @@ public class KinesisService implements ResourceProvider {
 
     private KinesisShard selectShard(KinesisStream stream, String partitionKey, String explicitHashKey) {
         if (explicitHashKey != null) {
+            normalizeOpenShardRanges(stream);
             return selectShardByExplicitHashKey(stream, explicitHashKey);
         }
 
@@ -899,6 +900,44 @@ public class KinesisService implements ResourceProvider {
         BigInteger start = new BigInteger(shard.getHashKeyRange().startingHashKey());
         BigInteger end = new BigInteger(shard.getHashKeyRange().endingHashKey());
         return hashKey.compareTo(start) >= 0 && hashKey.compareTo(end) <= 0;
+    }
+
+    // Streams created before explicit-hash routing persisted the same full-span range on every
+    // shard, so an explicit key matches all open shards and first-match routing collapses onto
+    // shardId-...000. Repartition those legacy overlapping open shards into the disjoint ranges a
+    // freshly created stream would have, ordered by shard id, so explicit routing is correct after
+    // an upgrade without recreating the stream. Already-disjoint open shards (new streams, split or
+    // merged streams) are left untouched. The caller persists the mutated stream under its lock.
+    private static void normalizeOpenShardRanges(KinesisStream stream) {
+        List<KinesisShard> openShards = stream.getShards().stream()
+                .filter(shard -> !shard.isClosed())
+                .sorted(Comparator.comparing(KinesisShard::getShardId))
+                .toList();
+        if (openShards.size() <= 1 || openShardRangesDisjoint(openShards)) {
+            return;
+        }
+        int openShardCount = openShards.size();
+        for (int i = 0; i < openShardCount; i++) {
+            openShards.get(i).setHashKeyRange(new KinesisShard.HashKeyRange(
+                    shardStartingHashKey(i, openShardCount),
+                    shardEndingHashKey(i, openShardCount)));
+        }
+    }
+
+    private static boolean openShardRangesDisjoint(List<KinesisShard> openShards) {
+        List<KinesisShard> byStartingHashKey = openShards.stream()
+                .sorted(Comparator.comparing(shard -> new BigInteger(shard.getHashKeyRange().startingHashKey())))
+                .toList();
+        for (int i = 1; i < byStartingHashKey.size(); i++) {
+            BigInteger previousEnd =
+                    new BigInteger(byStartingHashKey.get(i - 1).getHashKeyRange().endingHashKey());
+            BigInteger currentStart =
+                    new BigInteger(byStartingHashKey.get(i).getHashKeyRange().startingHashKey());
+            if (currentStart.compareTo(previousEnd) <= 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static BigInteger parseExplicitHashKey(String explicitHashKey) {
