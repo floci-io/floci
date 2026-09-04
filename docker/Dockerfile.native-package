@@ -7,25 +7,12 @@ ARG TARGETARCH
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
-ENV GOSU_VERSION=1.17
-ENV GOSU_AMD64_SHA256=bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3
-ENV GOSU_ARM64_SHA256=c3805a85d17f4454c23d7059bcb97e1ec1af272b90126e79ed002342de08389b
-RUN set -eux; \
-    microdnf install -y --nodocs shadow-utils; \
-    microdnf clean all; \
-    useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci; \
-    arch="$(uname -m)"; \
-    case "$arch" in \
-        x86_64) gosuArch='amd64'; gosuSha256="$GOSU_AMD64_SHA256" ;; \
-        aarch64) gosuArch='arm64'; gosuSha256="$GOSU_ARM64_SHA256" ;; \
-        *) echo >&2 "unsupported arch: $arch"; exit 1 ;; \
-    esac; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-        -o /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosuArch}"; \
-    echo "${gosuSha256}  /usr/local/bin/gosu" | sha256sum -c -; \
-    chmod +x /usr/local/bin/gosu; \
-    gosu --version; \
-    gosu nobody true
+# ubi9-minimal already ships shadow-utils (useradd) and coreutils (chroot), so no package is
+# installed and no binary is downloaded: the entrypoint drops privileges with
+# `chroot --userspec`, which replaces gosu, and adds the Docker socket's group with
+# `chroot --groups`, which replaces the runtime usermod. Measured on 2.0.1 the layer this
+# replaces was 3.66 MB compressed and 19 MB on disk.
+RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci
 
 WORKDIR /app
 
