@@ -294,6 +294,10 @@ public class StackSetService {
             throw new AwsException("InvalidOperationException",
                     "DeploymentTargets can be used only with SERVICE_MANAGED StackSets.", 400);
         }
+        if (!directAccounts.isEmpty() && "SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "Accounts can be used only with SELF_MANAGED StackSets. Use DeploymentTargets for SERVICE_MANAGED StackSets.", 400);
+        }
         if (directAccounts.stream().anyMatch(account -> account == null || !account.matches("[0-9]{12}"))) {
             throw new AwsException("ValidationError",
                     "1 validation error detected: Value '" + directAccounts

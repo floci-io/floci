@@ -95,6 +95,34 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     @Test
+    void serviceManagedStackSetRejectsTopLevelAccounts() {
+        String management = "777777777777";
+        String targetAccount = "999999999999";
+        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "ActivateOrganizationsAccess")
+                .post("/").then().statusCode(200);
+
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "reject-accounts-" + suffix;
+        String queue = "reject-accounts-q-" + suffix;
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate(queue))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .post("/").then().statusCode(200);
+
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("Accounts.member.1", targetAccount)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(400)
+                .body(containsString("InvalidOperationException"));
+
+        assertQueueAbsent(targetAccount, queue);
+    }
+
+    @Test
     void activateOrganizationsAccessRequiresAllFeatures() {
         String management = "666666666666";
         organizations(management, "CreateOrganization", "{\"FeatureSet\":\"CONSOLIDATED_BILLING\"}")
@@ -153,6 +181,16 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 .formParam("QueueName", queueName)
                 .post("/").then().statusCode(200)
                 .body(containsString("/" + account + "/" + queueName));
+    }
+
+    private void assertQueueAbsent(String account, String queueName) {
+        given()
+                .header("Authorization", auth(account, "sqs"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueUrl")
+                .formParam("QueueName", queueName)
+                .post("/").then().statusCode(400)
+                .body(containsString("AWS.SimpleQueueService.NonExistentQueue"));
     }
 
     private static String queueTemplate(String queueName) {
