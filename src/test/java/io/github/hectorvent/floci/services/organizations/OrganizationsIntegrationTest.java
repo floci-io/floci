@@ -330,6 +330,7 @@ class OrganizationsIntegrationTest {
             .body("Account.Id", equalTo(memberAccountId))
             .body("Account.Email", equalTo("dev@example.com"))
             .body("Account.Name", equalTo("Dev"))
+            .body("Account.State", equalTo("ACTIVE"))
             .body("Account.Status", equalTo("ACTIVE"))
             .body("Account.JoinedMethod", equalTo("CREATED"))
             .body("Account.Arn", startsWith("arn:aws:organizations::000000000000:account/" + organizationId));
@@ -339,7 +340,8 @@ class OrganizationsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Accounts.Id", hasItems("000000000000", memberAccountId));
+            .body("Accounts.Id", hasItems("000000000000", memberAccountId))
+            .body("Accounts.State", hasItems("ACTIVE", "ACTIVE"));
     }
 
     @Test
@@ -359,7 +361,8 @@ class OrganizationsIntegrationTest {
         .then()
             .statusCode(200)
             .body("Accounts", hasSize(1))
-            .body("Accounts[0].Id", equalTo(memberAccountId));
+            .body("Accounts[0].Id", equalTo(memberAccountId))
+            .body("Accounts[0].State", equalTo("ACTIVE"));
     }
 
     @Test
