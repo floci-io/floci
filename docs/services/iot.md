@@ -168,10 +168,12 @@ statement  := SELECT item (',' item)* FROM '<topic filter>' [WHERE expr]
 item       := '*' | operand [AS identifier]
 expr       := term (OR term)*
 term       := factor (AND factor)*
-factor     := NOT factor | '(' expr ')' | operand [comparison operand]
+factor     := NOT factor | '(' expr ')' | operand [comparison operand | IN operand]
 comparison := '=' | '<>' | '!=' | '<' | '<=' | '>' | '>='
-operand    := path | literal | call
+operand    := path | literal | array | call
+array      := '[' [operand (',' operand)*] ']'
 call       := topic() | topic(<segment>) | startswith(operand, operand) | endswith(operand, operand)
+            | clientid() | timestamp() | accountid() | newuuid() | isNull(operand) | isUndefined(operand)
 path       := identifier ('.' identifier)*
 literal    := 'string' | "string" | number | TRUE | FALSE | NULL
 ```
@@ -180,6 +182,16 @@ Semantics:
 
 - Keywords and function names are case insensitive, field names are case sensitive.
 - `topic()` is the full MQTT topic, `topic(n)` is its nth segment counting from 1.
+- `clientid()` is the MQTT client that published the message, or `n/a` for an IoT Data `Publish`
+  over HTTP, as on AWS. `accountid()` is the account that owns the rule. `timestamp()` is the
+  current time in milliseconds since the epoch. `newuuid()` is a fresh random UUID.
+- `isNull(x)` is true only for a JSON `null`, `isUndefined(x)` only for a missing field or an
+  undefined expression. Neither is ever undefined itself.
+- `x IN y` is true when the array `y` holds a value equal to `x` under the equality rules below,
+  false otherwise. It is undefined when `x` is undefined or `y` is not an array. `y` may be a
+  payload field or an array literal such as `[1, 'a']`.
+- An array literal is undefined as a whole when any of its elements is, so a position is never
+  silently dropped.
 - A select item without `AS` is written under the last segment of its path, or under the function
   name, so `topic()` becomes `topic`.
 - When `*` is present, every payload field is copied first and the other select items are written
@@ -193,9 +205,10 @@ Semantics:
   `clientToken <> 'x'`.
 - JSON `null` is a value, not `Undefined`: it equals only `NULL`, so `clientToken <> 'x'` is true
   when the field is null and undefined when it is missing.
-- `=` and `<>` compare two numbers by value and anything else by type and value, so operands of
-  different types are simply not equal: `level = '3'` is false and `level <> '3'` is true when
-  `level` is the number 3. These follow the operator tables in the AWS IoT SQL reference.
+- `=` and `<>` compare two numbers by value, arrays element by element in order, objects by key in
+  any order, and anything else by type and value, so operands of different types are simply not
+  equal: `level = '3'` is false and `level <> '3'` is true when `level` is the number 3. These
+  follow the operator tables in the AWS IoT SQL reference.
 - `<`, `<=`, `>` and `>=` convert both operands to a number. A string converts when it looks like
   one (`'10' > 9` is true); any other operand makes the comparison undefined.
 - Payload numbers are read exactly, never through a double, so `9007199254740993.0`, `1e-400` and
@@ -218,10 +231,11 @@ statement with `SqlParseException` instead, the way AWS does. It is `false` by d
 
 Current limitations:
 
-- Not evaluated: `clientid()`, `timestamp()`, `accountid()`, `principal()`, `newuuid()`, `isNull()`,
-  `isUndefined()`, `encode()`, `get_thing_shadow()`, arithmetic, array indexing, `IN`, `CASE`, and
-  `${}` substitution templates in action fields. A rule using any of them takes the unparsed path
-  described above.
+- Not evaluated: `principal()`, which needs the certificate a device authenticated with and the
+  broker does not verify one yet; `traceid()`; `encode()`, `get()`, `get_thing_shadow()` and the
+  rest of the AWS function list; arithmetic; array indexing; `CASE`; `SELECT VALUE`; object
+  literals; the `SET` clause; `EXISTS` subqueries; and `${}` substitution templates in action
+  fields. A rule using any of them takes the unparsed path described above.
 - `awsIotSqlVersion` is stored and echoed back but not acted on. The versions differ in how
   `SELECT *` treats arrays, which Floci does not model.
 - Less common AWS IoT rule action types are follow-up scope.

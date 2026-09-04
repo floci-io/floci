@@ -56,7 +56,8 @@ public record RuleSql(List<Projection> projections, String topicFilter, Expr whe
     public record Aliased(Expr expression, String alias) implements Projection {
     }
 
-    public sealed interface Expr permits Path, Literal, Call, Comparison, Conjunction, Disjunction, Negation {
+    public sealed interface Expr
+            permits Path, Literal, Call, ArrayLiteral, Comparison, Membership, Conjunction, Disjunction, Negation {
     }
 
     /** A dotted field path such as {@code state.reported.temperature}. */
@@ -69,14 +70,25 @@ public record RuleSql(List<Projection> projections, String topicFilter, Expr whe
     public record Literal(JsonNode value) implements Expr {
     }
 
-    /** A supported function call: {@code topic}, {@code startswith} or {@code endswith}. */
+    /** A supported function call under the name AWS documents, such as {@code topic} or {@code isNull}. */
     public record Call(String function, List<Expr> arguments) implements Expr {
         public Call {
             arguments = List.copyOf(arguments);
         }
     }
 
+    /** A JSON array written in the statement, such as {@code [lat, long]}. */
+    public record ArrayLiteral(List<Expr> elements) implements Expr {
+        public ArrayLiteral {
+            elements = List.copyOf(elements);
+        }
+    }
+
     public record Comparison(Expr left, Operator operator, Expr right) implements Expr {
+    }
+
+    /** {@code element IN array}: true when the array holds a value equal to the element. */
+    public record Membership(Expr element, Expr array) implements Expr {
     }
 
     public record Conjunction(Expr left, Expr right) implements Expr {

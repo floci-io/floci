@@ -354,6 +354,44 @@ class IotMqttEnabledIntegrationTest {
         }
     }
 
+    @Test
+    void clientidIsTheMqttClientThatPublishedTheMessage() throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "topicRulePayload": {
+                    "sql": "SELECT clientid() AS client, topic() AS topic FROM 'devices/phase8/mqtt/clientid'",
+                    "actions": [
+                      {
+                        "republish": {
+                          "roleArn": "arn:aws:iam::000000000000:role/iot-rule-role",
+                          "topic": "devices/phase8/mqtt/clientid-target"
+                        }
+                      }
+                    ]
+                  }
+                }
+                """)
+        .when()
+            .put("/rules/phase8MqttClientIdRule")
+        .then()
+            .statusCode(200);
+
+        try (MqttTestClient subscriber = connectMqtt("phase8-clientid-sub")) {
+            subscriber.subscribe("devices/phase8/mqtt/clientid-target");
+            String publisherId = uniqueClientId("phase8-clientid-pub");
+
+            try (MqttTestClient publisher = connectMqttClientId(publisherId)) {
+                publisher.publish("devices/phase8/mqtt/clientid", "{}".getBytes(StandardCharsets.UTF_8));
+            }
+
+            MqttPublish republished = subscriber.takePublish();
+            assertEquals("{\"client\":\"" + publisherId + "\",\"topic\":\"devices/phase8/mqtt/clientid\"}",
+                    new String(republished.payload(), StandardCharsets.UTF_8));
+        }
+    }
+
     private MqttTestClient connectMqtt(String clientId) throws MqttException {
         return connectMqttClientId(uniqueClientId(clientId));
     }

@@ -14,6 +14,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
+import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -52,7 +53,7 @@ class IotTopicRuleSqlIntegrationTest {
 
     @Test
     void aStatementOutsideTheSubsetKeepsFiringWithTheWholePayload() {
-        createRule("sqlPassthroughRule", "SELECT clientid() as client FROM 'sqltest/passthrough/+'",
+        createRule("sqlPassthroughRule", "SELECT principal() as p FROM 'sqltest/passthrough/+'",
                 "sqltest/passthrough-out");
 
         publish("sqltest/passthrough/a", "{\"any\":1}");
@@ -139,6 +140,42 @@ class IotTopicRuleSqlIntegrationTest {
         assertSame(parsed, compiledQuery("sqlToggleRule"));
     }
 
+    @Test
+    void messageFunctionsSeeTheRuleAccountAndNoMqttClientOnTheServicePath() {
+        createRule("sqlFunctionsRule", "SELECT clientid() AS client, accountid() AS account, isUndefined(missing) AS u "
+                + "FROM 'sqltest/functions/+' WHERE topic(2) IN ['functions'] AND isNull(n)", "sqltest/functions-out");
+
+        publish("sqltest/functions/a", "{\"n\":null}");
+
+        assertEquals(List.of("{\"client\":\"n/a\",\"account\":\"000000000000\",\"u\":true}"),
+                republished("sqltest/functions-out"));
+    }
+
+    @Test
+    void clientidIsTheMqttClientWhenThePublishCarriesOne() {
+        createRule("sqlClientIdRule", "SELECT clientid() AS client FROM 'sqltest/clientid/+'", "sqltest/clientid-out");
+
+        iotService.handlePublish("sqltest/clientid/a", "{}".getBytes(StandardCharsets.UTF_8), true, REGION, "sensor-9");
+
+        assertEquals(List.of("{\"client\":\"sensor-9\"}"), republished("sqltest/clientid-out"));
+    }
+
+    @Test
+    void anIotDataPublishOverHttpHasNoMqttClient() {
+        createRule("sqlHttpClientIdRule", "SELECT clientid() AS client FROM 'sqltest/httpclient/+'",
+                "sqltest/httpclient-out");
+
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/topics/sqltest/httpclient/a")
+        .then()
+            .statusCode(200);
+
+        assertEquals(List.of("{\"client\":\"n/a\"}"), republished("sqltest/httpclient-out"));
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
             "SELECT *, topic() as topic FROM '$aws/things/+/shadow/name/building/update/accepted' WHERE endswith(clientToken, 'inbound') | $aws/things/sensor-1/shadow/name/building/update/accepted | {\"clientToken\":\"job:inbound\"}  | true",
@@ -188,7 +225,7 @@ class IotTopicRuleSqlIntegrationTest {
     }
 
     private void publish(String topic, String payload) {
-        iotService.handlePublish(topic, payload.getBytes(StandardCharsets.UTF_8), true, REGION);
+        iotService.handlePublish(topic, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null);
     }
 
     private List<String> republished(String targetTopic) {

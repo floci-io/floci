@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.iot.rules;
 
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Aliased;
+import io.github.hectorvent.floci.services.iot.rules.RuleSql.ArrayLiteral;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Call;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Comparison;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Conjunction;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Disjunction;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Expr;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Literal;
+import io.github.hectorvent.floci.services.iot.rules.RuleSql.Membership;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Negation;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Operator;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql.Path;
@@ -17,7 +19,11 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Recursive descent parser for the subset of the AWS IoT rules SQL dialect Floci evaluates:
@@ -27,10 +33,12 @@ import java.util.Set;
  * item       := '*' | operand [AS identifier]
  * expr       := term (OR term)*
  * term       := factor (AND factor)*
- * factor     := NOT factor | '(' expr ')' | operand [comparison operand]
+ * factor     := NOT factor | '(' expr ')' | operand [comparison operand | IN operand]
  * comparison := '=' | '<>' | '!=' | '<' | '<=' | '>' | '>='
- * operand    := path | literal | call
+ * operand    := path | literal | array | call
+ * array      := '[' [operand (',' operand)*] ']'
  * call       := topic '(' [integer] ')' | (startswith | endswith) '(' operand ',' operand ')'
+ *             | (clientid | timestamp | accountid | newuuid) '(' ')' | (isNull | isUndefined) '(' operand ')'
  * path       := identifier ('.' identifier)*
  * literal    := 'string' | "string" | number | TRUE | FALSE | NULL
  * </pre>
@@ -41,7 +49,7 @@ import java.util.Set;
 public final class RuleSqlParser {
 
     private static final Set<String> KEYWORDS =
-            Set.of("SELECT", "FROM", "WHERE", "AS", "AND", "OR", "NOT", "TRUE", "FALSE", "NULL");
+            Set.of("SELECT", "FROM", "WHERE", "AS", "AND", "OR", "NOT", "IN", "TRUE", "FALSE", "NULL");
 
     /**
      * Bounds the work one statement can cost, counting real tokens only: {@link #tokenize} appends
@@ -51,8 +59,12 @@ public final class RuleSqlParser {
      */
     private static final int MAX_TOKENS = 1000;
 
-    private static final String TOPIC = "topic";
-    private static final Set<String> STRING_PREDICATES = Set.of("startswith", "endswith");
+    /** The supported functions by lower case name: the spelling AWS documents and the arguments each takes. */
+    private static final Map<String, Signature> FUNCTIONS = Stream.of(
+                    new Signature("topic", 0, 1), new Signature("startswith", 2, 2), new Signature("endswith", 2, 2),
+                    new Signature("clientid", 0, 0), new Signature("timestamp", 0, 0), new Signature("accountid", 0, 0),
+                    new Signature("newuuid", 0, 0), new Signature("isNull", 1, 1), new Signature("isUndefined", 1, 1))
+            .collect(Collectors.toMap(signature -> signature.name().toLowerCase(Locale.ROOT), Function.identity()));
 
     private final List<Token> tokens;
     private int index;
@@ -146,6 +158,9 @@ public final class RuleSqlParser {
             return grouped;
         }
         Expr left = operand();
+        if (matchKeyword("IN")) {
+            return new Membership(left, operand());
+        }
         Operator operator = comparisonOperator();
         return operator == null ? left : new Comparison(left, operator, operand());
     }
@@ -197,8 +212,25 @@ public final class RuleSqlParser {
                 advance();
                 return peekIsSymbol("(") ? call(token) : path(token);
             }
-            default -> throw fail("Expected a field, literal or function", token);
+            default -> {
+                if (matchSymbol("[")) {
+                    return arrayLiteral();
+                }
+                throw fail("Expected a field, literal, array or function", token);
+            }
         }
+    }
+
+    private Expr arrayLiteral() {
+        List<Expr> elements = new ArrayList<>();
+        if (!matchSymbol("]")) {
+            elements.add(operand());
+            while (matchSymbol(",")) {
+                elements.add(operand());
+            }
+            expectSymbol("]");
+        }
+        return new ArrayLiteral(elements);
     }
 
     private Literal numberLiteral(Token token) {
@@ -226,8 +258,8 @@ public final class RuleSqlParser {
     }
 
     private Expr call(Token name) {
-        String function = name.text().toLowerCase(Locale.ROOT);
-        if (!TOPIC.equals(function) && !STRING_PREDICATES.contains(function)) {
+        Signature signature = FUNCTIONS.get(name.text().toLowerCase(Locale.ROOT));
+        if (signature == null) {
             throw fail("Unsupported function", name);
         }
         expectSymbol("(");
@@ -239,22 +271,17 @@ public final class RuleSqlParser {
             }
         }
         expectSymbol(")");
-        if (TOPIC.equals(function)) {
-            validateTopicArguments(arguments, name);
-        } else if (arguments.size() != 2) {
-            throw fail("Function " + name.text() + " takes two arguments", name);
+        if (arguments.size() < signature.minArguments() || arguments.size() > signature.maxArguments()) {
+            throw fail("Function " + signature.name() + " does not take " + arguments.size() + " arguments", name);
         }
-        return new Call(function, arguments);
+        if (signature.name().equals("topic") && !arguments.isEmpty()) {
+            validateTopicSegment(arguments.getFirst(), name);
+        }
+        return new Call(signature.name(), arguments);
     }
 
-    private void validateTopicArguments(List<Expr> arguments, Token name) {
-        if (arguments.isEmpty()) {
-            return;
-        }
-        if (arguments.size() != 1
-                || !(arguments.getFirst() instanceof Literal literal)
-                || !literal.value().isIntegralNumber()
-                || literal.value().asLong() < 1) {
+    private void validateTopicSegment(Expr argument, Token name) {
+        if (!(argument instanceof Literal literal) || !literal.value().isIntegralNumber() || literal.value().asLong() < 1) {
             throw fail("topic() takes no argument or a segment number starting at 1", name);
         }
     }
@@ -388,7 +415,7 @@ public final class RuleSqlParser {
             return start + 2;
         }
         String one = sql.substring(start, start + 1);
-        if (!",.()*=<>".contains(one)) {
+        if (!",.()[]*=<>".contains(one)) {
             throw new RuleSqlParseException("Unsupported character", one, start);
         }
         tokens.add(new Token(Kind.SYMBOL, one, start));
@@ -400,5 +427,8 @@ public final class RuleSqlParser {
     }
 
     private record Token(Kind kind, String text, int position) {
+    }
+
+    private record Signature(String name, int minArguments, int maxArguments) {
     }
 }

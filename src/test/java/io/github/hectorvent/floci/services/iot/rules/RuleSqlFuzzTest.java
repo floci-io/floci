@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -35,14 +36,17 @@ class RuleSqlFuzzTest {
             "SELECT * FROM 'a/b' WHERE NOT active = FALSE AND (size > 10 OR weight <= -2.5) AND name <> NULL",
             "select level, name from \"a/b\" where level != 3 and name = \"o''brien\"",
             "SELECT NULL AS n, TRUE AS t, 'x' AS s, 1 AS i FROM 'topic/subtopic'",
-            "SELECT * FROM 'a/#' WHERE startswith(topic(2), 'b') AND endswith(topic(), 'c')");
+            "SELECT * FROM 'a/#' WHERE startswith(topic(2), 'b') AND endswith(topic(), 'c')",
+            "SELECT clientid() AS client, timestamp() AS ts, accountid() AS account, newuuid() AS id FROM 'a/b' WHERE clientid() <> 'n/a'",
+            "SELECT [a, b, 1, 'x', NULL] AS list, isNull(n) AS n, isUndefined(missing) AS u FROM 'a/b' WHERE a IN arr OR 3 IN [1, 2, 3]");
 
     private static final String ALPHABET = " \t\n'\"(),.*=<>!-+[]{}$/#_abcXYZ019äé😀\\;:%";
 
     private static final List<String> TOKENS = List.of(
             "SELECT", "FROM", "WHERE", "AS", "AND", "OR", "NOT", "TRUE", "FALSE", "NULL", "topic()", "topic(2)",
-            "topic(0)", "startswith(", "endswith(", "clientid()", "'x'", "\"y\"", "''", "42", "-1.5", "1e400",
-            "99999999999999999999", "*", ",", "(", ")", ".", "=", "<>", "!=", "<", "<=", ">", ">=", "a.b", "IN", "[", "]");
+            "topic(0)", "startswith(", "endswith(", "clientid()", "timestamp()", "accountid()", "newuuid()", "isNull(",
+            "isUndefined(", "principal()", "'x'", "\"y\"", "''", "42", "-1.5", "1e400", "99999999999999999999",
+            "*", ",", "(", ")", ".", "=", "<>", "!=", "<", "<=", ">", ">=", "a.b", "IN", "[", "]", "[1, 'a']", "arr");
 
     private static final List<String> TOPICS = List.of("a/b/c", "$aws/things/x/shadow/update/accepted", "", "a");
 
@@ -59,7 +63,7 @@ class RuleSqlFuzzTest {
             bytes(""),
             new byte[] {(byte) 0xff, (byte) 0xfe, 0x00, 0x7b});
 
-    private final RuleSqlEvaluator evaluator = new RuleSqlEvaluator(new ObjectMapper());
+    private final RuleSqlEvaluator evaluator = new RuleSqlEvaluator(new ObjectMapper(), Clock.systemUTC());
 
     @Test
     void theParserOnlyEverThrowsRuleSqlParseExceptionAndTheEvaluatorNeverThrows() {
@@ -109,7 +113,8 @@ class RuleSqlFuzzTest {
         }
         for (String topic : TOPICS) {
             for (byte[] payload : PAYLOADS) {
-                assertDoesNotThrow(() -> evaluator.evaluate("fuzz", query, topic, payload),
+                assertDoesNotThrow(() -> evaluator.evaluate("fuzz", query,
+                                new RuleSqlContext(topic, topic.isEmpty() ? null : "fuzz-client", "000000000000"), payload),
                         () -> "Evaluator threw for statement [" + sql + "] on topic [" + topic + "] with payload "
                                 + new String(payload, StandardCharsets.UTF_8));
             }

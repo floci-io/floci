@@ -7,6 +7,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -18,7 +19,7 @@ class RuleSqlEvaluatorTest {
 
     private static final String SHADOW_TOPIC = "$aws/things/sensor-1/shadow/name/building/update/accepted";
 
-    private final RuleSqlEvaluator evaluator = new RuleSqlEvaluator(new ObjectMapper());
+    private final RuleSqlEvaluator evaluator = new RuleSqlEvaluator(new ObjectMapper(), Clock.systemUTC());
 
     @Test
     void selectAllWithoutWhereForwardsTheOriginalBytes() {
@@ -286,7 +287,7 @@ class RuleSqlEvaluatorTest {
     }
 
     private Optional<byte[]> evaluate(String sql, String topic, byte[] payload) {
-        return evaluator.evaluate("test-rule", RuleSqlParser.parse(sql), topic, payload);
+        return evaluator.evaluate("test-rule", RuleSqlParser.parse(sql), new RuleSqlContext(topic, null, "000000000000"), payload);
     }
 
     private String text(Optional<byte[]> result) {
