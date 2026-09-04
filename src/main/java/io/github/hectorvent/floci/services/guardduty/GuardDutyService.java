@@ -96,12 +96,6 @@ public class GuardDutyService {
 
     GuardDutyService(
             StorageBackend<String, Detector> detectorStore,
-            StorageBackend<String, AdminAccount> adminAccountStore) {
-        this(detectorStore, adminAccountStore, new io.github.hectorvent.floci.core.storage.InMemoryStorage<>());
-    }
-
-    GuardDutyService(
-            StorageBackend<String, Detector> detectorStore,
             StorageBackend<String, AdminAccount> adminAccountStore,
             StorageBackend<String, MemberAccount> memberStore) {
         this.detectorStore = detectorStore;
@@ -248,7 +242,13 @@ public class GuardDutyService {
         if (details == null || !details.isArray() || details.size() < 1 || details.size() > 50) {
             throw badRequest("accountDetails must contain between 1 and 50 accounts.");
         }
-        String now = java.time.Instant.now().toString();
+        String administratorId = accountIdFromServiceRole(detector.getServiceRole());
+        boolean organizationDelegatedAdministrator = adminAccountStore.get(storageKey(region, administratorId))
+                .map(account -> "ENABLED".equals(account.getAdminStatus()))
+                .orElse(false);
+        String relationshipStatus = organizationDelegatedAdministrator ? "Enabled" : "Created";
+        String now = Instant.now().toString();
+        List<MemberWrite> writes = new ArrayList<>(details.size());
         for (JsonNode detail : details) {
             String accountId = requireText(detail, "accountId");
             if (!ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
@@ -260,14 +260,17 @@ public class GuardDutyService {
             }
             String key = region + "::" + detectorId + "::" + accountId;
             MemberAccount existing = memberStore.get(key).orElse(null);
-            memberStore.put(key, new MemberAccount(
+            writes.add(new MemberWrite(key, new MemberAccount(
                     accountId,
                     email,
-                    "Enabled",
-                    accountIdFromServiceRole(detector.getServiceRole()),
+                    relationshipStatus,
+                    administratorId,
                     detectorId,
                     existing == null ? now : existing.invitedAt(),
-                    now));
+                    now)));
+        }
+        for (MemberWrite write : writes) {
+            memberStore.put(write.key(), write.member());
         }
     }
 
@@ -302,10 +305,14 @@ public class GuardDutyService {
             return false;
         }
         int at = email.indexOf('@');
-        if (at <= 0 || at != email.lastIndexOf('@') || at == email.length() - 1) return false;
+        if (at <= 0 || at != email.lastIndexOf('@') || at == email.length() - 1) {
+            return false;
+        }
         String local = email.substring(0, at);
         String domain = email.substring(at + 1);
-        if (local.startsWith(".") || local.matches(".*[\\s\"'()<>\\[\\]:,\\\\|%&].*")) return false;
+        if (local.startsWith(".") || local.matches(".*[\\s\"'()<>\\[\\]:,\\\\|%&].*")) {
+            return false;
+        }
         if (!domain.matches("[A-Za-z0-9.-]+") || !domain.contains(".")
                 || domain.startsWith(".") || domain.endsWith(".") || domain.startsWith("-") || domain.endsWith("-")) {
             return false;
@@ -621,7 +628,9 @@ public class GuardDutyService {
     }
 
     private static String accountIdFromServiceRole(String serviceRole) {
-        if (serviceRole == null) return "000000000000";
+        if (serviceRole == null) {
+            return "000000000000";
+        }
         String[] parts = serviceRole.split(":", 6);
         return parts.length > 4 && ACCOUNT_ID_PATTERN.matcher(parts[4]).matches() ? parts[4] : "000000000000";
     }
@@ -637,5 +646,8 @@ public class GuardDutyService {
         String key() {
             return storageKey(region, detectorId);
         }
+    }
+
+    private record MemberWrite(String key, MemberAccount member) {
     }
 }

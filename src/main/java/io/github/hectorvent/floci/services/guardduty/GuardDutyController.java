@@ -161,7 +161,9 @@ public class GuardDutyController {
             node.put("relationshipStatus", member.relationshipStatus());
             node.put("updatedAt", member.updatedAt());
         }
-        if (page.nextToken() != null) response.put("nextToken", page.nextToken());
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
     @POST
