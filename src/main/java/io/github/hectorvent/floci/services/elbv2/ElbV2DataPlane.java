@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
@@ -60,6 +61,9 @@ public class ElbV2DataPlane {
 
     @Inject
     EmulatorConfig config;
+
+    @Inject
+    TlsProxyServer tlsProxyServer;
 
     @Inject
     LambdaService lambdaService;
@@ -182,7 +186,10 @@ public class ElbV2DataPlane {
         if (port == config.port()) {
             return true;
         }
-        return config.tls().enabled() && port == config.tls().awsHttpsPort();
+        // Ask the proxy whether it actually holds the port rather than inferring it from config.
+        // Binding the AWS-HTTPS port is privileged and its failure is non-fatal, so a port the
+        // proxy never acquired must stay available to listeners instead of going unserved.
+        return tlsProxyServer.reservesPort(port);
     }
 
     private HttpServer startPortServer(int port) {

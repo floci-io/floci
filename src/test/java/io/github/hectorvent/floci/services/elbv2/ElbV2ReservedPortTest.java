@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -23,8 +25,15 @@ class ElbV2ReservedPortTest {
         when(config.port()).thenReturn(flociPort);
         when(config.tls()).thenReturn(tls);
 
+        // Mirrors TlsProxyServer.reservesPort for the configured case; the bind-outcome half of
+        // that contract is covered by TlsProxyServerReservedPortTest.
+        TlsProxyServer proxy = mock(TlsProxyServer.class);
+        when(proxy.reservesPort(anyInt())).thenAnswer(inv ->
+                tlsEnabled && awsHttpsPort > 0 && (int) inv.getArgument(0) == awsHttpsPort);
+
         ElbV2DataPlane dataPlane = new ElbV2DataPlane();
         dataPlane.config = config;
+        dataPlane.tlsProxyServer = proxy;
         return dataPlane;
     }
 
