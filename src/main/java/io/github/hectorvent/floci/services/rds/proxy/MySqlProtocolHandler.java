@@ -43,8 +43,11 @@ public class MySqlProtocolHandler {
     private static final Logger LOG = Logger.getLogger(MySqlProtocolHandler.class);
 
     private static final int CLIENT_SSL = 0x0800;
+    private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
     private static final int CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x200000;
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
+    private static final String MYSQL_NATIVE_PASSWORD = "mysql_native_password";
+    private static final String CACHING_SHA2_PASSWORD = "caching_sha2_password";
 
     // First payload byte of the packet types that can appear during the connection phase.
     private static final int OK_PACKET_MARKER = 0x00;
@@ -78,6 +81,7 @@ public class MySqlProtocolHandler {
 
         // Extract the backend's nonce for our credential validation
         byte[] backendNonce = extractMysqlNonce(backendHandshakeRaw);
+        String backendAuthPlugin = extractMysqlAuthPlugin(backendHandshakeRaw);
 
         // The proxy terminates TLS itself, so advertise CLIENT_SSL to the client even if the
         // (plaintext) backend didn't.
@@ -153,7 +157,8 @@ public class MySqlProtocolHandler {
         boolean valid;
         try {
             if (masterUsername.equals(clientUsername)) {
-                byte[] expected = scrambleNativePassword(masterPassword, backendNonce);
+                byte[] expected = scramblePassword(
+                        masterPassword, backendNonce, backendAuthPlugin);
                 valid = Arrays.equals(expected, clientAuthData);
             } else {
                 // Non-master user: defer to backend — it knows their password.
@@ -345,6 +350,42 @@ public class MySqlProtocolHandler {
         return nonce;
     }
 
+    private static String extractMysqlAuthPlugin(byte[] raw) {
+        int i = 4 + 1;
+        while (i < raw.length && raw[i] != 0) {
+            i++;
+        }
+        i++;
+        i += 4 + 8 + 1;
+        if (i + 2 > raw.length) {
+            return MYSQL_NATIVE_PASSWORD;
+        }
+        int capabilities = (raw[i] & 0xFF) | ((raw[i + 1] & 0xFF) << 8);
+        i += 2;
+        if (i + 5 > raw.length) {
+            return MYSQL_NATIVE_PASSWORD;
+        }
+        i += 1 + 2;
+        capabilities |= ((raw[i] & 0xFF) | ((raw[i + 1] & 0xFF) << 8)) << 16;
+        i += 2;
+        int authDataLen = raw[i] & 0xFF;
+        i += 1 + 10;
+        if ((capabilities & CLIENT_PLUGIN_AUTH) == 0) {
+            return MYSQL_NATIVE_PASSWORD;
+        }
+        i += Math.max(13, authDataLen - 8);
+        if (i >= raw.length) {
+            return MYSQL_NATIVE_PASSWORD;
+        }
+        int pluginStart = i;
+        while (i < raw.length && raw[i] != 0) {
+            i++;
+        }
+        return i == pluginStart
+                ? MYSQL_NATIVE_PASSWORD
+                : new String(raw, pluginStart, i - pluginStart, StandardCharsets.UTF_8);
+    }
+
     // ── Parse HandshakeResponse41 ─────────────────────────────────────────────
 
     private static String[] parseHandshakeResponse(byte[] data) {
@@ -427,6 +468,16 @@ public class MySqlProtocolHandler {
 
     // ── Scramble ──────────────────────────────────────────────────────────────
 
+    private static byte[] scramblePassword(String password, byte[] nonce, String authPlugin)
+            throws Exception {
+        return switch (authPlugin) {
+            case CACHING_SHA2_PASSWORD -> scrambleCachingSha2Password(password, nonce);
+            case MYSQL_NATIVE_PASSWORD -> scrambleNativePassword(password, nonce);
+            default -> throw new IllegalArgumentException(
+                    "Unsupported MySQL authentication plugin: " + authPlugin);
+        };
+    }
+
     private static byte[] scrambleNativePassword(String password, byte[] nonce) throws Exception {
         if (password == null || password.isEmpty()) {
             return new byte[0];
@@ -442,6 +493,27 @@ public class MySqlProtocolHandler {
 
         byte[] result = new byte[20];
         for (int i = 0; i < 20; i++) {
+            result[i] = (byte) (hash1[i] ^ hash3[i]);
+        }
+        return result;
+    }
+
+    private static byte[] scrambleCachingSha2Password(String password, byte[] nonce)
+            throws Exception {
+        if (password == null || password.isEmpty()) {
+            return new byte[0];
+        }
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        byte[] hash1 = sha256.digest(password.getBytes(StandardCharsets.UTF_8));
+        sha256.reset();
+        byte[] hash2 = sha256.digest(hash1);
+        sha256.reset();
+        sha256.update(hash2);
+        sha256.update(nonce);
+        byte[] hash3 = sha256.digest();
+
+        byte[] result = new byte[32];
+        for (int i = 0; i < result.length; i++) {
             result[i] = (byte) (hash1[i] ^ hash3[i]);
         }
         return result;

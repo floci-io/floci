@@ -106,6 +106,7 @@ nav:
     - Lambda MicroVMs: services/lambda-microvms.md
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
+    - Cognito Identity: services/cognitoidentity.md
     - KMS: services/kms.md
     - CloudHSM v2: services/cloudhsmv2.md
     - Kinesis: services/kinesis.md

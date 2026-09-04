@@ -15,6 +15,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -95,7 +96,10 @@ public class EcrRegistryManager {
      * starting the backing registry container on first use. Any image that doesn't
      * match the AWS ECR URI shape (e.g. a plain Docker Hub reference or an image
      * already pointing at Floci's registry) is returned unchanged, without starting
-     * the registry container.
+     * the registry container, as is an AWS-shaped URI naming an image the Docker
+     * daemon already has (under the reference {@link ContainerBuilder#resolveImage}
+     * launches, so {@code floci.docker.image-registry-base} is honoured) while
+     * {@code floci.services.ecr.prefer-local-images} is on.
      */
     public String rewriteImageUri(String image) {
         if (image == null) {
@@ -105,6 +109,13 @@ public class EcrRegistryManager {
         if (!m.matches()) {
             return image;
         }
+        if (config.services().ecr().preferLocalImages()) {
+            String resolved = containerBuilder.resolveImage(image);
+            if (isPresentOnDaemon(resolved)) {
+                LOG.infov("Using locally present image {0} as-is (not rewriting to the emulated ECR registry)", resolved);
+                return image;
+            }
+        }
         String account = m.group(1);
         String region = m.group(2);
         String repoAndTag = m.group(3);
@@ -112,6 +123,19 @@ public class EcrRegistryManager {
         String rewritten = getRepositoryUri(account, region, repoAndTag);
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
+    }
+
+    private boolean isPresentOnDaemon(String image) {
+        try {
+            lifecycleManager.getDockerClient().inspectImageCmd(image).exec();
+            return true;
+        } catch (NotFoundException e) {
+            return false;
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not inspect image {0} on the Docker daemon ({1}); rewriting to the emulated ECR registry",
+                    image, e.getMessage());
+            return false;
+        }
     }
 
     /** Returns the docker-pullable repository URI for the given account/region/name. */

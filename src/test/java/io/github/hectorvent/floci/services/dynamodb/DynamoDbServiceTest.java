@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
@@ -14,10 +16,20 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class DynamoDbServiceTest {
 
@@ -381,7 +393,7 @@ class DynamoDbServiceTest {
         request.set("Keys", mapper.createArrayNode().add(item("userId", "user-1")));
         String usersArn = tableArn("us-east-1", "Users");
 
-        DynamoDbService.BatchGetResult result = service.batchGetItem(java.util.Map.of(usersArn, request), "us-east-1");
+        DynamoDbService.BatchGetResult result = service.batchGetItem(Map.of(usersArn, request), "us-east-1");
 
         assertTrue(result.responses().containsKey(usersArn));
         assertEquals("Alice", result.responses().get(usersArn).getFirst().get("name").get("S").asText());
@@ -1603,7 +1615,7 @@ class DynamoDbServiceTest {
         assertEquals(2, ssArray.size(), "tags should have 2 elements");
 
         // Verify values from the SS array
-        java.util.Set<String> tagValues = new java.util.HashSet<>();
+        Set<String> tagValues = new HashSet<>();
         ssArray.forEach(node -> tagValues.add(node.asText()));
         assertEquals(2, tagValues.size());
         assertTrue(tagValues.containsAll(Arrays.asList("a", "b")));
@@ -1912,9 +1924,9 @@ class DynamoDbServiceTest {
                 "ADD #meta.#tags :tags", names, values, "ALL_NEW", region);
 
         JsonNode stored = service.getItem("Users", userIdKey("nested-add-set"), region);
-        java.util.Set<String> tags = new java.util.HashSet<>();
+        Set<String> tags = new HashSet<>();
         stored.path("metadata").path("M").path("tags").path("SS").forEach(value -> tags.add(value.asText()));
-        assertEquals(java.util.Set.of("alpha", "beta", "gamma"), tags);
+        assertEquals(Set.of("alpha", "beta", "gamma"), tags);
         assertFalse(stored.has("#meta.#tags"), "ADD must not create a phantom top-level attribute");
     }
 
@@ -3274,5 +3286,235 @@ class DynamoDbServiceTest {
 
         JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
         assertEquals("2", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void batchWriteItem_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> writeRequests = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "u" + i));
+            ObjectNode putReq = mapper.createObjectNode();
+            putReq.set("Item", item);
+            ObjectNode req = mapper.createObjectNode();
+            req.set("PutRequest", putReq);
+            writeRequests.add(req);
+        }
+
+        serviceWithMock.batchWriteItem(Map.of("Users", writeRequests), "us-east-1");
+
+        // Verify that itemStore.put was called exactly once for the table, not 5 times
+        verify(mockItemStore, times(1))
+                .put(eq("us-east-1::Users"), any());
+    }
+
+    @Test
+    void transactWriteItems_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> transactItems = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "tx-u" + i));
+            ObjectNode put = mapper.createObjectNode();
+            put.put("TableName", "Users");
+            put.set("Item", item);
+            ObjectNode txItem = mapper.createObjectNode();
+            txItem.set("Put", put);
+            transactItems.add(txItem);
+        }
+
+        serviceWithMock.transactWriteItems(transactItems, "us-east-1");
+
+        verify(mockItemStore, times(1))
+                .put(eq("us-east-1::Users"), any());
+    }
+
+    @Test
+    void batchWriteItem_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item valid
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq1 = mapper.createObjectNode();
+        putReq1.set("Item", item1);
+        ObjectNode req1 = mapper.createObjectNode();
+        req1.set("PutRequest", putReq1);
+
+        // 2nd item invalid (missing partition key "userId")
+        ObjectNode item2 = mapper.createObjectNode();
+        item2.set("otherAttr", attributeValue("S", "val"));
+        ObjectNode putReq2 = mapper.createObjectNode();
+        putReq2.set("Item", item2);
+        ObjectNode req2 = mapper.createObjectNode();
+        req2.set("PutRequest", putReq2);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.batchWriteItem(Map.of("Users", List.of(req1, req2)), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not saved in memory
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    @Test
+    void transactWriteItems_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item: valid Put
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "tx-u1"));
+        ObjectNode put = mapper.createObjectNode();
+        put.put("TableName", "Users");
+        put.set("Item", item1);
+        ObjectNode txItem1 = mapper.createObjectNode();
+        txItem1.set("Put", put);
+
+        // 2nd item: invalid Update that attempts to modify key attribute "userId"
+        ObjectNode key2 = mapper.createObjectNode();
+        key2.set("userId", attributeValue("S", "tx-u2"));
+        ObjectNode upd = mapper.createObjectNode();
+        upd.put("TableName", "Users");
+        upd.set("Key", key2);
+        upd.put("UpdateExpression", "SET userId = :newId");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":newId", attributeValue("S", "tx-u2-modified"));
+        upd.set("ExpressionAttributeValues", exprValues);
+        ObjectNode txItem2 = mapper.createObjectNode();
+        txItem2.set("Update", upd);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.transactWriteItems(List.of(txItem1, txItem2), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not retained in memory
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "tx-u1"), "us-east-1"));
+    }
+
+    @Test
+    void transactWriteItems_whenMultipleOperationsOnSameItem_failsWithValidationException() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st operation on userId "u1": Put
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        item1.set("name", attributeValue("S", "Initial"));
+        ObjectNode put = mapper.createObjectNode();
+        put.put("TableName", "Users");
+        put.set("Item", item1);
+        ObjectNode txItem1 = mapper.createObjectNode();
+        txItem1.set("Put", put);
+
+        // 2nd operation on SAME userId "u1": Update
+        ObjectNode key2 = mapper.createObjectNode();
+        key2.set("userId", attributeValue("S", "u1"));
+        ObjectNode upd = mapper.createObjectNode();
+        upd.put("TableName", "Users");
+        upd.set("Key", key2);
+        upd.put("UpdateExpression", "SET #n = :val");
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+        upd.set("ExpressionAttributeNames", exprNames);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "Updated"));
+        upd.set("ExpressionAttributeValues", exprValues);
+        ObjectNode txItem2 = mapper.createObjectNode();
+        txItem2.set("Update", upd);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithMock.transactWriteItems(List.of(txItem1, txItem2), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Transaction request cannot include multiple operations on one item"));
+
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    @Test
+    void batchWriteItem_whenDuplicateKeysInBatch_failsWithValidationException() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq1 = mapper.createObjectNode();
+        putReq1.set("Item", item1);
+        ObjectNode req1 = mapper.createObjectNode();
+        req1.set("PutRequest", putReq1);
+
+        ObjectNode item2 = mapper.createObjectNode();
+        item2.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq2 = mapper.createObjectNode();
+        putReq2.set("Item", item2);
+        ObjectNode req2 = mapper.createObjectNode();
+        req2.set("PutRequest", putReq2);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithMock.batchWriteItem(Map.of("Users", List.of(req1, req2)), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Provided list of item keys contains duplicates"));
+
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
     }
 }

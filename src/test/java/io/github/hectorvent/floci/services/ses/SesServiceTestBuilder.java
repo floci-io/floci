@@ -119,7 +119,7 @@ final class SesServiceTestBuilder {
                 new SesIdentityService(identityStore, route53Service, clock),
                 new SesSentEmailService(emailStore),
                 new SesAccountService(accountSettingsStore, accountVdmStore, accountDetailsStore),
-                new SesTemplateService(templateStore),
+                new SesTemplateService(templateStore, objectMapper, new SecureRandom()),
                 new SesConfigurationSetService(configSetStore),
                 new SesSuppressionService(suppressionStore, accountSuppressionStore, new InMemoryStorage<>()),
                 new SesDedicatedIpService(dedicatedIpPoolStore),
@@ -128,7 +128,6 @@ final class SesServiceTestBuilder {
                 new SesReceiptRuleService(receiptRuleStore, clock),
                 new SesCvetService(cvetStore),
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
-                smtpRelay,
-                objectMapper);
+                smtpRelay);
     }
 }

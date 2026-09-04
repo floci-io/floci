@@ -15,6 +15,7 @@ public class KinesisShard {
     private String adjacentParentShardId;
     private HashKeyRange hashKeyRange;
     private SequenceNumberRange sequenceNumberRange;
+    private final Object recordsMonitor = new Object();
     private List<KinesisRecord> records = new ArrayList<>();
     private boolean closed = false;
     private Instant creationTimestamp = Instant.now();
@@ -42,8 +43,38 @@ public class KinesisShard {
     public SequenceNumberRange getSequenceNumberRange() { return sequenceNumberRange; }
     public void setSequenceNumberRange(SequenceNumberRange range) { this.sequenceNumberRange = range; }
 
-    public List<KinesisRecord> getRecords() { return records; }
-    public void setRecords(List<KinesisRecord> records) { this.records = records; }
+    /**
+     * A shallow snapshot of this shard's records. Safe to index and iterate without a
+     * ConcurrentModificationException even while producers append concurrently. Structural
+     * mutation of the returned list does NOT affect the shard (append via {@link #addRecord});
+     * element references are shared, so per-element setters still write through.
+     */
+    public List<KinesisRecord> getRecords() {
+        synchronized (recordsMonitor) {
+            return new ArrayList<>(records);
+        }
+    }
+
+    /** Appends a record. The sole production mutation path for a shard's log. */
+    public void addRecord(KinesisRecord record) {
+        synchronized (recordsMonitor) {
+            records.add(record);
+        }
+    }
+
+    /** Number of records currently held, without copying the log. */
+    public int recordCount() {
+        synchronized (recordsMonitor) {
+            return records.size();
+        }
+    }
+
+    /** Jackson rehydration only; not safe for concurrent replacement during live traffic. */
+    public void setRecords(List<KinesisRecord> records) {
+        synchronized (recordsMonitor) {
+            this.records = records == null ? new ArrayList<>() : new ArrayList<>(records);
+        }
+    }
 
     public boolean isClosed() { return closed; }
     public void setClosed(boolean closed) { this.closed = closed; }

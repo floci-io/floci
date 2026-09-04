@@ -166,6 +166,10 @@ services:
     # SubnetIds / VpcSecurityGroupIds / TagKeys are labels of an inner member-name
     # switch (memberKeyRegex), not actions — same shape as the rds exclusions above.
     exclude_actions: [SubnetIds, VpcSecurityGroupIds, TagKeys]
+  - service: cognitoidentity
+    doc: docs/services/cognitoidentity.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/cognitoidentity/CognitoIdentityJsonHandler.java, mode: switch }
   - service: route53
     doc: docs/services/route53.md
     sources:

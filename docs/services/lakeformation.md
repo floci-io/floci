@@ -18,6 +18,7 @@ The `lakeformation` service allows you to manage data lake settings, resources, 
 
 ### Resource Registration
 *   `RegisterResource`
+*   `UpdateResource`
 *   `DeregisterResource`
 *   `ListResources`
 *   `DescribeResource`

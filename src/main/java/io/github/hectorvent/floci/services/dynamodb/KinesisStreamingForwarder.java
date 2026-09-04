@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
 public class KinesisStreamingForwarder {
@@ -22,6 +23,7 @@ public class KinesisStreamingForwarder {
 
     private final KinesisService kinesisService;
     private final ObjectMapper objectMapper;
+    private final AtomicLong forwardFailures = new AtomicLong();
 
     @Inject
     public KinesisStreamingForwarder(KinesisService kinesisService, ObjectMapper objectMapper) {
@@ -53,10 +55,20 @@ public class KinesisStreamingForwarder {
                 LOG.debugv("Forwarded DynamoDB event to Kinesis stream {0}: {1} on {2}",
                         streamName, eventName, table.getTableName());
             } catch (Exception e) {
-                LOG.warnv("Failed to forward DynamoDB event to Kinesis destination {0}: {1}",
-                        dest.getStreamArn(), e.getMessage());
+                // Do NOT rethrow: put/delete/update persist before forwarding, so a rethrow would
+                // turn a committed write into a spurious 5xx; the TTL sweep forwards mid-loop and
+                // persists only after the batch, so a rethrow would abort the sweep. Surface the
+                // drop loudly (ERROR + stack trace) and count it for process-local diagnostics.
+                forwardFailures.incrementAndGet();
+                LOG.errorv(e, "Dropped DynamoDB CDC event: failed to forward {0} on table {1} to Kinesis destination {2}",
+                        eventName, table.getTableName(), dest.getStreamArn());
             }
         }
+    }
+
+    /** Process-local count of CDC events dropped because forwarding to Kinesis threw. */
+    public long getForwardFailureCount() {
+        return forwardFailures.get();
     }
 
     private ObjectNode buildPayload(String eventName, JsonNode keys,

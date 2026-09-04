@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -575,9 +576,10 @@ class ApiGatewayV2OpenApiImportTest {
 
     @Test
     @Order(17)
-    void sigv4ImportsAsAwsIamAndSaysItIsNotEnforced() throws Exception {
-        // The route records AWS_IAM because that is what AWS records, but this emulator's HTTP API
-        // dispatch only enforces JWT and CUSTOM, so the document's guarantee does not hold locally.
+    void sigv4ImportsAsAwsIamWithoutAnUnenforcedWarning() throws Exception {
+        // The route records AWS_IAM, and dispatch enforces it: an unsigned request to GET /signed
+        // is rejected before the integration runs, so the import no longer warns that the
+        // document's guarantee fails to hold locally.
         String spec = """
                 {
                   "openapi": "3.0.1",
@@ -600,9 +602,9 @@ class ApiGatewayV2OpenApiImportTest {
         assertNotNull(route);
         assertEquals("AWS_IAM", route.get("authorizationType").asText());
 
-        String warnings = get("/v2/apis/" + apiId).get("warnings").toString();
-        assertTrue(warnings.contains("GET /signed"), warnings);
-        assertTrue(warnings.contains("does not enforce"), warnings);
+        JsonNode warnings = get("/v2/apis/" + apiId).get("warnings");
+        assertFalse(warnings != null && warnings.toString().contains("does not enforce"),
+                String.valueOf(warnings));
     }
 
     @Test

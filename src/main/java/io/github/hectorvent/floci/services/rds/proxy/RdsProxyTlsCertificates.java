@@ -7,7 +7,6 @@ import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -21,7 +20,6 @@ import java.security.KeyPair;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.SecureRandom;
-import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -108,7 +106,6 @@ public class RdsProxyTlsCertificates {
             if (sslContext != null) {
                 return;
             }
-            ensureBouncyCastleRegistered();
             Path tlsDir = tlsDir();
             Path certFile = tlsDir.resolve(CERT_NAME);
             Path keyFile = tlsDir.resolve(KEY_NAME);
@@ -193,12 +190,6 @@ public class RdsProxyTlsCertificates {
 
     private Path tlsDir() {
         return Path.of(config.storage().persistentPath(), TLS_DIR);
-    }
-
-    private static void ensureBouncyCastleRegistered() {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(new BouncyCastleProvider());
-        }
     }
 
     /**

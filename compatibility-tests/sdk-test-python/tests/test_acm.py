@@ -7,7 +7,7 @@ import pytest
 from botocore.exceptions import ClientError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.x509.oid import NameOID
 
 FAKE_ARN = "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
@@ -24,6 +24,38 @@ class TestACMCertificateLifecycle:
         try:
             assert arn
             assert re.match(r"arn:aws:acm:.*:.*:certificate/.*", arn)
+        finally:
+            acm_client.delete_certificate(CertificateArn=arn)
+
+    @pytest.mark.parametrize(
+        "key_algorithm,key_type",
+        [("RSA_2048", rsa.RSAPublicKey), ("EC_prime256v1", ec.EllipticCurvePublicKey)],
+    )
+    def test_request_certificate_key_algorithms(
+        self, acm_client, key_algorithm, key_type
+    ):
+        """Test RequestCertificate issues a parseable certificate for each key algorithm."""
+        response = acm_client.request_certificate(
+            DomainName=f"{key_algorithm.lower().replace('_', '-')}.example.com",
+            KeyAlgorithm=key_algorithm,
+        )
+        arn = response["CertificateArn"]
+
+        try:
+            pem = acm_client.get_certificate(CertificateArn=arn)["Certificate"]
+            certificate = x509.load_pem_x509_certificate(pem.encode())
+            assert isinstance(certificate.public_key(), key_type)
+            # A certificate whose signature does not match its own contents would
+            # still parse, so check the self-signature rather than trusting the PEM.
+            certificate.public_key().verify(
+                certificate.signature,
+                certificate.tbs_certificate_bytes,
+                *(
+                    (ec.ECDSA(certificate.signature_hash_algorithm),)
+                    if isinstance(certificate.public_key(), ec.EllipticCurvePublicKey)
+                    else (padding.PKCS1v15(), certificate.signature_hash_algorithm)
+                ),
+            )
         finally:
             acm_client.delete_certificate(CertificateArn=arn)
 
@@ -164,8 +196,9 @@ class TestACMImportExport:
             acm_client.delete_certificate(CertificateArn=arn)
 
     def test_export_certificate(self, acm_client):
-        """Test ExportCertificate on imported cert returns cert and key."""
+        """Test ExportCertificate returns the imported key, encrypted under the passphrase."""
         cert_pem, key_pem = self._generate_self_signed_cert()
+        passphrase = b"test-passphrase"
 
         import_response = acm_client.import_certificate(
             Certificate=cert_pem, PrivateKey=key_pem
@@ -174,10 +207,27 @@ class TestACMImportExport:
 
         try:
             response = acm_client.export_certificate(
-                CertificateArn=arn, Passphrase=b"test-passphrase"
+                CertificateArn=arn, Passphrase=passphrase
             )
             assert response["Certificate"]
             assert response["PrivateKey"]
+
+            # Asserting on the PEM header alone would pass for a key no client can
+            # open. Decrypt it with the passphrase and check it is the key that was
+            # imported, which is the whole point of the export.
+            exported_key = serialization.load_pem_private_key(
+                response["PrivateKey"].encode(), password=passphrase
+            )
+            imported_key = serialization.load_pem_private_key(key_pem, password=None)
+            assert (
+                exported_key.private_numbers() == imported_key.private_numbers()
+            )
+
+            # The passphrase has to actually be doing the work.
+            with pytest.raises(ValueError):
+                serialization.load_pem_private_key(
+                    response["PrivateKey"].encode(), password=b"wrong-passphrase"
+                )
         finally:
             acm_client.delete_certificate(CertificateArn=arn)
 

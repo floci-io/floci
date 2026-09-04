@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
@@ -20,10 +21,12 @@ import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AcmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayAccountCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkAclCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
@@ -34,6 +37,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.EcrCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.FirehoseCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.IotDomainConfigurationCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KinesisCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaAddressingCfnProvisioner;
@@ -61,6 +65,7 @@ import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iot.IotDomainConfigurationService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -133,6 +138,7 @@ final class CfnProvisionerFixture {
         private KinesisService kinesisService;
         private CloudWatchMetricsService cloudWatchMetricsService;
         private AutoScalingService autoScalingService;
+        private AcmService acmService;
         private FirehoseService firehoseService;
         private DocDbService docDbService;
         private CloudFrontService cloudFrontService;
@@ -141,6 +147,7 @@ final class CfnProvisionerFixture {
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
+        private IotDomainConfigurationService iotDomainConfigurationService;
         private LambdaMicrovmsService lambdaMicrovmsService;
         private AwsConfigService awsConfigService;
         private OrganizationsService organizationsService;
@@ -203,6 +210,9 @@ final class CfnProvisionerFixture {
             if (pipesService != null) {
                 discovered.add(new PipesCfnProvisioner(pipesService));
             }
+            if (cognitoService != null) {
+                discovered.add(new CognitoCfnProvisioner(cognitoService));
+            }
             if (firehoseService != null) {
                 discovered.add(new FirehoseCfnProvisioner(firehoseService));
             }
@@ -227,12 +237,18 @@ final class CfnProvisionerFixture {
             if (autoScalingService != null) {
                 discovered.add(new AutoScalingLifecycleHookCfnProvisioner(autoScalingService));
             }
+            if (acmService != null) {
+                discovered.add(new AcmCfnProvisioner(acmService));
+            }
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
                 discovered.add(new LambdaVersionAliasCfnProvisioner(lambdaService));
             }
             if (flowLogService != null) {
                 discovered.add(new Ec2FlowLogCfnProvisioner(flowLogService));
+            }
+            if (iotDomainConfigurationService != null) {
+                discovered.add(new IotDomainConfigurationCfnProvisioner(iotDomainConfigurationService));
             }
             if (lambdaMicrovmsService != null) {
                 discovered.add(new LambdaMicrovmsCfnProvisioner(lambdaMicrovmsService));
@@ -421,6 +437,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder acm(AcmService v) {
+            this.acmService = v;
+            return this;
+        }
+
         public Builder firehose(FirehoseService v) {
             this.firehoseService = v;
             return this;
@@ -438,6 +459,11 @@ final class CfnProvisionerFixture {
 
         public Builder flowLog(FlowLogService v) {
             this.flowLogService = v;
+            return this;
+        }
+
+        public Builder iotDomainConfiguration(IotDomainConfigurationService v) {
+            this.iotDomainConfigurationService = v;
             return this;
         }
 

@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
@@ -3255,6 +3256,129 @@ class CognitoServiceTest {
         assertFalse(user.getEmailMfaSettings().isEnabled());
         assertFalse(user.getEmailMfaSettings().isPreferredMfa());
    }
+    // ──────────────────────────── User Pool Domains ────────────────────────────
+
+    private static final String CERTIFICATE_ARN =
+            "arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+    private static final String RENEWED_CERTIFICATE_ARN =
+            "arn:aws:acm:us-east-1:000000000000:certificate/99999999-2222-3333-4444-555555555555";
+
+    private UserPool createPoolWithCustomDomain(String domain) {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        service.createUserPoolDomain(domain, pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), 1);
+        return pool;
+    }
+
+    @Test
+    void updateUserPoolDomainReplacesTheCertificateAndKeepsTheCloudFrontDistribution() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        String cloudFront = service.describeUserPoolDomain("auth.example.com").getCloudFrontDistribution();
+
+        UserPoolDomain updated = service.updateUserPoolDomain("auth.example.com", pool.getId(),
+                Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN), 2);
+
+        assertEquals(RENEWED_CERTIFICATE_ARN, updated.getCertificateArn());
+        assertEquals(cloudFront, updated.getCloudFrontDistribution());
+        assertEquals(2, updated.getManagedLoginVersion());
+        UserPoolDomain stored = service.describeUserPoolDomain("auth.example.com");
+        assertEquals(RENEWED_CERTIFICATE_ARN, stored.getCertificateArn());
+        assertEquals(2, stored.getManagedLoginVersion());
+    }
+
+    @Test
+    void updateUserPoolDomainLeavesOmittedSettingsUnchanged() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+
+        service.updateUserPoolDomain("auth.example.com", pool.getId(), null, null);
+
+        UserPoolDomain stored = service.describeUserPoolDomain("auth.example.com");
+        assertEquals(CERTIFICATE_ARN, stored.getCertificateArn());
+        assertEquals(1, stored.getManagedLoginVersion());
+    }
+
+    @Test
+    void updateUserPoolDomainSetsTheManagedLoginVersionOfAPrefixDomain() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        service.createUserPoolDomain("my-prefix", pool.getId(), null, null);
+
+        UserPoolDomain updated = service.updateUserPoolDomain("my-prefix", pool.getId(), null, 2);
+
+        assertEquals(2, updated.getManagedLoginVersion());
+        assertFalse(updated.isCustomDomain());
+        assertNull(updated.getCloudFrontDistribution());
+    }
+
+    @Test
+    void updateUserPoolDomainRejectsACustomDomainConfigOnAPrefixDomain() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        service.createUserPoolDomain("my-prefix", pool.getId(), null, null);
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "my-prefix", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertFalse(service.describeUserPoolDomain("my-prefix").isCustomDomain());
+    }
+
+    @Test
+    void updateUserPoolDomainRequiresACertificateArnInTheCustomDomainConfig() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of(), 2));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(CERTIFICATE_ARN, service.describeUserPoolDomain("auth.example.com").getCertificateArn());
+    }
+
+    @Test
+    void updateUserPoolDomainOfAnotherPoolsDomainIsNotFound() {
+        createPoolWithCustomDomain("auth.example.com");
+        UserPool otherPool = service.createUserPool(Map.of("PoolName", "OtherPool"), "us-east-1");
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "auth.example.com", otherPool.getId(), Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN), null));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+        assertEquals(CERTIFICATE_ARN, service.describeUserPoolDomain("auth.example.com").getCertificateArn());
+    }
+
+    @Test
+    void updateUserPoolDomainOfAnUnknownDomainIsNotFound() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "nobody.example.com", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+    }
+
+    @Test
+    void updateUserPoolDomainReplacesTheSecurityPolicyAndKeepsItWhenOmitted() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        assertEquals("TLS_V1_2_2021", service.describeUserPoolDomain("auth.example.com").getSecurityPolicy());
+
+        service.updateUserPoolDomain("auth.example.com", pool.getId(),
+                Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN, "SecurityPolicy", "TLS_V1_2_2019"), null);
+        assertEquals("TLS_V1_2_2019", service.describeUserPoolDomain("auth.example.com").getSecurityPolicy());
+
+        service.updateUserPoolDomain("auth.example.com", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null);
+
+        UserPoolDomain stored = service.describeUserPoolDomain("auth.example.com");
+        assertEquals("TLS_V1_2_2019", stored.getSecurityPolicy());
+        assertEquals(CERTIFICATE_ARN, stored.getCertificateArn());
+    }
+
+    @Test
+    void updateUserPoolDomainOfAnUnknownPoolIsNotFound() {
+        createPoolWithCustomDomain("auth.example.com");
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "auth.example.com", "us-east-1_missing", Map.of("CertificateArn", CERTIFICATE_ARN), null));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+    }
+
     private static String jwtPayload(String token) {
         String segment = token.split("\\.")[1];
         int pad = (4 - segment.length() % 4) % 4;

@@ -33,6 +33,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -50,11 +52,13 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -146,6 +150,7 @@ class ContainerLauncherTest {
         // lenient: the failure-path test (populate fails before any container is created) never
         // reaches these, but every success-path test does — they must not trip strict-stubs.
         lenient().when(lifecycleManager.create(any())).thenReturn("container-123");
+        lenient().when(lifecycleManager.create(any(), anyString())).thenReturn("container-123");
         ContainerLifecycleManager.ContainerInfo info =
                 new ContainerLifecycleManager.ContainerInfo("container-123", Map.of());
         lenient().when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
@@ -204,6 +209,13 @@ class ContainerLauncherTest {
                 .orElseGet(() -> specs.get(specs.size() - 1));
     }
 
+    private String captureRealContainerPlatform() {
+        ArgumentCaptor<String> platformCaptor = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager, atLeastOnce()).create(any(ContainerSpec.class), platformCaptor.capture());
+        List<String> platforms = platformCaptor.getAllValues();
+        return platforms.get(platforms.size() - 1);
+    }
+
     /** Returns the read-only {@code /var/task} volume mount on the spec, or null if absent. */
     private static Mount varTaskVolumeMount(ContainerSpec spec) {
         if (spec.mounts() == null) {
@@ -213,6 +225,137 @@ class ContainerLauncherTest {
                 .filter(m -> m.getType() == MountType.VOLUME && "/var/task".equals(m.getTarget()))
                 .findFirst()
                 .orElse(null);
+    }
+
+    @Test
+    void launchFunction_usesArm64DockerPlatformWhenArchitectureHonouringIsEnabled() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("arm64-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("arm64-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(List.of("arm64"));
+
+        launcher.launch(fn);
+
+        assertEquals("linux/arm64", captureRealContainerPlatform());
+    }
+
+    @Test
+    void launchFunction_usesAmd64DockerPlatformForX86Architecture() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("x86-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("x86-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(List.of("x86_64"));
+
+        launcher.launch(fn);
+
+        assertEquals("linux/amd64", captureRealContainerPlatform());
+    }
+
+    @Test
+    void launchFunction_usesAmd64DockerPlatformWhenArchitectureIsOmitted() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("default-architecture-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("default-architecture-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        assertEquals("linux/amd64", captureRealContainerPlatform());
+    }
+
+    @Test
+    void launchFunction_keepsDaemonDefaultPlatformWhenArchitectureHonouringIsDisabled() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("native-platform-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("native-platform-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(List.of("arm64"));
+
+        launcher.launch(fn);
+
+        captureRealContainerSpec();
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidPersistedArchitectures")
+    void launchFunction_rejectsInvalidPersistedArchitecturesBeforeCreatingContainer(
+            List<String> architectures) throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("legacy-invalid-architecture-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("legacy-invalid-architecture-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setArchitectures(architectures);
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class,
+                () -> launcher.launch(fn));
+
+        assertEquals("Invalid persisted architectures " + architectures
+                + " for function 'legacy-invalid-architecture-fn'", exception.getMessage());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
+        assertSame(architectures, fn.getArchitectures());
+    }
+
+    private static Stream<List<String>> invalidPersistedArchitectures() {
+        return Stream.of(
+                List.of(),
+                List.of("riscv64"),
+                List.of("arm64", "x86_64"));
+    }
+
+    @Test
+    void launchFunction_usesArm64DockerPlatformForCodeVolumeHelper() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.honourArchitectures()).thenReturn(true);
+        Path codePath = Files.createDirectory(tempDir.resolve("large-arm64-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]);
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("large-arm64-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setCodeSha256("large-arm64-code-sha");
+        fn.setArchitectures(List.of("arm64"));
+
+        long originalThreshold = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(fn);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalThreshold;
+        }
+
+        ArgumentCaptor<String> platformCaptor = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager, times(2)).create(any(ContainerSpec.class), platformCaptor.capture());
+        assertTrue(platformCaptor.getAllValues().stream()
+                .allMatch("linux/arm64"::equals));
     }
 
     @Test

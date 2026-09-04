@@ -682,6 +682,35 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
     }
 
+    void authorizeBucketWrite(String bucketName, String action, RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+
+        authorizeSignedRequest(authorization);
+        RequestAuthorization requestAuthorization = authorization != null
+                ? authorization
+                : RequestAuthorization.unsigned();
+        if (requestAuthorization.signed()) {
+            return;
+        }
+
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+        S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
+                S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, bucketArn);
+        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.ALLOW) {
+            return;
+        }
+
+        throw new AwsException("AccessDenied", "Access Denied", 403);
+    }
+
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
         String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
         authorizeS3Read(bucketName, key, versionId, action, objectArn, authorization);
@@ -1780,7 +1809,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     // --- Metrics Configurations ---
 
-    private static final String METRICS_XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+    private static final String S3_XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 
     /**
      * Stores a CloudWatch request metrics configuration under {@code id}, replacing any
@@ -1811,7 +1840,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (innerXml == null) {
             throw noSuchMetricsConfiguration();
         }
-        return METRICS_XML_DECLARATION + new XmlBuilder()
+        return S3_XML_DECLARATION + new XmlBuilder()
                 .start("MetricsConfiguration", AwsNamespaces.S3)
                 .raw(innerXml)
                 .end("MetricsConfiguration")
@@ -1833,7 +1862,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .start("MetricsConfiguration")
                 .raw(configurations.get(id))
                 .end("MetricsConfiguration"));
-        return METRICS_XML_DECLARATION + xml
+        return S3_XML_DECLARATION + xml
                 .elem("IsTruncated", false)
                 .end("ListMetricsConfigurationsResult")
                 .build();
@@ -1876,6 +1905,88 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static AwsException noSuchMetricsConfiguration() {
+        return new AwsException("NoSuchConfiguration", "The specified configuration does not exist.", 404);
+    }
+
+    // --- Intelligent-Tiering Configurations ---
+
+    /**
+     * Stores an Intelligent-Tiering configuration under {@code id}, replacing any configuration
+     * already stored under it. floci records the configuration and returns it; no objects are
+     * transitioned between tiers because of it.
+     */
+    public void putBucketIntelligentTieringConfiguration(String bucketName, String id, String innerXml) {
+        Bucket bucket = requireBucket(bucketName);
+        // Read-modify-write of the bucket record, so it takes the same monitor as the other
+        // bucket-scoped mutations: without it two concurrent puts of different ids both start from
+        // the same map and one of the configurations is lost.
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            Map<String, String> configurations = bucket.getIntelligentTieringConfigurations() != null
+                    ? new java.util.LinkedHashMap<>(bucket.getIntelligentTieringConfigurations())
+                    : new java.util.LinkedHashMap<>();
+            configurations.put(id, innerXml);
+            bucket.setIntelligentTieringConfigurations(configurations);
+            bucketStore.put(bucketName, bucket);
+        }
+        LOG.debugv("Put intelligent-tiering configuration {0} on bucket: {1}", id, bucketName);
+    }
+
+    public String getBucketIntelligentTieringConfiguration(String bucketName, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        String innerXml = bucket.getIntelligentTieringConfigurations() == null
+                ? null : bucket.getIntelligentTieringConfigurations().get(id);
+        if (innerXml == null) {
+            throw noSuchIntelligentTieringConfiguration();
+        }
+        return S3_XML_DECLARATION + new XmlBuilder()
+                .start("IntelligentTieringConfiguration", AwsNamespaces.S3)
+                .raw(innerXml)
+                .end("IntelligentTieringConfiguration")
+                .build();
+    }
+
+    /**
+     * Lists every Intelligent-Tiering configuration on the bucket. AWS pages these with a
+     * continuation token; floci returns them all in one unpaged response, ordered by id so that
+     * the listing is stable.
+     */
+    public String listBucketIntelligentTieringConfigurations(String bucketName) {
+        Bucket bucket = requireBucket(bucketName);
+        Map<String, String> configurations = bucket.getIntelligentTieringConfigurations() != null
+                ? bucket.getIntelligentTieringConfigurations() : Map.of();
+
+        XmlBuilder xml = new XmlBuilder().start("ListBucketIntelligentTieringConfigurationsResult",
+                AwsNamespaces.S3);
+        configurations.keySet().stream().sorted().forEach(id -> xml
+                .start("IntelligentTieringConfiguration")
+                .raw(configurations.get(id))
+                .end("IntelligentTieringConfiguration"));
+        return S3_XML_DECLARATION + xml
+                .elem("IsTruncated", false)
+                .end("ListBucketIntelligentTieringConfigurationsResult")
+                .build();
+    }
+
+    public void deleteBucketIntelligentTieringConfiguration(String bucketName, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        // Same monitor as the put: the existence check and the write have to be one step, or a
+        // concurrent put of another id is dropped by the write that follows it.
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            Map<String, String> configurations = bucket.getIntelligentTieringConfigurations();
+            if (configurations == null || !configurations.containsKey(id)) {
+                throw noSuchIntelligentTieringConfiguration();
+            }
+            Map<String, String> remaining = new java.util.LinkedHashMap<>(configurations);
+            remaining.remove(id);
+            bucket.setIntelligentTieringConfigurations(remaining);
+            bucketStore.put(bucketName, bucket);
+        }
+        LOG.debugv("Deleted intelligent-tiering configuration {0} from bucket: {1}", id, bucketName);
+    }
+
+    private static AwsException noSuchIntelligentTieringConfiguration() {
         return new AwsException("NoSuchConfiguration", "The specified configuration does not exist.", 404);
     }
 

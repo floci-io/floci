@@ -1042,49 +1042,49 @@ class KmsIntegrationTest {
     @ParameterizedTest
     @CsvSource({
             "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, 200",
-            "SYMMETRIC_DEFAULT, SIGN_VERIFY, 200",
+            "SYMMETRIC_DEFAULT, SIGN_VERIFY, 400",
             "SYMMETRIC_DEFAULT, GENERATE_VERIFY_MAC, 400",
-            "SYMMETRIC_DEFAULT, KEY_AGREEMENT, 200",
+            "SYMMETRIC_DEFAULT, KEY_AGREEMENT, 400",
 
             "RSA_2048, ENCRYPT_DECRYPT, 200",
             "RSA_2048, SIGN_VERIFY, 200",
             "RSA_2048, GENERATE_VERIFY_MAC, 400",
-            "RSA_2048, KEY_AGREEMENT, 200",
+            "RSA_2048, KEY_AGREEMENT, 400",
 
             "RSA_3072, ENCRYPT_DECRYPT, 200",
             "RSA_3072, SIGN_VERIFY, 200",
             "RSA_3072, GENERATE_VERIFY_MAC, 400",
-            "RSA_3072, KEY_AGREEMENT, 200",
+            "RSA_3072, KEY_AGREEMENT, 400",
 
             "RSA_4096, ENCRYPT_DECRYPT, 200",
             "RSA_4096, SIGN_VERIFY, 200",
             "RSA_4096, GENERATE_VERIFY_MAC, 400",
-            "RSA_4096, KEY_AGREEMENT, 200",
+            "RSA_4096, KEY_AGREEMENT, 400",
 
-            "ECC_NIST_P256, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P256, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_P256, SIGN_VERIFY, 200",
             "ECC_NIST_P256, GENERATE_VERIFY_MAC, 400",
             "ECC_NIST_P256, KEY_AGREEMENT, 200",
 
-            "ECC_NIST_P384, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P384, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_P384, SIGN_VERIFY, 200",
             "ECC_NIST_P384, GENERATE_VERIFY_MAC, 400",
             "ECC_NIST_P384, KEY_AGREEMENT, 200",
 
-            "ECC_NIST_P521, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P521, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_P521, SIGN_VERIFY, 200",
             "ECC_NIST_P521, GENERATE_VERIFY_MAC, 400",
             "ECC_NIST_P521, KEY_AGREEMENT, 200",
 
-            "ECC_NIST_EDWARDS25519, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_EDWARDS25519, ENCRYPT_DECRYPT, 400",
             "ECC_NIST_EDWARDS25519, SIGN_VERIFY, 200",
             "ECC_NIST_EDWARDS25519, GENERATE_VERIFY_MAC, 400",
-            "ECC_NIST_EDWARDS25519, KEY_AGREEMENT, 200",
+            "ECC_NIST_EDWARDS25519, KEY_AGREEMENT, 400",
 
-            "ECC_SECG_P256K1, ENCRYPT_DECRYPT, 200",
+            "ECC_SECG_P256K1, ENCRYPT_DECRYPT, 400",
             "ECC_SECG_P256K1, SIGN_VERIFY, 200",
             "ECC_SECG_P256K1, GENERATE_VERIFY_MAC, 400",
-            "ECC_SECG_P256K1, KEY_AGREEMENT, 200",
+            "ECC_SECG_P256K1, KEY_AGREEMENT, 400",
 
             "HMAC_224, ENCRYPT_DECRYPT, 400",
             "HMAC_224, SIGN_VERIFY, 400",
@@ -1141,6 +1141,46 @@ class KmsIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(expectedStatusCode);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "SYMMETRIC_DEFAULT, SIGN_VERIFY",
+            "RSA_2048, KEY_AGREEMENT",
+            "ECC_NIST_P256, ENCRYPT_DECRYPT",
+            "ECC_NIST_EDWARDS25519, ENCRYPT_DECRYPT",
+            "ECC_NIST_EDWARDS25519, KEY_AGREEMENT",
+            "ECC_SECG_P256K1, KEY_AGREEMENT"
+    })
+    void createKeyRejectsIncompatibleKeyUsage(String keySpec, String keyUsage) {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"%s\",\"KeySpec\":\"%s\"}".formatted(keyUsage, keySpec))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(
+                        "KeyUsage " + keyUsage + " is not compatible with KeySpec " + keySpec + "."));
+    }
+
+    /**
+     * AWS accepts KEY_AGREEMENT for NIST-standard ECC key specs at CreateKey, even though
+     * Floci has no DeriveSharedSecret operation yet. Matching AWS at the CreateKey boundary
+     * is deliberate; this guards against an over-broad tightening.
+     */
+    @Test
+    void createKeyAllowsKeyAgreementForNistEccSpecs() {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"KEY_AGREEMENT\",\"KeySpec\":\"ECC_NIST_P256\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.KeyUsage", equalTo("KEY_AGREEMENT"))
+                .body("KeyMetadata.KeySpec", equalTo("ECC_NIST_P256"));
     }
 
     // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
@@ -1521,5 +1561,197 @@ class KmsIntegrationTest {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /**
+     * Real KMS applies RSAES-OAEP with the key's actual RSA material, so the ciphertext for an
+     * RSA_2048 key is exactly 256 bytes of raw RSA output, and both Encrypt and Decrypt echo the
+     * EncryptionAlgorithm. Checked against real AWS in us-east-1.
+     */
+    @Test
+    void rsaOaepEncryptDecryptRoundTripThroughJsonHandler() {
+        String keyId = createRsaEncryptionKey();
+        String plaintext = Base64.getEncoder().encodeToString("secret payload".getBytes(StandardCharsets.UTF_8));
+
+        var encryptResponse = given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
+                        .formatted(keyId, plaintext))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyId", startsWith("arn:aws:kms:"))
+                .body("EncryptionAlgorithm", equalTo("RSAES_OAEP_SHA_256"))
+                .extract().jsonPath();
+
+        String ciphertext = encryptResponse.getString("CiphertextBlob");
+        assertEquals(256, Base64.getDecoder().decode(ciphertext).length);
+
+        given()
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"CiphertextBlob\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
+                        .formatted(keyId, ciphertext))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Plaintext", equalTo(plaintext))
+                .body("KeyId", startsWith("arn:aws:kms:"))
+                .body("EncryptionAlgorithm", equalTo("RSAES_OAEP_SHA_256"));
+    }
+
+    /**
+     * The envelope pattern from issue #3024: only the encrypting side holds the public key from
+     * GetPublicKey, encrypts locally with RSA-OAEP, and Decrypt accepts that ciphertext. Real
+     * AWS returns the plaintext here.
+     */
+    @Test
+    void decryptAcceptsRsaOaepCiphertextMadeWithGetPublicKey() throws Exception {
+        String keyId = createRsaEncryptionKey();
+
+        String publicKeyBase64 = given()
+                .header("X-Amz-Target", "TrentService.GetPublicKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeySpec", equalTo("RSA_2048"))
+                .body("KeyUsage", equalTo("ENCRYPT_DECRYPT"))
+                .body("EncryptionAlgorithms", equalTo(List.of("RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256")))
+                .extract().path("PublicKey");
+
+        var publicKey = java.security.KeyFactory.getInstance("RSA").generatePublic(
+                new java.security.spec.X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyBase64)));
+        var cipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding");
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
+                "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256,
+                javax.crypto.spec.PSource.PSpecified.DEFAULT));
+        byte[] localCiphertext = cipher.doFinal("secret payload".getBytes(StandardCharsets.UTF_8));
+
+        given()
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"CiphertextBlob\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
+                        .formatted(keyId, Base64.getEncoder().encodeToString(localCiphertext)))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Plaintext", equalTo(Base64.getEncoder()
+                        .encodeToString("secret payload".getBytes(StandardCharsets.UTF_8))));
+    }
+
+    /**
+     * Real KMS rejects Encrypt on an RSA key when EncryptionAlgorithm is left at its
+     * SYMMETRIC_DEFAULT default: InvalidKeyUsageException with this exact message.
+     */
+    @Test
+    void rsaEncryptWithDefaultAlgorithmReturnsInvalidKeyUsage() {
+        String keyId = createRsaEncryptionKey();
+        String plaintext = Base64.getEncoder().encodeToString("secret payload".getBytes(StandardCharsets.UTF_8));
+
+        given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\"}".formatted(keyId, plaintext))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048."));
+    }
+
+    /**
+     * The Decrypt-side twin of the test above, with the algorithm left at its default.
+     * Real KMS parses the ciphertext before comparing the defaulted SYMMETRIC_DEFAULT
+     * algorithm with the named key's spec, so a raw RSA ciphertext answers
+     * InvalidCiphertextException, measured against real AWS in us-east-1.
+     */
+    @Test
+    void rsaDecryptWithDefaultAlgorithmReturnsInvalidCiphertext() {
+        String keyId = createRsaEncryptionKey();
+        String plaintext = Base64.getEncoder().encodeToString("secret payload".getBytes(StandardCharsets.UTF_8));
+
+        String ciphertext = given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
+                        .formatted(keyId, plaintext))
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("CiphertextBlob");
+
+        given()
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"CiphertextBlob\":\"%s\"}".formatted(keyId, ciphertext))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidCiphertextException"));
+    }
+
+    /**
+     * ReEncrypt threads SourceEncryptionAlgorithm and DestinationEncryptionAlgorithm
+     * independently. Re-wrapping a symmetric ciphertext under an RSA key makes the two
+     * response fields differ, which pins the source/destination wiring.
+     */
+    @Test
+    void reEncryptFromSymmetricToRsaEchoesBothAlgorithms() {
+        String symmetricKeyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"symmetric source\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+        String rsaKeyId = createRsaEncryptionKey();
+        String plaintext = Base64.getEncoder().encodeToString("secret payload".getBytes(StandardCharsets.UTF_8));
+
+        String symmetricCiphertext = given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\"}".formatted(symmetricKeyId, plaintext))
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("CiphertextBlob");
+
+        var reEncryptResponse = given()
+                .header("X-Amz-Target", "TrentService.ReEncrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body(("{\"CiphertextBlob\":\"%s\",\"SourceKeyId\":\"%s\",\"DestinationKeyId\":\"%s\","
+                        + "\"DestinationEncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}")
+                        .formatted(symmetricCiphertext, symmetricKeyId, rsaKeyId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyId", startsWith("arn:aws:kms:"))
+                .body("SourceKeyId", startsWith("arn:aws:kms:"))
+                .body("SourceEncryptionAlgorithm", equalTo("SYMMETRIC_DEFAULT"))
+                .body("DestinationEncryptionAlgorithm", equalTo("RSAES_OAEP_SHA_256"))
+                .extract().jsonPath();
+
+        String rsaCiphertext = reEncryptResponse.getString("CiphertextBlob");
+        assertEquals(256, Base64.getDecoder().decode(rsaCiphertext).length);
+
+        given()
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"CiphertextBlob\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
+                        .formatted(rsaKeyId, rsaCiphertext))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Plaintext", equalTo(plaintext));
+    }
+
+    private String createRsaEncryptionKey() {
+        return given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"ENCRYPT_DECRYPT\",\"KeySpec\":\"RSA_2048\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
     }
 }

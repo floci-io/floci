@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
@@ -7,6 +8,7 @@ import io.github.hectorvent.floci.services.ses.model.Tag;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.security.SecureRandom;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,7 +28,7 @@ class SesTemplateServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new SesTemplateService(new InMemoryStorage<>());
+        service = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(), new SecureRandom());
     }
 
     private static EmailTemplate template(String name) {

@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * Covers CreateUserPoolDomain/DescribeUserPoolDomain/DeleteUserPoolDomain (lex00/floci#63)
+ * Covers CreateUserPoolDomain/DescribeUserPoolDomain/UpdateUserPoolDomain/DeleteUserPoolDomain (lex00/floci#63)
  * for both an Amazon Cognito prefix domain and a custom domain fronted by an ACM certificate.
  */
 @QuarkusTest
@@ -29,6 +29,8 @@ class CognitoUserPoolDomainIntegrationTest {
     private static String prefixDomain;
     private static String customDomain;
     private static final String CERTIFICATE_ARN =
+            "arn:aws:acm:us-east-1:000000000000:certificate/" + UUID.randomUUID();
+    private static final String RENEWED_CERTIFICATE_ARN =
             "arn:aws:acm:us-east-1:000000000000:certificate/" + UUID.randomUUID();
 
     @BeforeAll
@@ -142,6 +144,56 @@ class CognitoUserPoolDomainIntegrationTest {
 
     @Test
     @Order(8)
+    void updateCustomDomainReplacesTheCertificateAndKeepsTheCloudFrontDistribution() throws Exception {
+        String cloudFront = cognitoJson("DescribeUserPoolDomain", """
+                {
+                  "Domain": "%s"
+                }
+                """.formatted(customDomain)).path("DomainDescription").path("CloudFrontDistribution").asText();
+
+        JsonNode response = cognitoJson("UpdateUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "%s",
+                  "CustomDomainConfig": {
+                    "CertificateArn": "%s"
+                  },
+                  "ManagedLoginVersion": 2
+                }
+                """.formatted(customDomain, poolId, RENEWED_CERTIFICATE_ARN));
+
+        // As on AWS, the distribution survives a certificate change, so a DNS alias stays valid.
+        assertEquals(cloudFront, response.path("CloudFrontDomain").asText());
+        assertEquals(2, response.path("ManagedLoginVersion").asInt());
+
+        JsonNode description = cognitoJson("DescribeUserPoolDomain", """
+                {
+                  "Domain": "%s"
+                }
+                """.formatted(customDomain)).path("DomainDescription");
+        assertEquals(RENEWED_CERTIFICATE_ARN, description.path("CustomDomainConfig").path("CertificateArn").asText());
+        assertEquals(cloudFront, description.path("CloudFrontDistribution").asText());
+        assertEquals(2, description.path("ManagedLoginVersion").asInt());
+    }
+
+    @Test
+    @Order(9)
+    void updateDomainOfAnotherPoolIsNotFound() {
+        cognitoAction("UpdateUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "us-east-1_missing",
+                  "CustomDomainConfig": {
+                    "CertificateArn": "%s"
+                  }
+                }
+                """.formatted(customDomain, CERTIFICATE_ARN))
+                .then()
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(10)
     void createCustomDomainWithoutCertificateArnFails() {
         cognitoAction("CreateUserPoolDomain", """
                 {
@@ -156,7 +208,7 @@ class CognitoUserPoolDomainIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void deleteCustomDomainThenDescribeIsNotFound() {
         cognitoAction("DeleteUserPoolDomain", """
                 {
@@ -178,7 +230,7 @@ class CognitoUserPoolDomainIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(12)
     void deleteUserPoolWithDomainIsRejected() throws Exception {
         // The DeleteUserPool API reference's own example documents this refusal verbatim.
         String blockingDomain = "floci-block-" + UUID.randomUUID().toString().substring(0, 8);
@@ -211,7 +263,7 @@ class CognitoUserPoolDomainIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(13)
     void deleteUserPoolSucceedsOnceDomainIsGone() {
         cognitoAction("DeleteUserPool", """
                 {

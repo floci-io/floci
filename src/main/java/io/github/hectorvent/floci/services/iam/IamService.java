@@ -1825,6 +1825,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .map(SessionCredential::getSecretAccessKey));
     }
 
+    /**
+     * The session token issued alongside a temporary credential, for callers that must tell a
+     * missing token apart from one that does not match.
+     *
+     * <p>Empty means the token cannot be verified, not that any token is acceptable: the key is
+     * not a temporary credential, names no session Floci minted, or names a session stored before
+     * tokens were recorded. A caller that treats the token as required must check
+     * {@link #isTemporaryAccessKey(String)} separately. Where that distinction does not matter,
+     * {@link #findSecretKey(String, String)} resolves the secret and matches the token in one step.
+     */
+    public Optional<String> findSessionToken(String accessKeyId) {
+        return currentSession(accessKeyId)
+                .map(SessionCredential::getSessionToken)
+                .filter(token -> !token.isBlank());
+    }
+
     /** Whether an access key ID identifies Floci's documented public deployer credential. */
     public boolean isSeededDeployerAccessKey(String accessKeyId) {
         return DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(accessKeyId);
@@ -2153,7 +2169,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return Optional.empty();
     }
 
-    private static boolean isTemporaryAccessKey(String accessKeyId) {
+    /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */
+    public static boolean isTemporaryAccessKey(String accessKeyId) {
         return accessKeyId != null && accessKeyId.startsWith(TEMPORARY_ACCESS_KEY_PREFIX);
     }
 

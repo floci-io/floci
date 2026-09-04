@@ -4,6 +4,8 @@ class PartiQLExecuteContext {
 
     private Integer limit;
     private String nextToken;
+    private String tokenBinding;
+    private boolean consistentRead;
 
     private PartiQLExecuteContext() {
     }
@@ -22,11 +24,29 @@ class PartiQLExecuteContext {
         return this;
     }
 
+    PartiQLExecuteContext tokenBinding(String tokenBinding) {
+        this.tokenBinding = tokenBinding;
+        return this;
+    }
+
+    PartiQLExecuteContext consistentRead(boolean consistentRead) {
+        this.consistentRead = consistentRead;
+        return this;
+    }
+
+    boolean consistentRead() {
+        return consistentRead;
+    }
+
     Integer limit() {
         return limit;
     }
 
     String nextToken() {
         return nextToken;
+    }
+
+    String tokenBinding() {
+        return tokenBinding;
     }
 }

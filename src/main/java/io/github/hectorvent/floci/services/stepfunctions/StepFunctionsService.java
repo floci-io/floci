@@ -52,6 +52,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     // When each pending token last showed progress, so a Task's HeartbeatSeconds can bound the gap
     // between heartbeats instead of the whole wait.
     private final Map<String, Long> taskHeartbeatNanos = new ConcurrentHashMap<>();
+    // Serializes the StartExecution check-and-create so two concurrent calls with the same name cannot
+    // both create and launch an execution; also enables AWS idempotent-success for STANDARD workflows.
+    private final Object executionStartLock = new Object();
     private final RegionResolver regionResolver;
     private final AslExecutor aslExecutor;
     private final ObjectMapper objectMapper;
@@ -527,29 +530,42 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         var execName = (name != null && !name.isBlank()) ? name : UUID.randomUUID().toString();
         var arn = regionResolver.buildArn("states", region, "execution:" + sm.getName() + ":" + execName);
 
-        if (executionStore.get(arn).isPresent()) {
-            throw new AwsException("ExecutionAlreadyExists", "Execution already exists: " + arn, 400);
+        Execution exec;
+        ExecutionHistory history;
+        synchronized (executionStartLock) {
+            Optional<Execution> existing = executionStore.get(arn);
+            if (existing.isPresent()) {
+                Execution prior = existing.get();
+                // AWS idempotency (STANDARD only): the same name + same input while the original is still
+                // RUNNING returns the original execution as a success; a different input, or a closed
+                // execution with that name, is a conflict. EXPRESS workflows get no idempotency guarantee.
+                if ("STANDARD".equals(sm.getType())
+                        && "RUNNING".equals(prior.getStatus())
+                        && Objects.equals(prior.getInput(), input)) {
+                    return prior;
+                }
+                throw new AwsException("ExecutionAlreadyExists", "Execution already exists: " + arn, 400);
+            }
+
+            exec = new Execution();
+            exec.setExecutionArn(arn);
+            exec.setStateMachineArn(selection.stateMachineArn());
+            exec.setName(execName);
+            exec.setInput(input);
+            exec.setStatus("RUNNING");
+            executionStore.put(arn, exec);
+
+            history = new ExecutionHistory();
+            var startEvent = new HistoryEvent();
+            startEvent.setId(1L);
+            startEvent.setPreviousEventId(0L);
+            startEvent.setType("ExecutionStarted");
+            startEvent.setDetails(Map.of("input", input != null ? input : "{}",
+                                         "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : "",
+                                         "inputDetails", Map.of("truncated", false)));
+            history.add(startEvent);
+            historyCache.put(arn, history);
         }
-
-        var exec = new Execution();
-        exec.setExecutionArn(arn);
-        exec.setStateMachineArn(selection.stateMachineArn());
-        exec.setName(execName);
-        exec.setInput(input);
-        exec.setStatus("RUNNING");
-
-        executionStore.put(arn, exec);
-
-        var history = new ExecutionHistory();
-        var startEvent = new HistoryEvent();
-        startEvent.setId(1L);
-        startEvent.setPreviousEventId(0L);
-        startEvent.setType("ExecutionStarted");
-        startEvent.setDetails(Map.of("input", input != null ? input : "{}",
-                                     "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : "",
-                                     "inputDetails", Map.of("truncated", false)));
-        history.add(startEvent);
-        historyCache.put(arn, history);
 
         LOG.infov("Started execution: {0}", arn);
 
@@ -1767,6 +1783,16 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                 }
             }
             collectTopLevelReferences(statePath, stateDef, errors);
+        }
+
+        // Structurally validate JSONPath Choice rules (comparator allowlist, exactly-one operator,
+        // per-family operand types, And/Or/Not shapes, Next placement). JSONata Choice uses a
+        // Condition string and is validated elsewhere.
+        if (choiceType && !stateIsJsonata && stateDef.path("Choices").isArray()) {
+            JsonNode choices = stateDef.path("Choices");
+            for (int i = 0; i < choices.size(); i++) {
+                ChoiceOperators.validateChoiceRule(statePath + "/Choices/" + i, choices.get(i), true, errors);
+            }
         }
 
         if ("Map".equals(stateType)) {

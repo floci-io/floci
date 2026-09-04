@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.neptune.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class NeptuneInstance {
@@ -17,6 +19,15 @@ public class NeptuneInstance {
     private boolean iamDatabaseAuthenticationEnabled;
     private String dbInstanceArn;
     private String dbiResourceId;
+    private String availabilityZone;
+    private boolean autoMinorVersionUpgrade = true;
+    private int promotionTier = 1;
+    private boolean publiclyAccessible;
+    private String dbParameterGroupName;
+    private String dbSubnetGroupName;
+    private String preferredBackupWindow;
+    private String preferredMaintenanceWindow;
+    private Map<String, String> tags = new LinkedHashMap<>();
     private Instant createdAt;
 
     public NeptuneInstance() {}
@@ -53,6 +64,39 @@ public class NeptuneInstance {
     public String getDbiResourceId() { return dbiResourceId; }
     public void setDbiResourceId(String dbiResourceId) { this.dbiResourceId = dbiResourceId; }
 
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>();
+    }
+
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+
+    public String getAvailabilityZone() { return availabilityZone; }
+    public void setAvailabilityZone(String availabilityZone) { this.availabilityZone = availabilityZone; }
+
+    public boolean isAutoMinorVersionUpgrade() { return autoMinorVersionUpgrade; }
+    public void setAutoMinorVersionUpgrade(boolean autoMinorVersionUpgrade) {
+        this.autoMinorVersionUpgrade = autoMinorVersionUpgrade;
+    }
+
+    public int getPromotionTier() { return promotionTier; }
+    public void setPromotionTier(int promotionTier) { this.promotionTier = promotionTier; }
+
+    public boolean isPubliclyAccessible() { return publiclyAccessible; }
+    public void setPubliclyAccessible(boolean publiclyAccessible) { this.publiclyAccessible = publiclyAccessible; }
+
+    public String getDbParameterGroupName() { return dbParameterGroupName; }
+    public void setDbParameterGroupName(String dbParameterGroupName) { this.dbParameterGroupName = dbParameterGroupName; }
+
+    public String getDbSubnetGroupName() { return dbSubnetGroupName; }
+    public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
+
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String preferredBackupWindow) { this.preferredBackupWindow = preferredBackupWindow; }
+
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) {
+        this.preferredMaintenanceWindow = preferredMaintenanceWindow;
+    }
 }

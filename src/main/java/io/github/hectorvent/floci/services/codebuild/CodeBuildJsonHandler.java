@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class CodeBuildJsonHandler {
@@ -121,8 +122,10 @@ public class CodeBuildJsonHandler {
         List<String> names = new ArrayList<>();
         req.path("names").forEach(n -> names.add(n.asText()));
         List<Project> found = service.batchGetProjects(region, names);
-        List<String> foundNames = found.stream().map(Project::getName).toList();
-        List<String> notFound = names.stream().filter(n -> !foundNames.contains(n)).toList();
+        List<String> foundIdentifiers = found.stream()
+                .flatMap(project -> Stream.of(project.getName(), project.getArn()))
+                .toList();
+        List<String> notFound = names.stream().filter(n -> !foundIdentifiers.contains(n)).toList();
         return Response.ok(Map.of("projects", found, "projectsNotFound", notFound)).build();
     }
 

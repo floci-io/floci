@@ -127,6 +127,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      honour-architectures: false
       # aws-config-path:
       hot-reload:
         enabled: true
@@ -373,6 +374,8 @@ floci:
     route53resolver:
       enabled: true
     connect:
+      enabled: true
+    cognitoidentity:
       enabled: true
     aps:
       enabled: true

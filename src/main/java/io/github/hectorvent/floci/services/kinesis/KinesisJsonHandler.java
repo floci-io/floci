@@ -638,7 +638,7 @@ public class KinesisJsonHandler {
         }
 
         int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt(1000) : 1000;
-        List<KinesisShard> page = shards.size() > maxResults ? shards.subList(0, maxResults) : shards;
+        List<KinesisShard> page = paginateShards(shards, maxResults);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode shardsArray = response.putArray("Shards");
@@ -664,6 +664,18 @@ public class KinesisJsonHandler {
         response.putNull("NextToken");
 
         return Response.ok(response).build();
+    }
+
+    /**
+     * Take a ListShards page, snapshotting first. The shard list is a live
+     * {@link java.util.concurrent.CopyOnWriteArrayList}: its {@code subList} view is NOT an independent
+     * snapshot. It stays bound to the backing array and throws {@link java.util.ConcurrentModificationException}
+     * the moment a concurrent split/merge appends a shard. Copying to an immutable list first gives a page
+     * that reads consistently regardless of concurrent resharding.
+     */
+    static List<KinesisShard> paginateShards(List<KinesisShard> shards, int maxResults) {
+        List<KinesisShard> snapshot = List.copyOf(shards);
+        return snapshot.size() > maxResults ? snapshot.subList(0, maxResults) : snapshot;
     }
 
     private Response handleEnableEnhancedMonitoring(JsonNode request, String region) {
