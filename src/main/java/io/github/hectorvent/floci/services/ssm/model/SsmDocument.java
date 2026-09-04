@@ -103,7 +103,39 @@ public class SsmDocument {
         this.versions = versions != null ? new LinkedHashMap<>(versions) : new LinkedHashMap<>();
     }
 
+    /**
+     * Whether {@code version} could ever have existed on this document. A document persisted
+     * before {@link #versions} was introduced backfills only its current version's content (the
+     * older content was never retained), so a document already at version 3 when this field
+     * shipped has no recorded content for "1" or "2" even though both were real, valid versions.
+     * Falling back to a numeric range check (rather than requiring map membership) keeps those
+     * legacy version numbers resolvable instead of permanently rejecting them as invalid.
+     */
+    public boolean hasVersion(String version) {
+        if (version == null) {
+            return false;
+        }
+        if (getVersions().containsKey(version)) {
+            return true;
+        }
+        try {
+            long requested = Long.parseLong(version);
+            return requested >= 1 && requested <= documentVersion;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Content for {@code version}, or the current content as a best-effort fallback when the
+     * version is valid ({@link #hasVersion}) but its original content was never retained. Returns
+     * {@code null} only when the version could not have existed at all.
+     */
     public String getContentForVersion(String version) {
-        return getVersions().get(version);
+        String stored = getVersions().get(version);
+        if (stored != null) {
+            return stored;
+        }
+        return hasVersion(version) ? content : null;
     }
 }

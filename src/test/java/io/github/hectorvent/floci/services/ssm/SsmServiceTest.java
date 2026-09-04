@@ -733,6 +733,38 @@ class SsmServiceTest {
         assertEquals("InvalidDocumentVersion", exTooHigh.getErrorCode());
     }
 
+    /**
+     * A document persisted before {@code Versions} was tracked deserializes with an empty
+     * versions map even though its DocumentVersion may already be past 1 (issue found in PR #3057
+     * review): only its current content was ever retained, so versions "1"/"2" have no recorded
+     * content, but they are still valid version numbers that must not be rejected.
+     */
+    @Test
+    void testCreateAssociation_LegacyDocumentVersionWithoutHistoryIsStillValid() {
+        InMemoryStorage<String, SsmDocument> legacyDocumentStore = new InMemoryStorage<>();
+        SsmDocument legacyDoc = new SsmDocument();
+        legacyDoc.setName("LegacyDoc");
+        legacyDoc.setDocumentType("Command");
+        legacyDoc.setContent("v3-content");
+        legacyDoc.setDocumentVersion(3);
+        legacyDocumentStore.put("us-east-1::LegacyDoc", legacyDoc);
+        SsmService service = new SsmService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                legacyDocumentStore, new InMemoryStorage<>(), 5,
+                new RegionResolver("us-east-1", "123456789012"));
+
+        assertTrue(legacyDoc.hasVersion("1"));
+        assertTrue(legacyDoc.hasVersion("2"));
+        assertTrue(legacyDoc.hasVersion("3"));
+        assertFalse(legacyDoc.hasVersion("4"));
+        assertEquals("v3-content", legacyDoc.getContentForVersion("1"),
+                "content for a legacy version predating history is a best-effort fallback to current content");
+
+        SsmAssociation assoc = service.createAssociation(
+                "LegacyDoc", "legacy-assoc", "1", "i-12345", null, null, null, "us-east-1");
+        assertEquals("1", assoc.getDocumentVersion());
+    }
+
     @Test
     void testUpdateAssociation_InvalidDocumentVersionThrows() {
         String region = "us-east-1";

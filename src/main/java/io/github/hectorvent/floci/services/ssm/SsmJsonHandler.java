@@ -431,12 +431,12 @@ public class SsmJsonHandler {
 
         if (requestedVersion != null && !requestedVersion.isBlank()
                 && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
-            if (!document.getVersions().containsKey(requestedVersion)) {
+            if (!document.hasVersion(requestedVersion)) {
                 throw new AwsException("InvalidDocumentVersion",
                         "The document version is not valid or does not exist.", 400);
             }
             effectiveVersion = requestedVersion;
-            effectiveContent = document.getVersions().get(requestedVersion);
+            effectiveContent = document.getContentForVersion(requestedVersion);
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -1204,12 +1204,12 @@ public class SsmJsonHandler {
 
         if (requestedVersion != null && !requestedVersion.isBlank()
                 && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
-            if (!document.getVersions().containsKey(requestedVersion)) {
+            if (!document.hasVersion(requestedVersion)) {
                 throw new AwsException("InvalidDocumentVersion",
                         "The document version is not valid or does not exist.", 400);
             }
             effectiveVersion = requestedVersion;
-            effectiveContent = document.getVersions().get(requestedVersion);
+            effectiveContent = document.getContentForVersion(requestedVersion);
         }
 
         ObjectNode response = objectMapper.createObjectNode();

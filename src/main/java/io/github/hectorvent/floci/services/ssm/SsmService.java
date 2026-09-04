@@ -468,15 +468,18 @@ public class SsmService implements ResourceProvider {
      * Rejects a {@code DocumentVersion} that cannot resolve on the target document.
      * Stored document versions are retained across updates, so numeric versions are accepted
      * when they exist in the document's version history; {@code $LATEST}/{@code $DEFAULT}
-     * always resolve to the current version. Non-existent versions or malformed inputs throw
-     * {@code InvalidDocumentVersion}, matching AWS SSM behavior.
+     * always resolve to the current version. {@link SsmDocument#hasVersion} also accepts a
+     * numeric version that predates the retained history (see its javadoc) rather than rejecting
+     * a version that legitimately existed just because its content was never captured.
+     * Non-existent versions or malformed inputs throw {@code InvalidDocumentVersion}, matching
+     * AWS SSM behavior.
      */
     private void validateDocumentVersion(SsmDocument document, String documentVersion) {
         if (documentVersion == null || documentVersion.isBlank()
                 || "$LATEST".equals(documentVersion) || "$DEFAULT".equals(documentVersion)) {
             return;
         }
-        if (!document.getVersions().containsKey(documentVersion)) {
+        if (!document.hasVersion(documentVersion)) {
             throw new AwsException("InvalidDocumentVersion",
                     "The document version is not valid or does not exist.", 400);
         }
