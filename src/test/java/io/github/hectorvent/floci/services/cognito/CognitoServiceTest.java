@@ -3343,6 +3343,19 @@ class CognitoServiceTest {
     }
 
     @Test
+    void createUserPoolDomainRejectsAnAcmArnThatIsNotACertificate() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        String notACertificate = "arn:aws:acm:us-east-1:000000000000:certificate-authority/11111111-2222-3333-4444-555555555555";
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", notACertificate), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(AWS_CERTIFICATE_MESSAGE, failure.getMessage());
+        verify(acmService, never()).describeCertificate(any(), any());
+    }
+
+    @Test
     void createUserPoolDomainRejectsAMalformedCertificateArn() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
 
@@ -3351,6 +3364,36 @@ class CognitoServiceTest {
 
         assertEquals("InvalidParameterException", failure.getErrorCode());
         verify(acmService, never()).describeCertificate(any(), any());
+    }
+
+    @Test
+    void createUserPoolDomainStoresNothingWhenTheCertificateVanishesBeforeRegistration() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(acmService).addInUseBy(eq(CERTIFICATE_ARN), any(), eq("us-east-1"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(AWS_CERTIFICATE_MESSAGE, failure.getMessage());
+        assertThrows(AwsException.class, () -> service.describeUserPoolDomain("auth.example.com"));
+    }
+
+    @Test
+    void updateUserPoolDomainKeepsTheCurrentCertificateWhenTheNewOneVanishesBeforeRegistration() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(acmService).addInUseBy(eq(RENEWED_CERTIFICATE_ARN), any(), eq("us-east-1"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN), 2));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        UserPoolDomain stored = service.describeUserPoolDomain("auth.example.com");
+        assertEquals(CERTIFICATE_ARN, stored.getCertificateArn());
+        assertEquals(1, stored.getManagedLoginVersion());
+        verify(acmService, never()).removeInUseBy(any(), any(), any());
     }
 
     @Test

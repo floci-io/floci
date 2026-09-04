@@ -1123,11 +1123,10 @@ public class CognitoService implements ResourceProvider {
             userPoolDomain.setCloudFrontDistribution(generateCloudFrontDomain());
         }
 
-        domainStore.put(domain, userPoolDomain);
         if (userPoolDomain.isCustomDomain()) {
-            acmService.addInUseBy(userPoolDomain.getCertificateArn(),
-                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+            registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
         }
+        domainStore.put(domain, userPoolDomain);
         LOG.infov("Created User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
     }
@@ -1153,19 +1152,26 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
         }
         String previousCertificateArn = userPoolDomain.getCertificateArn();
+        String certificateArn = previousCertificateArn;
         if (customDomainConfig != null) {
             if (!userPoolDomain.isCustomDomain()) {
                 throw new AwsException("InvalidParameterException",
                         "CustomDomainConfig cannot be set on an Amazon Cognito prefix domain", 400);
             }
-            String certificateArn = (String) customDomainConfig.get("CertificateArn");
+            certificateArn = (String) customDomainConfig.get("CertificateArn");
             if (certificateArn == null || certificateArn.isBlank()) {
                 throw new AwsException("InvalidParameterException",
                         "CertificateArn is required in CustomDomainConfig", 400);
             }
-            if (!certificateArn.equals(previousCertificateArn)) {
-                requireUsableCertificate(certificateArn);
-            }
+        }
+        // A new certificate is checked and registered before anything changes, so a failure leaves
+        // the domain on its current certificate.
+        boolean certificateChanged = !Objects.equals(certificateArn, previousCertificateArn);
+        if (certificateChanged) {
+            requireUsableCertificate(certificateArn);
+            registerCertificateUse(certificateArn, userPoolDomain);
+        }
+        if (customDomainConfig != null) {
             userPoolDomain.setCertificateArn(certificateArn);
             Object securityPolicy = customDomainConfig.get("SecurityPolicy");
             if (securityPolicy != null) {
@@ -1177,10 +1183,9 @@ public class CognitoService implements ResourceProvider {
         }
         userPoolDomain.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         domainStore.put(domain, userPoolDomain);
-        if (!Objects.equals(previousCertificateArn, userPoolDomain.getCertificateArn())) {
-            String consumer = cloudFrontDistributionArn(userPoolDomain);
-            acmService.removeInUseBy(previousCertificateArn, consumer, CERTIFICATE_REGION);
-            acmService.addInUseBy(userPoolDomain.getCertificateArn(), consumer, CERTIFICATE_REGION);
+        if (certificateChanged) {
+            acmService.removeInUseBy(previousCertificateArn,
+                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
         }
         LOG.infov("Updated User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
@@ -1200,6 +1205,21 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
+     * Registers the domain on its certificate before the domain is stored or changed, so a
+     * certificate that disappears between the check and the registration leaves nothing behind.
+     */
+    private void registerCertificateUse(String certificateArn, UserPoolDomain userPoolDomain) {
+        try {
+            acmService.addInUseBy(certificateArn, cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+    }
+
+    /**
      * AWS accepts only an issued ACM certificate from us-east-1 behind a custom domain, and answers
      * anything else with this one message.
      */
@@ -1210,7 +1230,8 @@ public class CognitoService implements ResourceProvider {
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
-        if (!"acm".equals(arn.service()) || !CERTIFICATE_REGION.equals(arn.region())) {
+        if (!"acm".equals(arn.service()) || !CERTIFICATE_REGION.equals(arn.region())
+                || !arn.resource().startsWith("certificate/")) {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
         Certificate certificate;
