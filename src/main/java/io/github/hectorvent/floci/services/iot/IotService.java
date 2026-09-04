@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.iot.model.Thing;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql;
+import io.github.hectorvent.floci.services.iot.rules.RuleSqlContext;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlEvaluator;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParseException;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParser;
@@ -47,6 +48,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -195,7 +197,7 @@ public class IotService {
         this.firehoseService = firehoseService;
         this.cloudWatchLogsService = cloudWatchLogsService;
         this.certificateAuthority = certificateAuthority;
-        this.ruleSqlEvaluator = new RuleSqlEvaluator(objectMapper);
+        this.ruleSqlEvaluator = new RuleSqlEvaluator(objectMapper, Clock.systemUTC());
     }
 
     public String describeEndpoint(String endpointType) {
@@ -655,10 +657,11 @@ public class IotService {
     }
 
     public void publish(String topic, byte[] payload) {
-        publish(topic, payload, false, 0, null);
+        publish(topic, payload, false, 0, null, null);
     }
 
-    public void publish(String topic, byte[] payload, boolean retain, int qos, String region) {
+    /** {@code clientId} is the MQTT client that published, or null for a message that did not come over MQTT. */
+    public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         if (retain) {
             if (eventPayload.length == 0) {
@@ -672,7 +675,7 @@ public class IotService {
                 retainedMessageStore.put(retainedMessageKey(topic), retained);
             }
         }
-        handlePublish(topic, eventPayload, true, region);
+        handlePublish(topic, eventPayload, true, region, clientId);
     }
 
     public void deleteConnection(String clientId, boolean cleanSession) {
@@ -1056,7 +1059,7 @@ public class IotService {
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
     }
 
-    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region) {
+    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region, String clientId) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         publishEventRecorder.record(topic, eventPayload);
         if (!evaluateRules) {
@@ -1064,7 +1067,7 @@ public class IotService {
         }
         for (IotTopicRule rule : rulesForPublish(region)) {
             if (!rule.isRuleDisabled()) {
-                matchAndProject(rule, topic, eventPayload)
+                matchAndProject(rule, topic, clientId, eventPayload)
                         .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
             }
         }
@@ -1075,7 +1078,7 @@ public class IotService {
      * fire for this message. Rules whose SQL could not be parsed take the pre-parser path: the
      * topic filter is read straight out of the SQL and the payload is forwarded untouched.
      */
-    private Optional<byte[]> matchAndProject(IotTopicRule rule, String topic, byte[] payload) {
+    private Optional<byte[]> matchAndProject(IotTopicRule rule, String topic, String clientId, byte[] payload) {
         RuleSql query = ruleQuery(rule);
         if (query == null) {
             return topicMatches(extractTopicPattern(rule.getSql()), topic) ? Optional.of(payload) : Optional.empty();
@@ -1083,7 +1086,9 @@ public class IotService {
         if (!topicMatches(query.topicFilter(), topic)) {
             return Optional.empty();
         }
-        return ruleSqlEvaluator.evaluate(rule.getRuleName(), query, topic, payload);
+        RuleSqlContext context = new RuleSqlContext(topic, clientId,
+                AwsArnUtils.accountOrDefault(rule.getRuleArn(), config.defaultAccountId()));
+        return ruleSqlEvaluator.evaluate(rule.getRuleName(), query, context, payload);
     }
 
     /**
@@ -1265,7 +1270,7 @@ public class IotService {
             case "republish" -> {
                 String targetTopic = action.path("topic").asText(null);
                 if (targetTopic != null && !targetTopic.isBlank()) {
-                    handlePublish(targetTopic, payload, false, region);
+                    handlePublish(targetTopic, payload, false, region, null);
                     mqttBrokerService.publish(targetTopic, payload);
                 }
             }

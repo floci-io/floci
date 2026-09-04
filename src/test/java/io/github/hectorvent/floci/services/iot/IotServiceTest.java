@@ -137,7 +137,7 @@ class IotServiceTest {
     }
 
     private void publish(String payload) {
-        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION);
+        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null);
     }
 
     private JsonNode capturedInvocationPayload(String functionArn) throws Exception {

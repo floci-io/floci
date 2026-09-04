@@ -19,13 +19,13 @@ class IotTopicRuleSqlStrictIntegrationTest {
     void strictModeRejectsAStatementOutsideTheSubset() {
         given()
             .contentType("application/json")
-            .body(rule("SELECT clientid() as client FROM 'strict/rules/+'"))
+            .body(rule("SELECT principal() as p FROM 'strict/rules/+'"))
         .when()
             .put("/rules/strictRejectedRule")
         .then()
             .statusCode(400)
             .body("__type", equalTo("SqlParseException"))
-            .body("message", containsString("clientid"));
+            .body("message", containsString("principal"));
     }
 
     @Test
