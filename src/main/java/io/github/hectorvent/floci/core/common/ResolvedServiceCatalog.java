@@ -36,6 +36,7 @@ import io.github.hectorvent.floci.services.macie2.MacieController;
 import io.github.hectorvent.floci.services.account.AccountController;
 import io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController;
 import io.github.hectorvent.floci.services.aps.ApsController;
+import io.github.hectorvent.floci.services.controlcatalog.ControlCatalogController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerControlController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
 import io.github.hectorvent.floci.services.rum.RumController;
@@ -584,6 +585,9 @@ public class ResolvedServiceCatalog {
                         "servicecatalog", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AWS242ServiceCatalogService."), Set.of("servicecatalog"), Set.of(), Set.of()),
+                descriptor("controlcatalog", "controlcatalog", config.services().controlcatalog().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("controlcatalog"), Set.of(), Set.of(ControlCatalogController.class)),
                 descriptor("controltower", "controltower", config.services().controltower().enabled(), true,
                         "controltower", storageMode(config.storage().services().controltower().mode(), config.storage().mode()),
                         config.storage().services().controltower().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
