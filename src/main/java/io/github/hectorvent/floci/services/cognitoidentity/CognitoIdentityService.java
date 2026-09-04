@@ -207,7 +207,7 @@ public class CognitoIdentityService {
         }
         IdentityPool pool = findByArn(resourceArn, region);
         pool.getIdentityPoolTags().putAll(tags);
-        pools.put(storageKey(region, pool.getIdentityPoolId()), pool);
+        pools.put(storageKey(pool), pool);
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
@@ -216,7 +216,7 @@ public class CognitoIdentityService {
         }
         IdentityPool pool = findByArn(resourceArn, region);
         tagKeys.forEach(pool.getIdentityPoolTags()::remove);
-        pools.put(storageKey(region, pool.getIdentityPoolId()), pool);
+        pools.put(storageKey(pool), pool);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -301,5 +301,9 @@ public class CognitoIdentityService {
 
     private String storageKey(String region, String identityPoolId) {
         return region + "::" + identityPoolId;
+    }
+
+    private String storageKey(IdentityPool pool) {
+        return storageKey(AwsArnUtils.parse(pool.getArn()).region(), pool.getIdentityPoolId());
     }
 }

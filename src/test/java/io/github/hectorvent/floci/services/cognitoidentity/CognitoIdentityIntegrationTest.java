@@ -28,6 +28,8 @@ class CognitoIdentityIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET = "AWSCognitoIdentityService";
     private static final String USER_POOL_PROVIDER = "cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123";
+    private static final String EU_WEST_1_AUTHORIZATION =
+            "AWS4-HMAC-SHA256 Credential=test/20260101/eu-west-1/cognito-identity/aws4_request";
 
     private static String identityPoolId;
     private static String identityPoolArn;
@@ -377,5 +379,76 @@ class CognitoIdentityIntegrationTest {
         .then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(16)
+    void createIdentityPoolRequiresAllowUnauthenticatedIdentities() {
+        action("CreateIdentityPool")
+            .body("{\"IdentityPoolName\": \"missing member\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value null at 'allowUnauthenticatedIdentities'"
+                    + " failed to satisfy constraint: Member must not be null"));
+    }
+
+    @Test
+    @Order(17)
+    void tagResourceWithCrossRegionArnWritesBackToThePoolRegion() {
+        String euPoolId = action("CreateIdentityPool")
+            .header("Authorization", EU_WEST_1_AUTHORIZATION)
+            .body("{\"IdentityPoolName\": \"eu pool\", \"AllowUnauthenticatedIdentities\": false}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("IdentityPoolId", matchesPattern("eu-west-1:[0-9a-f-]{36}"))
+            .extract().path("IdentityPoolId");
+        String euPoolArn = "arn:aws:cognito-identity:eu-west-1:000000000000:identitypool/" + euPoolId;
+
+        action("TagResource")
+            .body("""
+                {"ResourceArn": "%s", "Tags": {"env": "eu"}}
+                """.formatted(euPoolArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        action("DescribeIdentityPool")
+            .header("Authorization", EU_WEST_1_AUTHORIZATION)
+            .body("{\"IdentityPoolId\": \"" + euPoolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("IdentityPoolTags.env", equalTo("eu"));
+
+        action("DescribeIdentityPool")
+            .body("{\"IdentityPoolId\": \"" + euPoolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        action("ListIdentityPools")
+            .body("{\"MaxResults\": 60}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("IdentityPools.IdentityPoolId", not(hasItem(euPoolId)));
+
+        action("DeleteIdentityPool")
+            .header("Authorization", EU_WEST_1_AUTHORIZATION)
+            .body("{\"IdentityPoolId\": \"" + euPoolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }

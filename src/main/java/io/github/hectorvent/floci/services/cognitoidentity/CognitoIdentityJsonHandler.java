@@ -133,7 +133,7 @@ public class CognitoIdentityJsonHandler {
         IdentityPool pool = new IdentityPool();
         pool.setIdentityPoolId(text(request, "IdentityPoolId"));
         pool.setIdentityPoolName(text(request, "IdentityPoolName"));
-        pool.setAllowUnauthenticatedIdentities(request.path("AllowUnauthenticatedIdentities").asBoolean(false));
+        pool.setAllowUnauthenticatedIdentities(requiredBool(request, "AllowUnauthenticatedIdentities"));
         pool.setAllowClassicFlow(request.path("AllowClassicFlow").asBoolean(false));
         pool.setSupportedLoginProviders(stringMap(request.get("SupportedLoginProviders")));
         pool.setDeveloperProviderName(text(request, "DeveloperProviderName"));
@@ -211,6 +211,16 @@ public class CognitoIdentityJsonHandler {
             return null;
         }
         return value.asBoolean();
+    }
+
+    private boolean requiredBool(JsonNode node, String field) {
+        Boolean value = bool(node, field);
+        if (value == null) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value null at '"
+                    + Character.toLowerCase(field.charAt(0)) + field.substring(1)
+                    + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+        return value;
     }
 
     private Map<String, String> stringMap(JsonNode node) {
