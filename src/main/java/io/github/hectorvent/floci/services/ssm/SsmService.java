@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
+import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -46,6 +47,7 @@ public class SsmService implements ResourceProvider {
     private final StorageBackend<String, List<String>> documentPermissionStore;
     private final StorageBackend<String, SsmDocument> documentStore;
     private final StorageBackend<String, ServiceSetting> serviceSettingStore;
+    private final StorageBackend<String, SsmAssociation> associationStore;
     private final int maxParameterHistory;
     private final RegionResolver regionResolver;
 
@@ -67,6 +69,9 @@ public class SsmService implements ResourceProvider {
                 storageFactory.create("ssm", "ssm-service-settings.json",
                         new TypeReference<>() {
                         }),
+                storageFactory.create("ssm", "ssm-associations.json",
+                        new TypeReference<>() {
+                        }),
                 config.services().ssm().maxParameterHistory(),
                 regionResolver
         );
@@ -80,7 +85,7 @@ public class SsmService implements ResourceProvider {
                StorageBackend<String, List<String>> documentPermissionStore,
                int maxParameterHistory) {
         this(parameterStore, historyStore, documentPermissionStore, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), maxParameterHistory,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), maxParameterHistory,
                 new RegionResolver("us-east-1", "000000000000"));
     }
 
@@ -91,7 +96,7 @@ public class SsmService implements ResourceProvider {
                StorageBackend<String, List<ParameterHistory>> historyStore,
                int maxParameterHistory) {
         this(parameterStore, historyStore, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), maxParameterHistory,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), maxParameterHistory,
                 new RegionResolver("us-east-1", "000000000000"));
     }
 
@@ -101,11 +106,23 @@ public class SsmService implements ResourceProvider {
                StorageBackend<String, SsmDocument> documentStore,
                StorageBackend<String, ServiceSetting> serviceSettingStore,
                int maxParameterHistory, RegionResolver regionResolver) {
+        this(parameterStore, historyStore, documentPermissionStore, documentStore,
+                serviceSettingStore, new InMemoryStorage<>(), maxParameterHistory, regionResolver);
+    }
+
+    SsmService(StorageBackend<String, Parameter> parameterStore,
+               StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
+               StorageBackend<String, SsmDocument> documentStore,
+               StorageBackend<String, ServiceSetting> serviceSettingStore,
+               StorageBackend<String, SsmAssociation> associationStore,
+               int maxParameterHistory, RegionResolver regionResolver) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
         this.documentPermissionStore = documentPermissionStore;
         this.documentStore = documentStore;
         this.serviceSettingStore = serviceSettingStore;
+        this.associationStore = associationStore;
         this.maxParameterHistory = maxParameterHistory;
         this.regionResolver = regionResolver;
     }
@@ -299,8 +316,7 @@ public class SsmService implements ResourceProvider {
     // can round-trip ModifyDocumentPermission -> DescribeDocumentPermission.
     // Both permission operations resolve the document first, so an unknown document
     // raises InvalidDocument instead of silently minting or reporting share state for
-    // a document that does not exist. (ListDocuments still returns an empty list; it
-    // is not wired to documentStore.)
+    // a document that does not exist.
 
     public SsmDocument getDocument(String name, String region) {
         return documentStore.get(regionKey(region, name))
@@ -373,6 +389,101 @@ public class SsmService implements ResourceProvider {
         accountIds.removeAll(accountIdsToRemove);
         documentPermissionStore.put(storageKey, accountIds);
         LOG.debugv("Modified document permission for {0}: {1} account(s) shared", name, accountIds.size());
+    }
+
+    public List<SsmDocument> listDocuments(String region, Map<String, List<String>> filters) {
+        String prefix = regionKey(region, "");
+        List<SsmDocument> docs = documentStore.scan(k -> k.startsWith(prefix));
+        if (filters == null || filters.isEmpty()) {
+            return docs;
+        }
+
+        List<String> nameFilters = findFilterValues(filters, "Name");
+        List<String> typeFilters = findFilterValues(filters, "DocumentType");
+
+        return docs.stream()
+                .filter(d -> nameFilters.isEmpty()
+                        || nameFilters.contains(d.getName())
+                        || nameFilters.stream().anyMatch(n -> d.getName() != null && d.getName().startsWith(n)))
+                .filter(d -> typeFilters.isEmpty()
+                        || typeFilters.stream().anyMatch(t -> t.equalsIgnoreCase(d.getDocumentType())))
+                .toList();
+    }
+
+    private List<String> findFilterValues(Map<String, List<String>> filters, String targetKey) {
+        if (filters == null) {
+            return List.of();
+        }
+        for (Map.Entry<String, List<String>> entry : filters.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(targetKey) && entry.getValue() != null) {
+                return entry.getValue();
+            }
+        }
+        return List.of();
+    }
+
+    // ──────────────────────── Associations ───────────────────────────────────
+
+    public synchronized SsmAssociation createAssociation(
+            String name,
+            String associationName,
+            String documentVersion,
+            String instanceId,
+            List<SsmAssociation.Target> targets,
+            Map<String, List<String>> parameters,
+            String scheduleExpression,
+            String region) {
+        getDocument(name, region);
+        String associationId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+
+        SsmAssociation association = new SsmAssociation();
+        association.setAssociationId(associationId);
+        association.setAssociationName(associationName);
+        association.setName(name);
+        association.setDocumentVersion(documentVersion);
+        association.setInstanceId(instanceId);
+        association.setTargets(targets);
+        association.setParameters(parameters);
+        association.setScheduleExpression(scheduleExpression);
+        association.setStatus(new SsmAssociation.AssociationStatus("Success", "Success", now, null));
+        association.setOverview(new SsmAssociation.AssociationOverview("Success", "Success"));
+        association.setCreatedDate(now);
+        association.setLastExecutionDate(now);
+
+        associationStore.put(regionKey(region, associationId), association);
+        LOG.infov("Created association {0} ({1}) for document {2} in region {3}",
+                associationId, associationName, name, region);
+        return association;
+    }
+
+    public List<SsmAssociation> listAssociations(String region) {
+        String prefix = regionKey(region, "");
+        return associationStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public SsmAssociation describeAssociation(String associationId, String name, String instanceId, String region) {
+        if (associationId != null && !associationId.isBlank()) {
+            return associationStore.get(regionKey(region, associationId))
+                    .orElseThrow(() -> new AwsException("AssociationDoesNotExist",
+                            "The specified association does not exist.", 400));
+        }
+        if (name != null && instanceId != null) {
+            String prefix = regionKey(region, "");
+            return associationStore.scan(k -> k.startsWith(prefix)).stream()
+                    .filter(a -> Objects.equals(a.getName(), name) && Objects.equals(a.getInstanceId(), instanceId))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("AssociationDoesNotExist",
+                            "The specified association does not exist.", 400));
+        }
+        throw new AwsException("AssociationDoesNotExist",
+                "The specified association does not exist.", 400);
+    }
+
+    public synchronized void deleteAssociation(String associationId, String name, String instanceId, String region) {
+        SsmAssociation association = describeAssociation(associationId, name, instanceId, region);
+        associationStore.delete(regionKey(region, association.getAssociationId()));
+        LOG.infov("Deleted association {0} in region {1}", association.getAssociationId(), region);
     }
 
     // ──────────────────────────── Patch Baselines ────────────────────────────
