@@ -1282,6 +1282,7 @@ public class DynamoDbJsonHandler {
 
         List<GlobalSecondaryIndex> gsiCreates = new ArrayList<>();
         List<String> gsiDeletes = new ArrayList<>();
+        List<JsonNode> gsiUpdatesToApply = new ArrayList<>();
         JsonNode gsiUpdates = request.path("GlobalSecondaryIndexUpdates");
         if (!gsiUpdates.isMissingNode() && gsiUpdates.isArray()) {
             for (JsonNode update : gsiUpdates) {
@@ -1322,6 +1323,21 @@ public class DynamoDbJsonHandler {
                 if (!deleteNode.isMissingNode()) {
                     gsiDeletes.add(deleteNode.path("IndexName").asText());
                 }
+                JsonNode updateNode = update.path("Update");
+                if (updateNode.isObject()) {
+                    gsiUpdatesToApply.add(updateNode);
+                }
+            }
+        }
+
+        if (!gsiUpdatesToApply.isEmpty()) {
+            TableDefinition currentTable = dynamoDbService.describeTable(tableName, region);
+            for (JsonNode updateNode : gsiUpdatesToApply) {
+                String indexName = updateNode.path("IndexName").asText();
+                if (currentTable.findGsi(indexName).isEmpty()) {
+                    throw new AwsException("ValidationException",
+                            "The table does not have the specified index: " + indexName, 400);
+                }
             }
         }
 
@@ -1342,6 +1358,28 @@ public class DynamoDbJsonHandler {
 
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
                 gsiCreates, gsiDeletes, newAttrDefs, region);
+
+        for (JsonNode updateNode : gsiUpdatesToApply) {
+            GlobalSecondaryIndex gsi = table.findGsi(updateNode.path("IndexName").asText()).orElseThrow();
+            JsonNode gsiPt = updateNode.path("ProvisionedThroughput");
+            if (gsiPt.isObject()) {
+                if (gsiPt.has("ReadCapacityUnits")) {
+                    gsi.getProvisionedThroughput().setReadCapacityUnits(gsiPt.get("ReadCapacityUnits").asLong());
+                }
+                if (gsiPt.has("WriteCapacityUnits")) {
+                    gsi.getProvisionedThroughput().setWriteCapacityUnits(gsiPt.get("WriteCapacityUnits").asLong());
+                }
+            }
+            JsonNode gsiOnDemand = updateNode.path("OnDemandThroughput");
+            if (gsiOnDemand.isObject()) {
+                if (gsiOnDemand.has("MaxReadRequestUnits")) {
+                    gsi.setOnDemandMaxReadRequestUnits(gsiOnDemand.get("MaxReadRequestUnits").asInt());
+                }
+                if (gsiOnDemand.has("MaxWriteRequestUnits")) {
+                    gsi.setOnDemandMaxWriteRequestUnits(gsiOnDemand.get("MaxWriteRequestUnits").asInt());
+                }
+            }
+        }
 
         JsonNode deletionProtectionNode = request.path("DeletionProtectionEnabled");
         if (!deletionProtectionNode.isMissingNode()) {
