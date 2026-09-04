@@ -495,6 +495,28 @@ class SsmServiceTest {
         // Owner=Amazon/Public/another account id match none: no AWS-owned or cross-account documents
         List<SsmDocument> amazonDocs = ssmService.listDocuments("us-east-1", Map.of("Owner", List.of("Amazon")));
         assertTrue(amazonDocs.isEmpty());
+
+        // Filter by PlatformTypes (all documents default to Windows/Linux/MacOS)
+        List<SsmDocument> windowsDocs = ssmService.listDocuments("us-east-1", Map.of("PlatformTypes", List.of("Windows")));
+        assertEquals(2, windowsDocs.size());
+        List<SsmDocument> aixDocs = ssmService.listDocuments("us-east-1", Map.of("PlatformTypes", List.of("AIX")));
+        assertTrue(aixDocs.isEmpty());
+    }
+
+    @Test
+    void testListDocuments_LegacyNullOwnerMatchesSelfAndAccountId() {
+        InMemoryStorage<String, SsmDocument> legacyDocumentStore = new InMemoryStorage<>();
+        SsmDocument legacyDoc = new SsmDocument("LegacyDoc", "{}", "Command");
+        legacyDocumentStore.put("us-east-1::LegacyDoc", legacyDoc);
+        SsmService service = new SsmService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                legacyDocumentStore, new InMemoryStorage<>(), 5,
+                new RegionResolver("us-east-1", "123456789012"));
+
+        assertNull(legacyDoc.getOwner());
+        assertEquals(1, service.listDocuments("us-east-1", Map.of("Owner", List.of("Self"))).size());
+        assertEquals(1, service.listDocuments("us-east-1", Map.of("Owner", List.of("123456789012"))).size());
+        assertTrue(service.listDocuments("us-east-1", Map.of("Owner", List.of("999999999999"))).isEmpty());
     }
 
     @Test
@@ -655,6 +677,50 @@ class SsmServiceTest {
         assertEquals("10%", found.getMaxErrors());
         assertEquals("50%", found.getMaxConcurrency());
         assertEquals("CRITICAL", found.getComplianceSeverity());
+    }
+
+    @Test
+    void testCreateAssociation_ValidDocumentVersionSucceeds() {
+        String region = "us-east-1";
+        ssmService.createDocument("MyDoc", "{}", "Command", region);
+
+        SsmAssociation assoc = ssmService.createAssociation(
+                "MyDoc", "my-assoc", "1", "i-12345", null, null, null, region);
+        assertEquals("1", assoc.getDocumentVersion());
+
+        SsmAssociation latest = ssmService.createAssociation(
+                "MyDoc", "my-assoc-2", "$LATEST", "i-99999", null, null, null, region);
+        assertEquals("$LATEST", latest.getDocumentVersion());
+    }
+
+    @Test
+    void testCreateAssociation_InvalidDocumentVersionThrows() {
+        String region = "us-east-1";
+        ssmService.createDocument("MyDoc", "{}", "Command", region);
+
+        AwsException exNonNumeric = assertThrows(AwsException.class, () ->
+                ssmService.createAssociation("MyDoc", "my-assoc", "not-a-version", "i-12345", null, null, null, region));
+        assertEquals("InvalidDocumentVersion", exNonNumeric.getErrorCode());
+        assertEquals(400, exNonNumeric.getHttpStatus());
+
+        AwsException exTooHigh = assertThrows(AwsException.class, () ->
+                ssmService.createAssociation("MyDoc", "my-assoc", "99", "i-12345", null, null, null, region));
+        assertEquals("InvalidDocumentVersion", exTooHigh.getErrorCode());
+    }
+
+    @Test
+    void testUpdateAssociation_InvalidDocumentVersionThrows() {
+        String region = "us-east-1";
+        ssmService.createDocument("MyDoc", "{}", "Command", region);
+        SsmAssociation created = ssmService.createAssociation("MyDoc", "my-assoc", null, "i-12345", null, null, null, region);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.updateAssociation(created.getAssociationId(), null, "99", null, null, null, null, null, null, region));
+        assertEquals("InvalidDocumentVersion", ex.getErrorCode());
+
+        // The association's DocumentVersion is unchanged after the rejected update
+        SsmAssociation found = ssmService.describeAssociation(created.getAssociationId(), null, null, region);
+        assertNull(found.getDocumentVersion());
     }
 
     @Test

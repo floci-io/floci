@@ -402,6 +402,8 @@ public class SsmService implements ResourceProvider {
         List<String> nameFilters = findFilterValues(filters, "Name");
         List<String> typeFilters = findFilterValues(filters, "DocumentType");
         List<String> ownerFilters = findFilterValues(filters, "Owner");
+        List<String> platformFilters = findFilterValues(filters, "PlatformTypes");
+        String accountId = regionResolver.getAccountId();
 
         return docs.stream()
                 .filter(d -> nameFilters.isEmpty()
@@ -409,7 +411,11 @@ public class SsmService implements ResourceProvider {
                         || nameFilters.stream().anyMatch(n -> !n.isEmpty() && d.getName() != null && d.getName().startsWith(n)))
                 .filter(d -> typeFilters.isEmpty()
                         || typeFilters.stream().anyMatch(t -> t.equalsIgnoreCase(d.getDocumentType())))
-                .filter(d -> ownerFilters.isEmpty() || ownerFilters.stream().anyMatch(o -> matchesOwner(o, d.getOwner())))
+                .filter(d -> ownerFilters.isEmpty()
+                        || ownerFilters.stream().anyMatch(o -> matchesOwner(o, d.getOwner(), accountId)))
+                .filter(d -> platformFilters.isEmpty()
+                        || (d.getPlatformTypes() != null && platformFilters.stream()
+                                .anyMatch(p -> d.getPlatformTypes().stream().anyMatch(p::equalsIgnoreCase))))
                 .toList();
     }
 
@@ -417,9 +423,12 @@ public class SsmService implements ResourceProvider {
      * Every document visible through {@code documentStore} already belongs to the caller's
      * account (it is an account-partitioned store), so "Self"/"Private"/"All" and the caller's own
      * account id all match every visible document; "Amazon"/"Public"/"ThirdParty" match none, since
-     * no AWS-owned or other-account documents are ever visible here.
+     * no AWS-owned or other-account documents are ever visible here. Documents created before the
+     * {@code Owner} field existed persist with a null owner; since the store already guarantees the
+     * caller's own partition, such a document is treated as owned by the current caller rather than
+     * excluded from an explicit-account-id or "Self" filter it would otherwise legitimately match.
      */
-    private boolean matchesOwner(String filterValue, String documentOwner) {
+    private boolean matchesOwner(String filterValue, String documentOwner, String accountId) {
         if ("Self".equalsIgnoreCase(filterValue) || "Private".equalsIgnoreCase(filterValue)
                 || "All".equalsIgnoreCase(filterValue)) {
             return true;
@@ -428,7 +437,8 @@ public class SsmService implements ResourceProvider {
                 || "ThirdParty".equalsIgnoreCase(filterValue)) {
             return false;
         }
-        return filterValue.equals(documentOwner);
+        String effectiveOwner = documentOwner != null ? documentOwner : accountId;
+        return filterValue.equals(effectiveOwner);
     }
 
     private List<String> findFilterValues(Map<String, List<String>> filters, String targetKey) {
@@ -441,6 +451,32 @@ public class SsmService implements ResourceProvider {
             }
         }
         return List.of();
+    }
+
+    /**
+     * Rejects a {@code DocumentVersion} that could not possibly resolve on the target document.
+     * This store keeps only the document's current content (no version history), so a numeric
+     * version is accepted when it falls within the range that must have existed
+     * ({@code 1..documentVersion}); {@code $LATEST}/{@code $DEFAULT} always resolve to the current
+     * version. Anything else — non-numeric, zero, negative, or past the current version — can never
+     * resolve, matching AWS's {@code InvalidDocumentVersion} for the same requests.
+     */
+    private void validateDocumentVersion(SsmDocument document, String documentVersion) {
+        if (documentVersion == null || documentVersion.isBlank()
+                || "$LATEST".equals(documentVersion) || "$DEFAULT".equals(documentVersion)) {
+            return;
+        }
+        long requested;
+        try {
+            requested = Long.parseLong(documentVersion);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidDocumentVersion",
+                    "The document version is not valid or does not exist.", 400);
+        }
+        if (requested < 1 || requested > document.getDocumentVersion()) {
+            throw new AwsException("InvalidDocumentVersion",
+                    "The document version is not valid or does not exist.", 400);
+        }
     }
 
     // ──────────────────────── Associations ───────────────────────────────────
@@ -470,7 +506,8 @@ public class SsmService implements ResourceProvider {
             String maxConcurrency,
             String complianceSeverity,
             String region) {
-        getDocument(name, region);
+        SsmDocument document = getDocument(name, region);
+        validateDocumentVersion(document, documentVersion);
 
         if (instanceId != null && !instanceId.isBlank()) {
             boolean duplicate = listAssociations(region).stream()
@@ -533,6 +570,10 @@ public class SsmService implements ResourceProvider {
         SsmAssociation association = associationStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AssociationDoesNotExist",
                         "The specified association does not exist.", 400));
+
+        if (documentVersion != null) {
+            validateDocumentVersion(getDocument(association.getName(), region), documentVersion);
+        }
 
         if (associationName != null) association.setAssociationName(associationName);
         if (documentVersion != null) association.setDocumentVersion(documentVersion);
