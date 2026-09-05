@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -94,14 +93,14 @@ public class TlsCertificateManager implements Resettable {
         if (name == null || !managesServerCertificate()) {
             return;
         }
-        if (!isAllowed(name)) {
-            LOG.warnv("TLS: refusing to add {0} to the server certificate: not under a local suffix "
-                    + "(localhost, localhost.floci.io, localhost.localstack.cloud, floci.hostname, "
-                    + "the floci.base-url host, floci.dns.extra-suffixes)", name);
-            return;
-        }
         synchronized (lock) {
             if (!loadOnce() || covers(name)) {
+                return;
+            }
+            if (!isAllowed(name)) {
+                LOG.warnv("TLS: refusing to add {0} to the server certificate: not under a local suffix "
+                        + "(localhost, localhost.floci.io, localhost.localstack.cloud, floci.hostname, "
+                        + "the floci.base-url host, floci.dns.extra-suffixes)", name);
                 return;
             }
             Set<String> learned = new LinkedHashSet<>(learnedHostnames);
@@ -207,22 +206,21 @@ public class TlsCertificateManager implements Resettable {
         metadata.setLearnedHostnames(new ArrayList<>(learned));
         writeAtomically(dir.resolve(CERT_NAME), issued.certificatePem());
         writeAtomically(dir.resolve(METADATA_NAME), OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata));
+        reloadServer();
 
+        // Only a name the listener actually serves is known; a failed reload leaves the in-memory
+        // state untouched so the next call for that name writes and reloads again.
         learnedHostnames = new LinkedHashSet<>(learned);
         knownHostnames = sansOf(generator.parseCertificate(issued.certificatePem()));
-        reloadServer();
     }
 
+    /** Re-reads the files into the registry and swaps the listener; throws when either did not happen. */
     private void reloadServer() {
-        Optional<TlsConfiguration> defaultTls = registry.getDefault();
-        if (defaultTls.isEmpty()) {
-            LOG.warn("TLS: no default TLS configuration registered; the new server certificate applies on the next restart");
-            return;
-        }
-        TlsConfiguration cfg = defaultTls.get();
+        TlsConfiguration cfg = registry.getDefault().orElseThrow(() -> new IllegalStateException(
+                "no default TLS configuration is registered; the new server certificate applies on the next restart"));
         if (!cfg.reload()) {
-            LOG.warn("TLS: the TLS registry could not reload the server certificate; it applies on the next restart");
-            return;
+            throw new IllegalStateException(
+                    "the TLS registry could not reload the server certificate; the next call retries");
         }
         certificateUpdated.fire(new CertificateUpdatedEvent(TlsConfig.DEFAULT_NAME, cfg));
     }

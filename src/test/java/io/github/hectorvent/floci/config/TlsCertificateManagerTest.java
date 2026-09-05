@@ -1,23 +1,10 @@
 package io.github.hectorvent.floci.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.tls.CertificateUpdatedEvent;
-import io.quarkus.tls.TlsConfiguration;
-import io.quarkus.tls.TlsConfigurationRegistry;
-import jakarta.enterprise.event.Event;
-import org.bouncycastle.asn1.x509.GeneralName;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -40,82 +27,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class TlsCertificateManagerTest {
-
-    private static final List<String> CONFIGURED = List.of("localhost", "127.0.0.1", "*.localhost.floci.io", "localhost.floci.io");
-    private static final String NEW_HOST = "api.example.localhost.floci.io";
-
-    @TempDir
-    Path tempDir;
-
-    private Path tlsDir;
-    private FlociCertificateAuthority ca;
-    private EmulatorConfig config;
-    private TlsConfigurationRegistry registry;
-    private TlsConfiguration defaultTls;
-    @SuppressWarnings("unchecked")
-    private final Event<CertificateUpdatedEvent> events = mock(Event.class);
-
-    @BeforeAll
-    static void bouncyCastle() {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(new BouncyCastleProvider());
-        }
-    }
-
-    @BeforeEach
-    void serverLeafOnDisk() throws Exception {
-        forgetBootstrapTlsDir();
-        tlsDir = Files.createDirectories(tempDir.resolve("tls"));
-        ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
-        var leaf = ca.issueServerCertificate("localhost", CONFIGURED, KeyAlgorithm.RSA_2048, null);
-        Files.writeString(tlsDir.resolve("floci-server.crt"), leaf.certificatePem());
-        Files.writeString(tlsDir.resolve("floci-server.key"), leaf.privateKeyPem());
-        Files.writeString(tlsDir.resolve("floci-server.metadata.json"),
-                new ObjectMapper().writeValueAsString(CertificateMetadata.create(CONFIGURED, "dev")));
-
-        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.tls().enabled()).thenReturn(true);
-        when(config.tls().certPath()).thenReturn(Optional.empty());
-        when(config.storage().persistentPath()).thenReturn(tempDir.toString());
-        when(config.hostname()).thenReturn(Optional.of("floci"));
-        when(config.baseUrl()).thenReturn("http://localhost:4566");
-        when(config.dns().extraSuffixes()).thenReturn(Optional.of(List.of("example.internal")));
-
-        registry = mock(TlsConfigurationRegistry.class);
-        defaultTls = mock(TlsConfiguration.class);
-        when(registry.getDefault()).thenReturn(Optional.of(defaultTls));
-        when(defaultTls.reload()).thenReturn(true);
-    }
-
-    private TlsCertificateManager manager() {
-        return new TlsCertificateManager(config, ca, registry, events);
-    }
-
-    /**
-     * The manager resolves the TLS directory like every CDI consumer: the one the config
-     * bootstrap laid down, else the configured persistent path. Another test class in this JVM
-     * may have run a TLS-on bootstrap; a TLS-off bootstrap clears that static, as a real boot does.
-     */
-    private static void forgetBootstrapTlsDir() {
-        System.setProperty("floci.tls.enabled", "false");
-        try {
-            new TlsConfigSource();
-        } finally {
-            System.clearProperty("floci.tls.enabled");
-        }
-        assertEquals(null, TlsConfigSource.resolvedTlsDir());
-    }
+/** Reissue, reload, persistence, reset, failure handling and concurrency. Name rules are next door. */
+class TlsCertificateManagerTest extends TlsCertificateManagerFixture {
 
     @Test
     void newHostIsAppendedWithTheSameKeyAndReloaded() throws Exception {
@@ -172,149 +94,16 @@ class TlsCertificateManagerTest {
     }
 
     @Test
-    void aWildcardCoversExactlyOneLabel() throws Exception {
-        TlsCertificateManager m = manager();
-
-        m.ensureHost("one.localhost.floci.io");
-        verify(defaultTls, never()).reload();
-
-        m.ensureHost("two.labels.localhost.floci.io");
-        verify(defaultTls, times(1)).reload();
-
-        m.ensureHost("other.labels.localhost.floci.io");
-        verify(defaultTls, times(2)).reload();
-        assertTrue(sans(read("floci-server.crt")).contains("*.localhost.floci.io"), "the wildcard itself is kept");
-    }
-
-    @Test
-    void anIpAddressAllowedByTheBaseUrlBecomesAnIpSan() throws Exception {
-        when(config.baseUrl()).thenReturn("https://192.168.1.100:4566");
-
-        manager().ensureHost("192.168.1.100");
-
-        boolean ipSan = false;
-        for (List<?> entry : read("floci-server.crt").getSubjectAlternativeNames()) {
-            if (entry.get(0).equals(GeneralName.iPAddress) && "192.168.1.100".equals(entry.get(1))) {
-                ipSan = true;
-            }
-        }
-        assertTrue(ipSan, "an IP is encoded as an iPAddress SAN, not a dNSName");
-    }
-
-    @Test
-    void knownOrWildcardCoveredHostIsANoOp() throws Exception {
-        byte[] certBefore = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
-
-        TlsCertificateManager m = manager();
-        m.ensureHost("localhost");
-        m.ensureHost("LOCALHOST.floci.io.");
-        m.ensureHost("one-label.localhost.floci.io");
-        m.ensureHost(" 127.0.0.1 ");
-
-        assertArrayEquals(certBefore, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
-        verify(defaultTls, never()).reload();
-        verify(events, never()).fire(any());
-    }
-
-    @Test
     void secondCallForTheSameHostDoesNotReissue() throws Exception {
         TlsCertificateManager m = manager();
         m.ensureHost(NEW_HOST);
-        byte[] certAfterFirst = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
+        byte[] certAfterFirst = servedCertificate();
 
         m.ensureHost(NEW_HOST);
         m.ensureHost(NEW_HOST.toUpperCase());
 
-        assertArrayEquals(certAfterFirst, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
+        assertArrayEquals(certAfterFirst, servedCertificate());
         verify(defaultTls, times(1)).reload();
-    }
-
-    @Test
-    void hostOutsideTheAllowListIsRefused() throws Exception {
-        byte[] certBefore = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
-
-        TlsCertificateManager m = manager();
-        m.ensureHost("accounts.google.com");
-        m.ensureHost("evil-localhost.floci.io");
-        m.ensureHost("localhost.floci.io.attacker.example");
-        m.ensureHost("floci.example");
-
-        assertArrayEquals(certBefore, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
-        verify(defaultTls, never()).reload();
-        assertEquals(List.of(), readMetadata().getLearnedHostnames());
-    }
-
-    @Test
-    void wildcardIsAcceptedOnlyAsAWholeLeftmostLabel() throws Exception {
-        TlsCertificateManager m = manager();
-
-        m.ensureHost("*.api.example.localhost.floci.io");
-        assertTrue(sans(read("floci-server.crt")).contains("*.api.example.localhost.floci.io"),
-                "one leading *. label is a valid SAN");
-        verify(defaultTls, times(1)).reload();
-
-        m.ensureHost("*");
-        m.ensureHost("*.");
-        m.ensureHost("api*.example.localhost.floci.io");
-        m.ensureHost("*.*.example.localhost.floci.io");
-        m.ensureHost("example.*.localhost.floci.io");
-        verify(defaultTls, times(1)).reload();
-        Set<String> starred = new TreeSet<>(sans(read("floci-server.crt")));
-        starred.removeIf(n -> !n.contains("*"));
-        assertEquals(Set.of("*.localhost.floci.io", "*.api.example.localhost.floci.io"), starred,
-                "malformed wildcards must not reach the certificate");
-    }
-
-    @Test
-    void namesThatAreNotHostnamesAreRefused() throws Exception {
-        byte[] certBefore = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
-
-        TlsCertificateManager m = manager();
-        m.ensureHost(null);
-        m.ensureHost("");
-        m.ensureHost("   ");
-        m.ensureHost(".");
-        m.ensureHost("api.example.localhost.floci.io:443");
-        m.ensureHost("https://api.example.localhost.floci.io");
-        m.ensureHost("api example.localhost.floci.io");
-        m.ensureHost("api_1.example.localhost.floci.io");
-        m.ensureHost("api..example.localhost.floci.io");
-        m.ensureHost(".api.example.localhost.floci.io");
-        m.ensureHost("-api.example.localhost.floci.io");
-        m.ensureHost("api-.example.localhost.floci.io");
-        m.ensureHost("a".repeat(64) + ".localhost.floci.io");
-        m.ensureHost("a".repeat(63) + "." + "b".repeat(63) + "." + "c".repeat(63) + "." + "d".repeat(63) + ".localhost.floci.io");
-
-        assertArrayEquals(certBefore, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
-        verify(defaultTls, never()).reload();
-        verify(events, never()).fire(any());
-    }
-
-    @Test
-    void allowListIncludesConfiguredHostnameBaseUrlAndExtraSuffixes() throws Exception {
-        when(config.baseUrl()).thenReturn("https://Floci.Corp.Example:4566");
-        TlsCertificateManager m = manager();
-
-        m.ensureHost("api.floci");
-        m.ensureHost("floci");
-        m.ensureHost("iot.example.internal");
-        m.ensureHost("data.localhost.localstack.cloud");
-        m.ensureHost("api.floci.corp.example");
-
-        Set<String> sans = sans(read("floci-server.crt"));
-        assertTrue(sans.containsAll(List.of("api.floci", "floci", "iot.example.internal",
-                "data.localhost.localstack.cloud", "api.floci.corp.example")), sans.toString());
-    }
-
-    @Test
-    void unusableBaseUrlAndAbsentOptionalConfigStillAllowBuiltinSuffixes() throws Exception {
-        when(config.baseUrl()).thenReturn("not a url");
-        when(config.hostname()).thenReturn(Optional.empty());
-        when(config.dns().extraSuffixes()).thenReturn(Optional.empty());
-
-        manager().ensureHost(NEW_HOST);
-
-        assertTrue(sans(read("floci-server.crt")).contains(NEW_HOST));
     }
 
     @Test
@@ -358,24 +147,24 @@ class TlsCertificateManagerTest {
 
     @Test
     void clearWithNothingLearnedTouchesNothing() throws Exception {
-        byte[] certBefore = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
+        byte[] certBefore = servedCertificate();
 
         manager().clear();
 
-        assertArrayEquals(certBefore, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
+        assertArrayEquals(certBefore, servedCertificate());
         verify(defaultTls, never()).reload();
     }
 
     @Test
     void doesNothingWhenTlsIsOff() throws Exception {
         when(config.tls().enabled()).thenReturn(false);
-        byte[] certBefore = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
+        byte[] certBefore = servedCertificate();
 
         TlsCertificateManager m = manager();
         m.ensureHost(NEW_HOST);
         m.clear();
 
-        assertArrayEquals(certBefore, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
+        assertArrayEquals(certBefore, servedCertificate());
         assertEquals(Set.of(), m.knownHostnames());
         verify(defaultTls, never()).reload();
     }
@@ -383,11 +172,11 @@ class TlsCertificateManagerTest {
     @Test
     void doesNothingWithAUserProvidedCertificate() throws Exception {
         when(config.tls().certPath()).thenReturn(Optional.of("/etc/floci/user.crt"));
-        byte[] certBefore = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
+        byte[] certBefore = servedCertificate();
 
         manager().ensureHost(NEW_HOST);
 
-        assertArrayEquals(certBefore, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
+        assertArrayEquals(certBefore, servedCertificate());
         verify(defaultTls, never()).reload();
     }
 
@@ -404,36 +193,69 @@ class TlsCertificateManagerTest {
     }
 
     @Test
-    void reloadReturningFalseFiresNoEvent() throws Exception {
+    void aFailedReloadIsRetriedByTheNextCall() throws Exception {
         when(defaultTls.reload()).thenReturn(false);
+        TlsCertificateManager m = manager();
 
-        manager().ensureHost(NEW_HOST);
+        m.ensureHost(NEW_HOST);
 
         assertTrue(sans(read("floci-server.crt")).contains(NEW_HOST), "the file is still written for the next boot");
         verify(events, never()).fire(any());
+        assertFalse(m.knownHostnames().contains(NEW_HOST), "a name the listener does not serve is not known");
+
+        when(defaultTls.reload()).thenReturn(true);
+        m.ensureHost(NEW_HOST);
+
+        verify(defaultTls, times(2)).reload();
+        verify(events, times(1)).fire(any());
+        assertTrue(m.knownHostnames().contains(NEW_HOST));
+        assertEquals(List.of(NEW_HOST), readMetadata().getLearnedHostnames());
     }
 
     @Test
-    void noDefaultTlsConfigurationFiresNoEvent() throws Exception {
+    void aMissingDefaultTlsConfigurationIsRetriedByTheNextCall() throws Exception {
         when(registry.getDefault()).thenReturn(Optional.empty());
+        TlsCertificateManager m = manager();
 
-        manager().ensureHost(NEW_HOST);
+        m.ensureHost(NEW_HOST);
 
-        assertTrue(sans(read("floci-server.crt")).contains(NEW_HOST));
         verify(events, never()).fire(any());
+        assertFalse(m.knownHostnames().contains(NEW_HOST));
+
+        when(registry.getDefault()).thenReturn(Optional.of(defaultTls));
+        m.ensureHost(NEW_HOST);
+
+        verify(defaultTls, times(1)).reload();
+        verify(events, times(1)).fire(any());
+        assertTrue(m.knownHostnames().contains(NEW_HOST));
+    }
+
+    @Test
+    void aFailingListenerIsRetriedByTheNextCall() throws Exception {
+        doThrow(new IllegalStateException("observer failed")).when(events).fire(any());
+        TlsCertificateManager m = manager();
+
+        m.ensureHost(NEW_HOST);
+        assertFalse(m.knownHostnames().contains(NEW_HOST));
+
+        doNothing().when(events).fire(any());
+        m.ensureHost(NEW_HOST);
+
+        verify(defaultTls, times(2)).reload();
+        assertTrue(m.knownHostnames().contains(NEW_HOST));
     }
 
     @Test
     void aFailedReissueLeavesTheServedFilesIntactAndDoesNotThrow() throws Exception {
         FlociCertificateAuthority broken = spy(ca);
         doThrow(new IllegalStateException("boom")).when(broken).issueServerCertificate(anyString(), anyList(), any(), any());
-        byte[] certBefore = Files.readAllBytes(tlsDir.resolve("floci-server.crt"));
+        byte[] certBefore = servedCertificate();
         String metadataBefore = Files.readString(tlsDir.resolve("floci-server.metadata.json"));
 
         TlsCertificateManager m = new TlsCertificateManager(config, broken, registry, events);
         m.ensureHost(NEW_HOST);
 
-        assertArrayEquals(certBefore, Files.readAllBytes(tlsDir.resolve("floci-server.crt")));
+        assertArrayEquals(certBefore, servedCertificate());
         assertEquals(metadataBefore, Files.readString(tlsDir.resolve("floci-server.metadata.json")));
         assertFalse(m.knownHostnames().contains(NEW_HOST), "a name that was never served is not known");
         verify(defaultTls, never()).reload();
@@ -497,21 +319,5 @@ class TlsCertificateManagerTest {
         } finally {
             pool.shutdownNow();
         }
-    }
-
-    private X509Certificate read(String name) throws Exception {
-        return new CertificateGenerator().parseCertificate(Files.readString(tlsDir.resolve(name)));
-    }
-
-    private CertificateMetadata readMetadata() throws Exception {
-        return new ObjectMapper().readValue(tlsDir.resolve("floci-server.metadata.json").toFile(), CertificateMetadata.class);
-    }
-
-    private static Set<String> sans(X509Certificate cert) throws Exception {
-        Set<String> out = new TreeSet<>();
-        for (List<?> entry : cert.getSubjectAlternativeNames()) {
-            out.add(String.valueOf(entry.get(1)));
-        }
-        return out;
     }
 }
