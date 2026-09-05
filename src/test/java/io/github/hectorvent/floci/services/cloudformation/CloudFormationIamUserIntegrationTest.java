@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
@@ -7,6 +8,9 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -36,12 +40,25 @@ class CloudFormationIamUserIntegrationTest {
                         "UserName": "%s"
                       }
                     }
+                  },
+                  "Outputs": {
+                    "UserRef": {"Value": {"Ref": "ProbeUser"}},
+                    "UserArn": {"Value": {"Fn::GetAtt": ["ProbeUser", "Arn"]}},
+                    "UserId": {"Value": {"Fn::GetAtt": ["ProbeUser", "UserId"]}}
                   }
                 }
                 """.formatted(userName);
 
         String stackId = createStack(stackName, template);
         awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        String stackXml = describeStacks(stackId);
+        assertEquals(userName, outputValue(stackXml, "UserRef"));
+        String expectedArn = "arn:aws:iam::111122223333:user/" + userName;
+        assertEquals(expectedArn, outputValue(stackXml, "UserArn"));
+        String userId = outputValue(stackXml, "UserId");
+        assertNotNull(userId);
+        assertTrue(userId.startsWith("AIDA"), "Fn::GetAtt UserId must start with AIDA: " + userId);
 
         // Verify IAM user exists and Arn matches
         given()
@@ -54,7 +71,8 @@ class CloudFormationIamUserIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<UserName>" + userName + "</UserName>"))
-            .body(containsString("<Arn>arn:aws:iam::111122223333:user/" + userName + "</Arn>"));
+            .body(containsString("<Arn>" + expectedArn + "</Arn>"))
+            .body(containsString("<UserId>" + userId + "</UserId>"));
 
         // Delete the stack
         deleteStack(stackName);
@@ -92,6 +110,11 @@ class CloudFormationIamUserIntegrationTest {
                     "GenUser": {
                       "Type": "AWS::IAM::User"
                     }
+                  },
+                  "Outputs": {
+                    "UserRef": {"Value": {"Ref": "GenUser"}},
+                    "UserArn": {"Value": {"Fn::GetAtt": ["GenUser", "Arn"]}},
+                    "UserId": {"Value": {"Fn::GetAtt": ["GenUser", "UserId"]}}
                   }
                 }
                 """;
@@ -99,14 +122,13 @@ class CloudFormationIamUserIntegrationTest {
         String stackId = createStack(stackName, template);
         awaitStackStatus(stackId, "CREATE_COMPLETE");
 
-        String resourcesXml = cfnQuery("DescribeStackResources", stackName)
-                .then().statusCode(200).extract().asString();
-        assertThat(resourcesXml, containsString("<PhysicalResourceId>"));
-
-        String physicalIdTag = "<PhysicalResourceId>";
-        int start = resourcesXml.indexOf(physicalIdTag) + physicalIdTag.length();
-        int end = resourcesXml.indexOf("</PhysicalResourceId>", start);
-        String generatedUserName = resourcesXml.substring(start, end);
+        String stackXml = describeStacks(stackId);
+        String generatedUserName = outputValue(stackXml, "UserRef");
+        assertNotNull(generatedUserName);
+        assertEquals("arn:aws:iam::111122223333:user/" + generatedUserName, outputValue(stackXml, "UserArn"));
+        String genUserId = outputValue(stackXml, "UserId");
+        assertNotNull(genUserId);
+        assertTrue(genUserId.startsWith("AIDA"), "Fn::GetAtt UserId must start with AIDA: " + genUserId);
 
         // Verify generated user exists
         given()
@@ -118,7 +140,9 @@ class CloudFormationIamUserIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<UserName>" + generatedUserName + "</UserName>"));
+            .body(containsString("<UserName>" + generatedUserName + "</UserName>"))
+            .body(containsString("<Arn>arn:aws:iam::111122223333:user/" + generatedUserName + "</Arn>"))
+            .body(containsString("<UserId>" + genUserId + "</UserId>"));
 
         deleteStack(stackName);
         awaitStackStatus(stackId, "DELETE_COMPLETE");
@@ -339,5 +363,9 @@ class CloudFormationIamUserIntegrationTest {
             req.formParam("TemplateBody", template);
         }
         return req.when().post("/");
+    }
+
+    private static String outputValue(String xml, String key) {
+        return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);
     }
 }
