@@ -13,6 +13,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.not;
 
 /** AWS Organizations semantics required by service-managed CloudFormation StackSets. */
 @QuarkusTest
@@ -119,6 +120,93 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 .post("/").then().statusCode(400)
                 .body(containsString("InvalidOperationException"));
 
+        assertQueueAbsent(targetAccount, queue);
+    }
+
+    @Test
+    void createServiceManagedStackSetWithoutTrustedAccessUsesValidationError() {
+        String management = "888888888888";
+        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .post("/").then().statusCode(200);
+
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", "no-access-" + UUID.randomUUID().toString().substring(0, 8))
+                .formParam("TemplateBody", queueTemplate("unused"))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .post("/").then().statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(not(containsString("InvalidOperationException")));
+    }
+
+    @Test
+    void describeSelfManagedStackSetOmitsAutoDeployment() {
+        String stackSet = "self-managed-" + UUID.randomUUID().toString().substring(0, 8);
+        cloudFormation("CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate("unused"))
+                .post("/").then().statusCode(200);
+
+        cloudFormation("DescribeStackSet")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .body(containsString("<PermissionModel>SELF_MANAGED</PermissionModel>"))
+                .body(not(containsString("<AutoDeployment>")));
+    }
+
+    @Test
+    void serviceManagedDeleteRequiresDeploymentTargets() {
+        String management = "444444444444";
+        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .post("/").then().statusCode(200);
+        String rootId = organizations(management, "ListRoots", "{}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("Roots[0].Id");
+        String targetOu = organizations(management, "CreateOrganizationalUnit",
+                "{\"ParentId\":\"" + rootId + "\",\"Name\":\"DeleteTarget\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("OrganizationalUnit.Id");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String targetAccount = organizations(management, "CreateAccount",
+                "{\"Email\":\"delete-target-" + suffix + "@example.com\",\"AccountName\":\"DeleteTarget\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("CreateAccountStatus.AccountId");
+        organizations(management, "MoveAccount",
+                "{\"AccountId\":\"" + targetAccount + "\",\"SourceParentId\":\"" + rootId
+                        + "\",\"DestinationParentId\":\"" + targetOu + "\"}")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "ActivateOrganizationsAccess")
+                .post("/").then().statusCode(200);
+
+        String stackSet = "delete-targets-" + suffix;
+        String queue = "delete-targets-q-" + suffix;
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate(queue))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .formParam("AutoDeployment.Enabled", "true")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", targetOu)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(200);
+        assertQueueVisible(targetAccount, queue);
+
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("Accounts.member.1", targetAccount)
+                .formParam("Regions.member.1", REGION)
+                .formParam("RetainStacks", "false")
+                .post("/").then().statusCode(400)
+                .body(containsString("InvalidOperationException"));
+        assertQueueVisible(targetAccount, queue);
+
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", targetOu)
+                .formParam("Regions.member.1", REGION)
+                .formParam("RetainStacks", "false")
+                .post("/").then().statusCode(200);
         assertQueueAbsent(targetAccount, queue);
     }
 
