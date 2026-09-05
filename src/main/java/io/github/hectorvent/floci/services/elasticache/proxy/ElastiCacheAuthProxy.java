@@ -213,7 +213,14 @@ public class ElastiCacheAuthProxy {
     }
 
     private static void closeQuietly(Socket s) {
-        try { s.close(); } catch (IOException ignored) {}
+        try {
+            if (!s.isClosed()) {
+                try {
+                    s.shutdownOutput();
+                } catch (IOException ignored) {}
+                s.close();
+            }
+        } catch (IOException ignored) {}
     }
 
     /**

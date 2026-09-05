@@ -248,11 +248,11 @@ public class ElastiCacheService implements ResourceProvider {
                     : 1);
             applyCommonAttributes(group, request, resolvedSettings);
 
+            groups.put(groupId, group);
             proxyManager.startProxy(groupId, authMode, proxyPort,
                     handle.getHost(), handle.getPort(),
                     (username, password) -> validatePassword(groupId, username, password));
 
-            groups.put(groupId, group);
             LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
             return group;
         } catch (RuntimeException e) {
@@ -615,6 +615,7 @@ public class ElastiCacheService implements ResourceProvider {
         } catch (RuntimeException e) {
             LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
         } finally {
+            groups.delete(groupId);
             releaseProxyPort(proxyPort);
         }
     }
