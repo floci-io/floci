@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -39,10 +40,9 @@ class ProjectionEvaluatorTest {
 
     @Test
     void projectsMultipleListIndicesCompactedAndIndexOrdered() {
-        var item = mapper.createObjectNode();
-        item.set("mylist", readValue("""
-                {"L": [{"S": "zero"}, {"S": "one"}, {"S": "two"}]}
-                """));
+        var item = readValue("""
+                {"mylist": {"L": [{"S": "zero"}, {"S": "one"}, {"S": "two"}]}}
+                """);
 
         var result = ProjectionEvaluator.project(item, "#l[2], #l[0]",
                 readValue("""
@@ -116,12 +116,13 @@ class ProjectionEvaluatorTest {
 
     // Malformed and out-of-range list indices, characterised on real DynamoDB
     // (us-east-1, 2026-09-05): non-digit content is a syntax error, and a numeric
-    // index above 4294967294 is rejected as out of the allowable range.
+    // index above 4294967294 is rejected as out of the allowable range. The empty
+    // item states that rejection happens before any item content is read.
 
     @Test
     void rejectsNonNumericListIndexAsSyntaxError() {
-        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
-                () -> ProjectionEvaluator.project(listItem(), "l[a]", null));
+        var ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[a]", null));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid ProjectionExpression: Syntax error; token: \"a\", near: \"[a]\"",
                 ex.getMessage());
@@ -129,8 +130,8 @@ class ProjectionEvaluatorTest {
 
     @Test
     void rejectsEmptyListIndexAsSyntaxError() {
-        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
-                () -> ProjectionEvaluator.project(listItem(), "l[]", null));
+        var ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[]", null));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid ProjectionExpression: Syntax error; token: \"]\", near: \"[]\"",
                 ex.getMessage());
@@ -138,8 +139,8 @@ class ProjectionEvaluatorTest {
 
     @Test
     void rejectsListIndexAboveTheAllowableRange() {
-        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
-                () -> ProjectionEvaluator.project(listItem(), "l[999999999999999999999]", null));
+        var ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[999999999999999999999]", null));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid ProjectionExpression: List index is not within the allowable range; "
                 + "index: [999999999999999999999]", ex.getMessage());
@@ -147,8 +148,8 @@ class ProjectionEvaluatorTest {
 
     @Test
     void rejectsFirstListIndexPastTheAllowableRange() {
-        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
-                () -> ProjectionEvaluator.project(listItem(), "l[4294967295]", null));
+        var ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[4294967295]", null));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid ProjectionExpression: List index is not within the allowable range; "
                 + "index: [4294967295]", ex.getMessage());

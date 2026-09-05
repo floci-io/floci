@@ -21,6 +21,9 @@ final class ProjectionEvaluator {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    // The highest list index real DynamoDB accepts in a document path.
+    private static final long MAX_LIST_INDEX = 4_294_967_294L;
+
     private ProjectionEvaluator() {}
 
     /**
@@ -40,16 +43,8 @@ final class ProjectionEvaluator {
             if (segments.isEmpty()) continue;
             root.insert(segments);
         }
-        ObjectNode result = MAPPER.createObjectNode();
-        for (Map.Entry<String, PathTrie> entry : root.names.entrySet()) {
-            JsonNode child = item.get(entry.getKey());
-            if (child == null) continue;
-            JsonNode projected = projectValue(child, entry.getValue());
-            if (projected != null) {
-                result.set(entry.getKey(), projected);
-            }
-        }
-        return result;
+        ObjectNode projected = projectMapEntries(item, root);
+        return projected != null ? projected : MAPPER.createObjectNode();
     }
 
     /**
@@ -81,11 +76,14 @@ final class ProjectionEvaluator {
         if (expression == null || expression.isBlank()) return;
         char first = expression.charAt(0);
         if (!Character.isLetterOrDigit(first) && first != '#' && first != '_') {
-            String token = String.valueOf(first);
             String near = expression.length() > 2 ? expression.substring(1, 3) : expression.substring(1);
-            throw new AwsException("ValidationException",
-                    "Invalid " + expressionType + ": Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
+            throw syntaxError(expressionType, String.valueOf(first), near);
         }
+    }
+
+    private static AwsException syntaxError(String expressionType, String token, String near) {
+        return new AwsException("ValidationException",
+                "Invalid " + expressionType + ": Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
     }
 
     static void validateExpression(String expression) {
@@ -149,20 +147,21 @@ final class ProjectionEvaluator {
     // index above 4294967294 as out of the allowable range, both at expression level.
     // Characterised on real DynamoDB (us-east-1, 2026-09-05).
     private static void validateListIndex(String content) {
+        if (content.isEmpty()) {
+            throw syntaxError("ProjectionExpression", "]", "[]");
+        }
         for (int i = 0; i < content.length(); i++) {
             if (!Character.isDigit(content.charAt(i))) {
-                throw new AwsException("ValidationException",
-                        "Invalid ProjectionExpression: Syntax error; token: \"" + content.charAt(i)
-                        + "\", near: \"[" + content + "]\"", 400);
+                throw syntaxError("ProjectionExpression",
+                        String.valueOf(content.charAt(i)), "[" + content + "]");
             }
         }
-        if (content.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "Invalid ProjectionExpression: Syntax error; token: \"]\", near: \"[]\"", 400);
+        int firstDigit = 0;
+        while (firstDigit < content.length() - 1 && content.charAt(firstDigit) == '0') {
+            firstDigit++;
         }
-        var canonical = content.replaceFirst("^0+(?=.)", "");
-        if (canonical.length() > 10
-                || (canonical.length() == 10 && canonical.compareTo("4294967294") > 0)) {
+        var canonical = content.substring(firstDigit);
+        if (canonical.length() > 10 || Long.parseLong(canonical) > MAX_LIST_INDEX) {
             throw new AwsException("ValidationException",
                     "Invalid ProjectionExpression: List index is not within the allowable range; "
                     + "index: [" + content + "]", 400);
@@ -231,16 +230,16 @@ final class ProjectionEvaluator {
             wrapper.set("L", projectedList);
             return wrapper;
         }
-        if (!node.names.isEmpty() && src.has("M")) {
-            JsonNode projectedMap = projectMapEntries(src.get("M"), node);
-            if (projectedMap == null) {
-                return null;
+        if (!node.names.isEmpty()) {
+            if (src.has("M")) {
+                JsonNode projectedMap = projectMapEntries(src.get("M"), node);
+                if (projectedMap == null) {
+                    return null;
+                }
+                ObjectNode wrapper = MAPPER.createObjectNode();
+                wrapper.set("M", projectedMap);
+                return wrapper;
             }
-            ObjectNode wrapper = MAPPER.createObjectNode();
-            wrapper.set("M", projectedMap);
-            return wrapper;
-        }
-        if (!node.names.isEmpty() && src.isObject()) {
             // Defensive fallback for plain (non-DynamoDB-typed) nested objects.
             return projectMapEntries(src, node);
         }
