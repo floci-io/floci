@@ -35,6 +35,10 @@ import java.util.Set;
  * trust the CA ({@code floci-root-ca.crt}, or {@code GET /_floci/ca.pem}), never the leaf.
  *
  * <p>
+ * It also writes {@link ContainerCaBundle}, the trust bundle every container Floci launches
+ * receives, next to the certificates.
+ *
+ * <p>
  * Both HTTP and HTTPS are served simultaneously (LocalStack parity).
  */
 public class TlsConfigSource implements ConfigSource {
@@ -59,9 +63,11 @@ public class TlsConfigSource implements ConfigSource {
     private final Map<String, String> properties = new HashMap<>();
 
     /**
-     * The directory the most recent bootstrap used for CA and leaf, or null when that bootstrap did
-     * not run the self-signed branch (TLS off, or a user-provided certificate). Reset on every
-     * construction so a later boot in the same JVM never sees a stale value.
+     * The TLS directory the most recent bootstrap used, or null when that bootstrap ran with TLS
+     * off. With a user-provided certificate it holds the container CA bundle and, once
+     * {@code GET /_floci/ca.pem} is called, the local CA; in self-signed mode the CA and the leaf
+     * as well. Reset on every construction so a later boot in the same JVM never sees a stale
+     * value.
      */
     static Path resolvedTlsDir() {
         return resolvedTlsDir;
@@ -79,17 +85,20 @@ public class TlsConfigSource implements ConfigSource {
         String keyPath = resolveProperty("floci.tls.key-path", "");
         String selfSigned = resolveProperty("floci.tls.self-signed", "true");
         String persistentPath = resolveProperty("floci.storage.persistent-path", "./data");
+        Path tlsDir = Path.of(persistentPath, TLS_DIR);
+        resolvedTlsDir = tlsDir;
 
+        Path trustAnchor;
         if (!certPath.isBlank() && !keyPath.isBlank()) {
             validateFileExists(certPath, "TLS certificate");
             validateFileExists(keyPath, "TLS private key");
             LOG.infov("TLS: using user-provided certificate: {0}", certPath);
+            trustAnchor = Path.of(certPath);
         } else if ("true".equalsIgnoreCase(selfSigned)) {
-            Path tlsDir = Path.of(persistentPath, TLS_DIR);
-            resolvedTlsDir = tlsDir;
             Path certFile = tlsDir.resolve(SERVER_CERT_NAME);
             Path keyFile = tlsDir.resolve(SERVER_KEY_NAME);
             FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
+            trustAnchor = ca.certificatePath();
 
             if (Files.exists(certFile) && Files.exists(keyFile)) {
                 List<String> currentHostnames = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
@@ -115,6 +124,8 @@ public class TlsConfigSource implements ConfigSource {
                     "TLS enabled but no certificate provided and self-signed generation disabled. "
                             + "Set FLOCI_TLS_CERT_PATH + FLOCI_TLS_KEY_PATH, or enable FLOCI_TLS_SELF_SIGNED.");
         }
+
+        writeContainerCaBundle(tlsDir, trustAnchor);
 
         // The default entry of the Quarkus TLS registry. The HTTP server reads it when no
         // quarkus.http.tls-configuration-name is set, and the registry can reload it at runtime.
@@ -244,6 +255,19 @@ public class TlsConfigSource implements ConfigSource {
                     certFile, e.getMessage());
         }
         return sans;
+    }
+
+    /**
+     * Containers Floci launches get this bundle copied in (Docker) or mounted (Kubernetes). A
+     * failure here must not stop Floci: log it, and containers simply will not trust Floci HTTPS
+     * until a boot manages to write it.
+     */
+    private static void writeContainerCaBundle(Path tlsDir, Path trustAnchor) {
+        try {
+            ContainerCaBundle.write(tlsDir, trustAnchor);
+        } catch (Exception e) {
+            LOG.warnv(e, "TLS: could not write the container CA bundle under {0}: {1}", tlsDir, e.getMessage());
+        }
     }
 
     private static void validateFileExists(String path, String description) {

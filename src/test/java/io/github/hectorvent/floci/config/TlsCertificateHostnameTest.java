@@ -377,7 +377,7 @@ class TlsCertificateHostnameTest {
     }
 
     @Test
-    void resolvedTlsDirIsClearedByABootThatDoesNotIssueALeaf() throws Exception {
+    void resolvedTlsDirFollowsEveryTlsOnBootAndIsClearedWhenTlsIsOff() throws Exception {
         System.setProperty("floci.tls.enabled", "true");
         System.setProperty("floci.tls.self-signed", "true");
         System.setProperty("floci.storage.persistent-path", tempDir.toString());
@@ -397,7 +397,8 @@ class TlsCertificateHostnameTest {
         System.setProperty("floci.tls.cert-path", userCert.toString());
         System.setProperty("floci.tls.key-path", userKey.toString());
         new TlsConfigSource();
-        assertNull(TlsConfigSource.resolvedTlsDir(), "user certificate: nothing was laid down");
+        assertEquals(tempDir.resolve("tls"), TlsConfigSource.resolvedTlsDir(),
+                "user certificate: the container CA bundle was laid down there");
     }
 
     @Test
