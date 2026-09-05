@@ -306,6 +306,10 @@ The RDS auth proxy validates the master username and password at the proxy layer
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
+On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
+
+Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
+
 ## TLS / SSL
 
 The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a

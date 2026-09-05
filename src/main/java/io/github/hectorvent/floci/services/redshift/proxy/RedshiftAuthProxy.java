@@ -138,13 +138,14 @@ public class RedshiftAuthProxy {
             backend = new Socket(backendHost, backendPort);
             backend.setTcpNoDelay(true);
             // iamEnabled = false: the SigV4 branch inside authenticate is never taken.
-            Socket activeClient = PostgresProtocolHandler.authenticate(
-                    client, backend, masterUsername, masterPassword, dbName,
-                    false, sigV4, tlsCertificates, passwordValidator::validate);
-            if (activeClient != null) {
+            PostgresProtocolHandler.AuthenticatedSession session =
+                    PostgresProtocolHandler.authenticate(
+                            client, backend, masterUsername, masterPassword, dbName,
+                            false, sigV4, tlsCertificates, passwordValidator::validate);
+            if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
-                new RedshiftInterceptingBridge(activeClient, backend).run();
+                new RedshiftInterceptingBridge(session.client(), backend).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
