@@ -119,9 +119,13 @@ func TestS3MultipartChecksums(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		for _, key := range keys {
-			svc.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+			if _, err := svc.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}); err != nil {
+				t.Logf("cleanup: could not delete s3://%s/%s: %v", bucket, key, err)
+			}
 		}
-		svc.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
+		if _, err := svc.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)}); err != nil {
+			t.Logf("cleanup: could not delete bucket %s: %v", bucket, err)
+		}
 	})
 
 	head := func(t *testing.T, key string) *s3.HeadObjectOutput {

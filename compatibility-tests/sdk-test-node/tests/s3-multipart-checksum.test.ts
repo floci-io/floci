@@ -101,9 +101,13 @@ describe('S3 multipart checksums', () => {
 
   afterAll(async () => {
     for (const Key of Object.values(keys)) {
-      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key })).catch(() => undefined);
+      await s3
+        .send(new DeleteObjectCommand({ Bucket: bucket, Key }))
+        .catch((e) => console.warn(`cleanup: could not delete s3://${bucket}/${Key}: ${e}`));
     }
-    await s3.send(new DeleteBucketCommand({ Bucket: bucket })).catch(() => undefined);
+    await s3
+      .send(new DeleteBucketCommand({ Bucket: bucket }))
+      .catch((e) => console.warn(`cleanup: could not delete bucket ${bucket}: ${e}`));
   });
 
   it('reports the composite SHA256 checksum of a multipart upload', async () => {

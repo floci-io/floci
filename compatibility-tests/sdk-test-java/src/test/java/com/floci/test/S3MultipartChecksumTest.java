@@ -76,11 +76,15 @@ class S3MultipartChecksumTest {
         for (String key : KEYS) {
             try {
                 s3.deleteObject(DeleteObjectRequest.builder().bucket(BUCKET).key(key).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                System.err.printf("cleanup: could not delete s3://%s/%s: %s%n", BUCKET, key, e.getMessage());
+            }
         }
         try {
             s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            System.err.printf("cleanup: could not delete bucket %s: %s%n", BUCKET, e.getMessage());
+        }
     }
 
     @Test
