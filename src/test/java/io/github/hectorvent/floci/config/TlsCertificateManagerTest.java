@@ -71,6 +71,7 @@ class TlsCertificateManagerTest {
 
     @BeforeEach
     void serverLeafOnDisk() throws Exception {
+        forgetBootstrapTlsDir();
         tlsDir = Files.createDirectories(tempDir.resolve("tls"));
         ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
         var leaf = ca.issueServerCertificate("localhost", CONFIGURED, KeyAlgorithm.RSA_2048, null);
@@ -95,6 +96,21 @@ class TlsCertificateManagerTest {
 
     private TlsCertificateManager manager() {
         return new TlsCertificateManager(config, ca, registry, events);
+    }
+
+    /**
+     * The manager resolves the TLS directory like every CDI consumer: the one the config
+     * bootstrap laid down, else the configured persistent path. Another test class in this JVM
+     * may have run a TLS-on bootstrap; a TLS-off bootstrap clears that static, as a real boot does.
+     */
+    private static void forgetBootstrapTlsDir() {
+        System.setProperty("floci.tls.enabled", "false");
+        try {
+            new TlsConfigSource();
+        } finally {
+            System.clearProperty("floci.tls.enabled");
+        }
+        assertEquals(null, TlsConfigSource.resolvedTlsDir());
     }
 
     @Test
