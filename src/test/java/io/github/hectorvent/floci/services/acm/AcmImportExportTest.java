@@ -193,6 +193,7 @@ class AcmImportExportTest {
     @Order(11)
     void exportCertificate() {
         String passphrase = Base64.getEncoder().encodeToString("testpassphrase".getBytes());
+        String localCa = given().when().get("/_floci/ca.pem").then().statusCode(200).extract().asString();
 
         given()
             .header("X-Amz-Target", "CertificateManager.ExportCertificate")
@@ -208,6 +209,7 @@ class AcmImportExportTest {
         .then()
             .statusCode(200)
             .body("Certificate", startsWith("-----BEGIN CERTIFICATE-----"))
+            .body("CertificateChain", equalTo(localCa))
             .body("PrivateKey", startsWith("-----BEGIN ENCRYPTED PRIVATE KEY-----"));
     }
 
