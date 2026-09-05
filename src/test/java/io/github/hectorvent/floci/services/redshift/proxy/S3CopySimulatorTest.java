@@ -515,4 +515,35 @@ class S3CopySimulatorTest {
         assertEquals('E', err.type());
         assertNull(in.nextMessage(), "Client must not receive an unconfirmed ReadyForQuery");
     }
+
+    @Test
+    void backendReturnsNonETransactionStatusAfterAbortClosesBackendAndClient() throws Exception {
+        when(s3.objectExists("wh", "missing")).thenReturn(false);
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
+                new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
+
+        // Fake backend returns ReadyForQuery with 'T' (e.g. abort query unexpectedly succeeded)
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+            assertEquals('Q', q.type());
+            assertTrue(q.getSql().contains("FLOCI_ABORT_TX"));
+            OutputStream out = testBackend.getOutputStream();
+            out.write(new byte[]{'Z', 0, 0, 0, 5, 'T'});
+            out.flush();
+        });
+
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'T');
+        joinBackend(backend);
+
+        assertTrue(simBackend.isClosed(), "simBackend must be closed when abort returns non-E status");
+        assertTrue(simClient.isClosed(), "simClient must be closed when abort returns non-E status");
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage err = in.nextMessage();
+        assertEquals('E', err.type());
+        assertNull(in.nextMessage(), "Client must not receive an unconfirmed ReadyForQuery");
+    }
 }

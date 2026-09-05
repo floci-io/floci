@@ -353,8 +353,13 @@ public final class S3CopySimulator {
                     return false;
                 }
                 if (msg.type() == 'Z') {
-                    if (onStatusChange != null && msg.body().length > 0) {
-                        onStatusChange.accept(msg.body()[0]);
+                    char status = (msg.body().length > 0) ? (char) msg.body()[0] : 0;
+                    if (onStatusChange != null && status != 0) {
+                        onStatusChange.accept(status);
+                    }
+                    if (status != 'E') {
+                        LOG.warnv("backend returned unexpected transaction status {0} instead of 'E' after abort query", status);
+                        return false;
                     }
                     return true;
                 }
