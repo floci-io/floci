@@ -286,10 +286,14 @@ public final class TestFixtures {
     }
 
     public static Macie2Client macie2Client() {
+        return macie2Client("test");
+    }
+
+    public static Macie2Client macie2Client(String accountId) {
         return Macie2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
                 .build();
     }
 

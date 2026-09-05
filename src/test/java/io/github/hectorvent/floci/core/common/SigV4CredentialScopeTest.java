@@ -28,6 +28,12 @@ class SigV4CredentialScopeTest {
     }
 
     @Test
+    void parsesPresignedCredentialScope() {
+        assertEquals(Optional.of("macie2"), SigV4CredentialScope.serviceNameFromCredential(
+                "222222222222/20260707/us-east-1/macie2/aws4_request"));
+    }
+
+    @Test
     void ignoresSigV4aBecauseItsCredentialOmitsTheRegion() {
         // SigV4a carries the region in X-Amz-Region-Set, so its credential is
         // <key>/<date>/<service>/aws4_request — one segment shorter than SigV4.
