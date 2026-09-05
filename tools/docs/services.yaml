@@ -142,6 +142,13 @@ services:
     doc: docs/services/memorydb.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/memorydb/MemoryDbHandler.java, mode: switch }
+  - service: macie2
+    doc: docs/services/macie2.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/macie2/MacieController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/securityadmin/SecurityAdminController.java, mode: rest }
+    rename_actions:
+      ListAdmin: ListOrganizationAdminAccounts
   - service: neptune
     doc: docs/services/neptune.md
     sources:
