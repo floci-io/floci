@@ -178,8 +178,7 @@ public class TlsConfigSource implements ConfigSource {
                     KeyAlgorithm.RSA_2048, null);
 
             Files.writeString(certFile, generated.certificatePem());
-            Files.writeString(keyFile, generated.privateKeyPem());
-            FlociCertificateAuthority.restrictToOwnerOnly(keyFile, "rw-------");
+            FlociCertificateAuthority.writePrivateKey(keyFile, generated.privateKeyPem());
 
             LOG.infov("TLS: generated server certificate {0} issued by {1}", certFile,
                     ca.certificate().getSubjectX500Principal().getName());

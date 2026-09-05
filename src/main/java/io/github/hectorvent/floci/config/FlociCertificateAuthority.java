@@ -77,7 +77,7 @@ public final class FlociCertificateAuthority {
                     LOG.infov("TLS: using local CA {0} ({1})", certFile, cert.getSubjectX500Principal().getName());
                     return new FlociCertificateAuthority(certFile, cert, key, pem, generator);
                 } catch (Exception e) {
-                    LOG.warnv("TLS: local CA at {0} is unusable ({1}); generating a new one. Clients that trusted "
+                    LOG.warnv(e, "TLS: local CA at {0} is unusable ({1}); generating a new one. Clients that trusted "
                             + "the old CA must re-import {2}", tlsDir, e.getMessage(), CA_CERT_NAME);
                 }
             }
@@ -85,8 +85,7 @@ public final class FlociCertificateAuthority {
             restrictToOwnerOnly(tlsDir, "rwx------");
             CertificateGenerator.GeneratedCertificate generated = generator.generateCaCertificate(COMMON_NAME);
             Files.writeString(certFile, generated.certificatePem());
-            Files.writeString(keyFile, generated.privateKeyPem());
-            restrictToOwnerOnly(keyFile, "rw-------");
+            writePrivateKey(keyFile, generated.privateKeyPem());
             LOG.infov("TLS: generated local CA {0}. Trust it once: GET /_floci/ca.pem", certFile);
             return new FlociCertificateAuthority(certFile,
                     generator.parseCertificate(generated.certificatePem()),
@@ -160,6 +159,19 @@ public final class FlociCertificateAuthority {
         verifier.initVerify(publicKey);
         verifier.update(probe);
         return verifier.verify(signature);
+    }
+
+    /**
+     * Writes a private key so that no other user can read it at any point: the file is created
+     * owner-only where the file system supports POSIX permissions, and re-tightened otherwise.
+     */
+    static void writePrivateKey(Path keyFile, String pem) throws IOException {
+        Files.deleteIfExists(keyFile);
+        if (Files.getFileAttributeView(keyFile.getParent(), PosixFileAttributeView.class) != null) {
+            Files.createFile(keyFile, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        }
+        Files.writeString(keyFile, pem);
+        restrictToOwnerOnly(keyFile, "rw-------");
     }
 
     static void restrictToOwnerOnly(Path path, String posixPerms) {
