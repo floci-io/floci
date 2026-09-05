@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.acm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -70,7 +71,8 @@ class AcmServicePersistenceTest {
         when(regionResolver.getAccountId()).thenReturn("000000000000");
 
         StorageBackend<String, Certificate> store = load(dir, "acm-certificates.json");
-        return new AcmService(store, generator, regionResolver, 0);
+        return new AcmService(store, generator, FlociCertificateAuthority.loadOrCreate(dir.resolve("tls")),
+                regionResolver, 0);
     }
 
     private StorageBackend<String, Certificate> load(Path dir, String file) {
