@@ -212,15 +212,19 @@ public class ElastiCacheAuthProxy {
         out.flush();
     }
 
-    private static void closeQuietly(Socket s) {
+    private void closeQuietly(Socket s) {
         try {
             if (!s.isClosed()) {
                 try {
                     s.shutdownOutput();
-                } catch (IOException ignored) {}
+                } catch (IOException e) {
+                    LOG.debugv(e, "Error shutting down socket output for group {0}", groupId);
+                }
                 s.close();
             }
-        } catch (IOException ignored) {}
+        } catch (IOException e) {
+            LOG.debugv(e, "Error closing socket for group {0}", groupId);
+        }
     }
 
     /**

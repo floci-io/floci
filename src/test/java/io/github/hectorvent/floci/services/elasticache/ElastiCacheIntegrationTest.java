@@ -212,7 +212,10 @@ class ElastiCacheIntegrationTest {
                 .formParam("AccessString", "on ~* +@all")
                 .header("Authorization", AUTH_HEADER)
                 .post("/");
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            // User already created when tests run in full class order; tolerated in isolation
+            System.err.println("Note: User creation tolerated: " + e.getMessage());
+        }
 
         // Create a second group and verify the user (associated with GROUP_ID only) cannot auth
         try {
@@ -234,15 +237,16 @@ class ElastiCacheIntegrationTest {
             String reply = sendCommand(crossGroupPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
             assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", reply);
         } finally {
-            // Clean up the cross-group
-            given()
-                .formParam("Action", "DeleteReplicationGroup")
-                .formParam("ReplicationGroupId", CROSS_GROUP_ID)
-                .header("Authorization", AUTH_HEADER)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200);
+            // Clean up the cross-group without masking test assertions if creation/auth failed
+            try {
+                given()
+                    .formParam("Action", "DeleteReplicationGroup")
+                    .formParam("ReplicationGroupId", CROSS_GROUP_ID)
+                    .header("Authorization", AUTH_HEADER)
+                    .post("/");
+            } catch (Exception e) {
+                System.err.println("Cross-group cleanup failed: " + e.getMessage());
+            }
         }
     }
 
