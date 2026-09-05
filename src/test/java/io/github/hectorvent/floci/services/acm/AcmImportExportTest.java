@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.services.acm;
 
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.file.Files;
 import java.util.Base64;
 import java.util.List;
 
@@ -24,29 +25,29 @@ class AcmImportExportTest {
 
     private static final String ACM_CONTENT_TYPE = "application/x-amz-json-1.1";
 
-    @Inject
-    CertificateGenerator certificateGenerator;
-
-    // Generated test certificate data
+    // A server certificate from a CA that is not Floci's, with that CA as its chain: what a user imports
     private String validTestCertificate;
     private String validTestPrivateKey;
+    private String validTestChain;
 
     private String importedCertificateArn;
     private String exportableCertificateArn;
 
     @BeforeAll
-    void setupTestCertificates() {
+    void setupTestCertificates() throws Exception {
         RestAssuredJsonUtils.configureAwsContentTypes();
 
-        // Generate a valid test certificate using CertificateGenerator
-        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateCertificate(
+        FlociCertificateAuthority otherCa = FlociCertificateAuthority.loadOrCreate(Files.createTempDirectory("acm-import-ca"));
+        CertificateGenerator.GeneratedCertificate generated = otherCa.issueServerCertificate(
             "test-import.example.com",
             List.of("www.test-import.example.com"),
-            KeyAlgorithm.RSA_2048
+            KeyAlgorithm.RSA_2048,
+            null
         );
 
         validTestCertificate = generated.certificatePem().replace("\r\n", "\n");
         validTestPrivateKey = generated.privateKeyPem().replace("\r\n", "\n");
+        validTestChain = otherCa.caPem().replace("\r\n", "\n");
     }
 
     // ==================== ImportCertificate Tests ====================
@@ -57,6 +58,7 @@ class AcmImportExportTest {
         // Escape newlines for JSON
         String certJson = validTestCertificate.replace("\n", "\\n");
         String keyJson = validTestPrivateKey.replace("\n", "\\n");
+        String chainJson = validTestChain.replace("\n", "\\n");
 
         importedCertificateArn = given()
             .header("X-Amz-Target", "CertificateManager.ImportCertificate")
@@ -64,9 +66,10 @@ class AcmImportExportTest {
             .body("""
                 {
                     "Certificate": "%s",
-                    "PrivateKey": "%s"
+                    "PrivateKey": "%s",
+                    "CertificateChain": "%s"
                 }
-                """.formatted(certJson, keyJson))
+                """.formatted(certJson, keyJson, chainJson))
         .when()
             .post("/")
         .then()
@@ -95,7 +98,25 @@ class AcmImportExportTest {
             .body("Certificate.DomainName", equalTo("test-import.example.com"))
             .body("Certificate.Status", equalTo("ISSUED"))
             .body("Certificate.Type", equalTo("IMPORTED"))
-            .body("Certificate.KeyAlgorithm", equalTo("RSA-2048"));
+            .body("Certificate.KeyAlgorithm", equalTo("RSA-2048"))
+            .body("Certificate.Serial", matchesPattern("([0-9a-f]{2}:)+[0-9a-f]{2}"))
+            .body("Certificate.SignatureAlgorithm", matchesPattern("SHA[0-9]+WITH[A-Z]+"));
+
+        // An import keeps the certificate and the chain exactly as uploaded
+        given()
+            .header("X-Amz-Target", "CertificateManager.GetCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s"
+                }
+                """.formatted(importedCertificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate", equalTo(validTestCertificate))
+            .body("CertificateChain", equalTo(validTestChain));
     }
 
     @Test
@@ -191,6 +212,7 @@ class AcmImportExportTest {
     @Order(11)
     void exportCertificate() {
         String passphrase = Base64.getEncoder().encodeToString("testpassphrase".getBytes());
+        String localCa = given().when().get("/_floci/ca.pem").then().statusCode(200).extract().asString();
 
         given()
             .header("X-Amz-Target", "CertificateManager.ExportCertificate")
@@ -206,6 +228,7 @@ class AcmImportExportTest {
         .then()
             .statusCode(200)
             .body("Certificate", startsWith("-----BEGIN CERTIFICATE-----"))
+            .body("CertificateChain", equalTo(localCa))
             .body("PrivateKey", startsWith("-----BEGIN ENCRYPTED PRIVATE KEY-----"));
     }
 

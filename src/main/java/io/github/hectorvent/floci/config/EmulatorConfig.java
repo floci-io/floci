@@ -2314,9 +2314,10 @@ public interface EmulatorConfig {
         Optional<String> keyPath();
 
         /**
-         * Auto-generate a self-signed certificate when no cert-path/key-path provided.
-         * The generated files are persisted to {@code {storage.persistent-path}/tls/}
-         * and reused across restarts. Env: FLOCI_TLS_SELF_SIGNED
+         * Auto-generate a server certificate when no cert-path/key-path is provided. The leaf is
+         * issued by Floci's local root CA; both live under {@code {storage.persistent-path}/tls/}
+         * and survive restarts. Clients trust the CA ({@code GET /_floci/ca.pem}), not the leaf.
+         * Env: FLOCI_TLS_SELF_SIGNED
          */
         @WithDefault("true")
         boolean selfSigned();
