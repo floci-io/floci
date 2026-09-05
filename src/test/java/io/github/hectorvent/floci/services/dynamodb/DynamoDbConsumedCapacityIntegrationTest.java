@@ -286,6 +286,62 @@ class DynamoDbConsumedCapacityIntegrationTest {
             .body("ConsumedCapacity.CapacityUnits", equalTo(1.5f));
     }
 
+    @Test
+    @Order(10)
+    void batchWriteItemReportsPerTableEntryWithTouchedArms() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchWriteItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "RequestItems": {
+                        "%s": [
+                            {"PutRequest": {"Item": {"pk": {"S": "cc-bw-1"}, "gsiPk": {"S": "g-bw"}}}},
+                            {"PutRequest": {"Item": {"pk": {"S": "cc-bw-2"}}}}
+                        ]
+                    },
+                    "ReturnConsumedCapacity": "INDEXES"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConsumedCapacity.size()", equalTo(1))
+            .body("ConsumedCapacity[0].TableName", equalTo(TABLE))
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(3.0f))
+            .body("ConsumedCapacity[0].Table.CapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].GlobalSecondaryIndexes.gsi1.CapacityUnits", equalTo(1.0f))
+            .body("ConsumedCapacity[0].LocalSecondaryIndexes", nullValue());
+    }
+
+    @Test
+    @Order(11)
+    void batchWriteItemUnderTotalFoldsTheArmsWithNoBreakdown() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchWriteItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "RequestItems": {
+                        "%s": [
+                            {"PutRequest": {"Item": {"pk": {"S": "cc-bw-3"}, "gsiPk": {"S": "g-bw2"}}}},
+                            {"PutRequest": {"Item": {"pk": {"S": "cc-bw-4"}}}}
+                        ]
+                    },
+                    "ReturnConsumedCapacity": "TOTAL"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConsumedCapacity.size()", equalTo(1))
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(3.0f))
+            .body("ConsumedCapacity[0].Table", nullValue())
+            .body("ConsumedCapacity[0].GlobalSecondaryIndexes", nullValue());
+    }
+
     private static void putItem(String itemJson) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.PutItem")

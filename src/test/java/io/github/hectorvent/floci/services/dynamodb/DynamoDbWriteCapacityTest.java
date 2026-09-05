@@ -163,6 +163,19 @@ class DynamoDbWriteCapacityTest {
     }
 
     @Test
+    void costPlusSumsTheTableAndMergesIndexArms() {
+        var indexed = DynamoDbWriteCapacity.forWrite(table, null, fullItem());
+        var sparse = DynamoDbWriteCapacity.forWrite(table, null, item("""
+                {"pk": {"S": "p2"}, "sk": {"S": "1"}, "other": {"S": "o"}}
+                """));
+        var sum = DynamoDbWriteCapacity.Cost.zero().plus(indexed).plus(sparse);
+        assertEquals(2.0, sum.table());
+        assertEquals(Map.of("gsi-inc", 1.0), sum.gsi());
+        assertEquals(Map.of("lsi1", 1.0), sum.lsi());
+        assertEquals(4.0, sum.total());
+    }
+
+    @Test
     void tableUnitsFollowTheLargerImagePerKilobyte() {
         var big = item("""
                 {"pk": {"S": "p1"}, "sk": {"S": "1"}}
