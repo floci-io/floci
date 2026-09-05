@@ -1405,7 +1405,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     /**
      * Returns {@code true} only if {@code certPath} holds a genuinely self-signed CA certificate
-     * (issuer == subject and BasicConstraints {@code CA:true}) — the form usable as a trust anchor.
+     * (issuer == subject and BasicConstraints {@code CA:true}): the form usable as a trust anchor.
      * A leaf/server certificate, or one that cannot be read/parsed as X.509, returns {@code false}.
      */
     static boolean isSelfSignedCaCertificate(Path certPath) {
@@ -1429,7 +1429,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      *   <li>{@code NODE_EXTRA_CA_CERTS} appends Floci's cert to Node's built-in CAs, so public TLS
      *       from the Lambda still works; and</li>
      *   <li>{@code AWS_CA_BUNDLE} is scoped to AWS SDK/CLI traffic, which Floci redirects to its own
-     *       endpoint via {@code AWS_ENDPOINT_URL} — so pointing it at Floci's cert only affects
+     *       endpoint via {@code AWS_ENDPOINT_URL}, so pointing it at Floci's cert only affects
      *       calls that already target Floci.</li>
      * </ul>
      * {@code SSL_CERT_FILE} and {@code REQUESTS_CA_BUNDLE} are deliberately <em>not</em> set: each
