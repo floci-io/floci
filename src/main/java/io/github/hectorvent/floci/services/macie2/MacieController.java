@@ -37,7 +37,9 @@ public class MacieController {
         MacieState state = macieService.state(region(headers));
         var response = objectMapper.createObjectNode();
         var accounts = response.putArray("adminAccounts");
-        if (state.getAdminAccountId() != null) accounts.addObject().put("accountId", state.getAdminAccountId()).put("status", "ENABLED");
+        if (state.getAdminAccountId() != null) {
+            accounts.addObject().put("accountId", state.getAdminAccountId()).put("status", "ENABLED");
+        }
         return Response.ok(response).build();
     }
 

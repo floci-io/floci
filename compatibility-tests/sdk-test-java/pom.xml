@@ -230,6 +230,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>organizations</artifactId>
         </dependency>
+        <!-- Amazon Macie client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>macie2</artifactId>
+        </dependency>
         <!-- Cloud Map (servicediscovery) client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
