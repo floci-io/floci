@@ -176,10 +176,9 @@ public class AcmService implements ResourceProvider {
         cert.setIdempotencyToken(idempotencyToken);
         cert.setTags(tags != null ? new HashMap<>(tags) : new HashMap<>());
 
-        // Generate domain validation options with correct status based on type
         List<DomainValidation> validations = new ArrayList<>();
         for (String san : allSans) {
-            validations.add(generateDomainValidation(san, validationMethod, type));
+            validations.add(generateDomainValidation(san, validationMethod, status));
         }
         cert.setDomainValidationOptions(validations);
 
@@ -236,6 +235,7 @@ public class AcmService implements ResourceProvider {
 
         List<Certificate> allCerts = store.scan(k -> true).stream()
             .filter(c -> c.getArn().contains(":acm:" + region + ":"))
+            .map(c -> settleValidation(c, region))
             .filter(c -> statuses == null || statuses.isEmpty() || statuses.contains(c.getStatus()))
             .filter(c -> keyTypes == null || keyTypes.isEmpty() || keyTypes.contains(c.getKeyAlgorithm()))
             .sorted(Comparator.comparing(Certificate::getArn))
@@ -572,9 +572,42 @@ public class AcmService implements ResourceProvider {
         String certId = extractCertificateIdFromArn(arn);
         String storageKey = regionKey(region, certId);
 
-        return store.get(storageKey).orElseThrow(() ->
+        Certificate cert = store.get(storageKey).orElseThrow(() ->
             new AwsException("ResourceNotFoundException",
                 "The certificate " + arn + " does not exist.", 404));
+        return settleValidation(cert, region);
+    }
+
+    /**
+     * Brings a stored certificate in line on read. A PENDING_VALIDATION certificate whose configured
+     * validation wait has passed is issued, since nothing else moves it along; and a certificate
+     * that has been issued (status ISSUED, or IssuedAt set on one revoked or expired since) reports
+     * SUCCESS for every domain, which also repairs records stored by earlier releases as ISSUED
+     * with pending entries. A certificate revoked before it was ever issued keeps its pending
+     * entries. Changes are stored, which is what a client polling ACM observes.
+     */
+    private Certificate settleValidation(Certificate cert, String region) {
+        boolean changed = false;
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION && cert.getCreatedAt() != null
+                && !Instant.now().isBefore(cert.getCreatedAt().plusSeconds(validationWaitSeconds))) {
+            cert.setStatus(CertificateStatus.ISSUED);
+            cert.setIssuedAt(Instant.now());
+            LOG.debugv("Certificate {0} issued after the validation wait", cert.getArn());
+            changed = true;
+        }
+        boolean issued = cert.getStatus() == CertificateStatus.ISSUED || cert.getIssuedAt() != null;
+        if (issued && !cert.getDomainValidationOptions().stream()
+                .allMatch(validation -> "SUCCESS".equals(validation.validationStatus()))) {
+            cert.setDomainValidationOptions(cert.getDomainValidationOptions().stream()
+                .map(validation -> new DomainValidation(validation.domainName(), validation.validationDomain(),
+                    "SUCCESS", validation.validationMethod(), validation.resourceRecord(), validation.validationEmails()))
+                .toList());
+            changed = true;
+        }
+        if (changed) {
+            store.put(regionKey(region, cert.extractCertificateId()), cert);
+        }
+        return cert;
     }
 
     /**
@@ -673,11 +706,10 @@ public class AcmService implements ResourceProvider {
     }
 
     /**
-     * Generates domain validation options with status based on certificate type.
-     * Private certificates have SUCCESS status immediately; public certificates
-     * start with PENDING_VALIDATION until DNS/email validation completes.
+     * Generates a domain validation entry whose status follows the certificate: an ISSUED
+     * certificate has validated every domain, a PENDING_VALIDATION one has not yet.
      */
-    private DomainValidation generateDomainValidation(String domain, ValidationMethod method, CertificateType type) {
+    private DomainValidation generateDomainValidation(String domain, ValidationMethod method, CertificateStatus status) {
         String validationToken = generateValidationToken(domain);
         String validationDomain = baseDomain(domain);
         ResourceRecord resourceRecord = new ResourceRecord(
@@ -686,8 +718,7 @@ public class AcmService implements ResourceProvider {
             "_" + validationToken.substring(32) + ".acm-validations.aws."
         );
 
-        // Private certificates don't need validation; public certificates do
-        String validationStatus = (type == CertificateType.PRIVATE) ? "SUCCESS" : "PENDING_VALIDATION";
+        String validationStatus = status == CertificateStatus.ISSUED ? "SUCCESS" : "PENDING_VALIDATION";
 
         return new DomainValidation(
             domain,
