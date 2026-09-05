@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
@@ -42,7 +45,10 @@ class LambdaServiceTest {
         CodeStore codeStore = new CodeStore(Path.of("target/test-data/lambda-code"));
         ZipExtractor zipExtractor = new ZipExtractor();
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        service = new LambdaService(store, warmPool, codeStore, zipExtractor, regionResolver);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        service = new LambdaService(store, warmPool, codeStore, zipExtractor, null, regionResolver, storageFactory);
     }
 
     private Map<String, Object> baseRequest(String name) {
@@ -1148,5 +1154,285 @@ class LambdaServiceTest {
             release.countDown();
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_success() {
+        service.createFunction(REGION, baseRequest("kafka-fn"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                ),
+                "SourceAccessConfigurations", List.of(
+                        Map.of("Type", "SASL_SCRAM_256_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:my-secret")
+                )
+        ));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, request);
+
+        assertNotNull(esm);
+        assertNotNull(esm.getUuid());
+        assertNull(esm.getEventSourceArn());
+        assertEquals(List.of("my-topic"), esm.getTopics());
+        assertNotNull(esm.getSelfManagedEventSource());
+        assertEquals(1, esm.getSourceAccessConfigurations().size());
+        assertEquals("Enabled", esm.getState());
+        assertTrue(esm.isEnabled());
+
+        // Verify update
+        EventSourceMapping updated = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of("updated-topic")
+        ));
+        assertEquals(List.of("updated-topic"), updated.getTopics());
+
+        // Verify delete
+        service.deleteEventSourceMapping(esm.getUuid());
+        assertThrows(AwsException.class, () -> service.getEventSourceMapping(esm.getUuid()));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_missingTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-missing-topics"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-missing-topics",
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Topics"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_missingBootstrapServers_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-missing-servers"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-missing-servers",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of()
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("KAFKA_BOOTSTRAP_SERVERS"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_atTimestamp_succeeds() {
+        service.createFunction(REGION, baseRequest("kafka-fn-at-timestamp"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-at-timestamp",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                ),
+                "StartingPosition", "AT_TIMESTAMP",
+                "StartingPositionTimestamp", 123456789
+        ));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, request);
+        assertNotNull(esm);
+        assertEquals("AT_TIMESTAMP", esm.getStartingPosition());
+        assertEquals(123456789000L, esm.getStartingPositionTimestamp());
+    }
+
+    @Test
+    void createEventSourceMapping_dynamoDb_atTimestamp_throws() {
+        service.createFunction(REGION, baseRequest("dynamo-fn-at-timestamp"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "dynamo-fn-at-timestamp",
+                "EventSourceArn", "arn:aws:dynamodb:us-east-1:000000000000:table/my-table/stream/2026-01-01T00:00:00.000",
+                "StartingPosition", "AT_TIMESTAMP",
+                "StartingPositionTimestamp", 123456789
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("AT_TIMESTAMP is only supported for Amazon Kinesis"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_crossRegionFunctionArn_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-cross-region"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:kafka-fn-cross-region",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Region 'us-west-2' in ARN does not match request region 'us-east-1'"));
+    }
+
+    @Test
+    void createEventSourceMapping_mixedSources_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-mixed"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-mixed",
+                "EventSourceArn", "arn:aws:sqs:us-east-1:000000000000:my-queue",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Cannot specify both EventSourceArn and SelfManagedEventSource/Topics"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_malformedTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-malformed-topics"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-malformed-topics",
+                "Topics", List.of(123),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateEventSourceMapping_malformedTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-update-topics"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-fn-update-topics",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of()
+        )));
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of(456)
+        )));
+    }
+
+    @Test
+    void updateEventSourceMapping_functionTargetValidation() {
+        service.createFunction(REGION, baseRequest("fn-esm-target-1"));
+        service.createFunction(REGION, baseRequest("fn-esm-target-2"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "fn-esm-target-1",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        // Valid function update
+        EventSourceMapping updated = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2"
+        ));
+        assertEquals("fn-esm-target-2", updated.getFunctionName());
+        assertTrue(updated.getFunctionArn().contains("fn-esm-target-2"));
+
+        // Qualified version target update
+        service.publishVersion(REGION, "fn-esm-target-2", "v1");
+        EventSourceMapping updatedVersion = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:1"
+        ));
+        assertEquals("fn-esm-target-2", updatedVersion.getFunctionName());
+        assertTrue(updatedVersion.getFunctionArn().endsWith(":fn-esm-target-2:1"));
+
+        // Qualified alias target update
+        service.createAlias(REGION, "fn-esm-target-2", "live", "1", "production alias", null);
+        EventSourceMapping updatedAlias = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:live"
+        ));
+        assertEquals("fn-esm-target-2", updatedAlias.getFunctionName());
+        assertTrue(updatedAlias.getFunctionArn().endsWith(":fn-esm-target-2:live"));
+
+        // Qualified $LATEST target update
+        EventSourceMapping updatedLatest = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:$LATEST"
+        ));
+        assertEquals("fn-esm-target-2", updatedLatest.getFunctionName());
+        assertTrue(updatedLatest.getFunctionArn().endsWith(":fn-esm-target-2:$LATEST"));
+
+        // Create ESM with qualified function reference
+        EventSourceMapping esmQualified = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "fn-esm-target-2:live",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+        assertEquals("fn-esm-target-2", esmQualified.getFunctionName());
+        assertTrue(esmQualified.getFunctionArn().endsWith(":fn-esm-target-2:live"));
+
+        // Non-existent version or alias throws 404
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:99"
+        )));
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:non-existent-alias"
+        )));
+
+        // Non-existent function throws
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "non-existent-fn"
+        )));
+
+        // Cross-region function ARN throws
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:other-region-fn"
+        )));
     }
 }

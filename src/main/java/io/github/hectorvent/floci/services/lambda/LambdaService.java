@@ -162,8 +162,8 @@ public class LambdaService implements ResourceProvider {
         this.zipExtractor = zipExtractor;
         this.config = config;
         this.regionResolver = regionResolver;
-        this.esmStore = null;
-        this.aliasStore = null;
+        this.esmStore = storageFactory != null ? new EsmStore(storageFactory) : null;
+        this.aliasStore = storageFactory != null ? new LambdaAliasStore(storageFactory) : null;
         this.s3Service = null;
         this.sqsService = null;
         this.poller = null;
@@ -553,6 +553,28 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("InvalidParameterValueException",
                     "Region '" + ref.region() + "' in ARN does not match request region '" + region + "'", 400);
         }
+    }
+
+    private record ResolvedFunctionTarget(String functionArn, String functionName) {}
+
+    private ResolvedFunctionTarget resolveFunctionTarget(String region, LambdaArnUtils.ResolvedFunctionRef fnRef) {
+        String name = fnRef.name();
+        LambdaFunction fn = getFunction(region, name);
+        String qualifier = fnRef.qualifier();
+        if (qualifier == null) {
+            return new ResolvedFunctionTarget(fn.getFunctionArn(), name);
+        }
+        if ("$LATEST".equals(qualifier)) {
+            return new ResolvedFunctionTarget(fn.getFunctionArn() + ":$LATEST", name);
+        }
+        if (qualifier.chars().allMatch(Character::isDigit)) {
+            LambdaFunction versionFn = functionStore.get(region, name, qualifier)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Function version not found: " + name + ":" + qualifier, 404));
+            return new ResolvedFunctionTarget(versionFn.getFunctionArn(), name);
+        }
+        LambdaAlias alias = getAlias(region, name, qualifier);
+        return new ResolvedFunctionTarget(alias.getAliasArn(), name);
     }
 
     public List<LambdaFunction> listFunctions(String region) {
@@ -1047,42 +1069,132 @@ public class LambdaService implements ResourceProvider {
         validateEventSourceMappingStructures(request);
 
         String functionName = (String) request.get("FunctionName");
-        String eventSourceArn = (String) request.get("EventSourceArn");
-
         if (functionName == null || functionName.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "FunctionName is required", 400);
-        }
-        if (eventSourceArn == null || eventSourceArn.isBlank()) {
-            throw new AwsException("InvalidParameterValueException", "EventSourceArn is required", 400);
-        }
-        if (!eventSourceArn.contains(":sqs:") && !eventSourceArn.contains(":kinesis:")
-                && !eventSourceArn.contains(":dynamodb:")) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Only SQS, Kinesis, and DynamoDB Streams event sources are supported.", 400);
         }
 
         // Resolve function — supports bare name, partial ARN, or full ARN
         LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(functionName);
         String resolvedName = fnRef.name();
 
-        // Extract region from the event source ARN (parts[3] for all supported ARN formats)
+        boolean hasKafkaSource = request.containsKey("SelfManagedEventSource") && request.get("SelfManagedEventSource") != null;
+        boolean hasTopics = request.containsKey("Topics") && request.get("Topics") != null;
+        boolean hasEventSourceArn = request.containsKey("EventSourceArn") && request.get("EventSourceArn") != null;
+        boolean isSelfManagedKafka = hasKafkaSource || hasTopics;
+
+        String eventSourceArn;
         String resolvedRegion;
-        if (eventSourceArn.contains(":sqs:")) {
-            resolvedRegion = SqsEventSourcePoller.regionFromArn(eventSourceArn);
+        Map<String, Object> selfManagedEventSource = null;
+        List<String> topics = null;
+        List<Map<String, Object>> sourceAccessConfigurations = null;
+
+        if (isSelfManagedKafka) {
+            if (hasEventSourceArn) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Cannot specify both EventSourceArn and SelfManagedEventSource/Topics", 400);
+            }
+            if (!hasKafkaSource) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource is required for self-managed Apache Kafka event sources", 400);
+            }
+            if (!hasTopics) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics is required for self-managed Apache Kafka event sources", 400);
+            }
+            eventSourceArn = null;
+
+            enforceRegion(region, fnRef);
+            resolvedRegion = region;
+
+            Object rawSource = request.get("SelfManagedEventSource");
+            if (!(rawSource instanceof Map<?, ?> sourceMap)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource must be a JSON object", 400);
+            }
+            Object rawEndpoints = sourceMap.get("Endpoints");
+            if (!(rawEndpoints instanceof Map<?, ?> endpointsMap)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource must contain Endpoints", 400);
+            }
+            Object rawServers = endpointsMap.get("KAFKA_BOOTSTRAP_SERVERS");
+            if (!(rawServers instanceof List<?> serverList) || serverList.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource must contain KAFKA_BOOTSTRAP_SERVERS", 400);
+            }
+            for (Object server : serverList) {
+                if (!(server instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "KAFKA_BOOTSTRAP_SERVERS elements must be non-blank strings", 400);
+                }
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> typedSource = (Map<String, Object>) rawSource;
+            selfManagedEventSource = typedSource;
+
+            Object rawTopics = request.get("Topics");
+            if (!(rawTopics instanceof List<?> topicList) || topicList.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics must be a non-empty list of strings", 400);
+            }
+            List<String> validatedTopics = new ArrayList<>();
+            for (Object item : topicList) {
+                if (!(item instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Topics elements must be non-blank strings", 400);
+                }
+                validatedTopics.add(s);
+            }
+            topics = validatedTopics;
+
+            if (request.containsKey("SourceAccessConfigurations")) {
+                Object rawAccess = request.get("SourceAccessConfigurations");
+                if (rawAccess != null) {
+                    if (!(rawAccess instanceof List<?> accessList)) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "SourceAccessConfigurations must be a list", 400);
+                    }
+                    List<Map<String, Object>> typedAccess = new ArrayList<>();
+                    for (Object item : accessList) {
+                        if (!(item instanceof Map<?, ?> m)) {
+                            throw new AwsException("InvalidParameterValueException",
+                                    "SourceAccessConfiguration entries must be JSON objects", 400);
+                        }
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> typedMap = (Map<String, Object>) m;
+                        typedAccess.add(typedMap);
+                    }
+                    sourceAccessConfigurations = typedAccess;
+                }
+            }
         } else {
-            // arn:aws:kinesis:region:... or arn:aws:dynamodb:region:...
-            resolvedRegion = AwsArnUtils.regionOrDefault(eventSourceArn, region);
+            eventSourceArn = (String) request.get("EventSourceArn");
+            if (eventSourceArn == null || eventSourceArn.isBlank()) {
+                throw new AwsException("InvalidParameterValueException", "EventSourceArn is required", 400);
+            }
+            if (!eventSourceArn.contains(":sqs:") && !eventSourceArn.contains(":kinesis:")
+                    && !eventSourceArn.contains(":dynamodb:")) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Only SQS, Kinesis, and DynamoDB Streams event sources are supported.", 400);
+            }
+
+            // Extract region from the event source ARN (parts[3] for all supported ARN formats)
+            if (eventSourceArn.contains(":sqs:")) {
+                resolvedRegion = SqsEventSourcePoller.regionFromArn(eventSourceArn);
+            } else {
+                // arn:aws:kinesis:region:... or arn:aws:dynamodb:region:...
+                resolvedRegion = AwsArnUtils.regionOrDefault(eventSourceArn, region);
+            }
+
+            // If the caller supplied a full function ARN, its region must agree
+            // with the region derived from the event source ARN. Otherwise we'd
+            // silently bind a different-region function of the same name.
+            if (fnRef.region() != null && !fnRef.region().equals(resolvedRegion)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Function ARN region '" + fnRef.region() + "' does not match event source region '" + resolvedRegion + "'", 400);
+            }
         }
 
-        // If the caller supplied a full function ARN, its region must agree
-        // with the region derived from the event source ARN. Otherwise we'd
-        // silently bind a different-region function of the same name.
-        if (fnRef.region() != null && !fnRef.region().equals(resolvedRegion)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Function ARN region '" + fnRef.region() + "' does not match event source region '" + resolvedRegion + "'", 400);
-        }
-
-        LambdaFunction fn = getFunction(resolvedRegion, resolvedName);
+        ResolvedFunctionTarget target = resolveFunctionTarget(resolvedRegion, fnRef);
 
         int batchSize = toInt(request.get("BatchSize"), 10);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
@@ -1102,15 +1214,17 @@ public class LambdaService implements ResourceProvider {
 
         EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
 
-        StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn);
+        StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn, isSelfManagedKafka);
 
-        String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
+        String queueUrl = (eventSourceArn != null && eventSourceArn.contains(":sqs:"))
+                ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config != null ? config.effectiveBaseUrl() : null)
+                : null;
 
         EventSourceMapping esm = new EventSourceMapping();
         esm.setUuid(UUID.randomUUID().toString());
         esm.setAccountId(regionResolver.getAccountId());
-        esm.setFunctionArn(fn.getFunctionArn());
-        esm.setFunctionName(resolvedName);
+        esm.setFunctionArn(target.functionArn());
+        esm.setFunctionName(target.functionName());
         esm.setEventSourceArn(eventSourceArn);
         esm.setQueueUrl(queueUrl);
         esm.setRegion(resolvedRegion);
@@ -1124,6 +1238,9 @@ public class LambdaService implements ResourceProvider {
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
         esm.setStartingPositionTimestamp(startingPosition.timestampMillis());
+        esm.setSelfManagedEventSource(selfManagedEventSource);
+        esm.setTopics(topics);
+        esm.setSourceAccessConfigurations(sourceAccessConfigurations);
         esm.setLastModified(System.currentTimeMillis());
 
         esmStore.save(esm);
@@ -1393,7 +1510,7 @@ public class LambdaService implements ResourceProvider {
      * requests that used to succeed. There is no update counterpart because AWS's
      * UpdateEventSourceMapping does not accept the field at all - it is replace-only.
      */
-    private StartingPositionSpec parseStartingPosition(Map<String, Object> request, String eventSourceArn) {
+    private StartingPositionSpec parseStartingPosition(Map<String, Object> request, String eventSourceArn, boolean isSelfManagedKafka) {
         Object raw = request.get("StartingPosition");
         if (raw == null) {
             return new StartingPositionSpec(null, null);
@@ -1409,12 +1526,13 @@ public class LambdaService implements ResourceProvider {
         if (!"AT_TIMESTAMP".equals(position)) {
             return new StartingPositionSpec(position, null);
         }
-        // AT_TIMESTAMP is Kinesis-only among the event sources Floci supports - DynamoDB Streams
-        // shard iterators have no timestamp form at all, so silently accepting it there would
-        // promise a starting point that can never be honoured.
-        if (eventSourceArn != null && !eventSourceArn.contains(":kinesis:")) {
+        // AT_TIMESTAMP is supported for Amazon Kinesis and self-managed Apache Kafka event sources -
+        // DynamoDB Streams shard iterators have no timestamp form at all, so silently accepting it there
+        // would promise a starting point that can never be honoured.
+        boolean isKinesis = eventSourceArn != null && eventSourceArn.contains(":kinesis:");
+        if (!isKinesis && !isSelfManagedKafka) {
             throw new AwsException("InvalidParameterValueException",
-                    "AT_TIMESTAMP is only supported for Amazon Kinesis event sources", 400);
+                    "AT_TIMESTAMP is only supported for Amazon Kinesis and self-managed Apache Kafka event sources", 400);
         }
         Object rawTimestamp = request.get("StartingPositionTimestamp");
         if (rawTimestamp == null) {
@@ -1473,6 +1591,9 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void startPollingHelper(EventSourceMapping esm) {
+        if (esm.getEventSourceArn() == null) {
+            return;
+        }
         if (esm.getEventSourceArn().contains(":sqs:")) {
             poller.startPolling(esm);
         } else if (esm.getEventSourceArn().contains(":kinesis:")) {
@@ -1483,6 +1604,9 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void stopPollingHelper(EventSourceMapping esm) {
+        if (esm.getEventSourceArn() == null) {
+            return;
+        }
         if (esm.getEventSourceArn().contains(":sqs:")) {
             poller.stopPolling(esm.getUuid());
         } else if (esm.getEventSourceArn().contains(":kinesis:")) {
@@ -1542,6 +1666,60 @@ public class LambdaService implements ResourceProvider {
             // AWS: passing FilterCriteria replaces the whole set; an empty object or an empty
             // Filters array clears all filters.
             esm.setFilterCriteria(parseFilterCriteria(request, objectMapper));
+        }
+
+        if (request.containsKey("FunctionName")) {
+            String fnName = (String) request.get("FunctionName");
+            if (fnName != null && !fnName.isBlank()) {
+                LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(fnName);
+                if (fnRef.region() != null && !fnRef.region().equals(esm.getRegion())) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Function ARN region '" + fnRef.region() + "' does not match event source region '" + esm.getRegion() + "'", 400);
+                }
+                ResolvedFunctionTarget target = resolveFunctionTarget(esm.getRegion(), fnRef);
+                esm.setFunctionArn(target.functionArn());
+                esm.setFunctionName(target.functionName());
+            }
+        }
+
+        if (request.containsKey("Topics")) {
+            Object rawTopics = request.get("Topics");
+            if (!(rawTopics instanceof List<?> topicList) || topicList.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics must be a non-empty list of strings", 400);
+            }
+            List<String> validatedTopics = new ArrayList<>();
+            for (Object item : topicList) {
+                if (!(item instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Topics elements must be non-blank strings", 400);
+                }
+                validatedTopics.add(s);
+            }
+            esm.setTopics(validatedTopics);
+        }
+
+        if (request.containsKey("SourceAccessConfigurations")) {
+            Object rawAccess = request.get("SourceAccessConfigurations");
+            if (rawAccess != null) {
+                if (!(rawAccess instanceof List<?> accessList)) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "SourceAccessConfigurations must be a list", 400);
+                }
+                List<Map<String, Object>> typedAccess = new ArrayList<>();
+                for (Object item : accessList) {
+                    if (!(item instanceof Map<?, ?> m)) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "SourceAccessConfiguration entries must be JSON objects", 400);
+                    }
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> typedMap = (Map<String, Object>) m;
+                    typedAccess.add(typedMap);
+                }
+                esm.setSourceAccessConfigurations(typedAccess);
+            } else {
+                esm.setSourceAccessConfigurations(null);
+            }
         }
 
         esm.setLastModified(System.currentTimeMillis());

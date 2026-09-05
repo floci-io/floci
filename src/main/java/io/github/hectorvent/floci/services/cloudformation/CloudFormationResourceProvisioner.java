@@ -256,7 +256,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy",
             "AWS::IAM::User",
-            "AWS::Lambda::EventSourceMapping",
             "AWS::Lambda::Function",
             "AWS::Lambda::LayerVersion",
             "AWS::RDS::DBCluster",
@@ -452,8 +451,6 @@ public class CloudFormationResourceProvisioner {
                                 region,
                                 accountId,
                                 stackName);
-                case "AWS::Lambda::EventSourceMapping" ->
-                        provisionLambdaEventSourceMapping(resource, properties, engine, region);
                 case "AWS::Cognito::UserPool" ->
                         provisionCognitoUserPool(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Cognito::UserPoolClient" ->
@@ -744,7 +741,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
             case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
-            case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
             case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
             case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
             case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
@@ -4113,58 +4109,6 @@ public class CloudFormationResourceProvisioner {
         if (source.has(sourceName) && !source.get(sourceName).isNull()) {
             target.set(targetName, source.get(sourceName));
         }
-    }
-
-    // ── Lambda EventSourceMapping ─────────────────────────────────────────────
-
-    private void provisionLambdaEventSourceMapping(StackResource r, JsonNode props,
-                                                   CloudFormationTemplateEngine engine, String region) {
-        Map<String, Object> req = new HashMap<>();
-        req.put("FunctionName", resolveOptional(props, "FunctionName", engine));
-        req.put("EventSourceArn", resolveOptional(props, "EventSourceArn", engine));
-
-        String enabledStr = resolveOptional(props, "Enabled", engine);
-        if (enabledStr != null) {
-            req.put("Enabled", Boolean.parseBoolean(enabledStr));
-        }
-
-        String batchSize = resolveOptional(props, "BatchSize", engine);
-        if (batchSize != null) {
-            try { req.put("BatchSize", Integer.parseInt(batchSize)); } catch (NumberFormatException ignored) {}
-        }
-
-        String startingPosition = resolveOptional(props, "StartingPosition", engine);
-        if (startingPosition != null) {
-            req.put("StartingPosition", startingPosition);
-        }
-
-        String startingPositionTimestamp = resolveOptional(props, "StartingPositionTimestamp", engine);
-        if (startingPositionTimestamp != null) {
-            try {
-                double timestamp = Double.parseDouble(startingPositionTimestamp);
-                if (!Double.isFinite(timestamp)) {
-                    throw new NumberFormatException("Non-finite timestamp");
-                }
-                req.put("StartingPositionTimestamp", timestamp);
-            } catch (NumberFormatException e) {
-                // Not swallowed the way BatchSize above is: dropping this one degrades into the
-                // "StartingPositionTimestamp is required" error from the service, which points at
-                // the wrong problem and hides the value that actually failed to parse. Double.parseDouble
-                // accepts "NaN"/"Infinity"/"-Infinity" without throwing, so isFinite is checked explicitly
-                // to keep those from silently becoming epoch-zero or long-extremum timestamps downstream.
-                throw new AwsException("ValidationError",
-                        "Value of property StartingPositionTimestamp must be a number.", 400);
-            }
-        }
-
-        List<String> functionResponseTypes = resolveStringList(props, "FunctionResponseTypes", engine);
-        if (!functionResponseTypes.isEmpty()) {
-            req.put("FunctionResponseTypes", functionResponseTypes);
-        }
-
-        var esm = lambdaService.createEventSourceMapping(region, req);
-        r.setPhysicalId(esm.getUuid());
-        r.getAttributes().put("Id", esm.getUuid());
     }
 
     // ── Pipes ──────────────────────────────────────────────────────────────────

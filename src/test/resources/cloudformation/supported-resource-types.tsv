@@ -80,7 +80,7 @@ AWS::KMS::Key	KmsCfnProvisioner
 AWS::Kinesis::Stream	KinesisCfnProvisioner
 AWS::KinesisFirehose::DeliveryStream	FirehoseCfnProvisioner
 AWS::Lambda::Alias	LambdaVersionAliasCfnProvisioner
-AWS::Lambda::EventSourceMapping	LEGACY_SWITCH
+AWS::Lambda::EventSourceMapping	LambdaEventSourceMappingCfnProvisioner
 AWS::Lambda::Function	LEGACY_SWITCH
 AWS::Lambda::LayerVersion	LEGACY_SWITCH
 AWS::Lambda::MicrovmImage	LambdaMicrovmsCfnProvisioner

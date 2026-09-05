@@ -4791,6 +4791,160 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_lambdaEventSourceMappingKafka() throws Exception {
+        String stackName = "cfn-esm-kafka-stack";
+        String funcName = "cfn-esm-kafka-func";
+
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Code": {
+                      "ZipFile": "exports.handler = async (e) => ({ statusCode: 200 });"
+                    }
+                  }
+                },
+                "MyKafkaESM": {
+                  "Type": "AWS::Lambda::EventSourceMapping",
+                  "Properties": {
+                    "FunctionName": { "Ref": "MyFunction" },
+                    "Enabled": true,
+                    "BatchSize": 100,
+                    "Topics": ["orders-topic", "events-topic"],
+                    "SelfManagedEventSource": {
+                      "Endpoints": {
+                        "KAFKA_BOOTSTRAP_SERVERS": ["kafka-broker-1:9092", "kafka-broker-2:9092"]
+                      }
+                    },
+                    "SourceAccessConfigurations": [
+                      {
+                        "Type": "SASL_SCRAM_512_AUTH",
+                        "URI": "arn:aws:secretsmanager:us-east-1:000000000000:secret:kafka-auth"
+                      }
+                    ]
+                  }
+                }
+              },
+              "Outputs": {
+                "EsmId": {
+                  "Value": { "Fn::GetAtt": ["MyKafkaESM", "Id"] }
+                },
+                "EsmArn": {
+                  "Value": { "Fn::GetAtt": ["MyKafkaESM", "EventSourceMappingArn"] }
+                },
+                "EsmRef": {
+                  "Value": { "Ref": "MyKafkaESM" }
+                }
+              }
+            }
+            """.formatted(funcName);
+
+        // 1. Create stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // 2. Stack must reach CREATE_COMPLETE
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().body().asString();
+
+        String getAttId = outputValue(describeXml, "EsmId");
+        String getAttArn = outputValue(describeXml, "EsmArn");
+        String getAttRef = outputValue(describeXml, "EsmRef");
+
+        // 3. Lambda list-event-source-mappings must return our ESM with Kafka properties populated
+        String esmJson = given()
+        .when()
+            .get("/2015-03-31/event-source-mappings?FunctionName=" + funcName)
+        .then()
+            .statusCode(200)
+            .body(containsString(funcName))
+            .extract().body().asString();
+
+        JsonNode esmList = OBJECT_MAPPER.readTree(esmJson);
+        assertEquals(1, esmList.path("EventSourceMappings").size());
+        JsonNode esmNode = esmList.path("EventSourceMappings").get(0);
+        String esmUuid = esmNode.path("UUID").asText();
+
+        // Verify Fn::GetAtt attributes and Ref
+        assertEquals(esmUuid, getAttId);
+        assertEquals(esmUuid, getAttRef);
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:event-source-mapping:" + esmUuid, getAttArn);
+
+        // Verify Topics
+        JsonNode topics = esmNode.path("Topics");
+        assertTrue(topics.isArray() && topics.size() == 2);
+        assertEquals("orders-topic", topics.get(0).asText());
+        assertEquals("events-topic", topics.get(1).asText());
+
+        // Verify SelfManagedEventSource
+        JsonNode smes = esmNode.path("SelfManagedEventSource");
+        assertTrue(smes.isObject());
+        JsonNode endpoints = smes.path("Endpoints").path("KAFKA_BOOTSTRAP_SERVERS");
+        assertTrue(endpoints.isArray() && endpoints.size() == 2);
+        assertEquals("kafka-broker-1:9092", endpoints.get(0).asText());
+
+        // Verify SourceAccessConfigurations
+        JsonNode accessConfigs = esmNode.path("SourceAccessConfigurations");
+        assertTrue(accessConfigs.isArray() && accessConfigs.size() == 1);
+        assertEquals("SASL_SCRAM_512_AUTH", accessConfigs.get(0).path("Type").asText());
+        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:kafka-auth", accessConfigs.get(0).path("URI").asText());
+
+        // 4. Delete stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            String deleteStatus = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .extract().body().asString();
+            if (deleteStatus.contains("DELETE_COMPLETE") || deleteStatus.contains("does not exist")) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        given()
+        .when()
+            .get("/2015-03-31/event-source-mappings/" + esmUuid)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
     void createStack_lambdaEventSourceMappingWithStartingPosition() {
         String stackName = "cfn-esm-starting-position-stack";
         String funcName = "cfn-esm-starting-position-func";
