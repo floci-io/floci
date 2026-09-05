@@ -43,7 +43,8 @@ public class LambdaEventSourceMappingCfnProvisioner implements CfnResourceProvis
         Map<String, Object> req = new HashMap<>();
         String functionName = ctx.resolveOptional(props, "FunctionName");
         if (functionName == null || functionName.isBlank()) {
-            throw new IllegalArgumentException("FunctionName is required for a lambda event source mapping");
+            throw new AwsException("ValidationError",
+                    "Property FunctionName is required for AWS::Lambda::EventSourceMapping", 400);
         }
         req.put("FunctionName", functionName);
 

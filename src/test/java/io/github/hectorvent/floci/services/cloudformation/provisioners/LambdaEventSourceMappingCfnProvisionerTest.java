@@ -239,6 +239,17 @@ class LambdaEventSourceMappingCfnProvisionerTest {
     }
 
     @Test
+    void provisionRejectsMissingFunctionName() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, mapper.createObjectNode(), ctx()));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("Property FunctionName is required for AWS::Lambda::EventSourceMapping", ex.getMessage());
+    }
+
+    @Test
     void provisionRejectsWrongResourceType() {
         StackResource r = new StackResource();
         r.setResourceType("AWS::Lambda::Function");
