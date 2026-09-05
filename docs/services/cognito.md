@@ -119,6 +119,11 @@ URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`
 routed, since that hostname never reaches Floci. `/oauth2/authorize`, `/login` and `/logout` are not
 served on any host.
 
+With TLS enabled, a custom domain (`CustomDomainConfig` set) is added to Floci's server
+certificate as soon as it is created, so `https://<domain>` verifies without a restart; see
+[TLS](../configuration/tls.md) for the accepted suffixes. A prefix domain is served under
+`amazoncognito.com` on AWS, not by Floci, and is left alone.
+
 ### Log Delivery
 
 | Action | Description |
