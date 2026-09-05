@@ -83,13 +83,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        Socket activeClient = PostgresProtocolHandler.authenticate(
+                        PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
-                        if (activeClient != null) {
-                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        if (session != null) {
+                            PostgresProtocolHandler.bridge(session, backend);
                         }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -140,13 +141,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        Socket activeClient = PostgresProtocolHandler.authenticate(
+                        PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
-                        if (activeClient != null) {
-                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        if (session != null) {
+                            PostgresProtocolHandler.bridge(session, backend);
                         }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -197,13 +199,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        Socket activeClient = PostgresProtocolHandler.authenticate(
+                        PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
-                        if (activeClient != null) {
-                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        if (session != null) {
+                            PostgresProtocolHandler.bridge(session, backend);
                         }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -263,13 +266,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        Socket activeClient = PostgresProtocolHandler.authenticate(
+                        PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), tlsCertificates,
                                 (user, pass) -> true);
-                        if (activeClient != null) {
-                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        if (session != null) {
+                            PostgresProtocolHandler.bridge(session, backend);
                         }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -316,13 +320,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        Socket activeClient = PostgresProtocolHandler.authenticate(
+                        PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), tlsCertificates,
                                 (user, pass) -> true);
-                        if (activeClient != null) {
-                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        if (session != null) {
+                            PostgresProtocolHandler.bridge(session, backend);
                         }
                     } catch (IOException ignored) {
                         // Client aborts the handshake below — the handler observing that is expected.
@@ -365,13 +370,14 @@ class PostgresProtocolHandlerTest {
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
-                        Socket activeClient = PostgresProtocolHandler.authenticate(
+                        PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
-                        if (activeClient != null) {
-                            PostgresProtocolHandler.bridge(activeClient, backend);
+                        if (session != null) {
+                            PostgresProtocolHandler.bridge(session, backend);
                         }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -541,6 +547,174 @@ class PostgresProtocolHandlerTest {
     }
 
     @Test
+    void iamSessionIsTerminatedWhenPostgresReportsAnotherSessionRole() throws Exception {
+        AtomicReference<String> backendQuery = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), backendQuery,
+                            "approle", true, (in, out) -> {
+                                readSimpleQuery(in);
+                                // What PostgreSQL reports after RESET SESSION AUTHORIZATION and
+                                // friends hand the session back to the connection's master role.
+                                writeParameterStatus(out, "session_authorization", "masteruser");
+                                writeParameterStatus(out, "is_superuser", "on");
+                                writeCommandComplete(out, "RESET");
+                                writeReadyForQuery(out);
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "approle", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+                readAuthenticationOk(clientIn);
+                readParametersUntilReadyForQuery(clientIn);
+
+                writeSimpleQuery(clientOut, "RESET SESSION AUTHORIZATION");
+
+                Map<Character, String> error = readErrorResponse(clientIn);
+                assertEquals("FATAL", error.get('S'));
+                assertEquals("42501", error.get('C'));
+                assertEquals("permission denied to set session authorization", error.get('M'));
+                assertEquals(-1, clientIn.read(), "session must be closed, not handed back as master");
+
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+            }
+        }
+    }
+
+    @Test
+    void iamSessionKeepsRelayingWhenTheReportedRoleIsUnchanged() throws Exception {
+        byte[] wideRow = new byte[40_000];
+        java.util.Arrays.fill(wideRow, (byte) 'x');
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(),
+                            new AtomicReference<>(), "approle", true, (in, out) -> {
+                                readSimpleQuery(in);
+                                writeParameterStatus(out, "session_authorization", "approle");
+                                writeMessage(out, 'D', wideRow);
+                                writeCommandComplete(out, "SELECT 1");
+                                writeReadyForQuery(out);
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "approle", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+                readAuthenticationOk(clientIn);
+                readParametersUntilReadyForQuery(clientIn);
+
+                writeSimpleQuery(clientOut, "SET SESSION AUTHORIZATION approle");
+
+                assertEquals('S', clientIn.readByte());
+                clientIn.readNBytes(clientIn.readInt() - 4);
+                assertEquals('D', clientIn.readByte());
+                // A message larger than the relay buffer must arrive whole.
+                assertEquals(wideRow.length, clientIn.readInt() - 4);
+                assertEquals(wideRow.length, clientIn.readNBytes(wideRow.length).length);
+                assertEquals('C', clientIn.readByte());
+                clientIn.readNBytes(clientIn.readInt() - 4);
+                readReadyForQuery(clientIn);
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+            }
+        }
+    }
+
+    @Test
+    void nonIamSessionRelaysSessionAuthorizationChanges() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendMasterSession(backendServer, (in, out) -> {
+                        readSimpleQuery(in);
+                        writeParameterStatus(out, "session_authorization", "approle");
+                        writeCommandComplete(out, "SET");
+                        writeReadyForQuery(out);
+                    });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "dbadmin", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, "adminpass");
+                readAuthenticationOk(clientIn);
+                readReadyForQuery(clientIn);
+
+                // The master session is the backend's own identity, so switching roles is its
+                // business. The guard applies only to IAM sessions.
+                writeSimpleQuery(clientOut, "SET SESSION AUTHORIZATION approle");
+                Map<String, String> params = readParametersUntilReadyForQuery(clientIn);
+                assertEquals("approle", params.get("session_authorization"));
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+            }
+        }
+    }
+
+    @Test
     void quotesRoleNamesContainingDoubleQuotes() {
         assertEquals("\"app\"\"role\"", PostgresProtocolHandler.quoteIdentifier("app\"role"));
     }
@@ -548,13 +722,14 @@ class PostgresProtocolHandlerTest {
     private Thread startIamAuth(Socket proxyClient, Socket backend) {
         return Thread.ofVirtual().start(() -> {
             try {
-                Socket activeClient = PostgresProtocolHandler.authenticate(
+                PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
                         proxyClient, backend,
                         "dbadmin", "adminpass", "postgres",
                         true, testSigV4Validator(), testTlsCertificates(),
                         (user, pass) -> true);
-                if (activeClient != null) {
-                    PostgresProtocolHandler.bridge(activeClient, backend);
+                if (session != null) {
+                    PostgresProtocolHandler.bridge(session, backend);
                 }
             } catch (IOException e) {
                 throw new RuntimeException(e);
@@ -575,6 +750,13 @@ class PostgresProtocolHandlerTest {
     private static void mockBackendRoleSwitch(ServerSocket server, AtomicReference<String> backendUser,
                                               AtomicReference<String> backendQuery,
                                               String role, boolean roleExists) throws IOException {
+        mockBackendRoleSwitch(server, backendUser, backendQuery, role, roleExists, null);
+    }
+
+    private static void mockBackendRoleSwitch(ServerSocket server, AtomicReference<String> backendUser,
+                                              AtomicReference<String> backendQuery,
+                                              String role, boolean roleExists,
+                                              BackendScript afterHandover) throws IOException {
         try (Socket socket = server.accept()) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
@@ -614,7 +796,59 @@ class PostgresProtocolHandlerTest {
             writeParameterStatus(out, "is_superuser", "off");
             writeCommandComplete(out, "SET");
             writeReadyForQuery(out);
+
+            if (afterHandover != null) {
+                afterHandover.run(in, out);
+            }
         }
+    }
+
+    /** Drives the backend side of a bridged session, once the client is past authentication. */
+    @FunctionalInterface
+    private interface BackendScript {
+        void run(DataInputStream in, DataOutputStream out) throws IOException;
+    }
+
+    /** Backend that completes a plain master startup and then runs {@code script}. */
+    private static void mockBackendMasterSession(ServerSocket server, BackendScript script)
+            throws IOException {
+        try (Socket socket = server.accept()) {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+            int length = in.readInt();
+            assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
+            in.readNBytes(length - 8);
+
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(3);
+            out.flush();
+
+            assertEquals('p', in.readByte());
+            in.readNBytes(in.readInt() - 4);
+
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(0);
+            writeReadyForQuery(out);
+
+            script.run(in, out);
+        }
+    }
+
+    private static String readSimpleQuery(DataInputStream in) throws IOException {
+        assertEquals('Q', in.readByte());
+        byte[] query = in.readNBytes(in.readInt() - 4);
+        return new String(query, 0, query.length - 1, StandardCharsets.UTF_8);
+    }
+
+    private static void writeMessage(DataOutputStream out, char type, byte[] payload)
+            throws IOException {
+        out.writeByte(type);
+        out.writeInt(4 + payload.length);
+        out.write(payload);
+        out.flush();
     }
 
     private static void writeParameterStatus(DataOutputStream out, String name, String value)
