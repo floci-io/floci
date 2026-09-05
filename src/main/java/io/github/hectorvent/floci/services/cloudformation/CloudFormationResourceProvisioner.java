@@ -255,7 +255,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::InstanceProfile",
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy",
-            "AWS::IAM::User",
             "AWS::Lambda::Function",
             "AWS::Lambda::LayerVersion",
             "AWS::RDS::DBCluster",
@@ -418,7 +417,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::LayerVersion" ->
                         provisionLambdaLayerVersion(resource, properties, engine, region, stackName);
-                case "AWS::IAM::User" -> provisionIamUser(resource, properties, engine, stackName);
                 case "AWS::IAM::AccessKey" -> provisionIamAccessKey(resource, properties, engine);
                 case "AWS::IAM::Policy" -> provisionIamInlinePolicy(resource, properties, engine, stackName);
                 case "AWS::IAM::ManagedPolicy" ->
@@ -4796,17 +4794,6 @@ public class CloudFormationResourceProvisioner {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-
-    private void provisionIamUser(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                  String stackName) {
-        String userName = resolveOptional(props, "UserName", engine);
-        if (userName == null || userName.isBlank()) {
-            userName = generatePhysicalName(stackName, r.getLogicalId(), 64, false);
-        }
-        var user = iamService.createUser(userName, "/");
-        r.setPhysicalId(userName);
-        r.getAttributes().put("Arn", user.getArn());
-    }
 
     private void provisionIamAccessKey(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
         String userName = resolveOptional(props, "UserName", engine);

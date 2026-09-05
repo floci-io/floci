@@ -73,7 +73,7 @@ AWS::IAM::InstanceProfile	LEGACY_SWITCH
 AWS::IAM::ManagedPolicy	LEGACY_SWITCH
 AWS::IAM::Policy	LEGACY_SWITCH
 AWS::IAM::Role	IamRoleCfnProvisioner
-AWS::IAM::User	LEGACY_SWITCH
+AWS::IAM::User	IamUserCfnProvisioner
 AWS::IoT::DomainConfiguration	IotDomainConfigurationCfnProvisioner
 AWS::KMS::Alias	KmsCfnProvisioner
 AWS::KMS::Key	KmsCfnProvisioner
