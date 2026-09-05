@@ -27,6 +27,8 @@ class RedshiftInterceptingBridgeTest {
     private Socket testBackendEnd;  // test reads what the bridge forwarded, writes backend replies
     private Thread bridgeThread;
 
+    private io.github.hectorvent.floci.services.s3.S3Service s3Stub;
+
     private void startBridge() throws IOException {
         clientListener = new ServerSocket(0);
         testClientEnd = new Socket("localhost", clientListener.getLocalPort());
@@ -36,7 +38,8 @@ class RedshiftInterceptingBridgeTest {
         bridgeBackendEnd = new Socket("localhost", backendListener.getLocalPort());
         testBackendEnd = backendListener.accept();
 
-        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(bridgeClientEnd, bridgeBackendEnd);
+        s3Stub = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.s3.S3Service.class);
+        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(bridgeClientEnd, bridgeBackendEnd, s3Stub);
         bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
     }
 
@@ -137,5 +140,68 @@ class RedshiftInterceptingBridgeTest {
         bridgeThread.join(5_000);
         assertFalse(bridgeThread.isAlive(), "bridge did not stop after Terminate");
         assertEquals(-1, testClientEnd.getInputStream().read(), "bridge left the client socket open");
+    }
+
+    @Test
+    void interceptsCopyFromS3AndDoesNotForwardTheOriginalQuery() throws Exception {
+        startBridge();
+        org.mockito.Mockito.when(s3Stub.objectExists("wh", "k")).thenReturn(true);
+        org.mockito.Mockito.when(s3Stub.getObject("wh", "k")).thenReturn(
+                new io.github.hectorvent.floci.services.s3.model.S3Object(
+                        "wh", "k", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+
+        // fake backend: expect a fabricated Query, answer 'G', then after CopyDone answer 'C'+'Z'
+        Thread backend = Thread.ofVirtual().start(() -> {
+            try {
+                PostgresWireDecoder in = new PostgresWireDecoder(testBackendEnd.getInputStream());
+                PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+                assertEquals('Q', q.type());
+                assertTrue(q.getSql().contains("FROM STDIN"), q.getSql());
+                java.io.OutputStream out = testBackendEnd.getOutputStream();
+                out.write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
+                out.flush();
+                while (true) {
+                    PostgresWireDecoder.FrontendMessage m = in.nextMessage();
+                    if (m == null || m.type() == 'c') {
+                        break;
+                    }
+                }
+                byte[] tag = "COPY 1\0".getBytes(StandardCharsets.US_ASCII);
+                out.write('C');
+                out.write(new byte[]{(byte) 0, 0, 0, (byte) (4 + tag.length)});
+                out.write(tag);
+                out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+                out.flush();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        testClientEnd.getOutputStream().write(
+                PostgresWireDecoder.encodeQuery("COPY t FROM 's3://wh/k'"));
+        testClientEnd.getOutputStream().flush();
+
+        PostgresWireDecoder.FrontendMessage toClient =
+                new PostgresWireDecoder(testClientEnd.getInputStream()).nextMessage();
+        assertEquals('C', toClient.type());
+        backend.join();
+    }
+
+    @Test
+    void fallsOpenAndForwardsCopyWhenBackendHasAnOutstandingResponse() throws Exception {
+        startBridge();
+        // send a normal query first and never answer it, so outstandingResponses stays > 0
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeQuery("SELECT 1"));
+        testClientEnd.getOutputStream().flush();
+        PostgresWireDecoder backendIn = new PostgresWireDecoder(testBackendEnd.getInputStream());
+        assertEquals('Q', backendIn.nextMessage().type()); // SELECT 1 arrived, unanswered
+
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeQuery("COPY t FROM 's3://wh/k'"));
+        testClientEnd.getOutputStream().flush();
+
+        // within the ~2s deadline the bridge gives up and forwards the COPY verbatim
+        PostgresWireDecoder.FrontendMessage forwarded = backendIn.nextMessage();
+        assertEquals('Q', forwarded.type());
+        assertTrue(forwarded.getSql().contains("s3://wh/k"), forwarded.getSql());
     }
 }

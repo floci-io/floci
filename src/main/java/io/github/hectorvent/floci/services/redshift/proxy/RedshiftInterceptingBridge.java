@@ -36,15 +36,17 @@ public class RedshiftInterceptingBridge {
 
     private final Socket client;
     private final Socket backend;
+    private final io.github.hectorvent.floci.services.s3.S3Service s3Service;
 
     private final ReentrantLock backendLock = new ReentrantLock(true);
     private volatile boolean pumpBetweenMessages = true;
     private final AtomicInteger outstandingResponses = new AtomicInteger(0);
     private volatile boolean pumpFinished = false;
 
-    public RedshiftInterceptingBridge(Socket client, Socket backend) {
+    public RedshiftInterceptingBridge(Socket client, Socket backend, io.github.hectorvent.floci.services.s3.S3Service s3Service) {
         this.client = client;
         this.backend = backend;
+        this.s3Service = s3Service;
     }
 
     @FunctionalInterface
@@ -90,6 +92,23 @@ public class RedshiftInterceptingBridge {
                 }
 
                 String sql = msg.getSql();
+
+                CopyStatementParser.S3CopyFrom copyFrom = null;
+                try {
+                    copyFrom = CopyStatementParser.parse(sql);
+                } catch (RuntimeException e) {
+                    LOG.warnv("CopyStatementParser failed, forwarding original query: {0}", e.getMessage());
+                }
+
+                if (copyFrom != null) {
+                    CopyStatementParser.S3CopyFrom spec = copyFrom;
+                    boolean intercepted = runWithBackendOwned(
+                            () -> S3CopySimulator.runCopyFrom(client, backend, spec, s3Service));
+                    if (intercepted) {
+                        continue;
+                    }
+                }
+
                 byte[] toBackend = msg.toPacketBytes();
                 try {
                     String rewritten = RedshiftSqlInterceptor.rewrite(sql);
