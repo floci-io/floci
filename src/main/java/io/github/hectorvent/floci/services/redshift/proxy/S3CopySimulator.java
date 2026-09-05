@@ -308,7 +308,24 @@ public final class S3CopySimulator {
     private static void sendError(Socket client, Socket backend, String sqlState, String message,
                                   char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
         if (txStatus == 'T' && backend != null && !backend.isClosed()) {
-            failBackendTransaction(backend, onStatusChange);
+            if (!failBackendTransaction(backend, onStatusChange)) {
+                closeQuietly(backend);
+                // Backend transaction state could not be confirmed; do not report an unconfirmed
+                // failed transaction ('E') or leave a desynchronized backend in the pump.
+                try {
+                    OutputStream out = client.getOutputStream();
+                    byte[] body = errorBody(sqlState, message);
+                    out.write('E');
+                    out.write(intBytes(4 + body.length));
+                    out.write(body);
+                    out.flush();
+                } catch (IOException e) {
+                    LOG.debugv(e, "failed to send ErrorResponse to client before closing socket");
+                } finally {
+                    closeQuietly(client);
+                }
+                return;
+            }
         }
         OutputStream out = client.getOutputStream();
         byte[] body = errorBody(sqlState, message);
@@ -323,7 +340,7 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void failBackendTransaction(Socket backend, java.util.function.IntConsumer onStatusChange) {
+    private static boolean failBackendTransaction(Socket backend, java.util.function.IntConsumer onStatusChange) {
         try {
             OutputStream out = backend.getOutputStream();
             out.write(PostgresWireDecoder.encodeQuery("(FLOCI_ABORT_TX)"));
@@ -332,17 +349,19 @@ public final class S3CopySimulator {
             while (true) {
                 PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage();
                 if (msg == null) {
-                    break;
+                    LOG.warn("backend closed before transaction abort could be synchronized");
+                    return false;
                 }
                 if (msg.type() == 'Z') {
                     if (onStatusChange != null && msg.body().length > 0) {
                         onStatusChange.accept(msg.body()[0]);
                     }
-                    break;
+                    return true;
                 }
             }
         } catch (IOException e) {
             LOG.warnv(e, "failed to synchronize backend transaction abort state");
+            return false;
         }
     }
 
@@ -351,7 +370,8 @@ public final class S3CopySimulator {
             if (s != null && !s.isClosed()) {
                 s.close();
             }
-        } catch (IOException ignored) {
+        } catch (IOException e) {
+            LOG.debugv(e, "failed to close socket: {0}", s);
         }
     }
 

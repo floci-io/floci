@@ -20,6 +20,7 @@ import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -484,5 +485,34 @@ class S3CopySimulatorTest {
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
         assertEquals('E', in.nextMessage().type());
         assertEquals('Z', in.nextMessage().type());
+    }
+
+    @Test
+    void failedBackendTransactionAbortClosesBackendAndClientWithoutReportingFailedTransaction() throws Exception {
+        when(s3.objectExists("wh", "missing")).thenReturn(false);
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
+                new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
+
+        // Backend closes socket when abort query arrives, simulating dropped connection
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+            assertEquals('Q', q.type());
+            assertTrue(q.getSql().contains("FLOCI_ABORT_TX"));
+            testBackend.close();
+        });
+
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'T');
+        joinBackend(backend);
+
+        assertTrue(simBackend.isClosed(), "simBackend must be closed upon synchronization failure");
+        assertTrue(simClient.isClosed(), "simClient must be closed upon synchronization failure");
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage err = in.nextMessage();
+        assertEquals('E', err.type());
+        assertNull(in.nextMessage(), "Client must not receive an unconfirmed ReadyForQuery");
     }
 }
