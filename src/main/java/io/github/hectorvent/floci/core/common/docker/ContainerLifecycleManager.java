@@ -128,8 +128,25 @@ public class ContainerLifecycleManager {
     private String create(ContainerSpec spec, String resolvedImage, String platform) {
         LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
+        // Built once: a dynamic port binding allocates its host port here.
         HostConfig hostConfig = buildHostConfig(spec);
+        Optional<Path> caBundle = ContainerCaBundle.hostPath(config);
+        if (caBundle.isEmpty()) {
+            return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
+        }
+        String containerId = createContainer(spec, resolvedImage, platform, hostConfig,
+                ContainerCaBundle.appendEnv(spec.env()));
+        if (copyCaBundle(containerId, caBundle.get())) {
+            return containerId;
+        }
+        // SSL_CERT_FILE and friends replace the image's trust store, so they must never name a
+        // file that is not there. Start over without them: the container keeps its own trust.
+        dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+        return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
+    }
 
+    private String createContainer(ContainerSpec spec, String resolvedImage, String platform,
+                                   HostConfig hostConfig, List<String> env) {
         CreateContainerCmd createCmd = dockerClient.createContainerCmd(resolvedImage)
                 .withHostConfig(hostConfig);
 
@@ -143,8 +160,6 @@ public class ContainerLifecycleManager {
         if (spec.user() != null && !spec.user().isBlank()) {
             createCmd.withUser(spec.user());
         }
-        Optional<Path> caBundle = ContainerCaBundle.hostPath(config);
-        List<String> env = caBundle.isPresent() ? ContainerCaBundle.appendEnv(spec.env()) : spec.env();
         if (env != null && !env.isEmpty()) {
             createCmd.withEnv(env);
         }
@@ -167,7 +182,6 @@ public class ContainerLifecycleManager {
 
         CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
-        caBundle.ifPresent(bundle -> copyCaBundle(containerId, bundle));
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
     }
@@ -176,11 +190,10 @@ public class ContainerLifecycleManager {
      * Copies the CA bundle into the created, not yet started, container so runtimes that read
      * {@code SSL_CERT_FILE} and friends at init find it. A copy rather than a bind mount because
      * when Floci itself runs in Docker its persistent path is not a host path the daemon can mount.
-     * A failure is logged and the container still starts: an image without {@code /etc} is rare,
-     * and refusing every launch over trust plumbing would be worse than a workload that cannot
-     * verify Floci.
+     * Returns false, after logging why, when the copy failed; an image without {@code /etc} is the
+     * expected reason, and the caller then recreates the container without the trust variables.
      */
-    private void copyCaBundle(String containerId, Path bundle) {
+    private boolean copyCaBundle(String containerId, Path bundle) {
         try {
             byte[] content = Files.readAllBytes(bundle);
             ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
@@ -196,9 +209,12 @@ public class ContainerLifecycleManager {
                     .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
                     .exec();
             LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
+            return true;
         } catch (Exception e) {
-            LOG.warnv(e, "Could not copy the CA bundle into container {0}; its SSL_CERT_FILE points at a file "
-                    + "that does not exist, so it will not trust Floci HTTPS: {1}", containerId, e.getMessage());
+            LOG.warnv(e, "Could not copy the CA bundle into container {0}; creating it again without the trust "
+                    + "variables, so it keeps its own trust store and will not trust Floci HTTPS: {1}",
+                    containerId, e.getMessage());
+            return false;
         }
     }
 

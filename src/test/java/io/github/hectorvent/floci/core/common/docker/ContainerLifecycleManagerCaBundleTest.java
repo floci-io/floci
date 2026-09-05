@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsConfigSource;
@@ -36,6 +37,7 @@ import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -175,17 +177,35 @@ class ContainerLifecycleManagerCaBundleTest {
     }
 
     @Test
-    void aFailedCopyIsLoggedAndTheContainerIsStillCreated() throws Exception {
+    void aFailedCopyRecreatesTheContainerWithoutTheTrustVariables() throws Exception {
+        // SSL_CERT_FILE and friends replace the image's trust store, so they must never name a
+        // file that is not there: an image without /etc keeps its own trust instead.
         when(tlsConfig.enabled()).thenReturn(true);
         writeBundle();
-        stubCreateContainer();
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        CreateContainerResponse first = mock(CreateContainerResponse.class);
+        when(first.getId()).thenReturn("container-id");
+        CreateContainerResponse second = mock(CreateContainerResponse.class);
+        when(second.getId()).thenReturn("container-id-2");
+        when(createCmd.exec()).thenReturn(first, second);
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
         when(copyCmd.exec()).thenThrow(new NotFoundException("Could not find the file /etc in container"));
+        RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
 
-        assertEquals("container-id", manager().create(specWithEnv(List.of("FOO=bar"))));
+        assertEquals("container-id-2", manager().create(specWithEnv(List.of("FOO=bar"))));
 
-        verify(dockerClient, never()).removeContainerCmd(anyString());
+        verify(removeCmd).withForce(true);
+        verify(removeCmd).exec();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass((Class<List<String>>) (Class<?>) List.class);
+        verify(createCmd, times(2)).withEnv(env.capture());
+        assertEquals(6, env.getAllValues().get(0).size(), "the first attempt carried the trust variables");
+        assertEquals(List.of("FOO=bar"), env.getAllValues().get(1), "the retry carries only the spec's own");
+        verify(dockerClient, times(1)).copyArchiveToContainerCmd(anyString());
+        verify(portAllocator, never()).allocateAny();
     }
 
     private Path writeBundle() throws Exception {
