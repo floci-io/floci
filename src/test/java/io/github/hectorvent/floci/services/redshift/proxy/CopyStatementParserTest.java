@@ -1,0 +1,111 @@
+package io.github.hectorvent.floci.services.redshift.proxy;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class CopyStatementParserTest {
+
+    @Test
+    void parsesMinimalCopyFromKey() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY sales FROM 's3://warehouse/data/sales.txt'");
+        assertEquals("sales", c.targetTable());
+        assertEquals(List.of(), c.columns());
+        assertEquals("warehouse", c.bucket());
+        assertEquals("data/sales.txt", c.keyOrPrefix());
+        assertEquals("|", c.delimiter());
+        assertEquals(0, c.headerLines());
+        assertFalse(c.gzip());
+        assertFalse(c.csv());
+        assertNull(c.nullAs());
+    }
+
+    @Test
+    void parsesColumnsOptionsAndPrefix() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY public.events (id, ts, note) FROM 's3://bkt/evt/' "
+                        + "GZIP DELIMITER ',' IGNOREHEADER 2 NULL AS '\\\\N' FORMAT AS CSV");
+        assertEquals("public.events", c.targetTable());
+        assertEquals(List.of("id", "ts", "note"), c.columns());
+        assertEquals("bkt", c.bucket());
+        assertEquals("evt/", c.keyOrPrefix());
+        assertTrue(c.gzip());
+        assertTrue(c.csv());
+        assertEquals(",", c.delimiter());
+        assertEquals(2, c.headerLines());
+        assertEquals("\\N", c.nullAs());
+    }
+
+    @Test
+    void defaultsDelimiterToCommaForCsvAndTreatsHeaderKeywordAsOneLine() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' CSV HEADER");
+        assertEquals(",", c.delimiter());
+        assertEquals(1, c.headerLines());
+    }
+
+    @Test
+    void decodesTabDelimiterToken() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' DELIMITER '\\\\t'");
+        assertEquals("\t", c.delimiter());
+    }
+
+    @Test
+    void bucketOnlyPathGivesEmptyPrefix() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse("COPY t FROM 's3://only-bucket'");
+        assertEquals("only-bucket", c.bucket());
+        assertEquals("", c.keyOrPrefix());
+    }
+
+    @Test
+    void stripsLeadingComments() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "-- load nightly\n/* batch */ COPY t FROM 's3://b/k'");
+        assertEquals("t", c.targetTable());
+    }
+
+    @Test
+    void rejectsInjectionInTableName() {
+        assertNull(CopyStatementParser.parse("COPY t; DROP TABLE u; FROM 's3://b/k'"));
+        assertNull(CopyStatementParser.parse("COPY (SELECT 1) FROM 's3://b/k'"));
+    }
+
+    @Test
+    void rejectsInjectionInColumnList() {
+        assertNull(CopyStatementParser.parse("COPY t (id, x) FROM STDIN) --) FROM 's3://b/k'"));
+        assertNull(CopyStatementParser.parse("COPY t (id, ts::text) FROM 's3://b/k'"));
+    }
+
+    @Test
+    void returnsNullForNonCopyAndForCopyWithoutS3() {
+        assertNull(CopyStatementParser.parse("SELECT 1"));
+        assertNull(CopyStatementParser.parse("CREATE TABLE t (id int) DISTKEY (id)"));
+        assertNull(CopyStatementParser.parse("COPY t FROM STDIN"));
+        assertNull(CopyStatementParser.parse("COPY t TO 's3://b/k'"));
+        assertNull(CopyStatementParser.parse(null));
+        assertNull(CopyStatementParser.parse("   "));
+    }
+
+    @Test
+    void quotedIdentifiersSurvive() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY \"My Schema\".\"Tab\" (\"col one\") FROM 's3://b/k'");
+        assertEquals("\"My Schema\".\"Tab\"", c.targetTable());
+        assertEquals(List.of("\"col one\""), c.columns());
+    }
+
+    @Test
+    void explicitDelimiterOverridesCsvDefault() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' CSV DELIMITER '\t'");
+        assertEquals("\t", c.delimiter());
+        assertTrue(c.csv());
+    }
+}
