@@ -145,9 +145,9 @@ final class ProjectionEvaluator {
         return segments;
     }
 
-    // DynamoDB rejects a non-numeric bracket segment as a syntax error and a numeric
-    // index above 4294967294 as out of the allowable range, both at expression level.
-    // Characterised on real DynamoDB (us-east-1, 2026-09-05).
+    // DynamoDB rejects a non-numeric bracket segment and a leading zero as syntax
+    // errors, and a numeric index above 4294967294 as out of the allowable range,
+    // all at expression level. Verified on real DynamoDB (us-east-1, 2026-09-05).
     private static void validateListIndex(String content) {
         if (content.isEmpty()) {
             throw syntaxError("ProjectionExpression", "]", "[]");
@@ -158,12 +158,11 @@ final class ProjectionEvaluator {
                         String.valueOf(content.charAt(i)), "[" + content + "]");
             }
         }
-        int firstDigit = 0;
-        while (firstDigit < content.length() - 1 && content.charAt(firstDigit) == '0') {
-            firstDigit++;
+        if (content.length() > 1 && content.charAt(0) == '0') {
+            throw syntaxError("ProjectionExpression", "0",
+                    content.substring(0, Math.min(3, content.length())));
         }
-        var canonical = content.substring(firstDigit);
-        if (canonical.length() > 10 || Long.parseLong(canonical) > MAX_LIST_INDEX) {
+        if (content.length() > 10 || Long.parseLong(content) > MAX_LIST_INDEX) {
             throw new AwsException("ValidationException",
                     "Invalid ProjectionExpression: List index is not within the allowable range; "
                     + "index: [" + content + "]", 400);

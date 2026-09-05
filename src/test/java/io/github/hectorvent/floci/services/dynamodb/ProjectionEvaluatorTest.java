@@ -114,11 +114,6 @@ class ProjectionEvaluatorTest {
         assertNull(list.get(1).get("M").get("a"));
     }
 
-    // Malformed and out-of-range list indices, characterised on real DynamoDB
-    // (us-east-1, 2026-09-05): non-digit content is a syntax error, and a numeric
-    // index above 4294967294 is rejected as out of the allowable range. The empty
-    // item states that rejection happens before any item content is read.
-
     @Test
     void rejectsNonNumericListIndexAsSyntaxError() {
         var ex = assertThrows(AwsException.class,
@@ -153,6 +148,24 @@ class ProjectionEvaluatorTest {
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid ProjectionExpression: List index is not within the allowable range; "
                 + "index: [4294967295]", ex.getMessage());
+    }
+
+    @Test
+    void rejectsLeadingZeroListIndexAsSyntaxError() {
+        var ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[001]", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: Syntax error; token: \"0\", near: \"001\"",
+                ex.getMessage());
+    }
+
+    @Test
+    void rejectsLongZeroPaddedListIndexAsSyntaxError() {
+        var ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[0000000000001]", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: Syntax error; token: \"0\", near: \"000\"",
+                ex.getMessage());
     }
 
     @Test
