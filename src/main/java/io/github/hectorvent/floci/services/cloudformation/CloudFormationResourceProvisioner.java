@@ -4157,7 +4157,14 @@ public class CloudFormationResourceProvisioner {
             }
         }
 
-        List<String> functionResponseTypes = resolveStringList(props, "FunctionResponseTypes", engine);
+        // resolveList (not resolveStringList/resolveStringListOrEmpty) because it is the engine's
+        // purpose-built list resolver: besides a literal array it also evaluates Fn::Split with its
+        // actual delimiter, an Fn::If choosing between two such lists, and a Ref to a
+        // CommaDelimitedList parameter (comma-split as a fallback), none of which the raw
+        // isArray()-on-the-unresolved-node check in the other two helpers can see.
+        List<String> functionResponseTypes = props != null
+                ? engine.resolveList(props.get("FunctionResponseTypes"))
+                : List.of();
         if (!functionResponseTypes.isEmpty()) {
             req.put("FunctionResponseTypes", functionResponseTypes);
         }
