@@ -150,10 +150,12 @@ public class CertificateGenerator {
 
     /**
      * A leaf signed by {@code issuer}. {@code subjectKeyPair} may be {@code null} to mint a new
-     * one; pass the previous pair to reissue with an updated SAN list and an unchanged public key.
-     * The result is checked before it is returned: the leaf must verify against the issuer's
-     * certificate, and a supplied key pair must be a pair, so a caller can never get back a
-     * certificate its own issuer rejects or a private key that does not fit it.
+     * one of {@code keyAlgorithm}; pass the previous pair to reissue with an updated SAN list and
+     * an unchanged public key, in which case it must be of {@code keyAlgorithm}. The result is
+     * checked before it is returned: the leaf must verify against the issuer's certificate, and a
+     * supplied key pair must be a pair of the requested algorithm, so a caller can never get back
+     * a certificate its own issuer rejects, a private key that does not fit it, or a key type it
+     * did not ask for.
      */
     public GeneratedCertificate generateIssuedCertificate(String domainName, List<String> sans,
                                                           KeyAlgorithm keyAlgorithm, KeyPair subjectKeyPair,
@@ -161,6 +163,10 @@ public class CertificateGenerator {
         try {
             if (subjectKeyPair != null && !isPair(subjectKeyPair.getPrivate(), subjectKeyPair.getPublic())) {
                 throw new IllegalArgumentException("supplied private key does not match its public key");
+            }
+            if (subjectKeyPair != null && detectKeyAlgorithm(subjectKeyPair.getPublic()) != keyAlgorithm) {
+                throw new IllegalArgumentException("supplied key pair is " + detectKeyAlgorithm(subjectKeyPair.getPublic())
+                        + ", not the requested " + keyAlgorithm);
             }
             KeyPair keyPair = subjectKeyPair != null ? subjectKeyPair : generateKeyPair(keyAlgorithm);
             X500Name subject = new X500Name("CN=" + domainName);

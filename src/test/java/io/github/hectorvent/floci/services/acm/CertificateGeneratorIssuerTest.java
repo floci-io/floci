@@ -151,6 +151,21 @@ class CertificateGeneratorIssuerTest {
     }
 
     @Test
+    void aSuppliedKeyPairOfAnotherAlgorithmIsRefused() {
+        var issuer = newIssuer();
+        var rsa = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
+                CertificateGenerator.LeafUsage.CLIENT);
+        var rsaPair = new KeyPair(generator.parseCertificate(rsa.certificatePem()).getPublicKey(),
+                generator.parsePrivateKey(rsa.privateKeyPem()));
+
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+                () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, rsaPair, issuer,
+                        CertificateGenerator.LeafUsage.CLIENT));
+        assertTrue(refused.getMessage().contains("RSA_2048") && refused.getMessage().contains("EC_prime256v1"),
+                refused.getMessage());
+    }
+
+    @Test
     void duplicateSansAreWrittenOnce() throws Exception {
         var leaf = generator.generateIssuedCertificate("dup.example.test", List.of("dup.example.test", "other.example.test",
                 "other.example.test"), KeyAlgorithm.RSA_2048, null, newIssuer(), CertificateGenerator.LeafUsage.SERVER);
