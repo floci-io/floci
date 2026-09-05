@@ -2838,6 +2838,9 @@ public class S3Controller {
         if (!S3PostPolicySigner.isValidS3CredentialScope(credential)) {
             throw new AwsException("AccessDenied", "Access Denied", 403);
         }
+        if (!S3PostPolicySigner.isConsistentAmzDate(date, credential)) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
 
         String accessKeyId = credential.split("/", 2)[0];
         Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId);

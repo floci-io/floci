@@ -7,6 +7,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * SigV4 verification for presigned POST policy documents. Mirrors the credential/secret-key
@@ -40,6 +41,23 @@ final class S3PostPolicySigner {
     static boolean isValidS3CredentialScope(String credential) {
         String[] parts = credential.split("/");
         return parts.length == 5 && "s3".equals(parts[3]) && "aws4_request".equals(parts[4]);
+    }
+
+    private static final Pattern AMZ_DATE_PATTERN = Pattern.compile("\\d{8}T\\d{6}Z");
+
+    /**
+     * Verifies that {@code amzDate} (the form's {@code x-amz-date} field) is a well-formed
+     * ISO8601-basic timestamp ({@code yyyyMMdd'T'HHmmss'Z'}) whose date matches the date embedded
+     * in {@code credential}'s scope. Real S3 rejects a presigned POST whose form date doesn't
+     * agree with the credential scope, even though only the credential's date drives signing-key
+     * derivation.
+     */
+    static boolean isConsistentAmzDate(String amzDate, String credential) {
+        if (!AMZ_DATE_PATTERN.matcher(amzDate).matches()) {
+            return false;
+        }
+        String[] parts = credential.split("/");
+        return parts.length == 5 && amzDate.substring(0, 8).equals(parts[1]);
     }
 
     /**

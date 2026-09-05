@@ -40,8 +40,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     private static final String BUCKET = "presigned-post-auth-bucket";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
-    private static final DateTimeFormatter AMZ_DATE_FORMAT =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+    // Matches the "20260101" date embedded in every credential scope built by this test class.
+    private static final String AMZ_DATE = "20260101T000000Z";
 
     @Test
     @Order(1)
@@ -80,7 +80,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request")
-            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-date", AMZ_DATE)
             .multiPart("x-amz-signature",
                     "0000000000000000000000000000000000000000000000000000000000dead")
             .multiPart("file", "fabricated-signature.txt",
@@ -112,7 +112,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
-            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-date", AMZ_DATE)
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "unknown-key.txt",
                     "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
@@ -161,9 +161,34 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
-            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-date", AMZ_DATE)
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "malformed-scope.txt",
+                    "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+    }
+
+    @Test
+    @Order(15)
+    void rejectsUploadWhereFormDateDisagreesWithCredentialScope() {
+        String key = "date-mismatch.txt";
+        String policyBase64 = buildPolicyBase64(BUCKET, key);
+        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+
+        // x-amz-date's date (20260102) disagrees with the credential scope's date (20260101).
+        given()
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", "20260102T000000Z")
+            .multiPart("x-amz-signature", signature)
+            .multiPart("file", "date-mismatch.txt",
                     "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
         .when()
             .post("/" + BUCKET)
@@ -186,7 +211,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
-            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-date", AMZ_DATE)
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "genuine.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
         .when()
@@ -229,7 +254,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
-            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-date", AMZ_DATE)
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "expired.txt",
                     "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
@@ -261,7 +286,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
-            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-date", AMZ_DATE)
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "no-expiration.txt",
                     "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
