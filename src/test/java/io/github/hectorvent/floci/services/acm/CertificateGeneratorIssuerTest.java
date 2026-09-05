@@ -193,20 +193,15 @@ class CertificateGeneratorIssuerTest {
     }
 
     @Test
-    void existingSelfSignedAndAcmStylePathsAreUnchanged() throws Exception {
+    void existingSelfSignedPathIsUnchanged() throws Exception {
         var selfSigned = generator.generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
         X509Certificate ss = generator.parseCertificate(selfSigned.certificatePem());
         assertEquals(ss.getSubjectX500Principal(), ss.getIssuerX500Principal());
         assertTrue(ss.getBasicConstraints() >= 0);
         assertNull(ss.getExtendedKeyUsage(), "the self-signed trust anchor carries no EKU, as before");
+        assertEquals(selfSigned.subject(), selfSigned.issuer());
+        assertTrue(selfSigned.serial().matches("([0-9a-f]{2}:)+[0-9a-f]{2}"));
         ss.verify(ss.getPublicKey());
-
-        var acmStyle = generator.generateCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
-        X509Certificate acm = generator.parseCertificate(acmStyle.certificatePem());
-        assertTrue(acm.getIssuerX500Principal().getName().contains("Amazon"));
-        assertEquals(-1, acm.getBasicConstraints());
-        assertEquals("CN=Amazon,OU=Server CA 1B,O=Amazon,C=US", acmStyle.issuer());
-        assertTrue(acmStyle.serial().matches("([0-9a-f]{2}:)+[0-9a-f]{2}"));
     }
 
     @Test

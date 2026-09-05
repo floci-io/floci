@@ -61,7 +61,6 @@ import java.util.regex.Pattern;
 public class CertificateGenerator {
 
     private static final Logger LOG = Logger.getLogger(CertificateGenerator.class);
-    private static final String ISSUER_DN = "CN=Amazon,OU=Server CA 1B,O=Amazon,C=US";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final String PBE_ALGORITHM = "PBEWithHmacSHA256AndAES_256";
     private static final int PBE_SALT_BYTES = 16;
@@ -97,21 +96,6 @@ public class CertificateGenerator {
     public record Issuer(X509Certificate certificate, PrivateKey key) {}
 
     /**
-     * Generates a certificate for local emulation that mimics an ACM-issued certificate:
-     * the subject is {@code CN=<domainName>} but the issuer is a cosmetic Amazon CA DN, matching
-     * what real ACM returns. It is signed by its own key, so it is <em>not</em> verifiable as a
-     * trust anchor (the issuer DN does not match any certificate a client could hold). Use this
-     * for ACM responses; use {@link #generateSelfSignedCertificate} for a cert clients must trust.
-     *
-     * <p>Note: RSA key generation (especially 4096-bit) can take 100-500ms.
-     * In production emulator usage, consider moving this to a worker thread
-     * or using virtual threads for concurrent certificate generation.</p>
-     */
-    public GeneratedCertificate generateCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
-        return buildCertificate(domainName, sans, keyAlgorithm, ISSUER_DN, false, null);
-    }
-
-    /**
      * Generates a genuinely self-signed certificate (issuer == subject, marked as a CA) suitable
      * for use as a <em>trust anchor</em>: a client that adds this certificate to its CA store can
      * verify a TLS connection that presents it. Used for Floci's own HTTPS server certificate so
@@ -119,7 +103,7 @@ public class CertificateGenerator {
      * Floci once the certificate is installed in their CA bundle.
      */
     public GeneratedCertificate generateSelfSignedCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
-        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true, null);
+        return buildSelfSignedCertificate(domainName, sans, keyAlgorithm, null);
     }
 
     /**
@@ -131,7 +115,7 @@ public class CertificateGenerator {
      */
     public GeneratedCertificate generateSelfSignedCertificate(String domainName, List<String> sans,
                                                               KeyAlgorithm keyAlgorithm, KeyPair keyPair) {
-        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true, keyPair);
+        return buildSelfSignedCertificate(domainName, sans, keyAlgorithm, keyPair);
     }
 
     /**
@@ -216,16 +200,15 @@ public class CertificateGenerator {
         return verifier.verify(signature);
     }
 
-    private GeneratedCertificate buildCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm,
-                                                  String issuerDn, boolean asCa, KeyPair suppliedKeyPair) {
+    private GeneratedCertificate buildSelfSignedCertificate(String domainName, List<String> sans,
+                                                            KeyAlgorithm keyAlgorithm, KeyPair suppliedKeyPair) {
         try {
             KeyPair keyPair = suppliedKeyPair != null ? suppliedKeyPair : generateKeyPair(keyAlgorithm);
-            String subjectDn = "CN=" + domainName;
-            // Signed with the subject's own key, as before: generateCertificate keeps its cosmetic
-            // Amazon issuer DN, generateSelfSignedCertificate keeps issuer == subject.
-            X509Certificate cert = signCertificate(new X500Name(subjectDn), keyPair.getPublic(),
-                    new X500Name(issuerDn), keyPair.getPrivate(), withDomainFirst(domainName, sans), asCa, null, 365);
-            return toGenerated(cert, keyPair.getPrivate(), subjectDn, issuerDn);
+            String dn = "CN=" + domainName;
+            // Signed with the subject's own key: issuer == subject, and a CA so it can be a trust anchor.
+            X509Certificate cert = signCertificate(new X500Name(dn), keyPair.getPublic(),
+                    new X500Name(dn), keyPair.getPrivate(), withDomainFirst(domainName, sans), true, null, 365);
+            return toGenerated(cert, keyPair.getPrivate(), dn, dn);
         } catch (Exception e) {
             LOG.error("Failed to generate certificate", e);
             throw new CertificateGenerationException("Certificate generation failed: " + e.getMessage(), e);

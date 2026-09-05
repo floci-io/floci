@@ -10,18 +10,12 @@ import java.security.cert.X509Certificate;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Verifies the distinction between the two certificate flavors:
- * <ul>
- *   <li>{@code generateCertificate} mimics an ACM-issued cert (cosmetic Amazon issuer, not a CA)
- *       — unchanged legacy behavior, not verifiable as a trust anchor.</li>
- *   <li>{@code generateSelfSignedCertificate} is genuinely self-signed (issuer == subject) and a
- *       CA, so a client that trusts it can verify a TLS connection presenting it. This is what
- *       lets Floci's HTTPS endpoint be trusted by Lambda containers (CDK cfn-response callbacks).</li>
- * </ul>
+ * {@code generateSelfSignedCertificate} is genuinely self-signed (issuer == subject) and a CA, so
+ * a client that trusts it can verify a TLS connection presenting it. Leaves that clients must
+ * validate are issued by a CA through {@code generateIssuedCertificate} instead.
  */
 class CertificateGeneratorSelfSignedTest {
 
@@ -50,19 +44,5 @@ class CertificateGeneratorSelfSignedTest {
 
         // Sanity: the self-signature verifies against the cert's own public key.
         cert.verify(cert.getPublicKey());
-    }
-
-    @Test
-    void acmStyleCertificateKeepsCosmeticAmazonIssuerAndIsNotACa() throws Exception {
-        var generated = generator.generateCertificate(
-                "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
-
-        X509Certificate cert = generator.parseCertificate(generated.certificatePem());
-
-        assertNotEquals(cert.getSubjectX500Principal(), cert.getIssuerX500Principal(),
-                "ACM-style cert keeps a cosmetic Amazon issuer distinct from the subject");
-        assertTrue(cert.getIssuerX500Principal().getName().contains("Amazon"),
-                "ACM-style issuer should still be the Amazon CA DN");
-        assertEquals(-1, cert.getBasicConstraints(), "ACM-style leaf cert must not be a CA");
     }
 }
