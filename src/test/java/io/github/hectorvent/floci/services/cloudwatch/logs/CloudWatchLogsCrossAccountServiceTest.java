@@ -79,6 +79,22 @@ class CloudWatchLogsCrossAccountServiceTest {
     }
 
     @Test
+    void fieldIndexIgnoresReservedFieldNamesInsidePrefixValue() {
+        service.putAccountPolicy("prefix-index", DOCUMENT, "FIELD_INDEX_POLICY",
+                "LogGroupNamePrefix = \"/DataSourceName/DataSourceType/\"", "ALL", REGION);
+
+        assertEquals(1, service.describeAccountPolicies("FIELD_INDEX_POLICY", null, REGION).size());
+    }
+
+    @Test
+    void fieldIndexIgnoresReservedFieldNamesInsideDataSourceValues() {
+        service.putAccountPolicy("data-source-index", DOCUMENT, "FIELD_INDEX_POLICY",
+                "DataSourceName = \"LogGroupNamePrefix\" AND DataSourceType = \"flow\"", "ALL", REGION);
+
+        assertEquals(1, service.describeAccountPolicies("FIELD_INDEX_POLICY", null, REGION).size());
+    }
+
+    @Test
     void metricExtractionRejectsMoreThanFiftySelectionValues() {
         StringBuilder criteria = new StringBuilder("LogGroupName IN [");
         for (int i = 0; i < 51; i++) {

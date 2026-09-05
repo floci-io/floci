@@ -26,6 +26,8 @@ public class CloudWatchLogsCrossAccountService {
     private static final Pattern METRIC_SELECTION_CRITERIA = Pattern.compile(
             "\\s*(LogGroupName|LogGroupNamePrefix)\\s+(IN|NOT\\s+IN)\\s*(\\[.*])\\s*",
             Pattern.DOTALL);
+    private static final Pattern QUOTED_SELECTION_VALUE = Pattern.compile(
+            "'(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\"");
     private static final Set<String> POLICY_TYPES = Set.of(
             "DATA_PROTECTION_POLICY", "SUBSCRIPTION_FILTER_POLICY", "FIELD_INDEX_POLICY",
             "TRANSFORMER_POLICY", "METRIC_EXTRACTION_POLICY");
@@ -223,9 +225,10 @@ public class CloudWatchLogsCrossAccountService {
                 }
             }
             case "FIELD_INDEX_POLICY" -> {
-                boolean prefix = selectionCriteria.contains("LogGroupNamePrefix");
-                boolean dataSourceName = selectionCriteria.contains("DataSourceName");
-                boolean dataSourceType = selectionCriteria.contains("DataSourceType");
+                String operators = QUOTED_SELECTION_VALUE.matcher(selectionCriteria).replaceAll("");
+                boolean prefix = operators.contains("LogGroupNamePrefix");
+                boolean dataSourceName = operators.contains("DataSourceName");
+                boolean dataSourceType = operators.contains("DataSourceType");
                 boolean prefixOnly = prefix && !dataSourceName && !dataSourceType;
                 boolean dataSourcePairOnly = !prefix && dataSourceName && dataSourceType;
                 if (!prefixOnly && !dataSourcePairOnly) {

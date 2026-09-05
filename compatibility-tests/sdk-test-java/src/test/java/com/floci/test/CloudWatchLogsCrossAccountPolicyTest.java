@@ -51,6 +51,16 @@ class CloudWatchLogsCrossAccountPolicyTest {
                         assertThat(policy.selectionCriteria())
                                 .isEqualTo("LogGroupNamePrefix = \"/floci/sdk-cross-account/\"");
                     });
+
+            var fieldIndex = logs.putAccountPolicy(request -> request
+                    .policyName("floci-sdk-field-index-quoted-value")
+                    .policyType("FIELD_INDEX_POLICY")
+                    .policyDocument("{\"Fields\":[\"requestId\"]}")
+                    .selectionCriteria("LogGroupNamePrefix = \"/DataSourceName/DataSourceType/\"")
+                    .scope("ALL"));
+
+            assertThat(fieldIndex.accountPolicy().selectionCriteria())
+                    .isEqualTo("LogGroupNamePrefix = \"/DataSourceName/DataSourceType/\"");
         }
     }
 
