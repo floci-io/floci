@@ -93,6 +93,34 @@ class FlociCertificateAuthorityTest {
     }
 
     @Test
+    void expiredCaIsRegenerated() throws Exception {
+        CertificateGenerator gen = new CertificateGenerator();
+        java.security.KeyPair keyPair = java.security.KeyPairGenerator.getInstance("RSA").generateKeyPair();
+        var dn = new org.bouncycastle.asn1.x500.X500Name("CN=" + FlociCertificateAuthority.COMMON_NAME);
+        X509Certificate expired = gen.signCertificate(dn, keyPair.getPublic(), dn, keyPair.getPrivate(), List.of(),
+                true, null, -1);
+        Files.writeString(tempDir.resolve("floci-root-ca.crt"), gen.toPem(expired));
+        Files.writeString(tempDir.resolve("floci-root-ca.key"), gen.toPem(keyPair.getPrivate()));
+
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+
+        assertNotEquals(expired, ca.certificate(), "an expired trust anchor is useless and must be replaced");
+        ca.certificate().checkValidity();
+    }
+
+    @Test
+    void missingKeyFileRegeneratesThePair() throws Exception {
+        FlociCertificateAuthority first = FlociCertificateAuthority.loadOrCreate(tempDir);
+        Files.delete(tempDir.resolve("floci-root-ca.key"));
+
+        FlociCertificateAuthority second = FlociCertificateAuthority.loadOrCreate(tempDir);
+
+        assertNotEquals(first.certificate(), second.certificate(), "a certificate without its key cannot sign");
+        assertTrue(Files.exists(tempDir.resolve("floci-root-ca.key")));
+        assertEquals(second.caPem(), Files.readString(tempDir.resolve("floci-root-ca.crt")));
+    }
+
+    @Test
     void aLeafInPlaceOfTheCaIsRegenerated() throws Exception {
         var leaf = new CertificateGenerator().generateCertificate("localhost", List.of(), KeyAlgorithm.RSA_2048);
         Files.writeString(tempDir.resolve("floci-root-ca.crt"), leaf.certificatePem());

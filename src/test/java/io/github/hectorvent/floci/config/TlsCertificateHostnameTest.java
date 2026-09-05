@@ -428,6 +428,37 @@ class TlsCertificateHostnameTest {
     }
 
     @Test
+    void expiredServerLeafIsReissued() throws Exception {
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", tempDir.toString());
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
+        CertificateGenerator gen = new CertificateGenerator();
+        List<String> sans = List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
+                "localhost.floci.io", "*.localhost.floci.io", "*.execute-api.localhost.floci.io",
+                "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
+        java.security.KeyPair keyPair = java.security.KeyPairGenerator.getInstance("RSA").generateKeyPair();
+        // Issued by the current CA with a validity that ended a day ago: only the expiry check can trigger.
+        X509Certificate expired = gen.signCertificate(new org.bouncycastle.asn1.x500.X500Name("CN=localhost"),
+                keyPair.getPublic(), org.bouncycastle.asn1.x500.X500Name.getInstance(
+                        ca.certificate().getSubjectX500Principal().getEncoded()), ca.key(), sans, false,
+                CertificateGenerator.LeafUsage.SERVER, -1);
+        Files.writeString(tlsDir.resolve("floci-server.crt"), gen.toPem(expired));
+        Files.writeString(tlsDir.resolve("floci-server.key"), gen.toPem(keyPair.getPrivate()));
+        Files.writeString(tlsDir.resolve("floci-server.metadata.json"),
+                new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(CertificateMetadata.create(sans, "dev")));
+        assertTrue(ca.isIssuedByUs(expired), "the expired leaf is ours, so only validity can reject it");
+
+        new TlsConfigSource();
+
+        X509Certificate leaf = parseCertificate(tlsDir.resolve("floci-server.crt"));
+        leaf.checkValidity();
+        assertNotEquals(expired.getSerialNumber(), leaf.getSerialNumber());
+        assertTrue(ca.isIssuedByUs(leaf));
+    }
+
+    @Test
     void leafSignedByAPreviousCaIsReplacedWhenTheCaChanges() throws Exception {
         System.setProperty("floci.tls.enabled", "true");
         System.setProperty("floci.tls.self-signed", "true");
