@@ -16,6 +16,11 @@ import java.util.Comparator;
  * the account-prefixed S3 key {@code LambdaService.codeObjectKey} uses for the same
  * deployment package. Without the account segment two accounts' same-named functions in
  * one region share a single extraction directory and overwrite each other's code.
+ *
+ * <p>That per-function directory holds one subdirectory per distinct deployment package
+ * rather than the code itself, keyed by content hash — see {@link #getCodePath(String,
+ * String, String)}. Code deployed before that layout still sits directly in the function
+ * directory, which is why callers must not assume every child is a build.
  */
 @ApplicationScoped
 public class CodeStore {
@@ -35,6 +40,19 @@ public class CodeStore {
 
     public Path getCodePath(String accountId, String functionName) {
         return baseDir.resolve(sanitizeName(accountId)).resolve(sanitizeName(functionName));
+    }
+
+    /**
+     * Content-addressed path for one specific build of a function's code, keyed by the hex
+     * SHA-256 of its deployment package. A published version's {@code codeLocalPath} names the
+     * directory for the exact code it was published with, so a later {@code UpdateFunctionCode}
+     * against {@code $LATEST} extracts into a *different* directory (a different hash) instead
+     * of overwriting the one a published version still points at (#2958). Identical deployment
+     * packages resolve to the same directory, so redeploying unchanged code reuses storage
+     * rather than duplicating it.
+     */
+    public Path getCodePath(String accountId, String functionName, String codeHashHex) {
+        return getCodePath(accountId, functionName).resolve(sanitizeName(codeHashHex));
     }
 
     /**
@@ -58,6 +76,19 @@ public class CodeStore {
      */
     public void deleteLegacy(String functionName) {
         deleteDirectory(getLegacyCodePath(functionName), functionName);
+    }
+
+    /**
+     * Removes one content-addressed build directory (see {@link #getCodePath(String, String,
+     * String)}) that no version references any more. Refuses anything outside {@link #baseDir}
+     * so a caller cannot be tricked into deleting an unrelated directory.
+     */
+    public void deleteContentDirectory(Path path, String functionName) {
+        if (!path.toAbsolutePath().normalize().startsWith(baseDir.toAbsolutePath().normalize())) {
+            LOG.warnv("Refusing to delete directory outside the code store: {0}", path);
+            return;
+        }
+        deleteDirectory(path, functionName);
     }
 
     private void deleteDirectory(Path path, String functionName) {

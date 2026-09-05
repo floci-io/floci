@@ -258,14 +258,58 @@ class LambdaVersionIntegrationTest {
         }
     }
 
-    private void createInvocableFunction(String fnName) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write("exports.handler = async () => ({ ok: true });".getBytes());
-            zos.closeEntry();
+    @Test
+    @Order(10)
+    void publishedVersionKeepsRunningItsOwnCodeAfterLatestIsRedeployed() throws Exception {
+        // Regression test for #2958: a published version is supposed to be an immutable
+        // snapshot of code plus configuration. Before the fix, CodeStore.getCodePath had no
+        // version component, so every version shared $LATEST's on-disk directory; publishing
+        // a version only copied the codeLocalPath *pointer*, and a later UpdateFunctionCode
+        // rewrote the directory that pointer named. A version's metadata (CodeSha256) still
+        // reported the original hash, but invoking it would launch the container with
+        // whatever code $LATEST was last redeployed with.
+        String fnName = "version-immutability";
+        createInvocableFunction(fnName, "v1");
+
+        try {
+            given()
+                .contentType("application/json")
+                .body("{\"Description\": \"first build\"}")
+            .when()
+                .post(BASE_PATH + "/functions/" + fnName + "/versions")
+            .then()
+                .statusCode(201)
+                .body("Version", equalTo("1"));
+
+            // Redeploy $LATEST with different code, the way a normal iterative deploy would.
+            updateFunctionCode(fnName, "v2");
+
+            // The published version must still run the code it was published with. Only the
+            // version-qualified invoke is checked here, not a follow-up $LATEST invoke on the
+            // same function name: the warm pool is keyed by function name alone (#1988, see the
+            // comment on invokePublishedVersion_runsTheVersionsCode above), so a second invoke
+            // on this function could reuse this call's warm container and pass or fail on that
+            // unrelated bug instead of on the one this test targets.
+            given()
+                .contentType("application/json")
+                .body("{}")
+            .when()
+                .post(BASE_PATH + "/functions/" + fnName + ":1/invocations")
+            .then()
+                .statusCode(200)
+                .header("X-Amz-Function-Error", nullValue())
+                .body("build", equalTo("v1"));
+        } finally {
+            given().delete(BASE_PATH + "/functions/" + fnName);
         }
-        String base64Zip = Base64.getEncoder().encodeToString(baos.toByteArray());
+    }
+
+    private void createInvocableFunction(String fnName) throws Exception {
+        createInvocableFunction(fnName, "v1");
+    }
+
+    private void createInvocableFunction(String fnName, String build) throws Exception {
+        String base64Zip = zipHandler(build);
 
         given()
             .contentType("application/json")
@@ -285,5 +329,29 @@ class LambdaVersionIntegrationTest {
             .post(BASE_PATH + "/functions")
         .then()
             .statusCode(201);
+    }
+
+    private void updateFunctionCode(String fnName, String build) throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ZipFile": "%s"
+                }
+                """.formatted(zipHandler(build)))
+        .when()
+            .put(BASE_PATH + "/functions/" + fnName + "/code")
+        .then()
+            .statusCode(200);
+    }
+
+    private String zipHandler(String build) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write(("exports.handler = async () => ({ ok: true, build: '" + build + "' });").getBytes());
+            zos.closeEntry();
+        }
+        return Base64.getEncoder().encodeToString(baos.toByteArray());
     }
 }

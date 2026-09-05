@@ -580,6 +580,103 @@ class LambdaServiceTest {
     }
 
     @Test
+    void publishedVersionCodeDirectorySurvivesLatestRedeploy() throws Exception {
+        // Regression test for #2958: CodeStore.getCodePath had no version component, so every
+        // version shared $LATEST's on-disk directory. publishVersion only copied the
+        // codeLocalPath *pointer*, so a later UpdateFunctionCode rewrote the directory a
+        // published version's pointer named — the version's own metadata (CodeSha256) still
+        // reported the original hash while the bytes behind it silently became a different build.
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "immutable-version-fn",
+                "Runtime", "nodejs20.x",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Handler", "index.handler",
+                "Code", Map.of("ZipFile", createZipBase64WithContent("v1"))
+        ));
+        service.createFunction(REGION, req);
+        LambdaFunction version = service.publishVersion(REGION, "immutable-version-fn", null);
+        String versionCodePath = version.getCodeLocalPath();
+        String versionCodeSha256 = version.getCodeSha256();
+        assertEquals("v1", java.nio.file.Files.readString(Path.of(versionCodePath, "index.js")));
+
+        service.updateFunctionCode(REGION, "immutable-version-fn",
+                Map.of("ZipFile", createZipBase64WithContent("v2")));
+
+        // The version's own metadata never changed...
+        assertEquals(versionCodeSha256, version.getCodeSha256());
+        // ...and now the directory it names agrees with that metadata too: still v1's bytes,
+        // not $LATEST's new ones.
+        assertEquals("v1", java.nio.file.Files.readString(Path.of(versionCodePath, "index.js")));
+
+        LambdaFunction latest = service.getFunction(REGION, "immutable-version-fn");
+        assertNotEquals(versionCodePath, latest.getCodeLocalPath(),
+                "$LATEST must extract to a directory of its own, not the version's");
+        assertEquals("v2", java.nio.file.Files.readString(Path.of(latest.getCodeLocalPath(), "index.js")));
+    }
+
+    @Test
+    void redeployingLatestWithoutPublishingReclaimsTheSupersededContentDirectory() throws Exception {
+        // Content-addressing (one directory per distinct deployment package) means a function
+        // that is redeployed repeatedly without ever publishing a version would otherwise
+        // accumulate one directory per historical deploy forever. Nothing referenced the old
+        // build once $LATEST moves on, so it must be cleaned up rather than leaked.
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "churn-fn",
+                "Runtime", "nodejs20.x",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Handler", "index.handler",
+                "Code", Map.of("ZipFile", createZipBase64WithContent("v1"))
+        ));
+        service.createFunction(REGION, req);
+        String v1Path = service.getFunction(REGION, "churn-fn").getCodeLocalPath();
+
+        service.updateFunctionCode(REGION, "churn-fn", Map.of("ZipFile", createZipBase64WithContent("v2")));
+
+        assertFalse(java.nio.file.Files.exists(Path.of(v1Path)),
+                "no version references v1's build any more, so its directory should be reclaimed");
+    }
+
+    @Test
+    void reclaimLeavesThePreContentAddressingLayoutAlone() throws Exception {
+        // A function deployed before content-addressing has its code directly in the function
+        // directory, and a version published back then points at that directory itself. The
+        // first redeploy after the upgrade extracts to a hash subdirectory and then reclaims
+        // unreferenced ones — it must not treat that older layout's own subdirectories as
+        // superseded builds, which would strip files out from under that still-live version.
+        CodeStore codeStore = new CodeStore(Path.of("target/test-data/lambda-code"));
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "legacy-layout-fn",
+                "Runtime", "nodejs20.x",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Handler", "index.handler",
+                "Code", Map.of("ZipFile", createZipBase64WithContent("v1"))
+        ));
+        service.createFunction(REGION, req);
+
+        // Recreate the old on-disk shape: code sitting straight in the function directory.
+        Path functionDir = codeStore.getCodePath("000000000000", "legacy-layout-fn");
+        Path preUpgradeSubdir = functionDir.resolve("node_modules");
+        java.nio.file.Files.createDirectories(preUpgradeSubdir);
+        java.nio.file.Files.writeString(preUpgradeSubdir.resolve("dep.js"), "dependency");
+
+        service.updateFunctionCode(REGION, "legacy-layout-fn",
+                Map.of("ZipFile", createZipBase64WithContent("v2")));
+
+        assertTrue(java.nio.file.Files.exists(preUpgradeSubdir.resolve("dep.js")),
+                "the pre-upgrade layout is not a superseded build and must survive the reclaim");
+    }
+
+    private static String createZipBase64WithContent(String content) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write(content.getBytes());
+            zos.closeEntry();
+        }
+        return Base64.getEncoder().encodeToString(baos.toByteArray());
+    }
+
+    @Test
     void rehydrateConcurrency_restoresReservedFromStore() {
         // Simulate a persisted state: functions already live in the store
         // with reserved values before the limiter is populated.

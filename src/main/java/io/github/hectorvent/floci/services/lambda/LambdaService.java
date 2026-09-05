@@ -75,6 +75,8 @@ public class LambdaService implements ResourceProvider {
             "arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+");
     private static final Pattern HANDLER_PATTERN = Pattern.compile("\\S+");
     private static final int MAX_HANDLER_LENGTH = 128;
+    /** Shape of the hex SHA-256 directory names {@link CodeStore#getCodePath} creates. */
+    private static final Pattern CONTENT_DIRECTORY = Pattern.compile("[0-9a-f]{64}");
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -774,9 +776,10 @@ public class LambdaService implements ResourceProvider {
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.drainEnvironment(version.get());
             functionStore.deleteVersion(region, name, qualifier);
-            // The snapshot shares $LATEST's code directory, so this only reclaims once no
-            // remaining version references it.
+            // Reclaims a directory (legacy or content-addressed) only once no remaining
+            // version, including $LATEST, still references it.
             reclaimLegacyCodeDirectoryIfUnused(name);
+            reclaimUnusedCodeVersionDirectories(region, fn);
         }
         LOG.infov("Deleted version {0} of Lambda function: {1}", qualifier, name);
     }
@@ -838,6 +841,58 @@ public class LambdaService implements ResourceProvider {
                         && legacyPath.equals(other.getCodeLocalPath()));
         if (!stillLive) {
             codeStore.deleteLegacy(functionName);
+        }
+    }
+
+    /**
+     * Deletes content-addressed code directories under a function that no version — including
+     * the just-extracted {@code $LATEST} still in memory, not yet persisted by the caller — still
+     * references by {@code codeLocalPath}. Content-addressing (see {@link CodeStore#getCodePath
+     * (String, String, String)}) means every deploy that changes the code creates a new
+     * directory rather than overwriting one a published version relies on, so without this a
+     * function accumulates one directory per historical deploy forever. Must run under the same
+     * per-function lock as {@link #publishVersion}, otherwise a version could be published
+     * between this method's scan and its delete, referencing a directory about to be removed.
+     *
+     * <p>Only directories named like a content hash are ever considered, which is what keeps two
+     * other things in that same directory safe. ZipExtractor stages and retires trees under
+     * {@code <hash>.floci-staging-<uuid>} / {@code <hash>.floci-previous-<uuid>} SIBLINGS of its
+     * target, so they land here too — and extraction runs outside the lock below, meaning a
+     * concurrent deploy of the same function can have one live mid-flight. Pre-content-addressing
+     * functions are the other case: their code sits directly in this directory, so its
+     * subdirectories are that older layout's own files (a {@code node_modules}, say), still named
+     * by a version published before the upgrade. Matching hash-shaped names only leaves both
+     * alone; the cost is that the superseded layout lingers until the function is deleted.
+     */
+    private void reclaimUnusedCodeVersionDirectories(String region, LambdaFunction fn) {
+        Path functionDir = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName())
+                .toAbsolutePath().normalize();
+        if (!Files.isDirectory(functionDir)) {
+            return;
+        }
+        Set<String> referenced = new java.util.HashSet<>();
+        referenced.add(functionDir.relativize(Path.of(fn.getCodeLocalPath()).toAbsolutePath().normalize()).toString());
+        for (LambdaFunction version : functionStore.listVersions(region, fn.getFunctionName())) {
+            String path = version.getCodeLocalPath();
+            if (path == null) {
+                continue;
+            }
+            Path normalized = Path.of(path).toAbsolutePath().normalize();
+            if (normalized.startsWith(functionDir)) {
+                referenced.add(functionDir.relativize(normalized).toString());
+            }
+        }
+        try (var children = Files.list(functionDir)) {
+            for (Path child : children.toList()) {
+                String name = child.getFileName().toString();
+                if (CONTENT_DIRECTORY.matcher(name).matches()
+                        && !referenced.contains(name)
+                        && Files.isDirectory(child)) {
+                    codeStore.deleteContentDirectory(child, fn.getFunctionName());
+                }
+            }
+        } catch (IOException e) {
+            LOG.warnv("Failed to scan code directory for {0}: {1}", fn.getFunctionName(), e.getMessage());
         }
     }
 
@@ -1962,15 +2017,24 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
-        Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
+        // Hashed up front so the extraction target itself is content-addressed: a version's
+        // codeLocalPath then names the directory for the exact bytes it was published with,
+        // and a later redeploy of $LATEST lands in a different directory (a different hash)
+        // instead of overwriting the one a published version still points at (#2958).
+        byte[] digest;
+        try {
+            digest = java.security.MessageDigest.getInstance("SHA-256").digest(zipBytes);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
+        String codeSha256 = Base64.getEncoder().encodeToString(digest);
+        Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName(),
+                java.util.HexFormat.of().formatHex(digest));
         try {
             zipExtractor.extractTo(zipBytes, codePath);
             fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
             fn.setCodeSizeBytes(zipBytes.length);
-            try {
-                byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(zipBytes);
-                fn.setCodeSha256(Base64.getEncoder().encodeToString(digest));
-            } catch (java.security.NoSuchAlgorithmException ignored) {}
+            fn.setCodeSha256(codeSha256);
 
             // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
             if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {
@@ -2006,6 +2070,7 @@ public class LambdaService implements ResourceProvider {
             // and the actual delete.
             synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
                 reclaimLegacyCodeDirectoryIfUnused(fn.getFunctionName());
+                reclaimUnusedCodeVersionDirectories(region, fn);
             }
         } catch (AwsException e) {
             throw e;

@@ -103,6 +103,71 @@ class CodeStoreTest {
         assertFalse(Files.exists(legacyPath));
     }
 
+    @Test
+    void contentAddressedPathsForDifferentHashesAreDistinctSiblings(@TempDir Path baseDir) {
+        // #2958: without a version/content component every deploy shared one directory, so a
+        // published version and a later $LATEST redeploy could not both keep their own code.
+        CodeStore store = new CodeStore(baseDir);
+
+        Path v1 = store.getCodePath(ACCOUNT_A, "fn", "aaaa");
+        Path v2 = store.getCodePath(ACCOUNT_A, "fn", "bbbb");
+
+        assertNotEquals(v1, v2);
+        assertEquals(store.getCodePath(ACCOUNT_A, "fn"), v1.getParent());
+        assertEquals(v1.getParent(), v2.getParent());
+    }
+
+    @Test
+    void sameHashResolvesToTheSameContentAddressedPath(@TempDir Path baseDir) {
+        CodeStore store = new CodeStore(baseDir);
+
+        assertEquals(store.getCodePath(ACCOUNT_A, "fn", "aaaa"), store.getCodePath(ACCOUNT_A, "fn", "aaaa"));
+    }
+
+    @Test
+    void deleteOfTheWholeFunctionRemovesEveryContentAddressedDirectoryUnderIt(
+            @TempDir Path baseDir) throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        writeHandler(store.getCodePath(ACCOUNT_A, "fn", "aaaa"), "v1");
+        writeHandler(store.getCodePath(ACCOUNT_A, "fn", "bbbb"), "v2");
+
+        store.delete(ACCOUNT_A, "fn");
+
+        assertFalse(Files.exists(store.getCodePath(ACCOUNT_A, "fn")));
+    }
+
+    @Test
+    void deleteContentDirectoryRemovesOnlyThatOneBuild(@TempDir Path baseDir) throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        Path v1 = store.getCodePath(ACCOUNT_A, "fn", "aaaa");
+        Path v2 = store.getCodePath(ACCOUNT_A, "fn", "bbbb");
+        writeHandler(v1, "v1");
+        writeHandler(v2, "v2");
+
+        store.deleteContentDirectory(v1, "fn");
+
+        assertFalse(Files.exists(v1));
+        assertTrue(Files.exists(v2));
+    }
+
+    @Test
+    void deleteContentDirectoryRefusesAPathOutsideTheBaseDirectory(@TempDir Path baseDir) throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        Path outside = baseDir.getParent().resolve("outside-" + baseDir.getFileName());
+        writeHandler(outside, "not-ours");
+
+        store.deleteContentDirectory(outside, "fn");
+
+        assertTrue(Files.exists(outside), "must refuse to delete anything outside baseDir");
+        Files.walk(outside).sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+            try {
+                Files.delete(p);
+            } catch (IOException ignored) {
+                // best-effort cleanup of the temp fixture created outside @TempDir
+            }
+        });
+    }
+
     private void writeHandler(Path codePath, String content) throws IOException {
         Files.createDirectories(codePath);
         Files.writeString(codePath.resolve("index.js"), content);
