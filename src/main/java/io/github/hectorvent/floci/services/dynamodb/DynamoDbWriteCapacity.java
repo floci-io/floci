@@ -13,9 +13,10 @@ import java.util.Map;
 /**
  * Computes the write ConsumedCapacity of a single item write the way DynamoDB bills it.
  * The table is charged one unit per 1KB of the larger image. Each secondary index is
- * charged by how the write changes what the index stores: one unit for an insert, an
- * in-place update or a delete, two when the index key changes (delete plus insert),
- * and nothing when the stored view is unchanged or the item never touches the index.
+ * charged by how the write changes what the index stores, at one unit per 1KB of the
+ * stored view: one view write for an insert, an in-place update or a delete, two view
+ * writes when the index key changes (delete plus insert), and nothing when the stored
+ * view is unchanged or the item never touches the index.
  */
 final class DynamoDbWriteCapacity {
 

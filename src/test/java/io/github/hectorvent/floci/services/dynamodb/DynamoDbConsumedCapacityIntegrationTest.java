@@ -48,12 +48,17 @@ class DynamoDbConsumedCapacityIntegrationTest {
                     "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
                     "AttributeDefinitions": [
                         {"AttributeName": "pk", "AttributeType": "S"},
-                        {"AttributeName": "gsiPk", "AttributeType": "S"}
+                        {"AttributeName": "gsiPk", "AttributeType": "S"},
+                        {"AttributeName": "gsi2Pk", "AttributeType": "S"}
                     ],
                     "GlobalSecondaryIndexes": [{
                         "IndexName": "gsi1",
                         "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}],
                         "Projection": {"ProjectionType": "ALL"}
+                    }, {
+                        "IndexName": "gsi2",
+                        "KeySchema": [{"AttributeName": "gsi2Pk", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
                     }],
                     "BillingMode": "PAY_PER_REQUEST"
                 }
@@ -229,6 +234,56 @@ class DynamoDbConsumedCapacityIntegrationTest {
             .body("ConsumedCapacity.CapacityUnits", equalTo(2.0f))
             .body("ConsumedCapacity.Table", nullValue())
             .body("ConsumedCapacity.GlobalSecondaryIndexes", nullValue());
+    }
+
+    /**
+     * A read served by a secondary index is billed on what the index stores, not on
+     * the full base item. On real AWS a 20KB item behind a KEYS_ONLY GSI costs 0.5
+     * units to query while the same item through an ALL projection carries its size
+     * (measured us-east-1, 2026-09-05).
+     */
+    @Test
+    @Order(9)
+    void indexReadsAreBilledOnTheProjectedView() {
+        putItem("""
+            {"pk": {"S": "cc-big"}, "gsiPk": {"S": "g-big"}, "gsi2Pk": {"S": "g-big"}, "filler": {"S": "%s"}}
+            """.formatted("x".repeat(9000)));
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "IndexName": "gsi2",
+                    "KeyConditionExpression": "gsi2Pk = :g",
+                    "ExpressionAttributeValues": {":g": {"S": "g-big"}},
+                    "ReturnConsumedCapacity": "TOTAL"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Count", equalTo(1))
+            .body("ConsumedCapacity.CapacityUnits", equalTo(0.5f));
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "IndexName": "gsi1",
+                    "KeyConditionExpression": "gsiPk = :g",
+                    "ExpressionAttributeValues": {":g": {"S": "g-big"}},
+                    "ReturnConsumedCapacity": "TOTAL"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Count", equalTo(1))
+            .body("ConsumedCapacity.CapacityUnits", equalTo(1.5f));
     }
 
     private static void putItem(String itemJson) {
