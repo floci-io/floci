@@ -612,6 +612,11 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeGetObject(bucketName, key, null, RequestAuthorization.unsigned());
     }
 
+    /** Authorize an unsigned {@code s3:ListBucket}; see {@link #authorizeAnonymousGetObject}. */
+    public void authorizeAnonymousListBucket(String bucketName) {
+        authorizeListBucket(bucketName, RequestAuthorization.unsigned());
+    }
+
     public void authorizeCloudFrontOacGetObject(
             String bucketName, String key, String distributionArn) {
         authorizeCloudFrontGetObject(
