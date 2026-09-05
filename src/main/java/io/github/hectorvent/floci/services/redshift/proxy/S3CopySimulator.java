@@ -30,7 +30,7 @@ public final class S3CopySimulator {
 
     private static final Logger LOG = Logger.getLogger(S3CopySimulator.class);
 
-    private static final int MAX_KEYS = 10_000;
+    private static final int LIST_PAGE_SIZE = 1000;
     private static final int CHUNK = 8192;
 
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
@@ -49,11 +49,17 @@ public final class S3CopySimulator {
     public static boolean runCopyFrom(Socket client, Socket backend,
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3,
                                       char txStatus) throws IOException {
+        return runCopyFrom(client, backend, spec, s3, txStatus, null);
+    }
+
+    public static boolean runCopyFrom(Socket client, Socket backend,
+                                      CopyStatementParser.S3CopyFrom spec, S3Service s3,
+                                      char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
         try {
             s3.authorizeAnonymousListBucket(spec.bucket());
         } catch (AwsException e) {
             LOG.debugv(e, "ListBucket denied for COPY from s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
-            sendAccessDenied(client, spec, txStatus);
+            sendAccessDenied(client, backend, spec, txStatus, onStatusChange);
             return true;
         }
 
@@ -62,8 +68,8 @@ public final class S3CopySimulator {
             keys = resolveKeys(spec, s3);
         } catch (AwsException e) {
             LOG.warnv(e, "failed to list s3://{0}/{1} for COPY", spec.bucket(), spec.keyOrPrefix());
-            sendError(client, SQLSTATE_INTERNAL,
-                    "S3 COPY could not list s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus);
+            sendError(client, backend, SQLSTATE_INTERNAL,
+                    "S3 COPY could not list s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus, onStatusChange);
             return true;
         }
 
@@ -73,13 +79,13 @@ public final class S3CopySimulator {
             }
         } catch (AwsException e) {
             LOG.debugv(e, "GetObject denied for COPY from s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
-            sendAccessDenied(client, spec, txStatus);
+            sendAccessDenied(client, backend, spec, txStatus, onStatusChange);
             return true;
         }
 
         if (keys.isEmpty()) {
-            sendError(client, SQLSTATE_INTERNAL,
-                    "S3 object s3://" + spec.bucket() + "/" + spec.keyOrPrefix() + " not found", txStatus);
+            sendError(client, backend, SQLSTATE_INTERNAL,
+                    "S3 object s3://" + spec.bucket() + "/" + spec.keyOrPrefix() + " not found", txStatus, onStatusChange);
             return true;
         }
 
@@ -93,19 +99,23 @@ public final class S3CopySimulator {
             first = nextNonAsync(backendDecoder, client);
         } catch (IOException e) {
             LOG.warnv(e, "backend read failed while awaiting CopyInResponse");
-            sendError(client, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed", txStatus);
+            closeQuietly(backend);
+            sendError(client, null, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed or timed out", txStatus, onStatusChange);
+            closeQuietly(client);
             return true;
         }
         if (first == null) {
             LOG.warn("backend closed before answering the fabricated COPY");
-            sendError(client, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed before COPY started", txStatus);
+            closeQuietly(backend);
+            sendError(client, null, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed before COPY started", txStatus, onStatusChange);
+            closeQuietly(client);
             return true;
         }
         if (first.type() != 'G') {
             // Backend rejected the COPY itself (e.g. no such table). Its ErrorResponse and the
             // ReadyForQuery that follows are the client's one response.
             forward(client, first);
-            drainToReadyForQuery(backendDecoder, client);
+            drainToReadyForQuery(backendDecoder, client, onStatusChange);
             return true;
         }
 
@@ -115,24 +125,26 @@ public final class S3CopySimulator {
         try {
             streamObjects(spec, s3, keys, backendOut);
             writeCopyDone(backendOut);
-            drainToReadyForQuery(backendDecoder, client);
+            drainToReadyForQuery(backendDecoder, client, onStatusChange);
         } catch (RuntimeException | IOException e) {
             LOG.warnv(e, "S3 COPY streaming failed; aborting the open CopyIn");
-            abortOpenCopyIn(client, backendOut, backendDecoder, e, txStatus);
+            abortOpenCopyIn(client, backend, backendOut, backendDecoder, e, txStatus, onStatusChange);
         }
         return true;
     }
 
-    private static void abortOpenCopyIn(Socket client, OutputStream backendOut,
+    private static void abortOpenCopyIn(Socket client, Socket backend, OutputStream backendOut,
                                         PostgresWireDecoder backendDecoder, Exception cause,
-                                        char txStatus) throws IOException {
+                                        char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
         try {
             writeCopyFail(backendOut, cause.getMessage());
-            drainToReadyForQuery(backendDecoder, client);
+            drainToReadyForQuery(backendDecoder, client, onStatusChange);
         } catch (IOException backendGone) {
             LOG.debugv(backendGone, "backend unreachable while aborting CopyIn; synthesizing client error");
+            closeQuietly(backend);
             String detail = cause.getMessage() != null ? cause.getMessage() : cause.toString();
-            sendError(client, SQLSTATE_INTERNAL, "S3 COPY failed: " + detail, txStatus);
+            sendError(client, null, SQLSTATE_INTERNAL, "S3 COPY failed: " + detail, txStatus, onStatusChange);
+            closeQuietly(client);
         }
     }
 
@@ -142,13 +154,19 @@ public final class S3CopySimulator {
             keys.add(spec.keyOrPrefix());
             return keys;
         }
-        List<S3Object> objects = s3.listObjects(spec.bucket(), spec.keyOrPrefix(), null, MAX_KEYS);
-        if (objects != null) {
-            for (S3Object object : objects) {
-                keys.add(object.getKey());
+        String continuationToken = null;
+        do {
+            S3Service.ListObjectsResult result = s3.listObjectsWithPrefixes(
+                    spec.bucket(), spec.keyOrPrefix(), null, LIST_PAGE_SIZE, continuationToken, null);
+            if (result != null && result.objects() != null) {
+                for (S3Object object : result.objects()) {
+                    keys.add(object.getKey());
+                }
             }
-            keys.sort(String::compareTo);
-        }
+            continuationToken = (result != null && result.isTruncated()) ? result.nextContinuationToken() : null;
+        } while (continuationToken != null);
+
+        keys.sort(String::compareTo);
         return keys;
     }
 
@@ -257,7 +275,8 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void drainToReadyForQuery(PostgresWireDecoder decoder, Socket client) throws IOException {
+    private static void drainToReadyForQuery(PostgresWireDecoder decoder, Socket client,
+                                            java.util.function.IntConsumer onStatusChange) throws IOException {
         OutputStream clientOut = client.getOutputStream();
         while (true) {
             PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
@@ -267,6 +286,9 @@ public final class S3CopySimulator {
             clientOut.write(message.toPacketBytes());
             clientOut.flush();
             if (message.type() == 'Z') {
+                if (onStatusChange != null && message.body().length > 0) {
+                    onStatusChange.accept(message.body()[0]);
+                }
                 return;
             }
         }
@@ -277,13 +299,17 @@ public final class S3CopySimulator {
         client.getOutputStream().flush();
     }
 
-    private static void sendAccessDenied(Socket client, CopyStatementParser.S3CopyFrom spec, char txStatus)
-            throws IOException {
-        sendError(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus);
+    private static void sendAccessDenied(Socket client, Socket backend, CopyStatementParser.S3CopyFrom spec,
+                                         char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+        sendError(client, backend, SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus, onStatusChange);
     }
 
-    private static void sendError(Socket client, String sqlState, String message, char txStatus) throws IOException {
+    private static void sendError(Socket client, Socket backend, String sqlState, String message,
+                                  char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+        if (txStatus == 'T' && backend != null && !backend.isClosed()) {
+            failBackendTransaction(backend, onStatusChange);
+        }
         OutputStream out = client.getOutputStream();
         byte[] body = errorBody(sqlState, message);
         out.write('E');
@@ -292,6 +318,41 @@ public final class S3CopySimulator {
         byte status = (txStatus == 'I' || txStatus == 0) ? (byte) 'I' : (byte) 'E';
         out.write(new byte[]{'Z', 0, 0, 0, 5, status});
         out.flush();
+        if (onStatusChange != null) {
+            onStatusChange.accept(status);
+        }
+    }
+
+    private static void failBackendTransaction(Socket backend, java.util.function.IntConsumer onStatusChange) {
+        try {
+            OutputStream out = backend.getOutputStream();
+            out.write(PostgresWireDecoder.encodeQuery("(FLOCI_ABORT_TX)"));
+            out.flush();
+            PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
+            while (true) {
+                PostgresWireDecoder.FrontendMessage msg = decoder.nextMessage();
+                if (msg == null) {
+                    break;
+                }
+                if (msg.type() == 'Z') {
+                    if (onStatusChange != null && msg.body().length > 0) {
+                        onStatusChange.accept(msg.body()[0]);
+                    }
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            LOG.warnv(e, "failed to synchronize backend transaction abort state");
+        }
+    }
+
+    private static void closeQuietly(Socket s) {
+        try {
+            if (s != null && !s.isClosed()) {
+                s.close();
+            }
+        } catch (IOException ignored) {
+        }
     }
 
     private static byte[] errorBody(String sqlState, String message) {

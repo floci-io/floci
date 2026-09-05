@@ -139,4 +139,33 @@ class CopyStatementParserTest {
         assertEquals(";", c.delimiter());
         assertEquals("csv", c.nullAs());
     }
+
+    @Test
+    void rejectsTyposInOptionKeywords() {
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DELIMETER ','"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIPP"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' HEADERR"));
+    }
+
+    @Test
+    void rejectsLeftoverOrUnknownTokens() {
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP EXTRA_TOKEN"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' SOME_UNKNOWN_OPTION"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' CSV FOO"));
+    }
+
+    @Test
+    void rejectsDuplicateOrConflictingOptions() {
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP GZIP"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' CSV FORMAT CSV"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DELIMITER ',' DELIMITER '\t'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' HEADER IGNOREHEADER 2"));
+    }
+
+    @Test
+    void parsesEscapedSingleQuoteInDelimiter() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' DELIMITER ''''");
+        assertEquals("'", c.delimiter());
+    }
 }

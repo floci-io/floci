@@ -112,7 +112,8 @@ public class RedshiftInterceptingBridge {
                 if (copyFrom != null) {
                     CopyStatementParser.S3CopyFrom spec = copyFrom;
                     boolean intercepted = runWithBackendOwned(
-                            () -> S3CopySimulator.runCopyFrom(client, backend, spec, s3Service, lastBackendStatus));
+                            () -> S3CopySimulator.runCopyFrom(client, backend, spec, s3Service, lastBackendStatus,
+                                    status -> lastBackendStatus = (char) status));
                     if (intercepted) {
                         continue;
                     }

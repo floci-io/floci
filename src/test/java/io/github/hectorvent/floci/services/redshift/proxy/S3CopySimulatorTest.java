@@ -22,6 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -232,9 +236,11 @@ class S3CopySimulatorTest {
     @Test
     void concatenatesPrefixObjectsInKeyOrderAndSkipsHeaderOnFirstOnly() throws Exception {
         when(s3.objectExists("wh", "p/")).thenReturn(false);
-        when(s3.listObjects("wh", "p/", null, 10000)).thenReturn(List.of(
-                new S3Object("wh", "p/1", "h1|h2\n1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"),
-                new S3Object("wh", "p/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain")));
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("p/"), isNull(), anyInt(), any(), any())).thenReturn(
+                new S3Service.ListObjectsResult(List.of(
+                        new S3Object("wh", "p/1", "h1|h2\n1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"),
+                        new S3Object("wh", "p/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain")),
+                        List.of(), false, null));
         when(s3.getObject("wh", "p/1")).thenReturn(
                 new S3Object("wh", "p/1", "h1|h2\n1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         when(s3.getObject("wh", "p/2")).thenReturn(
@@ -287,7 +293,8 @@ class S3CopySimulatorTest {
     @Test
     void missingKeySendsNotFoundErrorResponse() throws Exception {
         when(s3.objectExists("wh", "missing")).thenReturn(false);
-        when(s3.listObjects("wh", "missing", null, 10000)).thenReturn(List.of());
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
+                new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "missing", "|", 0, false, false, null);
 
@@ -392,16 +399,90 @@ class S3CopySimulatorTest {
     @Test
     void synthesizedErrorReportsFailedTransactionStatusWhenInABlock() throws Exception {
         when(s3.objectExists("wh", "missing")).thenReturn(false);
-        when(s3.listObjects("wh", "missing", null, 10000)).thenReturn(List.of());
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
+                new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "missing", "|", 0, false, false, null);
 
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+            assertEquals('Q', q.type());
+            assertTrue(q.getSql().contains("FLOCI_ABORT_TX"));
+            OutputStream out = testBackend.getOutputStream();
+            byte[] err = "SERROR\0C42601\0Msyntax error\0\0".getBytes(StandardCharsets.US_ASCII);
+            out.write('E');
+            out.write(intBytes(4 + err.length));
+            out.write(err);
+            out.write(new byte[]{'Z', 0, 0, 0, 5, 'E'});
+            out.flush();
+        });
+
         S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'T');
+        joinBackend(backend);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
         assertEquals('E', in.nextMessage().type());
         PostgresWireDecoder.FrontendMessage ready = in.nextMessage();
         assertEquals('Z', ready.type());
         assertEquals('E', (char) ready.body()[0]);
+    }
+
+    @Test
+    void paginatesPrefixListingAcrossMultiplePages() throws Exception {
+        when(s3.objectExists("wh", "multi/")).thenReturn(false);
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("multi/"), isNull(), anyInt(), isNull(), isNull())).thenReturn(
+                new S3Service.ListObjectsResult(List.of(
+                        new S3Object("wh", "multi/1", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain")),
+                        List.of(), true, "tok-1"));
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("multi/"), isNull(), anyInt(), eq("tok-1"), isNull())).thenReturn(
+                new S3Service.ListObjectsResult(List.of(
+                        new S3Object("wh", "multi/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain")),
+                        List.of(), false, null));
+
+        when(s3.getObject("wh", "multi/1")).thenReturn(
+                new S3Object("wh", "multi/1", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+        when(s3.getObject("wh", "multi/2")).thenReturn(
+                new S3Object("wh", "multi/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "multi/", "|", 0, false, false, null);
+
+        ByteArrayOutputStream copyData = new ByteArrayOutputStream();
+        Thread backend = backendThread(() -> playHappyBackend(copyData));
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+
+        assertEquals("1|a\n2|b\n", copyData.toString(StandardCharsets.US_ASCII));
+    }
+
+    @Test
+    void backendTimeoutAwaitingCopyInResponseClosesBackend() throws Exception {
+        when(s3.objectExists("wh", "k")).thenReturn(true);
+        when(s3.getObject("wh", "k")).thenReturn(
+                new S3Object("wh", "k", "1\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null);
+
+        simBackend.setSoTimeout(100);
+
+        Thread backend = backendThread(() -> {
+            new PostgresWireDecoder(testBackend.getInputStream()).nextMessage();
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        assertTrue(simBackend.isClosed(), "simBackend must be closed upon timeout");
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        assertEquals('Z', in.nextMessage().type());
     }
 }

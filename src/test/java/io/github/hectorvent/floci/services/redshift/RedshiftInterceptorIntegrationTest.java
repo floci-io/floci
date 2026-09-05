@@ -190,4 +190,34 @@ class RedshiftInterceptorIntegrationTest {
                     ex.getMessage().toLowerCase().contains("not found"), ex.getMessage());
         }
     }
+
+    @Test
+    void copyFromMissingObjectInTransactionAbortsTransaction() throws Exception {
+        clusterId = "it-copy-tx-abort";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-it-tx";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE tx_test (id int)");
+            c.setAutoCommit(false);
+            Statement st = c.createStatement();
+            st.execute("INSERT INTO tx_test VALUES (1)");
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    SQLException.class,
+                    () -> st.execute("COPY tx_test FROM 's3://redshift-copy-it-tx/does/not/exist'"));
+            // The backend must now be in the aborted transaction state ('E').
+            // Subsequent statements in this transaction block must fail.
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    SQLException.class,
+                    () -> st.execute("INSERT INTO tx_test VALUES (2)"));
+            c.rollback();
+            c.setAutoCommit(true);
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*) FROM tx_test")) {
+                assertTrue(rs.next());
+                assertEquals(0, rs.getInt(1));
+            }
+        }
+    }
 }

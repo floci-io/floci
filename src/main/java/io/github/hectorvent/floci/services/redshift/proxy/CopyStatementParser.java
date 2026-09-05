@@ -33,9 +33,9 @@ public final class CopyStatementParser {
     private static final Pattern SIMPLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\"");
 
     private static final Pattern DELIMITER_PATTERN = Pattern.compile(
-            "(?i)\\bDELIMITER\\s+(?:AS\\s+)?(?:'([^']*)'|\"([^\"]*)\"|([^\\s;]+))");
+            "(?i)\\bDELIMITER\\s+(?:AS\\s+)?(?:'((?:[^']|'')*)'|\"([^\"]*)\"|([^\\s;]+))");
     private static final Pattern NULL_AS_PATTERN = Pattern.compile(
-            "(?i)\\bNULL\\s+(?:AS\\s+)?(?:'([^']*)'|\"([^\"]*)\")");
+            "(?i)\\bNULL\\s+(?:AS\\s+)?(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
     private static final Pattern IGNOREHEADER_PATTERN = Pattern.compile(
             "(?i)\\bIGNOREHEADER\\s+(?:AS\\s+)?(\\d+)\\b");
     private static final Pattern HEADER_PATTERN = Pattern.compile("(?i)\\bHEADER\\b");
@@ -99,50 +99,122 @@ public final class CopyStatementParser {
             return null;
         }
 
-        boolean csv = CSV_PATTERN.matcher(flagScan).find();
-        boolean gzip = GZIP_PATTERN.matcher(flagScan).find();
-        String nullAs = firstGroup(NULL_AS_PATTERN.matcher(options));
-        String delimiter = extractDelimiter(options, csv);
-        int headerLines = extractHeaderLines(flagScan);
+        int semiIdx = flagScan.indexOf(';');
+        if (semiIdx >= 0) {
+            if (!flagScan.substring(semiIdx + 1).isBlank()) {
+                return null;
+            }
+            options = options.substring(0, semiIdx);
+        }
+
+        boolean csv = false;
+        boolean gzip = false;
+        String nullAs = null;
+        String delimiter = null;
+        int headerLines = 0;
+
+        boolean seenCsv = false;
+        boolean seenGzip = false;
+        boolean seenNull = false;
+        boolean seenDelimiter = false;
+        boolean seenHeader = false;
+
+        Matcher csvMatcher = CSV_PATTERN.matcher(options);
+        Matcher gzipMatcher = GZIP_PATTERN.matcher(options);
+        Matcher ignoreHeaderMatcher = IGNOREHEADER_PATTERN.matcher(options);
+        Matcher headerMatcher = HEADER_PATTERN.matcher(options);
+        Matcher delimiterMatcher = DELIMITER_PATTERN.matcher(options);
+        Matcher nullMatcher = NULL_AS_PATTERN.matcher(options);
+
+        int offset = 0;
+        int len = options.length();
+        while (offset < len) {
+            while (offset < len && Character.isWhitespace(options.charAt(offset))) {
+                offset++;
+            }
+            if (offset >= len) {
+                break;
+            }
+
+            if (matchClause(csvMatcher, offset, len)) {
+                if (seenCsv) {
+                    return null;
+                }
+                seenCsv = true;
+                csv = true;
+                offset = csvMatcher.end();
+            } else if (matchClause(gzipMatcher, offset, len)) {
+                if (seenGzip) {
+                    return null;
+                }
+                seenGzip = true;
+                gzip = true;
+                offset = gzipMatcher.end();
+            } else if (matchClause(ignoreHeaderMatcher, offset, len)) {
+                if (seenHeader) {
+                    return null;
+                }
+                seenHeader = true;
+                headerLines = Math.max(0, Integer.parseInt(ignoreHeaderMatcher.group(1)));
+                offset = ignoreHeaderMatcher.end();
+            } else if (matchClause(headerMatcher, offset, len)) {
+                if (seenHeader) {
+                    return null;
+                }
+                seenHeader = true;
+                headerLines = 1;
+                offset = headerMatcher.end();
+            } else if (matchClause(delimiterMatcher, offset, len)) {
+                if (seenDelimiter) {
+                    return null;
+                }
+                seenDelimiter = true;
+                delimiter = extractDelimiterValue(delimiterMatcher);
+                offset = delimiterMatcher.end();
+            } else if (matchClause(nullMatcher, offset, len)) {
+                if (seenNull) {
+                    return null;
+                }
+                seenNull = true;
+                nullAs = extractNullValue(nullMatcher);
+                offset = nullMatcher.end();
+            } else {
+                return null;
+            }
+        }
+
+        if (delimiter == null) {
+            delimiter = csv ? "," : "|";
+        }
 
         return new S3CopyFrom(table, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv, nullAs);
     }
 
-    private static int extractHeaderLines(String flagScan) {
-        Matcher ignoreHeader = IGNOREHEADER_PATTERN.matcher(flagScan);
-        if (ignoreHeader.find()) {
-            return Math.max(0, Integer.parseInt(ignoreHeader.group(1)));
-        }
-        return HEADER_PATTERN.matcher(flagScan).find() ? 1 : 0;
+    private static boolean matchClause(Matcher m, int start, int end) {
+        m.region(start, end);
+        return m.lookingAt();
     }
 
-    private static String extractDelimiter(String options, boolean csv) {
-        Matcher delimiter = DELIMITER_PATTERN.matcher(options);
-        if (delimiter.find()) {
-            String value = delimiter.group(1) != null ? delimiter.group(1)
-                    : delimiter.group(2) != null ? delimiter.group(2)
-                    : delimiter.group(3);
-            if (value != null) {
-                value = unescape(value);
-            }
-            return "\\t".equals(value) || "\t".equals(value) ? "\t" : value;
+    private static String extractDelimiterValue(Matcher matcher) {
+        String value = matcher.group(1) != null ? matcher.group(1)
+                : matcher.group(2) != null ? matcher.group(2)
+                : matcher.group(3);
+        if (value != null) {
+            value = unescape(value);
         }
-        return csv ? "," : "|";
+        return "\\t".equals(value) || "\t".equals(value) ? "\t" : value;
     }
 
-    private static String firstGroup(Matcher matcher) {
-        if (matcher.find()) {
-            String value = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
-            return unescape(value);
-        }
-        return null;
+    private static String extractNullValue(Matcher matcher) {
+        String value = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+        return unescape(value);
     }
 
     private static String unescape(String s) {
         if (s == null) {
             return null;
         }
-        return s.replace("\\\\", "\\");
+        return s.replace("''", "'").replace("\\\\", "\\");
     }
 
     /** Replace every character inside a single- or double-quoted run with a space. */
@@ -154,6 +226,11 @@ public final class CopyStatementParser {
             char c = s.charAt(i);
             if (inSingle) {
                 if (c == '\'') {
+                    if (i + 1 < s.length() && s.charAt(i + 1) == '\'') {
+                        out.append("  ");
+                        i++;
+                        continue;
+                    }
                     inSingle = false;
                 }
                 out.append(' ');
