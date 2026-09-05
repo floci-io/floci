@@ -295,8 +295,28 @@ jobs:
             -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
             floci:test-native
 
-      - name: Wait for floci to be ready
-        run: timeout 60 bash -c 'until curl -sf http://localhost:4566/ >/dev/null 2>&1; do sleep 1; done'
+      # Waits on Docker's health status rather than curling the port so the image's
+      # HEALTHCHECK runs under CI on every arch: the native image has no curl and probes
+      # over bash's /dev/tcp, and a malformed probe would otherwise leave the container
+      # "unhealthy" while the suites pass against the open port. Healthy takes one
+      # interval (5 s); unhealthy takes retries x interval (25 s) and fails fast here.
+      - name: Wait for floci to be healthy
+        run: |
+          health=starting
+          for _ in $(seq 1 60); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' floci)
+            if [ "$health" = healthy ]; then
+              exit 0
+            fi
+            if [ "$health" = unhealthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "::error::floci did not report healthy (last status: $health)"
+          docker inspect -f '{{json .State.Health}}' floci
+          docker logs --tail 50 floci
+          exit 1
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
