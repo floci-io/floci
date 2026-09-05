@@ -205,6 +205,19 @@ class CertificateGeneratorIssuerTest {
     }
 
     @Test
+    void ecPrivateKeysAreWrittenAsPkcs8AndReadBack() throws Exception {
+        var ec = generator.generateIssuedCertificate("ec.example.test", List.of(), KeyAlgorithm.EC_secp384r1, null,
+                newIssuer(), CertificateGenerator.LeafUsage.SERVER);
+        var rsa = generator.generateIssuedCertificate("rsa.example.test", List.of(), KeyAlgorithm.RSA_2048, null,
+                newIssuer(), CertificateGenerator.LeafUsage.CLIENT);
+
+        assertTrue(ec.privateKeyPem().startsWith("-----BEGIN PRIVATE KEY-----"), "PKCS#8 carries the curve");
+        assertTrue(rsa.privateKeyPem().startsWith("-----BEGIN RSA PRIVATE KEY-----"), "RSA stays PKCS#1, as AWS IoT hands out");
+        assertTrue(CertificateGenerator.isPair(generator.parsePrivateKey(ec.privateKeyPem()),
+                generator.parseCertificate(ec.certificatePem()).getPublicKey()), "the EC key reads back and matches");
+    }
+
+    @Test
     void colonHexPadsOddLengthAndSplitsBytes() {
         assertEquals("0a", CertificateGenerator.colonHex(BigInteger.TEN));
         assertEquals("01:00", CertificateGenerator.colonHex(BigInteger.valueOf(256)));
