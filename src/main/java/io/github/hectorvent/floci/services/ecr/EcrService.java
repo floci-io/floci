@@ -121,7 +121,12 @@ public class EcrService implements ResourceProvider {
                                        Map<String, String> tags,
                                        String region) {
         validateRepoName(repositoryName);
-        registryManager.ensureStarted();
+        // Repository records are pure metadata: the ARN and the URI are derived from the
+        // configured account, region and registry port, none of which need Docker. Start
+        // the backing registry opportunistically so the URI reflects an already-adopted
+        // container's published port, but never fail CreateRepository when no Docker
+        // daemon is reachable, the registry is retried on the next image operation.
+        registryManager.tryEnsureStarted();
         String account = effectiveAccount(registryId);
         String key = key(region, account, repositoryName);
         if (repoStore.get(key).isPresent()) {
@@ -220,7 +225,7 @@ public class EcrService implements ResourceProvider {
     // ============================================================
 
     public AuthorizationData getAuthorizationToken() {
-        registryManager.ensureStarted();
+        requireRegistry();
         String token = Base64.getEncoder()
                 .encodeToString("AWS:floci".getBytes(StandardCharsets.UTF_8));
         Instant expires = Instant.now().plusSeconds(12 * 60 * 60);
@@ -234,7 +239,7 @@ public class EcrService implements ResourceProvider {
 
     public List<ImageIdentifier> listImages(String repositoryName, String registryId, String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         try {
             RegistryHttpClient http = registryManager.httpClient();
@@ -256,7 +261,7 @@ public class EcrService implements ResourceProvider {
                                                 String registryId,
                                                 String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
@@ -331,7 +336,7 @@ public class EcrService implements ResourceProvider {
                                               String registryId,
                                               String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
@@ -371,7 +376,7 @@ public class EcrService implements ResourceProvider {
                                                     String registryId,
                                                     String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
@@ -532,6 +537,20 @@ public class EcrService implements ResourceProvider {
         return key(region, account, repoName) + "::" + digest;
     }
 
+
+    /**
+     * Gate for the ECR data plane, which cannot be emulated without the backing
+     * registry container. Surfaces ECR's modelled {@code ServerException} instead of
+     * letting the Docker client's {@code SocketException} escape as an InternalFailure.
+     */
+    private void requireRegistry() {
+        if (!registryManager.tryEnsureStarted()) {
+            throw new AwsException("ServerException",
+                    "The ECR backing registry is unavailable because no Docker daemon is reachable "
+                            + "from Floci. Repository metadata operations are supported; image push, "
+                            + "pull and image queries require Docker.", 500);
+        }
+    }
 
     private List<String> listTagsBestEffort(String account, String region, String repoName) {
         try {

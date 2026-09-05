@@ -53,6 +53,7 @@ public class ElastiCacheContainerManager {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Map<String, ElastiCacheContainerHandle> activeContainers = new ConcurrentHashMap<>();
+    private volatile boolean dockerUnavailableLogged;
 
     @Inject
     public ElastiCacheContainerManager(ContainerBuilder containerBuilder,
@@ -67,6 +68,55 @@ public class ElastiCacheContainerManager {
         this.containerDetector = containerDetector;
         this.config = config;
         this.regionResolver = regionResolver;
+    }
+
+    /**
+     * Attempts {@link #start} and reports the backend as unavailable instead of propagating the
+     * failure, when the cause is that no Docker daemon is reachable from Floci: Floci running
+     * inside Docker without a mounted socket, or a stopped daemon on the host. A failure raised
+     * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
+     * so nothing changes for a Floci that can start Valkey containers.
+     *
+     * @return the container handle, or {@code null} when no Docker daemon is reachable and no
+     *         container was created
+     */
+    public ElastiCacheContainerHandle tryStart(String groupId, String image) {
+        try {
+            ElastiCacheContainerHandle handle = start(groupId, image);
+            dockerUnavailableLogged = false;
+            return handle;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            boolean partial = activeContainers.containsKey(groupId);
+            stopByGroupId(groupId);
+            if (partial) {
+                throw e;
+            }
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "
+                        + "operations keep working and replication groups still reach 'available', "
+                        + "but they have no backing Valkey container until a daemon becomes "
+                        + "reachable.", e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
     }
 
     public ElastiCacheContainerHandle start(String groupId, String image) {
