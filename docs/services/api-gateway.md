@@ -105,6 +105,24 @@ immediately.
 > disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
 > than being rejected with `403`.
 
+### Custom Domain Names
+
+A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDomainName` is
+`<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
+itself is routed through the domain's base path mappings to the mapped REST API stage. An
+`EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
+CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. Moving a
+domain between the two types with `UpdateDomainName` creates or drops the distribution.
+`GetDomainName` returns the `domainNameArn`, the `endpointConfiguration`, both certificate ARNs
+and the `tags`. Tags are managed through `TagResource`, `UntagResource` and `GetTags` on
+`arn:aws:apigateway:<region>::/domainnames/<domain>`. A second mapping on a base path that
+already has one is a `ConflictException`. A `PRIVATE` endpoint type is refused: private custom
+domains are not emulated. Mutual TLS, ownership verification certificates, routing modes and
+endpoint access modes are accepted and ignored.
+
+Templates can create domains and mappings with `AWS::ApiGateway::DomainName` and
+`AWS::ApiGateway::BasePathMapping`; see [CloudFormation](cloudformation.md).
+
 ### IAM Authorization (`AWS_IAM`) {#iam-authorization}
 
 A method (v1) or route (v2) whose `authorizationType` is `AWS_IAM` requires a SigV4-signed caller.

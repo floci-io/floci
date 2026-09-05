@@ -46,9 +46,10 @@ public class ReplayDispatcher {
                   BiConsumer<String, ReplayState> stateUpdater,
                   Consumer<Instant> progressUpdater) {
 
+        String replayArn = replay.getReplayArn();
         String replayName = replay.getReplayName();
         AtomicBoolean cancelled = new AtomicBoolean(false);
-        cancelFlags.put(replayName, cancelled);
+        cancelFlags.put(replayArn, cancelled);
 
         vertx.executeBlocking(promise -> {
             try {
@@ -88,7 +89,7 @@ public class ReplayDispatcher {
                 stateUpdater.accept(replayName, ReplayState.FAILED);
                 promise.fail(e);
             } finally {
-                cancelFlags.remove(replayName);
+                cancelFlags.remove(replayArn, cancelled);
             }
         });
     }
@@ -97,8 +98,8 @@ public class ReplayDispatcher {
      * Signals a running replay to stop after the current event. Returns false if the replay is
      * not running (already completed, cancelled, or unknown).
      */
-    boolean requestCancel(String replayName) {
-        AtomicBoolean flag = cancelFlags.get(replayName);
+    boolean requestCancel(String replayArn) {
+        AtomicBoolean flag = cancelFlags.get(replayArn);
         if (flag != null) {
             flag.set(true);
             return true;

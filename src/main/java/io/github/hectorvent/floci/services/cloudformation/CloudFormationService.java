@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -291,6 +292,21 @@ public class CloudFormationService implements ResourceProvider {
                 if (isCreateType && !reusableReviewPlaceholder) {
                     throw new AwsException("AlreadyExistsException",
                             "Stack [" + stackName + "] already exists", 400);
+                }
+                // A status ending in _IN_PROGRESS says an operation owns the stack: a create, an
+                // update, a rollback or the cleanup phase of a committed update. AWS refuses to
+                // start a second one over it, and offers nothing that finishes a phase whose
+                // process is gone - DeleteStack is the only way out of one. Refusing here keeps
+                // every abandoned phase out of the next update's transaction.
+                //
+                // The message is the one real CloudFormation emits, down to its own "can not"
+                // spelling and the stack id carried as "Stack:<arn>" with no space: clients match
+                // on this string.
+                if (!isCreateType && existing.getStatus() != null
+                        && existing.getStatus().endsWith("_IN_PROGRESS")) {
+                    throw new AwsException("ValidationError",
+                            "Stack:" + existing.getStackId() + " is in " + existing.getStatus()
+                                    + " state and can not be updated.", 400);
                 }
                 target = existing;
             }
@@ -1307,8 +1323,7 @@ public class CloudFormationService implements ResourceProvider {
                         null);
             }
             while (true) {
-                CloudFormationResourceProvisioner.UpdateCleanupResult result =
-                        provisioner.completeUpdate(resource);
+                UpdateCleanupResult result = provisioner.completeUpdate(resource);
                 if (!result.applicable()) {
                     break;
                 }
@@ -1740,12 +1755,51 @@ public class CloudFormationService implements ResourceProvider {
         return failures;
     }
 
+    /**
+     * The stack's resources in the order the current template creates them, for a delete that walks
+     * them backwards. The resource map keeps insertion order, and a resource added by a later
+     * update sits after the resources that depend on it, so reversing the map would delete it
+     * first: a certificate still used by a user pool domain, for one. Resources the template no
+     * longer names, left behind by a failed cleanup, sort first here so they are deleted last,
+     * after anything that might still use them. Insertion order is the fallback when the template
+     * cannot be read.
+     */
+    private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
+        List<StackResource> ordered = new ArrayList<>(stack.getResources().values());
+        try {
+            JsonNode template = parseTemplate(stack.getTemplateBody());
+            JsonNode resources = template.path("Resources");
+            if (!resources.isObject()) {
+                return ordered;
+            }
+            Map<String, Boolean> conditions = resolveConditions(
+                    template, stack.getParameters(), stack, region, regionResolver.getAccountId());
+            List<String> creationOrder = topologicalSort(resources, conditions);
+            Map<String, Integer> rank = new HashMap<>();
+            for (int i = 0; i < creationOrder.size(); i++) {
+                rank.put(creationOrder.get(i), i);
+            }
+            ordered.sort(Comparator.comparingInt(r -> rank.getOrDefault(r.getLogicalId(), -1)));
+        } catch (Exception e) {
+            LOG.debugv("Deleting stack {0} in insertion order, its template could not be ordered: {1}",
+                    stack.getStackName(), e.getMessage());
+        }
+        return ordered;
+    }
+
     private void deleteStackResources(Stack stack, String region) {
         try {
-            List<StackResource> resources = new ArrayList<>(stack.getResources().values());
-            Collections.reverse(resources); // Delete in reverse order
+            List<StackResource> resources = resourcesInCreationOrder(stack, region);
+            Collections.reverse(resources); // Dependents go before what they depend on
 
             List<String> failedResources = new ArrayList<>();
+            // The walk below addresses each resource by its physical id, which names the entity the
+            // last update left in place. An entity displaced by a replacement whose cleanup phase
+            // never ended is named only by the cleanup the resource still carries, so the stack
+            // deletes that one too: nothing else ever will.
+            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack)) {
+                failedResources.add(displacedFailure.logicalId());
+            }
             for (StackResource resource : resources) {
                 // CREATE_COMPLETE/UPDATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous
                 // delete left the resource behind (e.g. the bucket was non-empty); AWS re-attempts

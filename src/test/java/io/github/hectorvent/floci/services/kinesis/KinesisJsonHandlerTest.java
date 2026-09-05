@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +31,14 @@ class KinesisJsonHandlerTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "123456789012";
     private static final String STREAM_ARN = "arn:aws:kinesis:us-east-1:123456789012:stream/test-stream";
+    private static final String MAX_HASH_KEY_PLUS_ONE = "340282366920938463463374607431768211456";
+    private static final String NON_DECIMAL_HASH_KEY = "1.5";
+    private static final long NUMERIC_EXPLICIT_HASH_KEY = 12345L;
+    private static final String MIN_HASH_KEY = "0";
+    private static final String MAX_HASH_KEY = "340282366920938463463374607431768211455";
+    private static final int TWO_SHARDS = 2;
+    private static final String FIRST_SHARD_ID = "shardId-000000000000";
+    private static final String SECOND_SHARD_ID = "shardId-000000000001";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private KinesisService service;
@@ -45,9 +55,13 @@ class KinesisJsonHandlerTest {
     }
 
     private void createStream(String name) {
+        createStream(name, 1);
+    }
+
+    private void createStream(String name, int shardCount) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("StreamName", name);
-        req.put("ShardCount", 1);
+        req.put("ShardCount", shardCount);
         assertThat(handler.handle("CreateStream", req, REGION).getStatus(), is(200));
     }
 
@@ -419,6 +433,97 @@ class KinesisJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutRecord", req, REGION));
         assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordRejectsExplicitHashKeyOutsideHashKeySpace() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", "dGVzdA==");
+        req.put("PartitionKey", "pk1");
+        req.put("ExplicitHashKey", MAX_HASH_KEY_PLUS_ONE);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordsRejectsNonDecimalExplicitHashKey() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject()
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk1")
+                .put("ExplicitHashKey", NON_DECIMAL_HASH_KEY);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordRejectsNumericExplicitHashKey() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", "dGVzdA==");
+        req.put("PartitionKey", "pk1");
+        // A JSON number is not the string-shaped field AWS accepts; asText coercion must not
+        // silently turn it into a valid decimal hash key.
+        req.put("ExplicitHashKey", NUMERIC_EXPLICIT_HASH_KEY);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordsRejectNumericExplicitHashKey() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject()
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk1")
+                .put("ExplicitHashKey", NUMERIC_EXPLICIT_HASH_KEY);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordMigratesLegacyOverlappingShardRangesForExplicitHashKey() {
+        // A multi-shard stream persisted before disjoint ranges existed carries the full 128-bit
+        // span on every open shard, so an explicit key matches all of them. Naive first-match
+        // routing would then collapse every explicit key onto the first shard.
+        createStream("legacy-stream", TWO_SHARDS);
+        KinesisStream stream = service.describeStream("legacy-stream", REGION);
+        for (KinesisShard shard : stream.getShards()) {
+            shard.setHashKeyRange(new KinesisShard.HashKeyRange(MIN_HASH_KEY, MAX_HASH_KEY));
+        }
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "legacy-stream");
+        req.put("Data", "dGVzdA==");
+        req.put("PartitionKey", "pk1");
+        req.put("ExplicitHashKey", MAX_HASH_KEY);
+
+        ObjectNode resp = responseEntity(handler.handle("PutRecord", req, REGION));
+        assertEquals(SECOND_SHARD_ID, resp.get("ShardId").asText());
+
+        req.put("ExplicitHashKey", MIN_HASH_KEY);
+        ObjectNode respMin = responseEntity(handler.handle("PutRecord", req, REGION));
+        assertEquals(FIRST_SHARD_ID, respMin.get("ShardId").asText());
     }
 
     @Test

@@ -171,7 +171,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         List<String> resources = arnBuilder.buildResources(credentialScope, ctx, region, accountId);
 
-        Map<String, String> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
+        Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
 
         // aws:PrincipalArn is populated for every principal this filter can identify — IAM users,
         // assumed-role sessions, and now the synthesized account-root principal above, using AWS's
@@ -184,7 +184,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 : iamService.resolveCallerArn(akid);
         if (principalArn.isPresent()) {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
-            conditionContext.put("aws:PrincipalArn", principalArn.get());
+            conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
         }
 
         for (String resource : resources) {

@@ -54,6 +54,9 @@ class AcmCfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        // resolveStringList delegates to the real engine method; for the literal arrays these
+        // tests use it just walks the array and calls resolve(...) per element, stubbed above.
+        when(engine.resolveStringList(any())).thenCallRealMethod();
         return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 

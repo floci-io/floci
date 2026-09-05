@@ -61,6 +61,7 @@ public class AthenaService {
     private final S3Service s3Service;
     private final EmulatorConfig config;
     private final Vertx vertx;
+    private final GlueViewDdlBuilder ddlBuilder;
 
     @Inject
     public AthenaService(StorageFactory storageFactory,
@@ -68,7 +69,8 @@ public class AthenaService {
                          GlueService glueService,
                          S3Service s3Service,
                          EmulatorConfig config,
-                         Vertx vertx) {
+                         Vertx vertx,
+                         GlueViewDdlBuilder ddlBuilder) {
         this.queryStore = storageFactory.create("athena", "queries.json",
                 new TypeReference<>() {});
         this.workGroupStore = storageFactory.create("athena", "workgroups.json",
@@ -78,6 +80,7 @@ public class AthenaService {
         this.s3Service = s3Service;
         this.config = config;
         this.vertx = vertx;
+        this.ddlBuilder = ddlBuilder;
     }
 
     public String startQueryExecution(String query,
@@ -132,7 +135,7 @@ public class AthenaService {
 
         // Submit async — caller gets the ID immediately while execution runs in background
         vertx.executeBlocking(() -> {
-            String setupDdl = buildGlueDdl(database);
+            String setupDdl = ddlBuilder.build(database);
             if (outputLocation != null) {
                 ensureOutputBucket(outputLocation);
             }
@@ -365,62 +368,6 @@ public class AthenaService {
 
     private record CreateDatabaseDdl(String name, boolean ifNotExists, String comment,
                                      String location, Map<String, String> properties) {
-    }
-
-    private String buildGlueDdl(String database) {
-        StringBuilder sb = new StringBuilder();
-        try {
-            List<Table> tables = glueService.getTables(database);
-            for (Table table : tables) {
-                String location = table.getStorageDescriptor() != null
-                        ? table.getStorageDescriptor().getLocation()
-                        : null;
-                if (location == null || location.isBlank()) {
-                    continue;
-                }
-                String readFn = inferReadFunction(table);
-                String normalizedLocation = location.endsWith("/")
-                        ? location.substring(0, location.length() - 1) : location;
-                sb.append("CREATE OR REPLACE VIEW \"")
-                  .append(table.getName())
-                  .append("\" AS SELECT * FROM ")
-                  .append(readExpression(readFn, normalizedLocation))
-                  .append(";\n");
-            }
-        } catch (Exception e) {
-            LOG.debugv("Could not inject Glue DDL for database {0}: {1}", database, e.getMessage());
-        }
-        return sb.toString();
-    }
-
-    private String readExpression(String readFn, String normalizedLocation) {
-        String glob = normalizedLocation + "/**";
-        if ("read_parquet".equals(readFn)) {
-            return "read_parquet('" + glob + "', union_by_name = true)";
-        }
-        return readFn + "('" + glob + "')";
-    }
-
-    private String inferReadFunction(Table table) {
-        if (table.getStorageDescriptor() == null) {
-            return "read_csv_auto";
-        }
-        String format = table.getStorageDescriptor().getInputFormat();
-        String serde = table.getStorageDescriptor().getSerdeInfo() != null
-                ? table.getStorageDescriptor().getSerdeInfo().getSerializationLibrary()
-                : null;
-        if (containsIgnoreCase(format, "parquet") || containsIgnoreCase(serde, "parquet")) {
-            return "read_parquet";
-        }
-        if (containsIgnoreCase(format, "json") || containsIgnoreCase(serde, "json")
-                || containsIgnoreCase(format, "hive")) {
-            return "read_json_auto";
-        }
-        return "read_csv_auto";
-    }
-
-    private static boolean containsIgnoreCase(String str, String sub) {
-        return str != null && str.toLowerCase().contains(sub);
     }
 
     private String resolveOutputLocation(ResultConfiguration rc, String queryId) {

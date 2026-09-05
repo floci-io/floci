@@ -60,6 +60,19 @@ class CloudFormationTemplateEngineTest {
                 engine().resolve(json("{\"Fn::Select\": [2, {\"Fn::Cidr\": [\"10.0.0.0/16\", 4, 8]}]}")));
     }
 
+    /**
+     * Fn::Select is positional: a blank entry ahead of the selected index is still a real list
+     * element and must not shift the elements after it, unlike resolveStringList's provisioner-
+     * facing contract of dropping blanks (issue found in PR #2946 review).
+     */
+    @Test
+    void selectFromLiteralArrayKeepsBlankEntriesAtTheirPosition() {
+        CloudFormationTemplateEngine e = engine();
+        assertEquals("", e.resolve(json("{\"Fn::Select\": [0, [\"\", \"subnet-b\", \"subnet-c\"]]}")));
+        assertEquals("subnet-b", e.resolve(json("{\"Fn::Select\": [1, [\"\", \"subnet-b\", \"subnet-c\"]]}")));
+        assertEquals("subnet-c", e.resolve(json("{\"Fn::Select\": [2, [\"\", \"subnet-b\", \"subnet-c\"]]}")));
+    }
+
     @Test
     void resolveJsonAttributeUnwrapsAlreadySerializedStringFromFnJoin() {
         // Reproduces #2317: CDK emits RedrivePolicy / FilterPolicy / Definition as an Fn::Join
@@ -87,5 +100,104 @@ class CloudFormationTemplateEngineTest {
     void resolveJsonAttributeReturnsNullForMissingOrNullNode() {
         assertNull(engine().resolveJsonAttribute(json("null")));
         assertNull(engine().resolveJsonAttribute(mapper.createArrayNode().path("nope")));
+    }
+
+    @Test
+    void resolveStringListSplitsListValuedIntrinsicNode() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                e.resolveStringList(json("{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]}")));
+    }
+
+    @Test
+    void resolveStringListFlattensListValuedArrayElements() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                e.resolveStringList(json(
+                        "[{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]}]")));
+    }
+
+    @Test
+    void resolveStringListKeepsLiteralArrayOfScalars() {
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                engine().resolveStringList(json("[\"subnet-a\",\"subnet-b\"]")));
+    }
+
+    @Test
+    void resolveStringListDropsBlankEntries() {
+        assertEquals(java.util.List.of("subnet-a"),
+                engine().resolveStringList(json("[\"subnet-a\",\"\",\"  \"]")));
+    }
+
+    @Test
+    void resolveStringListReturnsEmptyForNullOrMissing() {
+        assertEquals(java.util.List.of(), engine().resolveStringList(json("null")));
+        assertEquals(java.util.List.of(),
+                engine().resolveStringList(mapper.createArrayNode().path("nope")));
+    }
+
+    @Test
+    void resolveStringListExpandsFnIfWithListValuedBranch() {
+        CloudFormationTemplateEngine eTrue = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", true), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                eTrue.resolveStringList(json("{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}")));
+
+        CloudFormationTemplateEngine eFalse = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", false), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-default"),
+                eFalse.resolveStringList(json("{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}")));
+    }
+
+    @Test
+    void resolveStringListFlattensFnIfInsideArrayElements() {
+        CloudFormationTemplateEngine eTrue = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", true), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-a", "subnet-b"),
+                eTrue.resolveStringList(json("[{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}]")));
+
+        CloudFormationTemplateEngine eFalse = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", false), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-default"),
+                eFalse.resolveStringList(json("[{\"Fn::If\":[\"UseCustom\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]},\"subnet-default\"]}]")));
+    }
+
+    @Test
+    void resolveStringListExpandsFnIfSelectingArrayWithNestedSplit() {
+        CloudFormationTemplateEngine eTrue = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", true), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-prefix", "subnet-a", "subnet-b"),
+                eTrue.resolveStringList(json("{\"Fn::If\":[\"UseCustom\",[\"subnet-prefix\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]}],[\"subnet-default\"]]}")));
+
+        CloudFormationTemplateEngine eFalse = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("UseCustom", false), Map.of(), mapper, (Function<String, String>) name ->
+                        "Subnets".equals(name) ? "subnet-a,subnet-b" : null);
+
+        assertEquals(java.util.List.of("subnet-default"),
+                eFalse.resolveStringList(json("{\"Fn::If\":[\"UseCustom\",[\"subnet-prefix\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]}],[\"subnet-default\"]]}")));
     }
 }

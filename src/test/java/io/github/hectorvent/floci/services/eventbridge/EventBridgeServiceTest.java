@@ -5,7 +5,10 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
+import io.github.hectorvent.floci.services.eventbridge.model.Replay;
+import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -21,6 +24,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
 
 class EventBridgeServiceTest {
@@ -30,25 +34,44 @@ class EventBridgeServiceTest {
 
     private EventBridgeService service;
     private EventBridgeInvoker invokerMock;
+    private StorageBackend<String, Replay> replayStore;
+    private ReplayDispatcher replayDispatcherMock;
 
     @BeforeEach
     void setUp() {
         invokerMock = mock(EventBridgeInvoker.class);
+        replayStore = new InMemoryStorage<>();
+        replayDispatcherMock = mock(ReplayDispatcher.class);
         service = new EventBridgeService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                replayStore,
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(),
                 null,
                 invokerMock,
-                null,
+                replayDispatcherMock,
                 new ResourceGroupsTaggingService(null)
         );
+    }
+
+    @Test
+    void cancelReplayForwardsTheStoredReplayArn() {
+        Replay replay = new Replay();
+        replay.setReplayName("shared");
+        replay.setReplayArn("arn:aws:events:us-east-1:111111111111:replay/shared");
+        replay.setState(ReplayState.RUNNING);
+        replayStore.put("replay:" + REGION + ":shared", replay);
+        when(replayDispatcherMock.requestCancel(replay.getReplayArn())).thenReturn(true);
+
+        Replay cancelled = service.cancelReplay("shared", REGION);
+
+        assertEquals(ReplayState.CANCELLING, cancelled.getState());
+        verify(replayDispatcherMock).requestCancel(replay.getReplayArn());
     }
 
     // ──────────────────────────── Event Buses ────────────────────────────

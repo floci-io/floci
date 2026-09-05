@@ -666,6 +666,7 @@ public class OrganizationsJsonHandler {
         node.put("Arn", account.getArn());
         node.put("Email", account.getEmail());
         node.put("Name", account.getName());
+        node.put("State", account.getStatus());
         node.put("Status", account.getStatus());
         node.put("JoinedMethod", account.getJoinedMethod());
         putTimestamp(node, "JoinedTimestamp", account.getJoinedTimestamp());

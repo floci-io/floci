@@ -23,6 +23,10 @@ import static org.junit.jupiter.api.Assertions.*;
 class KinesisIntegrationTest {
 
     private static final String KINESIS_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String MIN_HASH_KEY = "0";
+    private static final String FIRST_SHARD_ENDING_HASH_KEY = "170141183460469231731687303715884105727";
+    private static final String SECOND_SHARD_STARTING_HASH_KEY = "170141183460469231731687303715884105728";
+    private static final String MAX_HASH_KEY = "340282366920938463463374607431768211455";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern CREATION_TIMESTAMP_PATTERN = Pattern.compile(
             "\\\"StreamCreationTimestamp\\\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)(?=\\s*[,}])");
@@ -64,7 +68,9 @@ class KinesisIntegrationTest {
             .body("Shards[0].ShardId", equalTo("shardId-000000000000"))
             .body("Shards[1].ShardId", equalTo("shardId-000000000001"))
             .body("Shards[0].HashKeyRange.StartingHashKey", notNullValue())
-            .body("Shards[0].HashKeyRange.EndingHashKey", equalTo("340282366920938463463374607431768211455"))
+            .body("Shards[0].HashKeyRange.EndingHashKey", equalTo(FIRST_SHARD_ENDING_HASH_KEY))
+            .body("Shards[1].HashKeyRange.StartingHashKey", equalTo(SECOND_SHARD_STARTING_HASH_KEY))
+            .body("Shards[1].HashKeyRange.EndingHashKey", equalTo(MAX_HASH_KEY))
             .body("Shards[0].SequenceNumberRange.StartingSequenceNumber", notNullValue());
     }
 
@@ -254,7 +260,7 @@ class KinesisIntegrationTest {
                 {
                     "StreamName": "list-shards-test",
                     "ShardToSplit": "shardId-000000000000",
-                    "NewStartingHashKey": "170141183460469231731687303715884105728"
+                    "NewStartingHashKey": "85070591730234615865843651857942052864"
                 }
                 """)
         .when()
@@ -790,6 +796,64 @@ class KinesisIntegrationTest {
 
     @Test
     @Order(44)
+    void putRecordHonorsExplicitHashKey() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "explicit-hash-put-test", "ShardCount": 2}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"explicit-hash-put-test\", \"Data\": \"dGVzdA==\","
+                + "\"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \"" + MIN_HASH_KEY + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ShardId", equalTo("shardId-000000000000"));
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"explicit-hash-put-test\", \"Data\": \"dGVzdA==\","
+                + "\"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \"" + MAX_HASH_KEY + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ShardId", equalTo("shardId-000000000001"));
+    }
+
+    @Test
+    @Order(45)
+    void putRecordsHonorsExplicitHashKeyPerEntry() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "explicit-hash-putrecords-test", "ShardCount": 2}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"explicit-hash-putrecords-test\","
+                + "\"Records\": ["
+                + "{\"Data\": \"dGVzdA==\", \"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \""
+                + MIN_HASH_KEY + "\"},"
+                + "{\"Data\": \"dGVzdA==\", \"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \""
+                + MAX_HASH_KEY + "\"}"
+                + "]}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("FailedRecordCount", equalTo(0))
+            .body("Records[0].ShardId", equalTo("shardId-000000000000"))
+            .body("Records[1].ShardId", equalTo("shardId-000000000001"));
+    }
+
+    @Test
+    @Order(46)
     void putRecordPreservesShardForNegativeHashCode() {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.CreateStream")

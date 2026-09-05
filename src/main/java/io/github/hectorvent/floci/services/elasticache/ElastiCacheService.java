@@ -253,17 +253,21 @@ public class ElastiCacheService implements ResourceProvider {
                 group.setContainerId(handle.getContainerId());
                 group.setContainerHost(handle.getHost());
                 group.setContainerPort(handle.getPort());
-
-                proxyManager.startProxy(groupId, authMode, proxyPort,
-                        handle.getHost(), handle.getPort(),
-                        (username, password) -> validatePassword(groupId, username, password));
-            } else {
-                LOG.warnv("Replication group {0} created without a backing cache container: no "
-                        + "Docker daemon is reachable. Metadata operations work; connections to "
-                        + "the cache do not until a daemon appears.", groupId);
             }
 
-            groups.put(groupId, group);
+            synchronized (lockFor("rg:" + groupId)) {
+                groups.put(groupId, group);
+                if (handle != null) {
+                    proxyManager.startProxy(groupId, authMode, proxyPort,
+                            handle.getHost(), handle.getPort(),
+                            (username, password) -> validatePassword(groupId, username, password));
+                } else {
+                    LOG.warnv("Replication group {0} created without a backing cache container: no "
+                            + "Docker daemon is reachable. Metadata operations work; connections to "
+                            + "the cache do not until a daemon appears.", groupId);
+                }
+            }
+
             LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
             return group;
         } catch (RuntimeException e) {
@@ -626,6 +630,7 @@ public class ElastiCacheService implements ResourceProvider {
         } catch (RuntimeException e) {
             LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
         } finally {
+            groups.delete(groupId);
             releaseProxyPort(proxyPort);
         }
     }

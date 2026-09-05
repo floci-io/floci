@@ -173,6 +173,62 @@ class PipesServiceTest {
         assertEquals(PipeState.STOPPED, updated.getCurrentState());
     }
 
+    /**
+     * The UpdatePipe contract: a property the caller omits keeps the value the pipe holds. It is
+     * the contract the CloudFormation update path relies on, and restorePipe is what reads an
+     * omitted property as a value to clear.
+     */
+    @Test
+    void updatePipeLeavesAnOmittedPropertyAlone() {
+        pipesService.createPipe("partial-update-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:source",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/original-role",
+                "the original description", DesiredState.RUNNING,
+                "arn:aws:lambda:us-east-1:000000000000:function:original-enrichment",
+                null, null, null, null, "us-east-1");
+
+        Pipe updated = pipesService.updatePipe("partial-update-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:new-target",
+                null, null, null, null, null, null, null, "us-east-1");
+
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:new-target", updated.getTarget());
+        assertEquals("arn:aws:iam::000000000000:role/original-role", updated.getRoleArn());
+        assertEquals("the original description", updated.getDescription());
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:original-enrichment",
+                updated.getEnrichment());
+        assertEquals(DesiredState.RUNNING, updated.getDesiredState());
+        assertEquals(PipeState.RUNNING, updated.getCurrentState());
+    }
+
+    /**
+     * restorePipe is handed a whole configuration, so an omitted property is one the pipe must
+     * stop carrying. The desired state is the exception: currentState is read off it, so a null
+     * leaves both as they are instead of contradicting each other.
+     */
+    @Test
+    void restorePipeClearsAnOmittedPropertyAndKeepsTheDesiredState() {
+        pipesService.createPipe("restore-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:source",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/original-role",
+                "the original description", DesiredState.STOPPED,
+                "arn:aws:lambda:us-east-1:000000000000:function:original-enrichment",
+                null, null, null, null, "us-east-1");
+
+        Pipe restored = pipesService.restorePipe("restore-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/original-role",
+                null, null, null, null, null, null, "us-east-1");
+
+        assertNull(restored.getDescription());
+        assertNull(restored.getEnrichment());
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:target", restored.getTarget());
+        assertEquals("arn:aws:iam::000000000000:role/original-role", restored.getRoleArn());
+        assertEquals(DesiredState.STOPPED, restored.getDesiredState());
+        assertEquals(PipeState.STOPPED, restored.getCurrentState());
+    }
+
     @Test
     void deletePipe() {
         pipesService.createPipe("del-pipe",

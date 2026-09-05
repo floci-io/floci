@@ -135,9 +135,27 @@ cluster = redshift.create_cluster(
 print(cluster["Cluster"]["Endpoint"])
 ```
 
+## SQL Interceptor
+
+Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire protocol (Simple Query `'Q'` protocol) and rewrites common Redshift-specific table DDL so it runs on the plain PostgreSQL backend.
+
+### DDL compatibility
+
+- Redshift-only table DDL keywords are stripped before the statement is forwarded: `DISTSTYLE ALL|EVEN|KEY|AUTO`, `DISTKEY (<col>)` and column-level `DISTKEY`, `[COMPOUND|INTERLEAVED] SORTKEY (<cols>)` and column-level `SORTKEY`, and `ENCODE <codec>` for the real Redshift column encodings (`raw`, `az64`, `bytedict`, `delta`, `delta32k`, `lzo`, `mostly8`, `mostly16`, `mostly32`, `runlength`, `text255`, `text32k`, `zstd`) or `auto`.
+- The rewrite only runs when the statement's first keyword is `CREATE TABLE` or `ALTER TABLE`. A `SELECT`, `INSERT`, function body, or string literal that merely contains one of these keywords is forwarded byte-for-byte. Single-quoted and dollar-quoted string literals are masked before the rewrite, so a keyword inside a quoted value (including in a later statement of a multi-statement query) is preserved.
+- Columns legitimately named `distkey`, `sortkey`, or `encode` survive.
+
+### Limitations
+
+- Emulation runs on the **Simple Query protocol** (`'Q'`) only. Extended Query protocol statements (`Parse`/`Bind`/`Execute`) pass through untouched, including anything a JDBC `PreparedStatement` sends, and, with the pgjdbc default `preferQueryMode=extended`, plain `Statement` calls too. Connect with `preferQueryMode=simple` to exercise the interceptor from JDBC.
+- The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
+- A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
+- Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
+- `COPY ... FROM 's3://...'` and `UNLOAD (...) TO 's3://...'` are **not** yet emulated (planned).
+
 ## Out of Scope
 
-- Real Redshift SQL semantics — the data plane is stock PostgreSQL, so Redshift-only SQL (distribution/sort keys, `COPY`/`UNLOAD` from S3, `SUPER`/`SPECTRUM`) is not emulated.
+- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; COPY/UNLOAD from S3 and SUPER/SPECTRUM are not emulated.
 - Multi-node clusters — `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.

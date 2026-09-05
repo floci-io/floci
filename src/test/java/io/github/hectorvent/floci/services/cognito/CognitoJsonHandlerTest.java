@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
 
 class CognitoJsonHandlerTest {
 
@@ -37,7 +39,8 @@ class CognitoJsonHandlerTest {
                 new InMemoryStorage<>(), // revokedTokenStore
                 "http://localhost:4566",
                 regionResolver,
-                null
+                null,
+                mock(AcmService.class)
         );
         handler = new CognitoJsonHandler(service, mapper);
     }

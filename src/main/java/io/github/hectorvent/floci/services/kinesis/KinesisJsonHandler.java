@@ -29,6 +29,10 @@ import java.util.Set;
 @ApplicationScoped
 public class KinesisJsonHandler {
 
+    private static final String EXPLICIT_HASH_KEY_FIELD = "ExplicitHashKey";
+    private static final String EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE =
+            "ExplicitHashKey must be a string.";
+
     private final KinesisService service;
     private final ObjectMapper objectMapper;
 
@@ -463,6 +467,21 @@ public class KinesisJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    // ExplicitHashKey is a string-shaped field in the AWS Kinesis JSON protocol. A JSON number
+    // such as 12345 is malformed input the real service rejects, so reject non-string nodes here
+    // rather than letting asText coerce them into an accepted decimal string. A missing or null
+    // node means the caller omitted the field and partition-key routing applies.
+    private String readExplicitHashKey(JsonNode record) {
+        JsonNode explicitHashKeyNode = record.path(EXPLICIT_HASH_KEY_FIELD);
+        if (explicitHashKeyNode.isMissingNode() || explicitHashKeyNode.isNull()) {
+            return null;
+        }
+        if (!explicitHashKeyNode.isTextual()) {
+            throw new AwsException("SerializationException", EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE, 400);
+        }
+        return explicitHashKeyNode.asText();
+    }
+
     private Response handlePutRecord(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
         JsonNode dataNode = request.path("Data");
@@ -478,8 +497,10 @@ public class KinesisJsonHandler {
             throw new AwsException("SerializationException", "Data is not valid base64.", 400);
         }
         String partitionKey = request.path("PartitionKey").asText();
+        String explicitHashKey = readExplicitHashKey(request);
 
-        KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);
+        KinesisService.PutRecordResult result = service.putRecordWithShardId(
+                streamName, data, partitionKey, explicitHashKey, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("SequenceNumber", result.sequenceNumber());
@@ -501,7 +522,7 @@ public class KinesisJsonHandler {
         // check. The count cap is checked upfront and the byte cap as the
         // loop goes, so neither an over-long batch nor an oversized one is
         // fully decoded before it is rejected.
-        record Entry(JsonNode node, byte[] data) {}
+        record Entry(JsonNode node, byte[] data, String explicitHashKey) {}
         List<Entry> entries = new ArrayList<>();
         long totalBytes = 0;
         for (JsonNode node : recordsNode) {
@@ -515,6 +536,8 @@ public class KinesisJsonHandler {
                 }
             }
             String partitionKey = node.path("PartitionKey").asText();
+            String explicitHashKey = readExplicitHashKey(node);
+            service.validateExplicitHashKey(explicitHashKey);
             service.validateRecordSize(stream, data, partitionKey);
             // Data that did not decode still travelled in the request, so it counts toward the
             // request cap at the bytes the caller sent rather than as nothing — otherwise a batch
@@ -526,7 +549,7 @@ public class KinesisJsonHandler {
                             : dataNode.toString().getBytes(StandardCharsets.UTF_8).length,
                     partitionKey);
             service.validateRequestSize(totalBytes);
-            entries.add(new Entry(node, data));
+            entries.add(new Entry(node, data, explicitHashKey));
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -544,7 +567,8 @@ public class KinesisJsonHandler {
                     data = Base64.getDecoder().decode(dataNode.asText());
                 }
                 String partitionKey = entry.node().path("PartitionKey").asText();
-                KinesisService.PutRecordResult result = service.putRecordWithShardId(streamName, data, partitionKey, region);
+                KinesisService.PutRecordResult result = service.putRecordWithShardId(
+                        streamName, data, partitionKey, entry.explicitHashKey(), region);
                 results.addObject()
                         .put("SequenceNumber", result.sequenceNumber())
                         .put("ShardId", result.shardId());

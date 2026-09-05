@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.acm.model.Certificate;
+import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
@@ -27,11 +30,13 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -43,12 +48,17 @@ class CognitoServiceTest {
     private InMemoryStorage<String, CognitoUser> userStore;
     private InMemoryStorage<String, CognitoGroup> groupStore;
     private RegionResolver regionResolver;
+    private AcmService acmService;
 
     @BeforeEach
     void setUp() {
         userStore = new InMemoryStorage<>();
         groupStore = new InMemoryStorage<>();
         regionResolver = new RegionResolver("us-east-1", "000000000000");
+        acmService = mock(AcmService.class);
+        // Every certificate exists and is issued unless a test says otherwise.
+        when(acmService.describeCertificate(anyString(), eq("us-east-1")))
+                .thenAnswer(inv -> issuedCertificate(inv.getArgument(0)));
         service = new CognitoService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -58,7 +68,8 @@ class CognitoServiceTest {
                 new InMemoryStorage<>(), // revokedTokenStore
                 "http://localhost:4566",
                 regionResolver,
-                null
+                null,
+                acmService
         );
     }
 
@@ -1391,6 +1402,7 @@ class CognitoServiceTest {
                 "http://localhost:4566",
                 regionResolver,
                 null,
+                acmService,
                 verificationCodeService,
                 messageDispatcher
         );
@@ -1430,6 +1442,7 @@ class CognitoServiceTest {
                 "http://localhost:4566",
                 regionResolver,
                 null,
+                acmService,
                 verificationCodeService,
                 messageDispatcher
         );
@@ -2900,6 +2913,7 @@ class CognitoServiceTest {
                     "http://localhost:4566",
                     regionResolver,
                     null,
+                    acmService,
                     verificationCodeService,
                     messageDispatcher
             );
@@ -3267,6 +3281,173 @@ class CognitoServiceTest {
         UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
         service.createUserPoolDomain(domain, pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), 1);
         return pool;
+    }
+
+    private static final String AWS_CERTIFICATE_MESSAGE = "The specified SSL certificate doesn't exist, "
+            + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain.";
+
+    private static Certificate issuedCertificate(String arn) {
+        Certificate certificate = new Certificate();
+        certificate.setArn(arn);
+        certificate.setStatus(CertificateStatus.ISSUED);
+        return certificate;
+    }
+
+    /** The ARN a domain registers on its certificate: the CloudFront distribution serving it. */
+    private String consumerArn(String domain) {
+        String distribution = service.describeUserPoolDomain(domain).getCloudFrontDistribution();
+        return "arn:aws:cloudfront::000000000000:distribution/"
+                + distribution.substring(0, distribution.indexOf('.')).toUpperCase(Locale.ROOT);
+    }
+
+    @Test
+    void createUserPoolDomainRejectsACertificateAcmDoesNotKnow() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        when(acmService.describeCertificate(CERTIFICATE_ARN, "us-east-1")).thenThrow(
+                new AwsException("ResourceNotFoundException", "The certificate " + CERTIFICATE_ARN + " does not exist.", 404));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(AWS_CERTIFICATE_MESSAGE, failure.getMessage());
+        assertThrows(AwsException.class, () -> service.describeUserPoolDomain("auth.example.com"));
+        verify(acmService, never()).addInUseBy(any(), any(), any());
+    }
+
+    @Test
+    void createUserPoolDomainRejectsACertificateOutsideUsEast1() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        String elsewhere = "arn:aws:acm:eu-west-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", elsewhere), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(AWS_CERTIFICATE_MESSAGE, failure.getMessage());
+        verify(acmService, never()).describeCertificate(any(), any());
+    }
+
+    @Test
+    void createUserPoolDomainRejectsACertificateThatIsNotIssued() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        Certificate pending = issuedCertificate(CERTIFICATE_ARN);
+        pending.setStatus(CertificateStatus.PENDING_VALIDATION);
+        when(acmService.describeCertificate(CERTIFICATE_ARN, "us-east-1")).thenReturn(pending);
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(AWS_CERTIFICATE_MESSAGE, failure.getMessage());
+    }
+
+    @Test
+    void createUserPoolDomainRejectsAnAcmArnThatIsNotACertificate() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        String notACertificate = "arn:aws:acm:us-east-1:000000000000:certificate-authority/11111111-2222-3333-4444-555555555555";
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", notACertificate), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(AWS_CERTIFICATE_MESSAGE, failure.getMessage());
+        verify(acmService, never()).describeCertificate(any(), any());
+    }
+
+    @Test
+    void createUserPoolDomainRejectsAMalformedCertificateArn() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", "not-an-arn"), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verify(acmService, never()).describeCertificate(any(), any());
+    }
+
+    @Test
+    void createUserPoolDomainStoresNothingWhenTheCertificateVanishesBeforeRegistration() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(acmService).addInUseBy(eq(CERTIFICATE_ARN), any(), eq("us-east-1"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(AWS_CERTIFICATE_MESSAGE, failure.getMessage());
+        assertThrows(AwsException.class, () -> service.describeUserPoolDomain("auth.example.com"));
+    }
+
+    @Test
+    void updateUserPoolDomainKeepsTheCurrentCertificateWhenTheNewOneVanishesBeforeRegistration() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(acmService).addInUseBy(eq(RENEWED_CERTIFICATE_ARN), any(), eq("us-east-1"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN), 2));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        UserPoolDomain stored = service.describeUserPoolDomain("auth.example.com");
+        assertEquals(CERTIFICATE_ARN, stored.getCertificateArn());
+        assertEquals(1, stored.getManagedLoginVersion());
+        verify(acmService, never()).removeInUseBy(any(), any(), any());
+    }
+
+    @Test
+    void createUserPoolDomainRegistersTheDomainAsACertificateConsumer() {
+        createPoolWithCustomDomain("auth.example.com");
+
+        verify(acmService).addInUseBy(CERTIFICATE_ARN, consumerArn("auth.example.com"), "us-east-1");
+    }
+
+    @Test
+    void updateUserPoolDomainMovesTheRegistrationToTheNewCertificate() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        String consumer = consumerArn("auth.example.com");
+
+        service.updateUserPoolDomain("auth.example.com", pool.getId(),
+                Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN), null);
+
+        verify(acmService).removeInUseBy(CERTIFICATE_ARN, consumer, "us-east-1");
+        verify(acmService).addInUseBy(RENEWED_CERTIFICATE_ARN, consumer, "us-east-1");
+    }
+
+    @Test
+    void updateUserPoolDomainWithTheSameCertificateKeepsTheRegistration() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+
+        service.updateUserPoolDomain("auth.example.com", pool.getId(),
+                Map.of("CertificateArn", CERTIFICATE_ARN), 2);
+
+        verify(acmService, never()).removeInUseBy(any(), any(), any());
+        verify(acmService, times(1)).addInUseBy(any(), any(), any());
+    }
+
+    @Test
+    void updateUserPoolDomainRejectsAnUnknownCertificateAndKeepsTheCurrentOne() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        when(acmService.describeCertificate(RENEWED_CERTIFICATE_ARN, "us-east-1")).thenThrow(
+                new AwsException("ResourceNotFoundException", "does not exist", 404));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateUserPoolDomain(
+                "auth.example.com", pool.getId(), Map.of("CertificateArn", RENEWED_CERTIFICATE_ARN), null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        assertEquals(CERTIFICATE_ARN, service.describeUserPoolDomain("auth.example.com").getCertificateArn());
+        verify(acmService, never()).removeInUseBy(any(), any(), any());
+    }
+
+    @Test
+    void deleteUserPoolDomainReleasesTheCertificate() {
+        UserPool pool = createPoolWithCustomDomain("auth.example.com");
+        String consumer = consumerArn("auth.example.com");
+
+        service.deleteUserPoolDomain("auth.example.com", pool.getId());
+
+        verify(acmService).removeInUseBy(CERTIFICATE_ARN, consumer, "us-east-1");
     }
 
     @Test

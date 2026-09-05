@@ -1174,7 +1174,7 @@ public class IamQueryHandler {
         if (resourceArns.isEmpty()) {
             resourceArns = List.of("*");
         }
-        Map<String, String> context = extractContextEntries(params);
+        Map<String, List<String>> context = extractContextEntries(params);
 
         XmlBuilder results = new XmlBuilder().start("EvaluationResults");
         for (String actionName : actionNames) {
@@ -1402,14 +1402,21 @@ public class IamQueryHandler {
         return values;
     }
 
-    private Map<String, String> extractContextEntries(MultivaluedMap<String, String> params) {
-        Map<String, String> context = new HashMap<>();
+    /**
+     * Reads every {@code ContextEntries.member.N.ContextKeyValues.member.M}. AWS context keys
+     * are set-typed, and the evaluator's set operators quantify over the whole set, so reading
+     * only {@code member.1} silently dropped the values a ForAnyValue:/ForAllValues: condition
+     * has to see. An entry that names a key but supplies no value is skipped.
+     */
+    private Map<String, List<String>> extractContextEntries(MultivaluedMap<String, String> params) {
+        Map<String, List<String>> context = new HashMap<>();
         for (int i = 1; ; i++) {
             String name = params.getFirst("ContextEntries.member." + i + ".ContextKeyName");
             if (name == null) break;
-            String value = params.getFirst("ContextEntries.member." + i + ".ContextKeyValues.member.1");
-            if (value != null) {
-                context.put(name, value);
+            List<String> values = extractIndexedValues(
+                    params, "ContextEntries.member." + i + ".ContextKeyValues.member");
+            if (!values.isEmpty()) {
+                context.put(name, values);
             }
         }
         return context;

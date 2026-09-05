@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AcmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayAccountCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayDomainCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
@@ -208,7 +209,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new EcrCfnProvisioner(ecrService));
             }
             if (pipesService != null) {
-                discovered.add(new PipesCfnProvisioner(pipesService));
+                discovered.add(new PipesCfnProvisioner(pipesService, objectMapper));
             }
             if (cognitoService != null) {
                 discovered.add(new CognitoCfnProvisioner(cognitoService));
@@ -233,6 +234,7 @@ final class CfnProvisionerFixture {
             }
             if (apiGatewayService != null) {
                 discovered.add(new ApiGatewayAccountCfnProvisioner(apiGatewayService));
+                discovered.add(new ApiGatewayDomainCfnProvisioner(apiGatewayService));
             }
             if (autoScalingService != null) {
                 discovered.add(new AutoScalingLifecycleHookCfnProvisioner(autoScalingService));

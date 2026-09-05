@@ -5264,8 +5264,18 @@ public class RdsService implements Resettable, ResourceProvider {
     private DbSubnetGroup buildSubnetGroup(String name, String description, List<String> subnetIds, String region) {
         List<Subnet> resolvedSubnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
         if (resolvedSubnets.size() != subnetIds.size()) {
+            Set<String> found = resolvedSubnets.stream()
+                    .map(Subnet::getSubnetId)
+                    .collect(java.util.stream.Collectors.toSet());
+            List<String> missing = subnetIds.stream()
+                    .filter(id -> !found.contains(id))
+                    .distinct()
+                    .toList();
+            String detail = missing.isEmpty()
+                    ? " do not exist."
+                    : " do not exist: " + missing + ".";
             throw new AwsException("InvalidSubnet",
-                    "One or more subnets for DB subnet group " + name + " do not exist.", 400);
+                    "One or more subnets for DB subnet group " + name + detail, 400);
         }
 
         String vpcId = resolvedSubnets.getFirst().getVpcId();

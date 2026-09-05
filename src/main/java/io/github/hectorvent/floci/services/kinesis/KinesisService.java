@@ -14,6 +14,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
@@ -43,6 +44,12 @@ public class KinesisService implements ResourceProvider {
     private static final int MAX_RECORD_SIZE_KIB = 10240;
     private static final int MAX_RECORDS_PER_REQUEST = 500;
     private static final int MAX_REQUEST_SIZE_BYTES = 10 * 1024 * 1024;
+    private static final String MIN_HASH_KEY_VALUE = "0";
+    private static final String INITIAL_SEQUENCE_NUMBER = "0";
+    private static final BigInteger MIN_HASH_KEY = BigInteger.ZERO;
+    private static final BigInteger MAX_HASH_KEY =
+            new BigInteger("340282366920938463463374607431768211455");
+    private static final BigInteger HASH_KEY_SPACE_SIZE = MAX_HASH_KEY.add(BigInteger.ONE);
 
     private final StorageBackend<String, KinesisStream> store;
     private final StorageBackend<String, KinesisConsumer> consumerStore;
@@ -117,7 +124,10 @@ public class KinesisService implements ResourceProvider {
 
         for (int i = 0; i < shardCount; i++) {
             String shardId = String.format("shardId-%012d", i);
-            stream.getShards().add(new KinesisShard(shardId, "0", "340282366920938463463374607431768211455", "0"));
+            stream.getShards().add(new KinesisShard(shardId,
+                    shardStartingHashKey(i, shardCount),
+                    shardEndingHashKey(i, shardCount),
+                    INITIAL_SEQUENCE_NUMBER));
         }
 
         store.put(storageKey, stream);
@@ -450,7 +460,7 @@ public class KinesisService implements ResourceProvider {
     }
 
     private String subtractOne(String val) {
-        return new java.math.BigInteger(val).subtract(java.math.BigInteger.ONE).toString();
+        return new BigInteger(val).subtract(BigInteger.ONE).toString();
     }
 
     public record PutRecordResult(String sequenceNumber, String shardId) {}
@@ -535,9 +545,21 @@ public class KinesisService implements ResourceProvider {
         }
     }
 
+    void validateExplicitHashKey(String explicitHashKey) {
+        if (explicitHashKey != null) {
+            parseExplicitHashKey(explicitHashKey);
+        }
+    }
+
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey, String region) {
+        return putRecordWithShardId(streamName, data, partitionKey, null, region);
+    }
+
+    public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey,
+                                                String explicitHashKey, String region) {
         String key = regionKey(region, streamName);
         KinesisStream stream = resolveStream(streamName, region);
+        validateExplicitHashKey(explicitHashKey);
         validateRecordSize(stream, data, partitionKey);
         putRecordBeforeLockHook.run();
 
@@ -550,7 +572,7 @@ public class KinesisService implements ResourceProvider {
             // persisting the stale pre-delete instance would resurrect a deleted stream, so bind to
             // the instance currently in the store and fail like any missing stream if it is gone.
             KinesisStream current = resolveStream(streamName, region);
-            KinesisShard shard = selectShard(current, partitionKey);
+            KinesisShard shard = selectShard(current, partitionKey, explicitHashKey);
             String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());
             putRecordAppendHook.run();
             KinesisRecord record = new KinesisRecord(data, partitionKey, sequenceNumber, Instant.now());
@@ -841,11 +863,16 @@ public class KinesisService implements ResourceProvider {
         return response;
     }
 
-    private KinesisShard selectShard(KinesisStream stream, String partitionKey) {
+    private KinesisShard selectShard(KinesisStream stream, String partitionKey, String explicitHashKey) {
+        if (explicitHashKey != null) {
+            normalizeOpenShardRanges(stream);
+            return selectShardByExplicitHashKey(stream, explicitHashKey);
+        }
+
         // Simple hash-based shard selection among ALL shards, then resolve to open one
         int index = (int) (Math.abs((long) partitionKey.hashCode()) % stream.getShards().size());
         KinesisShard shard = stream.getShards().get(index);
-        
+
         // If closed, find the first open child (simplified)
         while (shard.isClosed()) {
             KinesisShard finalShard = shard;
@@ -857,6 +884,96 @@ public class KinesisService implements ResourceProvider {
             if (shard == finalShard) break; // prevent infinite loop
         }
         return shard;
+    }
+
+    private KinesisShard selectShardByExplicitHashKey(KinesisStream stream, String explicitHashKey) {
+        BigInteger hashKey = parseExplicitHashKey(explicitHashKey);
+        return stream.getShards().stream()
+                .filter(shard -> !shard.isClosed())
+                .filter(shard -> containsHashKey(shard, hashKey))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidArgumentException",
+                        "ExplicitHashKey does not map to an open shard.", 400));
+    }
+
+    private static boolean containsHashKey(KinesisShard shard, BigInteger hashKey) {
+        BigInteger start = new BigInteger(shard.getHashKeyRange().startingHashKey());
+        BigInteger end = new BigInteger(shard.getHashKeyRange().endingHashKey());
+        return hashKey.compareTo(start) >= 0 && hashKey.compareTo(end) <= 0;
+    }
+
+    // Streams created before explicit-hash routing persisted the same full-span range on every
+    // shard, so an explicit key matches all open shards and first-match routing collapses onto
+    // shardId-...000. Repartition those legacy overlapping open shards into the disjoint ranges a
+    // freshly created stream would have, ordered by shard id, so explicit routing is correct after
+    // an upgrade without recreating the stream. Already-disjoint open shards (new streams, split or
+    // merged streams) are left untouched. The caller persists the mutated stream under its lock.
+    private static void normalizeOpenShardRanges(KinesisStream stream) {
+        List<KinesisShard> openShards = stream.getShards().stream()
+                .filter(shard -> !shard.isClosed())
+                .sorted(Comparator.comparing(KinesisShard::getShardId))
+                .toList();
+        if (openShards.size() <= 1 || openShardRangesDisjoint(openShards)) {
+            return;
+        }
+        int openShardCount = openShards.size();
+        for (int i = 0; i < openShardCount; i++) {
+            openShards.get(i).setHashKeyRange(new KinesisShard.HashKeyRange(
+                    shardStartingHashKey(i, openShardCount),
+                    shardEndingHashKey(i, openShardCount)));
+        }
+    }
+
+    private static boolean openShardRangesDisjoint(List<KinesisShard> openShards) {
+        List<KinesisShard> byStartingHashKey = openShards.stream()
+                .sorted(Comparator.comparing(shard -> new BigInteger(shard.getHashKeyRange().startingHashKey())))
+                .toList();
+        for (int i = 1; i < byStartingHashKey.size(); i++) {
+            BigInteger previousEnd =
+                    new BigInteger(byStartingHashKey.get(i - 1).getHashKeyRange().endingHashKey());
+            BigInteger currentStart =
+                    new BigInteger(byStartingHashKey.get(i).getHashKeyRange().startingHashKey());
+            if (currentStart.compareTo(previousEnd) <= 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static BigInteger parseExplicitHashKey(String explicitHashKey) {
+        if (explicitHashKey.isBlank()
+                || !explicitHashKey.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            throw new AwsException("InvalidArgumentException",
+                    "ExplicitHashKey must be a decimal integer.", 400);
+        }
+
+        if (!MIN_HASH_KEY_VALUE.equals(explicitHashKey) && explicitHashKey.startsWith(MIN_HASH_KEY_VALUE)) {
+            throw new AwsException("InvalidArgumentException",
+                    "ExplicitHashKey must not contain leading zeroes.", 400);
+        }
+
+        BigInteger hashKey = new BigInteger(explicitHashKey);
+        if (hashKey.compareTo(MIN_HASH_KEY) < 0 || hashKey.compareTo(MAX_HASH_KEY) > 0) {
+            throw new AwsException("InvalidArgumentException",
+                    "ExplicitHashKey must be between " + MIN_HASH_KEY + " and " + MAX_HASH_KEY + ".", 400);
+        }
+        return hashKey;
+    }
+
+    private static String shardStartingHashKey(int shardIndex, int shardCount) {
+        return HASH_KEY_SPACE_SIZE
+                .multiply(BigInteger.valueOf(shardIndex))
+                .divide(BigInteger.valueOf(shardCount))
+                .toString();
+    }
+
+    private static String shardEndingHashKey(int shardIndex, int shardCount) {
+        if (shardIndex == shardCount - 1) {
+            return MAX_HASH_KEY.toString();
+        }
+        return new BigInteger(shardStartingHashKey(shardIndex + 1, shardCount))
+                .subtract(BigInteger.ONE)
+                .toString();
     }
 
     private String regionKey(String region, String name) {

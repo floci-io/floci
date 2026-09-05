@@ -85,7 +85,7 @@ type_order:
   AWS::ElasticLoadBalancingV2: [LoadBalancer, TargetGroup, Listener, ListenerRule]
   AWS::AutoScaling: [LaunchConfiguration, AutoScalingGroup, LifecycleHook]
   AWS::Route53: [HostedZone, RecordSet]
-  AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account]
+  AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping]
   AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]

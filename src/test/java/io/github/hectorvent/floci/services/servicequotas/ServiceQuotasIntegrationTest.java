@@ -159,6 +159,81 @@ class ServiceQuotasIntegrationTest {
     }
 
     @Test
+    void organizationsQuotaUsesAwsQuotaCode() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.GetServiceQuota")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Quota.QuotaCode", equalTo("L-E619E033"))
+            .body("Quota.QuotaName", equalTo("Maximum number of accounts"))
+            .body("Quota.Value", equalTo(50.0f))
+            .body("Quota.GlobalQuota", equalTo(true));
+    }
+
+    @Test
+    void listRequestedQuotaHistoryByQuotaReturnsEmptyHistoryForKnownQuota() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistoryByQuota")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RequestedQuotas.size()", equalTo(0));
+    }
+
+    @Test
+    void listRequestedQuotaHistoryByQuotaRejectsImpossibleNextToken() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistoryByQuota")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\",\"NextToken\":\"MQ\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidPaginationTokenException"));
+    }
+
+    @Test
+    void listRequestedQuotaHistoryByQuotaRejectsUnknownQuota() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistoryByQuota")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-DOESNOTEX\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchResourceException"));
+    }
+
+    @Test
+    void requestOrganizationsQuotaIncreasePreservesGlobalQuota() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\",\"DesiredValue\":100}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RequestedQuota.ServiceCode", equalTo("organizations"))
+            .body("RequestedQuota.QuotaCode", equalTo("L-E619E033"))
+            .body("RequestedQuota.GlobalQuota", equalTo(true));
+    }
+
+    @Test
     void getServiceQuota_unknownQuotaCode_returnsNoSuchResource() {
         given()
             .contentType(CONTENT_TYPE)

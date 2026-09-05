@@ -102,6 +102,23 @@ public enum KmsKeySpec {
         };
     }
 
+    /**
+     * Length in bytes of the raw key material for the specs whose material is a byte string:
+     * SYMMETRIC_DEFAULT and the HMAC family. Asymmetric specs carry a DER-encoded key pair with
+     * no single length, so they have none.
+     */
+    public int materialByteLength() {
+        return switch (this) {
+            case SYMMETRIC_DEFAULT -> 32;
+            case HMAC_224 -> 28;
+            case HMAC_256 -> 32;
+            case HMAC_384 -> 48;
+            case HMAC_512 -> 64;
+            default -> throw new AwsException("InvalidCustomerMasterKeySpecException",
+                    "Key spec " + this + " has no fixed key material length.", 400);
+        };
+    }
+
     public enum KeyType {
         RSA, ECC, ED25519, SYMMETRIC, HMAC, ML_DSA, SM2
     }

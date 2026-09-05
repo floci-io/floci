@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -98,6 +101,7 @@ public class LambdaService implements ResourceProvider {
     private final Ec2Service ec2Service;
     /** Null in the constructors tests use, exactly as the other optional collaborators above are. */
     private final CustomResourceLiveness customResourceLiveness;
+    private final ObjectMapper objectMapper;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     /**
@@ -169,6 +173,7 @@ public class LambdaService implements ResourceProvider {
         this.layerService = null;
         this.ec2Service = null;
         this.customResourceLiveness = null;
+        this.objectMapper = new ObjectMapper();
     }
 
     @Inject
@@ -190,7 +195,8 @@ public class LambdaService implements ResourceProvider {
                           StorageFactory storageFactory,
                           LambdaLayerService layerService,
                           Ec2Service ec2Service,
-                          CustomResourceLiveness customResourceLiveness) {
+                          CustomResourceLiveness customResourceLiveness,
+                          ObjectMapper objectMapper) {
         this.customResourceLiveness = customResourceLiveness;
         this.functionStore = functionStore;
         this.executorService = executorService;
@@ -210,6 +216,7 @@ public class LambdaService implements ResourceProvider {
         this.storageFactory = storageFactory;
         this.layerService = layerService;
         this.ec2Service = ec2Service;
+        this.objectMapper = objectMapper;
     }
 
     // Real AWS validates a function's Layers eagerly at CreateFunction/UpdateFunctionConfiguration
@@ -310,6 +317,17 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaFunction createFunction(String region, Map<String, Object> request) {
+        Map<String, Object> environment = structureMember(request, "Environment");
+        Map<String, String> environmentVariables = environmentVariables(environment);
+        Map<String, Object> ephemeralStorage = structureMember(request, "EphemeralStorage");
+        Map<String, Object> tracingConfig = structureMember(request, "TracingConfig");
+        Map<String, Object> deadLetterConfig = structureMember(request, "DeadLetterConfig");
+        Map<String, Object> vpcConfig = structureMember(request, "VpcConfig");
+        Map<String, Object> snapStart = structureMember(request, "SnapStart");
+        Map<String, Object> loggingConfig = structureMember(request, "LoggingConfig");
+        Map<String, Object> imageConfig = structureMember(request, "ImageConfig");
+        Map<String, Object> code = structureMember(request, "Code");
+
         String functionName = (String) request.get("FunctionName");
         String role = (String) request.get("Role");
         String handler = (String) request.get("Handler");
@@ -358,12 +376,8 @@ public class LambdaService implements ResourceProvider {
         fn.setRevisionId(UUID.randomUUID().toString());
 
         // Handle environment variables
-        @SuppressWarnings("unchecked")
-        Map<String, Object> envBlock = (Map<String, Object>) request.get("Environment");
-        if (envBlock != null) {
-            @SuppressWarnings("unchecked")
-            Map<String, String> vars = (Map<String, String>) envBlock.get("Variables");
-            if (vars != null) fn.setEnvironment(vars);
+        if (environment != null) {
+            if (environmentVariables != null) fn.setEnvironment(environmentVariables);
         }
 
         // Handle tags
@@ -376,19 +390,19 @@ public class LambdaService implements ResourceProvider {
         }
 
         // EphemeralStorage
-        if (request.get("EphemeralStorage") instanceof Map<?, ?> es) {
-            fn.setEphemeralStorageSize(toInt(es.get("Size"), 512));
+        if (ephemeralStorage != null) {
+            fn.setEphemeralStorageSize(toInt(ephemeralStorage.get("Size"), 512));
         }
 
         // TracingConfig
-        if (request.get("TracingConfig") instanceof Map<?, ?> tc) {
-            Object mode = tc.get("Mode");
+        if (tracingConfig != null) {
+            Object mode = tracingConfig.get("Mode");
             fn.setTracingMode(mode != null ? mode.toString() : "PassThrough");
         }
 
         // DeadLetterConfig
-        if (request.get("DeadLetterConfig") instanceof Map<?, ?> dlq) {
-            fn.setDeadLetterTargetArn((String) dlq.get("TargetArn"));
+        if (deadLetterConfig != null) {
+            fn.setDeadLetterTargetArn((String) deadLetterConfig.get("TargetArn"));
         }
 
         // Layers
@@ -404,15 +418,13 @@ public class LambdaService implements ResourceProvider {
             fn.setKmsKeyArn((String) request.get("KMSKeyArn"));
         }
 
-        if (request.get("VpcConfig") instanceof Map<?, ?>) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
-            fn.setVpcConfig(vpc);
-            fn.setVpcId(resolveVpcId(region, vpc));
+        if (vpcConfig != null) {
+            fn.setVpcConfig(vpcConfig);
+            fn.setVpcId(resolveVpcId(region, vpcConfig));
         }
 
-        applySnapStart(fn, request.get("SnapStart"));
-        applyLoggingConfig(fn, request.get("LoggingConfig"));
+        applySnapStart(fn, snapStart);
+        applyLoggingConfig(fn, loggingConfig);
 
         List<LambdaFileSystemConfig> fileSystemConfigs =
                 parseFileSystemConfigs(request.get("FileSystemConfigs"));
@@ -420,9 +432,7 @@ public class LambdaService implements ResourceProvider {
         fn.setFileSystemConfigs(fileSystemConfigs);
 
         // ImageConfig (PackageType=Image overrides)
-        if (request.get("ImageConfig") instanceof Map<?, ?> ic) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> imageConfig = (Map<String, Object>) ic;
+        if (imageConfig != null) {
             if (imageConfig.get("Command") instanceof List<?> cmd) {
                 fn.setImageConfigCommand(cmd.stream().map(Object::toString).toList());
             }
@@ -435,8 +445,6 @@ public class LambdaService implements ResourceProvider {
         }
 
         // Handle code deployment
-        @SuppressWarnings("unchecked")
-        Map<String, Object> code = (Map<String, Object>) request.get("Code");
         if (code != null) {
             String imageUri = (String) code.get("ImageUri");
             if (imageUri != null) {
@@ -596,6 +604,16 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
+        Map<String, Object> environment = structureMember(request, "Environment");
+        Map<String, String> environmentVariables = environmentVariables(environment);
+        Map<String, Object> ephemeralStorage = structureMember(request, "EphemeralStorage");
+        Map<String, Object> tracingConfig = structureMember(request, "TracingConfig");
+        Map<String, Object> deadLetterConfig = structureMember(request, "DeadLetterConfig");
+        Map<String, Object> requestedVpcConfigUpdate = structureMember(request, "VpcConfig");
+        Map<String, Object> snapStart = structureMember(request, "SnapStart");
+        Map<String, Object> loggingConfig = structureMember(request, "LoggingConfig");
+        Map<String, Object> imageConfig = structureMember(request, "ImageConfig");
+
         LambdaFunction fn = getFunction(region, functionName);
         List<String> architectures = validateArchitectures(request.get("Architectures"));
 
@@ -611,10 +629,10 @@ public class LambdaService implements ResourceProvider {
             validateLayersResolvable(layerList);
         }
         if (request.containsKey("SnapStart")) {
-            validateSnapStart(request.get("SnapStart"));
+            validateSnapStart(snapStart);
         }
         if (request.containsKey("LoggingConfig")) {
-            validateLoggingConfig(request.get("LoggingConfig"));
+            validateLoggingConfig(loggingConfig);
         }
         if (request.containsKey("Role")) {
             validateRoleArn((String) request.get("Role"));
@@ -624,10 +642,8 @@ public class LambdaService implements ResourceProvider {
         }
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
-        if (request.get("VpcConfig") instanceof Map<?, ?>) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
-            requestedVpcConfig = new java.util.HashMap<>(vpc);
+        if (requestedVpcConfigUpdate != null) {
+            requestedVpcConfig = new java.util.HashMap<>(requestedVpcConfigUpdate);
         }
         List<LambdaFileSystemConfig> requestedFileSystemConfigs = fn.getFileSystemConfigs();
         if (request.containsKey("FileSystemConfigs")) {
@@ -656,12 +672,8 @@ public class LambdaService implements ResourceProvider {
             fn.setTimeout(((Number) request.get("Timeout")).intValue());
         }
         if (request.containsKey("Environment")) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> envBlock = (Map<String, Object>) request.get("Environment");
-            if (envBlock != null && envBlock.containsKey("Variables")) {
-                @SuppressWarnings("unchecked")
-                Map<String, String> vars = (Map<String, String>) envBlock.get("Variables");
-                fn.setEnvironment(vars != null ? vars : new java.util.HashMap<>());
+            if (environment != null && environment.containsKey("Variables")) {
+                fn.setEnvironment(environmentVariables != null ? environmentVariables : new java.util.HashMap<>());
             }
         }
 
@@ -681,21 +693,21 @@ public class LambdaService implements ResourceProvider {
         }
 
         if (request.containsKey("EphemeralStorage")) {
-            if (request.get("EphemeralStorage") instanceof Map<?, ?> es) {
-                fn.setEphemeralStorageSize(toInt(es.get("Size"), 512));
+            if (ephemeralStorage != null) {
+                fn.setEphemeralStorageSize(toInt(ephemeralStorage.get("Size"), 512));
             }
         }
 
         if (request.containsKey("TracingConfig")) {
-            if (request.get("TracingConfig") instanceof Map<?, ?> tc) {
-                Object mode = tc.get("Mode");
+            if (tracingConfig != null) {
+                Object mode = tracingConfig.get("Mode");
                 fn.setTracingMode(mode != null ? mode.toString() : "PassThrough");
             }
         }
 
         if (request.containsKey("DeadLetterConfig")) {
-            if (request.get("DeadLetterConfig") instanceof Map<?, ?> dlq) {
-                fn.setDeadLetterTargetArn((String) dlq.get("TargetArn"));
+            if (deadLetterConfig != null) {
+                fn.setDeadLetterTargetArn((String) deadLetterConfig.get("TargetArn"));
             }
         }
 
@@ -708,18 +720,18 @@ public class LambdaService implements ResourceProvider {
         }
 
         if (request.containsKey("VpcConfig")) {
-            if (request.get("VpcConfig") instanceof Map<?, ?>) {
+            if (requestedVpcConfigUpdate != null) {
                 fn.setVpcConfig(requestedVpcConfig);
                 fn.setVpcId(resolveVpcId(region, requestedVpcConfig));
             }
         }
 
         if (request.containsKey("SnapStart")) {
-            applySnapStart(fn, request.get("SnapStart"));
+            applySnapStart(fn, snapStart);
         }
 
         if (request.containsKey("LoggingConfig")) {
-            applyLoggingConfig(fn, request.get("LoggingConfig"));
+            applyLoggingConfig(fn, loggingConfig);
         }
 
         if (request.containsKey("FileSystemConfigs")) {
@@ -727,9 +739,7 @@ public class LambdaService implements ResourceProvider {
         }
 
         if (request.containsKey("ImageConfig")) {
-            if (request.get("ImageConfig") instanceof Map<?, ?> ic) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> imageConfig = (Map<String, Object>) ic;
+            if (imageConfig != null) {
                 if (imageConfig.containsKey("Command")) {
                     List<String> cmd = imageConfig.get("Command") instanceof List<?>
                             ? ((List<?>) imageConfig.get("Command")).stream().map(Object::toString).toList() : null;
@@ -1034,6 +1044,8 @@ public class LambdaService implements ResourceProvider {
     // ──────────────────────────── Event Source Mapping (SQS) ────────────────────────────
 
     public EventSourceMapping createEventSourceMapping(String region, Map<String, Object> request) {
+        validateEventSourceMappingStructures(request);
+
         String functionName = (String) request.get("FunctionName");
         String eventSourceArn = (String) request.get("EventSourceArn");
 
@@ -1088,6 +1100,8 @@ public class LambdaService implements ResourceProvider {
 
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
+        EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
+
         StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn);
 
         String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
@@ -1107,6 +1121,7 @@ public class LambdaService implements ResourceProvider {
         esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
         esm.setDestinationConfig(destinationConfig);
+        esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
         esm.setStartingPositionTimestamp(startingPosition.timestampMillis());
         esm.setLastModified(System.currentTimeMillis());
@@ -1120,22 +1135,15 @@ public class LambdaService implements ResourceProvider {
     }
 
     private EventSourceMapping.DestinationConfig parseDestinationConfig(Map<String, Object> request) {
-        Object raw = request.get("DestinationConfig");
-        if (raw == null) {
+        Map<String, Object> destinationConfigMember = structureMember(request, "DestinationConfig");
+        if (destinationConfigMember == null) {
             return null;
-        }
-        if (!(raw instanceof Map<?, ?> destMap)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "DestinationConfig must be a JSON object", 400);
         }
 
-        Object rawOnFailure = destMap.get("OnFailure");
-        if (rawOnFailure == null) {
+        Map<String, Object> onFailureMap = structureValue(
+                destinationConfigMember.get("OnFailure"), "DestinationConfig.OnFailure");
+        if (onFailureMap == null) {
             return null;
-        }
-        if (!(rawOnFailure instanceof Map<?, ?> onFailureMap)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "DestinationConfig.OnFailure must be a JSON object", 400);
         }
 
         Object destination = onFailureMap.get("Destination");
@@ -1149,6 +1157,228 @@ public class LambdaService implements ResourceProvider {
         EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
         destinationConfig.setOnFailure(onFailure);
         return destinationConfig;
+    }
+
+    /**
+     * Parses and validates {@code FilterCriteria} from a create/update request. Mirrors
+     * {@link #parseDestinationConfig} in shape and error behavior; static (with the mapper passed in) so the
+     * validation can be unit-tested without constructing the service.
+     *
+     * <p>AWS rejects invalid filter patterns at create/update time. Because the pollers silently drop, and
+     * checkpoint past (Kinesis/DynamoDB) or delete (SQS), any record a pattern fails to match, an unvalidated
+     * malformed pattern would become silent data loss. Patterns are therefore validated to be well-formed JSON
+     * objects here, before persistence. Returns {@code null} (filtering off) when {@code FilterCriteria} is
+     * absent, an empty object, or has an empty {@code Filters} array: AWS treats an empty object as the
+     * removal operation.
+     */
+    static EventSourceMapping.FilterCriteria parseFilterCriteria(Map<String, Object> request, ObjectMapper objectMapper) {
+        Object raw = request.get("FilterCriteria");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map<?, ?> criteriaMap)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FilterCriteria must be a JSON object", 400);
+        }
+        Object rawFilters = criteriaMap.get("Filters");
+        if (rawFilters == null) {
+            return null;
+        }
+        if (!(rawFilters instanceof List<?> filterList)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FilterCriteria.Filters must be a JSON array", 400);
+        }
+        if (filterList.isEmpty()) {
+            return null;
+        }
+        if (filterList.size() > 5) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FilterCriteria.Filters may contain a maximum of 5 filters", 400);
+        }
+        List<EventSourceMapping.Filter> filters = new ArrayList<>();
+        for (Object rawFilter : filterList) {
+            if (!(rawFilter instanceof Map<?, ?> filterMap)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Each FilterCriteria.Filters entry must be a JSON object", 400);
+            }
+            Object rawPattern = filterMap.get("Pattern");
+            if (!(rawPattern instanceof String pattern) || pattern.isBlank()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Each filter must have a non-empty Pattern string", 400);
+            }
+            if (pattern.length() > 4096) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern must not exceed 4096 characters", 400);
+            }
+            JsonNode patternNode;
+            try {
+                patternNode = objectMapper.readTree(pattern);
+            } catch (JsonProcessingException e) {
+                // Only a JSON parse failure is client error (400). An unexpected runtime failure
+                // (e.g. a misconfigured mapper) must surface as a server error, not a misleading 400.
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern is not valid JSON", 400);
+            }
+            if (!patternNode.isObject()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern must be a JSON object", 400);
+            }
+            validatePatternStructure(patternNode);
+            EventSourceMapping.Filter filter = new EventSourceMapping.Filter();
+            filter.setPattern(pattern);
+            filters.add(filter);
+        }
+        EventSourceMapping.FilterCriteria criteria = new EventSourceMapping.FilterCriteria();
+        criteria.setFilters(filters);
+        return criteria;
+    }
+
+    /** Match-array operators {@code PipesFilterMatcher} implements, with the operand shape each accepts. */
+    private static final Set<String> SUPPORTED_FILTER_OPERATORS =
+            Set.of("prefix", "suffix", "equals-ignore-case", "anything-but", "exists", "numeric");
+
+    /** Operators AWS documents that the matcher does not implement, rejected with a clearer message. */
+    private static final Set<String> UNIMPLEMENTED_FILTER_OPERATORS = Set.of("cidr", "wildcard");
+
+    /** Comparisons {@code matchesNumericFilter} understands. Anything else evaluates false for every record. */
+    private static final Set<String> NUMERIC_COMPARISONS = Set.of("=", ">", ">=", "<", "<=");
+
+    /**
+     * Validates the recursive shape of an EventBridge filter pattern: every field value must be either a
+     * non-empty match array (a leaf) or a nested object (recursed into). A scalar or empty-array value is a
+     * pattern the matcher can never satisfy, so, with enforcement active, it would silently drop every
+     * record; reject it at create/update instead.
+     *
+     * <p>Match-array elements are validated against the operator set the matcher implements. This does couple
+     * the validator to {@code PipesFilterMatcher}, which is deliberate: now that the pollers enforce filters,
+     * a pattern the matcher cannot satisfy is destructive rather than inert. A bad operand silently corrupts
+     * delivery instead of erroring, and the failure direction is not even consistent. {@code
+     * {"numeric":[">","abc"]}} coerces its operand to zero and matches every positive value, {@code
+     * {"numeric":[">"]}} matches every record because the comparison loop never runs, and an unknown operator
+     * matches nothing, so every record is checkpointed past or deleted. Failing at create/update is the only
+     * point where the caller can still act on it.
+     */
+    private static void validatePatternStructure(JsonNode node) {
+        for (Map.Entry<String, JsonNode> entry : node.properties()) {
+            JsonNode value = entry.getValue();
+            if (value.isArray()) {
+                if (value.isEmpty()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Filter Pattern field '" + entry.getKey() + "' must have a non-empty match array", 400);
+                }
+                for (JsonNode element : value) {
+                    validateMatchElement(entry.getKey(), element);
+                }
+            } else if (value.isObject()) {
+                validatePatternStructure(value);
+            } else {
+                throw new AwsException("InvalidParameterValueException",
+                        "Filter Pattern field '" + entry.getKey() + "' must be an array or object", 400);
+            }
+        }
+    }
+
+    /**
+     * A match-array element is either a literal the matcher compares directly (string, number, or null for
+     * "absent") or a single-operator object. Two operators in one object is rejected because the matcher
+     * tests them in a fixed order and silently honours only the first.
+     */
+    private static void validateMatchElement(String field, JsonNode element) {
+        if (element.isTextual() || element.isNumber() || element.isNull()) {
+            return;
+        }
+        if (!element.isObject()) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' has an invalid match value: expected a string, number, null, or an operator object", 400);
+        }
+        List<String> operators = new ArrayList<>();
+        element.fieldNames().forEachRemaining(operators::add);
+        if (operators.size() != 1) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' must carry exactly one operator per match element, found " + operators.size(), 400);
+        }
+        String op = operators.get(0);
+        JsonNode operand = element.get(op);
+        if (UNIMPLEMENTED_FILTER_OPERATORS.contains(op)) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' uses operator '" + op + "', which Floci does not implement", 400);
+        }
+        if (!SUPPORTED_FILTER_OPERATORS.contains(op)) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' uses unknown operator '" + op + "'", 400);
+        }
+        switch (op) {
+            case "prefix", "suffix", "equals-ignore-case" -> requireTextual(field, op, operand);
+            case "exists" -> {
+                if (!operand.isBoolean()) {
+                    throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                            + "' operator 'exists' requires true or false", 400);
+                }
+            }
+            case "anything-but" -> validateAnythingBut(field, operand);
+            case "numeric" -> validateNumeric(field, operand);
+            default -> throw new IllegalStateException("unreachable operator " + op);
+        }
+    }
+
+    private static void requireTextual(String field, String op, JsonNode operand) {
+        if (!operand.isTextual()) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' operator '" + op + "' requires a string operand", 400);
+        }
+    }
+
+    /** {@code anything-but} accepts a string, a non-empty array of strings/numbers, or a nested prefix. */
+    private static void validateAnythingBut(String field, JsonNode operand) {
+        if (operand.isTextual()) {
+            return;
+        }
+        if (operand.isArray()) {
+            if (operand.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                        + "' operator 'anything-but' requires a non-empty array", 400);
+            }
+            for (JsonNode v : operand) {
+                if (!v.isTextual() && !v.isNumber()) {
+                    throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                            + "' operator 'anything-but' accepts only strings and numbers", 400);
+                }
+            }
+            return;
+        }
+        if (operand.isObject()) {
+            List<String> inner = new ArrayList<>();
+            operand.fieldNames().forEachRemaining(inner::add);
+            if (inner.size() == 1 && "prefix".equals(inner.get(0))) {
+                requireTextual(field, "anything-but prefix", operand.get("prefix"));
+                return;
+            }
+        }
+        throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                + "' operator 'anything-but' requires a string, a non-empty array, or {\"prefix\": \"...\"}", 400);
+    }
+
+    /**
+     * {@code numeric} is a flat sequence of comparison/operand pairs. An odd length leaves a trailing
+     * comparison the matcher never evaluates, which makes the whole element match every record.
+     */
+    private static void validateNumeric(String field, JsonNode operand) {
+        if (!operand.isArray() || operand.isEmpty() || operand.size() % 2 != 0) {
+            throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                    + "' operator 'numeric' requires comparison/value pairs, for example [\">\", 5]", 400);
+        }
+        for (int i = 0; i < operand.size(); i += 2) {
+            JsonNode comparison = operand.get(i);
+            if (!comparison.isTextual() || !NUMERIC_COMPARISONS.contains(comparison.asText())) {
+                throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                        + "' operator 'numeric' has an invalid comparison at index " + i
+                        + ": expected one of =, >, >=, <, <=", 400);
+            }
+            if (!operand.get(i + 1).isNumber()) {
+                throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
+                        + "' operator 'numeric' requires a numeric value at index " + (i + 1), 400);
+            }
+        }
     }
 
     /** A validated {@code StartingPosition} plus, for {@code AT_TIMESTAMP}, its epoch-millis instant. */
@@ -1208,16 +1438,11 @@ public class LambdaService implements ResourceProvider {
      * an empty ScalingConfig as "clear the cap").
      */
     private ScalingConfig parseScalingConfig(Map<String, Object> request, String eventSourceArn) {
-        Object raw = request.get("ScalingConfig");
-        if (raw == null) {
+        Map<String, Object> map = structureMember(request, "ScalingConfig");
+        if (map == null) {
             return null;
         }
-        if (!(raw instanceof Map<?, ?>)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ScalingConfig must be a JSON object", 400);
-        }
         boolean isSqs = eventSourceArn != null && eventSourceArn.contains(":sqs:");
-        Map<?, ?> map = (Map<?, ?>) raw;
         Object mc = map.get("MaximumConcurrency");
         if (mc == null) {
             if (!isSqs) {
@@ -1284,6 +1509,8 @@ public class LambdaService implements ResourceProvider {
     }
 
     public EventSourceMapping updateEventSourceMapping(String uuid, Map<String, Object> request) {
+        validateEventSourceMappingStructures(request);
+
         EventSourceMapping esm = getEventSourceMapping(uuid);
 
         boolean wasEnabled = esm.isEnabled();
@@ -1309,6 +1536,12 @@ public class LambdaService implements ResourceProvider {
 
         if (request.containsKey("DestinationConfig")) {
             esm.setDestinationConfig(parseDestinationConfig(request));
+        }
+
+        if (request.containsKey("FilterCriteria")) {
+            // AWS: passing FilterCriteria replaces the whole set; an empty object or an empty
+            // Filters array clears all filters.
+            esm.setFilterCriteria(parseFilterCriteria(request, objectMapper));
         }
 
         esm.setLastModified(System.currentTimeMillis());
@@ -1630,6 +1863,39 @@ public class LambdaService implements ResourceProvider {
             }
         }
         return null;
+    }
+
+    private static Map<String, Object> structureMember(Map<String, Object> request, String member) {
+        return structureValue(request.get(member), member);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> environmentVariables(Map<String, Object> environment) {
+        if (environment == null) {
+            return null;
+        }
+        return (Map<String, String>) (Map<?, ?>) structureValue(
+                environment.get("Variables"), "Environment.Variables");
+    }
+
+    private static void validateEventSourceMappingStructures(Map<String, Object> request) {
+        structureMember(request, "ScalingConfig");
+        Map<String, Object> destinationConfig = structureMember(request, "DestinationConfig");
+        if (destinationConfig != null) {
+            structureValue(destinationConfig.get("OnFailure"), "DestinationConfig.OnFailure");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> structureValue(Object value, String member) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        throw new AwsException("SerializationException",
+                member + " must be a JSON object or null", 400);
     }
 
     private static void validateSnapStart(Object value) {

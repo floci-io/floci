@@ -381,6 +381,15 @@ public class LambdaController {
             ObjectNode scaling = node.putObject("ScalingConfig");
             scaling.put("MaximumConcurrency", maxConcurrency.intValue());
         }
+        // Only emit FilterCriteria when filters are configured: AWS omits the field
+        // entirely (rather than returning null or an empty object) when no filter is set.
+        if (esm.getFilterCriteria() != null && !esm.getFilterCriteria().getFilters().isEmpty()) {
+            ObjectNode filterCriteria = node.putObject("FilterCriteria");
+            ArrayNode filters = filterCriteria.putArray("Filters");
+            for (EventSourceMapping.Filter filter : esm.getFilterCriteria().getFilters()) {
+                filters.addObject().put("Pattern", filter.getPattern());
+            }
+        }
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
         return result;

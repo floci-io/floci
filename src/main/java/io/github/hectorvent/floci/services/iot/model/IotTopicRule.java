@@ -14,6 +14,8 @@ public class IotTopicRule {
     private String description;
     private boolean ruleDisabled;
     private String actionsJson = "[]";
+    private String awsIotSqlVersion;
+    private String errorActionJson;
     private Instant createdAt;
     private Map<String, String> tags = new TreeMap<>();
 
@@ -63,6 +65,22 @@ public class IotTopicRule {
 
     public void setActionsJson(String actionsJson) {
         this.actionsJson = actionsJson;
+    }
+
+    public String getAwsIotSqlVersion() {
+        return awsIotSqlVersion;
+    }
+
+    public void setAwsIotSqlVersion(String awsIotSqlVersion) {
+        this.awsIotSqlVersion = awsIotSqlVersion;
+    }
+
+    public String getErrorActionJson() {
+        return errorActionJson;
+    }
+
+    public void setErrorActionJson(String errorActionJson) {
+        this.errorActionJson = errorActionJson;
     }
 
     public Instant getCreatedAt() {

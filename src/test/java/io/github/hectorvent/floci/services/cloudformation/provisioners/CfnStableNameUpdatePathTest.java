@@ -135,7 +135,7 @@ class CfnStableNameUpdatePathTest {
                 any(), any(), anyString())).thenReturn(createdPipe);
         when(pipes.updatePipe(anyString(), any(), any(), any(), any(), any(), any(), any(), any(),
                 anyString())).thenReturn(updatedPipe);
-        PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes);
+        PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes, mapper);
 
         var props = mapper.createObjectNode()
                 .put("Source", "arn:aws:sqs:us-east-1:000000000000:src")
@@ -182,7 +182,7 @@ class CfnStableNameUpdatePathTest {
         when(pipes.describePipe("my-stack-Pipe-0123456789ab", "us-east-1")).thenReturn(existing);
         when(pipes.updatePipe(anyString(), any(), any(), any(), any(), any(), any(), any(), any(),
                 anyString())).thenReturn(existing);
-        PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes);
+        PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes, mapper);
 
         // Source is createOnly. With the name reused there is no replacement to move to, which is
         // the update CloudFormation refuses for a custom-named resource.
@@ -439,7 +439,7 @@ class CfnStableNameUpdatePathTest {
         pipe.setArn("arn:aws:pipes:us-east-1:000000000000:pipe/new");
         when(pipes.createPipe(anyString(), any(), any(), any(), any(), any(), any(), any(), any(),
                 any(), any(), anyString())).thenReturn(pipe);
-        PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes);
+        PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes, mapper);
 
         // The template now names the pipe, so this update derives a different name from the prior
         // physical id. That is a replacement, and it must create rather than update a pipe that

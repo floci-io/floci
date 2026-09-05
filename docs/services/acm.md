@@ -33,6 +33,7 @@
 - **Key Algorithms:** Supports `RSA_2048`, `RSA_3072`, `RSA_4096`, `EC_prime256v1`, `EC_secp384r1`, `EC_secp521r1`
 - **Certificate Types:** `AMAZON_ISSUED` (default) and `PRIVATE` (when `CertificateAuthorityArn` is provided)
 - **Export:** Only `PRIVATE` type certificates can be exported with their private key
+- **In use:** `DescribeCertificate` lists under `InUseBy` the CloudFront distribution of each Cognito custom domain that uses the certificate, and `DeleteCertificate` refuses with `ResourceInUseException` while that list is not empty. Other consumers, such as load balancers and API Gateway domain names, are not tracked yet.
 
 ## Configuration
 

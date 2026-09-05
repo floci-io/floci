@@ -49,10 +49,10 @@ public class CodeBuildJsonHandler {
             case "DeleteSourceCredentials" -> deleteSourceCredentials(request, region);
             case "ListCuratedEnvironmentImages" -> listCuratedEnvironmentImages();
             case "StartBuild" -> startBuild(request, region, account);
-            case "BatchGetBuilds" -> batchGetBuilds(request, region);
-            case "ListBuilds" -> listBuilds(region);
-            case "ListBuildsForProject" -> listBuildsForProject(request, region);
-            case "StopBuild" -> stopBuild(request, region);
+            case "BatchGetBuilds" -> batchGetBuilds(request, region, account);
+            case "ListBuilds" -> listBuilds(region, account);
+            case "ListBuildsForProject" -> listBuildsForProject(request, region, account);
+            case "StopBuild" -> stopBuild(request, region, account);
             case "RetryBuild" -> retryBuild(request, region, account);
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
@@ -239,28 +239,28 @@ public class CodeBuildJsonHandler {
         return env;
     }
 
-    private Response batchGetBuilds(JsonNode req, String region) {
+    private Response batchGetBuilds(JsonNode req, String region, String account) {
         List<String> ids = new ArrayList<>();
         req.path("ids").forEach(n -> ids.add(n.asText()));
-        List<Build> found = service.batchGetBuilds(region, ids);
+        List<Build> found = service.batchGetBuilds(region, account, ids);
         List<String> foundIds = found.stream().map(Build::getId).toList();
         List<String> notFound = ids.stream().filter(id -> !foundIds.contains(id)).toList();
         return Response.ok(Map.of("builds", found, "buildsNotFound", notFound)).build();
     }
 
-    private Response listBuilds(String region) {
-        return Response.ok(Map.of("ids", service.listBuilds(region))).build();
+    private Response listBuilds(String region, String account) {
+        return Response.ok(Map.of("ids", service.listBuilds(region, account))).build();
     }
 
-    private Response listBuildsForProject(JsonNode req, String region) {
+    private Response listBuildsForProject(JsonNode req, String region, String account) {
         String projectName = req.path("projectName").asText(null);
-        return Response.ok(Map.of("ids", service.listBuildsForProject(region, projectName))).build();
+        return Response.ok(Map.of("ids", service.listBuildsForProject(region, account, projectName))).build();
     }
 
-    private Response stopBuild(JsonNode req, String region) {
+    private Response stopBuild(JsonNode req, String region, String account) {
         String id = req.path("id").asText(null);
-        service.stopBuild(region, id);
-        Build build = service.getBuild(region, id);
+        service.stopBuild(region, account, id);
+        Build build = service.getBuild(region, account, id);
         return Response.ok(Map.of("build", build)).build();
     }
 

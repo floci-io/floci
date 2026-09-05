@@ -17,6 +17,9 @@ import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.acm.model.Certificate;
+import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
@@ -67,6 +70,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -121,6 +125,7 @@ public class CognitoService implements ResourceProvider {
     private final String baseUrl;
     private final RegionResolver regionResolver;
     private final LambdaService lambdaService;
+    private final AcmService acmService;
     private final VerificationCodeService verificationCodeService;
     private final CognitoMessageDispatcher messageDispatcher;
 
@@ -129,8 +134,8 @@ public class CognitoService implements ResourceProvider {
 
     @Inject
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
-            RegionResolver regionResolver, LambdaService lambdaService, SesService sesService,
-            SnsService snsService, Clock clock) {
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
+            SesService sesService, SnsService snsService, Clock clock) {
         this(
                 storageFactory.create("cognito", "cognito-pools.json",
                         new TypeReference<Map<String, UserPool>>() {}),
@@ -151,6 +156,7 @@ public class CognitoService implements ResourceProvider {
                 trimTrailingSlash(emulatorConfig.effectiveBaseUrl()),
                 regionResolver,
                 lambdaService,
+                acmService,
                 new VerificationCodeService(storageFactory, clock),
                 new CognitoMessageDispatcher(sesService, snsService)
         );
@@ -164,10 +170,11 @@ public class CognitoService implements ResourceProvider {
                    StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
                    String baseUrl,
                    RegionResolver regionResolver,
-                   LambdaService lambdaService) {
+                   LambdaService lambdaService,
+                   AcmService acmService) {
         this(poolStore, clientStore, resourceServerStore, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), userStore, groupStore, revokedTokenStore, baseUrl,
-                regionResolver, lambdaService, null, null);
+                regionResolver, lambdaService, acmService, null, null);
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -179,7 +186,7 @@ public class CognitoService implements ResourceProvider {
             StorageBackend<String, CognitoGroup> groupStore,
             StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
             String baseUrl,
-            RegionResolver regionResolver, LambdaService lambdaService,
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
             VerificationCodeService verificationCodeService,
             CognitoMessageDispatcher messageDispatcher) {
         this.poolStore = poolStore;
@@ -193,6 +200,7 @@ public class CognitoService implements ResourceProvider {
         this.baseUrl = baseUrl;
         this.regionResolver = regionResolver;
         this.lambdaService = lambdaService;
+        this.acmService = acmService;
         this.verificationCodeService = verificationCodeService;
         this.messageDispatcher = messageDispatcher;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
@@ -1073,6 +1081,10 @@ public class CognitoService implements ResourceProvider {
 
     // ──────────────────────────── User Pool Domains ────────────────────────────
 
+    private static final String CERTIFICATE_REGION = "us-east-1";
+    private static final String CERTIFICATE_NOT_USABLE = "The specified SSL certificate doesn't exist, "
+            + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain.";
+
     /**
      * Creates either an Amazon Cognito prefix domain ({@code customDomainConfig == null})
      * or a custom domain fronted by an ACM certificate. Domain names are globally unique
@@ -1104,12 +1116,16 @@ public class CognitoService implements ResourceProvider {
                 throw new AwsException("InvalidParameterException",
                         "CertificateArn is required in CustomDomainConfig", 400);
             }
+            requireUsableCertificate(certificateArn);
             userPoolDomain.setCertificateArn(certificateArn);
             Object securityPolicy = customDomainConfig.get("SecurityPolicy");
             userPoolDomain.setSecurityPolicy(securityPolicy != null ? securityPolicy.toString() : "TLS_V1_2_2021");
             userPoolDomain.setCloudFrontDistribution(generateCloudFrontDomain());
         }
 
+        if (userPoolDomain.isCustomDomain()) {
+            registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
+        }
         domainStore.put(domain, userPoolDomain);
         LOG.infov("Created User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
@@ -1135,16 +1151,27 @@ public class CognitoService implements ResourceProvider {
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
             throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
         }
+        String previousCertificateArn = userPoolDomain.getCertificateArn();
+        String certificateArn = previousCertificateArn;
         if (customDomainConfig != null) {
             if (!userPoolDomain.isCustomDomain()) {
                 throw new AwsException("InvalidParameterException",
                         "CustomDomainConfig cannot be set on an Amazon Cognito prefix domain", 400);
             }
-            String certificateArn = (String) customDomainConfig.get("CertificateArn");
+            certificateArn = (String) customDomainConfig.get("CertificateArn");
             if (certificateArn == null || certificateArn.isBlank()) {
                 throw new AwsException("InvalidParameterException",
                         "CertificateArn is required in CustomDomainConfig", 400);
             }
+        }
+        // A new certificate is checked and registered before anything changes, so a failure leaves
+        // the domain on its current certificate.
+        boolean certificateChanged = !Objects.equals(certificateArn, previousCertificateArn);
+        if (certificateChanged) {
+            requireUsableCertificate(certificateArn);
+            registerCertificateUse(certificateArn, userPoolDomain);
+        }
+        if (customDomainConfig != null) {
             userPoolDomain.setCertificateArn(certificateArn);
             Object securityPolicy = customDomainConfig.get("SecurityPolicy");
             if (securityPolicy != null) {
@@ -1156,6 +1183,10 @@ public class CognitoService implements ResourceProvider {
         }
         userPoolDomain.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         domainStore.put(domain, userPoolDomain);
+        if (certificateChanged) {
+            acmService.removeInUseBy(previousCertificateArn,
+                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+        }
         LOG.infov("Updated User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
     }
@@ -1166,7 +1197,66 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
         }
         domainStore.delete(domain);
+        if (userPoolDomain.isCustomDomain()) {
+            acmService.removeInUseBy(userPoolDomain.getCertificateArn(),
+                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+        }
         LOG.infov("Deleted User Pool Domain: {0} for pool {1}", domain, userPoolId);
+    }
+
+    /**
+     * Registers the domain on its certificate before the domain is stored or changed, so a
+     * certificate that disappears between the check and the registration leaves nothing behind.
+     */
+    private void registerCertificateUse(String certificateArn, UserPoolDomain userPoolDomain) {
+        try {
+            acmService.addInUseBy(certificateArn, cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+    }
+
+    /**
+     * AWS accepts only an issued ACM certificate from us-east-1 behind a custom domain, and answers
+     * anything else with this one message.
+     */
+    private void requireUsableCertificate(String certificateArn) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(certificateArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+        if (!"acm".equals(arn.service()) || !CERTIFICATE_REGION.equals(arn.region())
+                || !arn.resource().startsWith("certificate/")) {
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+        Certificate certificate;
+        try {
+            certificate = acmService.describeCertificate(certificateArn, CERTIFICATE_REGION);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+        if (certificate.getStatus() != CertificateStatus.ISSUED) {
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+    }
+
+    /**
+     * What a custom domain registers on its certificate: the CloudFront distribution that serves
+     * it, which is what ACM lists on AWS. Floci has no distribution object, so the id is the label
+     * of the generated CloudFront name.
+     */
+    private static String cloudFrontDistributionArn(UserPoolDomain userPoolDomain) {
+        String name = userPoolDomain.getCloudFrontDistribution();
+        String id = name.substring(0, name.indexOf('.')).toUpperCase(Locale.ROOT);
+        return "arn:aws:cloudfront::" + userPoolDomain.getAwsAccountId() + ":distribution/" + id;
     }
 
     private String generateCloudFrontDomain() {

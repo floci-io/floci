@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import jakarta.ws.rs.core.Response;
@@ -35,6 +36,22 @@ class DynamoDbJsonHandlerTest {
                 List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
                 5L, 5L, region);
+    }
+
+    private void createProvisionedTableWithGsi(String tableName, String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "TitleIndex",
+                List.of(new KeySchemaElement("title", "HASH")),
+                null, "ALL", null);
+        gsi.getProvisionedThroughput().setReadCapacityUnits(5);
+        gsi.getProvisionedThroughput().setWriteCapacityUnits(5);
+        service.createTable(
+                tableName,
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(
+                        new AttributeDefinition("id", "S"),
+                        new AttributeDefinition("title", "S")),
+                5L, 5L, List.of(gsi), region);
     }
 
     private ObjectNode attributeValue(String type, String value) {
@@ -411,7 +428,7 @@ class DynamoDbJsonHandlerTest {
     // DescribeTable could not report it back; the Terraform provider then proposes replacing
     // the GSI on every plan even though nothing drifted.
     @Test
-    void createTableWithGsiOnDemandThroughputRoundTripsThroughDescribeTable() throws Exception {
+    void createAndUpdateTableWithGsiOnDemandThroughputRoundTripsThroughDescribeTable() throws Exception {
         ObjectNode createRequest = mapper.createObjectNode();
         createRequest.put("TableName", "gsi-odt-table");
         createRequest.put("BillingMode", "PAY_PER_REQUEST");
@@ -464,5 +481,87 @@ class DynamoDbJsonHandlerTest {
         JsonNode odt = describedGsi.get("OnDemandThroughput");
         assertEquals(1, odt.get("MaxReadRequestUnits").asInt());
         assertEquals(1, odt.get("MaxWriteRequestUnits").asInt());
+
+        ObjectNode updateAction = mapper.createObjectNode();
+        updateAction.put("IndexName", "TitleIndex");
+        updateAction.set("OnDemandThroughput", mapper.createObjectNode()
+                .put("MaxReadRequestUnits", 20)
+                .put("MaxWriteRequestUnits", 30));
+        ObjectNode updateRequest = mapper.createObjectNode();
+        updateRequest.put("TableName", "gsi-odt-table");
+        updateRequest.set("GlobalSecondaryIndexUpdates", mapper.createArrayNode().add(
+                mapper.createObjectNode().set("Update", updateAction)));
+
+        Response updateResponse = handler.handle("UpdateTable", updateRequest, "eu-west-1");
+        assertEquals(200, updateResponse.getStatus());
+        JsonNode updateBody = mapper.convertValue(updateResponse.getEntity(), JsonNode.class);
+        JsonNode updatedGsi = updateBody.get("TableDescription").get("GlobalSecondaryIndexes").get(0);
+        assertEquals(20, updatedGsi.get("OnDemandThroughput").get("MaxReadRequestUnits").asInt());
+        assertEquals(30, updatedGsi.get("OnDemandThroughput").get("MaxWriteRequestUnits").asInt());
+
+        describeResponse = handler.handle("DescribeTable", describeRequest, "eu-west-1");
+        describeBody = mapper.convertValue(describeResponse.getEntity(), JsonNode.class);
+        describedGsi = describeBody.get("Table").get("GlobalSecondaryIndexes").get(0);
+        assertEquals(20, describedGsi.get("OnDemandThroughput").get("MaxReadRequestUnits").asInt());
+        assertEquals(30, describedGsi.get("OnDemandThroughput").get("MaxWriteRequestUnits").asInt());
+    }
+
+    @Test
+    void updateTableChangesGsiProvisionedThroughput() throws Exception {
+        createProvisionedTableWithGsi("gsi-provisioned-table", "eu-west-1");
+
+        ObjectNode updateAction = mapper.createObjectNode();
+        updateAction.put("IndexName", "TitleIndex");
+        updateAction.set("ProvisionedThroughput", mapper.createObjectNode()
+                .put("ReadCapacityUnits", 20)
+                .put("WriteCapacityUnits", 30));
+        ObjectNode updateRequest = mapper.createObjectNode();
+        updateRequest.put("TableName", "gsi-provisioned-table");
+        updateRequest.set("GlobalSecondaryIndexUpdates", mapper.createArrayNode().add(
+                mapper.createObjectNode().set("Update", updateAction)));
+
+        Response updateResponse = handler.handle("UpdateTable", updateRequest, "eu-west-1");
+        assertEquals(200, updateResponse.getStatus());
+        JsonNode updateBody = mapper.convertValue(updateResponse.getEntity(), JsonNode.class);
+        JsonNode updatedGsi = updateBody.get("TableDescription").get("GlobalSecondaryIndexes").get(0);
+        assertEquals(20, updatedGsi.get("ProvisionedThroughput").get("ReadCapacityUnits").asInt());
+        assertEquals(30, updatedGsi.get("ProvisionedThroughput").get("WriteCapacityUnits").asInt());
+
+        ObjectNode describeRequest = mapper.createObjectNode();
+        describeRequest.put("TableName", "gsi-provisioned-table");
+        Response describeResponse = handler.handle("DescribeTable", describeRequest, "eu-west-1");
+        JsonNode describeBody = mapper.convertValue(describeResponse.getEntity(), JsonNode.class);
+        JsonNode describedGsi = describeBody.get("Table").get("GlobalSecondaryIndexes").get(0);
+        assertEquals(20, describedGsi.get("ProvisionedThroughput").get("ReadCapacityUnits").asInt());
+        assertEquals(30, describedGsi.get("ProvisionedThroughput").get("WriteCapacityUnits").asInt());
+    }
+
+    @Test
+    void updateTableRejectsConflictingDeleteAndUpdateWithoutRemovingGsi() throws Exception {
+        createProvisionedTableWithGsi("gsi-conflicting-update-table", "eu-west-1");
+
+        ObjectNode updateRequest = mapper.createObjectNode();
+        updateRequest.put("TableName", "gsi-conflicting-update-table");
+        updateRequest.set("GlobalSecondaryIndexUpdates", mapper.createArrayNode()
+                .add(mapper.createObjectNode().set("Delete",
+                        mapper.createObjectNode().put("IndexName", "TitleIndex")))
+                .add(mapper.createObjectNode().set("Update", mapper.createObjectNode()
+                        .put("IndexName", "TitleIndex")
+                        .set("ProvisionedThroughput", mapper.createObjectNode()
+                                .put("ReadCapacityUnits", 20)
+                                .put("WriteCapacityUnits", 30)))));
+
+        RuntimeException error = assertThrows(RuntimeException.class,
+                () -> handler.handle("UpdateTable", updateRequest, "eu-west-1"));
+
+        ObjectNode describeRequest = mapper.createObjectNode();
+        describeRequest.put("TableName", "gsi-conflicting-update-table");
+        Response describeResponse = handler.handle("DescribeTable", describeRequest, "eu-west-1");
+        JsonNode describeBody = mapper.convertValue(describeResponse.getEntity(), JsonNode.class);
+        JsonNode describedIndexes = describeBody.get("Table").path("GlobalSecondaryIndexes");
+        assertAll(
+                () -> assertTrue(error instanceof AwsException awsError
+                        && "ValidationException".equals(awsError.getErrorCode())),
+                () -> assertEquals(1, describedIndexes.size()));
     }
 }

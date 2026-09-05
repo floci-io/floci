@@ -31,6 +31,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -42,6 +43,8 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class IotController {
+
+    private static final Logger LOG = Logger.getLogger(IotController.class);
 
     private final IotService iotService;
     private final IotTagHandler iotTagHandler;
@@ -1118,6 +1121,16 @@ public class IotController {
             response.set("actions", objectMapper.readTree(rule.getActionsJson()));
         } catch (JsonProcessingException e) {
             response.putArray("actions");
+        }
+        if (rule.getAwsIotSqlVersion() != null) {
+            response.put("awsIotSqlVersion", rule.getAwsIotSqlVersion());
+        }
+        if (rule.getErrorActionJson() != null) {
+            try {
+                response.set("errorAction", objectMapper.readTree(rule.getErrorActionJson()));
+            } catch (JsonProcessingException e) {
+                LOG.warnv(e, "Stored error action of topic rule {0} is not JSON", rule.getRuleName());
+            }
         }
         return response;
     }

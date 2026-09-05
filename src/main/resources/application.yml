@@ -59,9 +59,10 @@ quarkus:
         - org/xerial/snappy/native/Linux/s390x/**
         - org/xerial/snappy/native/Linux/x86/**
         - org/xerial/snappy/native/Linux/x86_64-musl/**
+    # No --allow-incomplete-classpath and no --report-unsupported-elements-at-runtime: both have
+    # been no-ops since GraalVM 22.1 (incomplete classpaths are the default, and Quarkus passes
+    # --link-at-build-time itself, so a reachable class missing from the classpath fails the build).
     additional-build-args:
-      - --report-unsupported-elements-at-runtime
-      - --allow-incomplete-classpath
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
