@@ -198,6 +198,33 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     }
 
     @Test
+    @Order(16)
+    void rejectsUploadWithImpossibleFormDate() {
+        String key = "impossible-date.txt";
+        String policyBase64 = buildPolicyBase64(BUCKET, key);
+        // "20261332" has the right digit shape but month 13 / day 32 don't exist; same for the
+        // 99:99:99 time. The credential scope's date is made to match digit-for-digit so only
+        // strict calendar parsing (not a same-date-string comparison) can catch this.
+        String credential = LEGACY_ACCESS_KEY_ID + "/20261332/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+
+        given()
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", "20261332T999999Z")
+            .multiPart("x-amz-signature", signature)
+            .multiPart("file", "impossible-date.txt",
+                    "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+    }
+
+    @Test
     @Order(20)
     void acceptsUploadWithGenuineSignature() {
         String key = "uploads/genuine.txt";

@@ -6,8 +6,10 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 /**
  * SigV4 verification for presigned POST policy documents. Mirrors the credential/secret-key
@@ -43,17 +45,21 @@ final class S3PostPolicySigner {
         return parts.length == 5 && "s3".equals(parts[3]) && "aws4_request".equals(parts[4]);
     }
 
-    private static final Pattern AMZ_DATE_PATTERN = Pattern.compile("\\d{8}T\\d{6}Z");
+    private static final DateTimeFormatter AMZ_DATE_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withResolverStyle(ResolverStyle.STRICT);
 
     /**
-     * Verifies that {@code amzDate} (the form's {@code x-amz-date} field) is a well-formed
-     * ISO8601-basic timestamp ({@code yyyyMMdd'T'HHmmss'Z'}) whose date matches the date embedded
-     * in {@code credential}'s scope. Real S3 rejects a presigned POST whose form date doesn't
-     * agree with the credential scope, even though only the credential's date drives signing-key
-     * derivation.
+     * Verifies that {@code amzDate} (the form's {@code x-amz-date} field) is a genuine calendar
+     * timestamp in ISO8601-basic form ({@code yyyyMMdd'T'HHmmss'Z'}) whose date matches the date
+     * embedded in {@code credential}'s scope. Real S3 rejects a presigned POST whose form date
+     * doesn't agree with the credential scope, even though only the credential's date drives
+     * signing-key derivation. Strict parsing (rather than a digit-shape regex) rejects impossible
+     * values such as month 13 or hour 99 that a lenient/smart resolver would otherwise accept.
      */
     static boolean isConsistentAmzDate(String amzDate, String credential) {
-        if (!AMZ_DATE_PATTERN.matcher(amzDate).matches()) {
+        try {
+            AMZ_DATE_TIME_FORMAT.parse(amzDate);
+        } catch (DateTimeParseException e) {
             return false;
         }
         String[] parts = credential.split("/");
