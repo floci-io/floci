@@ -44,6 +44,10 @@ class IamUserCfnProvisionerTest {
 
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
 
+        // resolveStringList delegates to the real engine method; for the literal arrays these
+        // tests use it just walks the array and calls resolve(...) per element, stubbed above.
+        when(engine.resolveStringList(any())).thenCallRealMethod();
+
         when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node != null && node.isTextual() ? node.asText() : node.toString();
@@ -224,7 +228,7 @@ class IamUserCfnProvisionerTest {
 
         StackResource r = resource();
         r.setPhysicalId("my-user");
-        r.getAttributes().put("UserId", "AIDAuser");
+        r.getAttributes().put("__FlociUserId", "AIDAuser");
         r.getAttributes().put("__FlociGroups", "keep-group\ndrop-group");
         r.getAttributes().put("__FlociManagedPolicyArns", "arn:aws:iam::aws:policy/Keep\narn:aws:iam::aws:policy/Drop");
         r.getAttributes().put("__FlociInlinePolicyNames", "keep-inline\ndrop-inline");
@@ -259,7 +263,7 @@ class IamUserCfnProvisionerTest {
 
         StackResource r = resource();
         r.setPhysicalId("my-user");
-        r.getAttributes().put("UserId", "AIDAuser");
+        r.getAttributes().put("__FlociUserId", "AIDAuser");
 
         provisioner.provision(r, props("""
                 {
@@ -279,7 +283,7 @@ class IamUserCfnProvisionerTest {
 
         StackResource r = resource();
         r.setPhysicalId("my-user");
-        r.getAttributes().put("UserId", "AIDAold-user");
+        r.getAttributes().put("__FlociUserId", "AIDAold-user");
 
         AwsException failure = assertThrows(AwsException.class, () ->
                 provisioner.provision(r, props("""
@@ -305,7 +309,7 @@ class IamUserCfnProvisionerTest {
 
         StackResource r = resource();
         r.setPhysicalId("my-user");
-        r.getAttributes().put("UserId", "AIDAuser");
+        r.getAttributes().put("__FlociUserId", "AIDAuser");
 
         assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
                 {

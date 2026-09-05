@@ -43,8 +43,7 @@ class CloudFormationIamUserIntegrationTest {
                   },
                   "Outputs": {
                     "UserRef": {"Value": {"Ref": "ProbeUser"}},
-                    "UserArn": {"Value": {"Fn::GetAtt": ["ProbeUser", "Arn"]}},
-                    "UserId": {"Value": {"Fn::GetAtt": ["ProbeUser", "UserId"]}}
+                    "UserArn": {"Value": {"Fn::GetAtt": ["ProbeUser", "Arn"]}}
                   }
                 }
                 """.formatted(userName);
@@ -56,9 +55,6 @@ class CloudFormationIamUserIntegrationTest {
         assertEquals(userName, outputValue(stackXml, "UserRef"));
         String expectedArn = "arn:aws:iam::111122223333:user/" + userName;
         assertEquals(expectedArn, outputValue(stackXml, "UserArn"));
-        String userId = outputValue(stackXml, "UserId");
-        assertNotNull(userId);
-        assertTrue(userId.startsWith("AIDA"), "Fn::GetAtt UserId must start with AIDA: " + userId);
 
         // Verify IAM user exists and Arn matches
         given()
@@ -71,8 +67,7 @@ class CloudFormationIamUserIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<UserName>" + userName + "</UserName>"))
-            .body(containsString("<Arn>" + expectedArn + "</Arn>"))
-            .body(containsString("<UserId>" + userId + "</UserId>"));
+            .body(containsString("<Arn>" + expectedArn + "</Arn>"));
 
         // Delete the stack
         deleteStack(stackName);
@@ -113,8 +108,7 @@ class CloudFormationIamUserIntegrationTest {
                   },
                   "Outputs": {
                     "UserRef": {"Value": {"Ref": "GenUser"}},
-                    "UserArn": {"Value": {"Fn::GetAtt": ["GenUser", "Arn"]}},
-                    "UserId": {"Value": {"Fn::GetAtt": ["GenUser", "UserId"]}}
+                    "UserArn": {"Value": {"Fn::GetAtt": ["GenUser", "Arn"]}}
                   }
                 }
                 """;
@@ -126,9 +120,6 @@ class CloudFormationIamUserIntegrationTest {
         String generatedUserName = outputValue(stackXml, "UserRef");
         assertNotNull(generatedUserName);
         assertEquals("arn:aws:iam::111122223333:user/" + generatedUserName, outputValue(stackXml, "UserArn"));
-        String genUserId = outputValue(stackXml, "UserId");
-        assertNotNull(genUserId);
-        assertTrue(genUserId.startsWith("AIDA"), "Fn::GetAtt UserId must start with AIDA: " + genUserId);
 
         // Verify generated user exists
         given()
@@ -141,8 +132,7 @@ class CloudFormationIamUserIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<UserName>" + generatedUserName + "</UserName>"))
-            .body(containsString("<Arn>arn:aws:iam::111122223333:user/" + generatedUserName + "</Arn>"))
-            .body(containsString("<UserId>" + genUserId + "</UserId>"));
+            .body(containsString("<Arn>arn:aws:iam::111122223333:user/" + generatedUserName + "</Arn>"));
 
         deleteStack(stackName);
         awaitStackStatus(stackId, "DELETE_COMPLETE");
