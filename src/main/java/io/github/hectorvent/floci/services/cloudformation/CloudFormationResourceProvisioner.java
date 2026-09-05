@@ -4165,6 +4165,24 @@ public class CloudFormationResourceProvisioner {
             req.put("FunctionResponseTypes", functionResponseTypes);
         }
 
+        // Support self-managed event source (Kafka/SelfManagedEventSource)
+        JsonNode selfManagedEventSource = props.get("SelfManagedEventSource");
+        if (selfManagedEventSource != null && !selfManagedEventSource.isNull()) {
+            req.put("SelfManagedEventSource", objectMapper.convertValue(selfManagedEventSource, Map.class));
+        }
+
+        // Kafka topic list
+        List<String> topics = resolveStringList(props, "Topics", engine);
+        if (!topics.isEmpty()) {
+            req.put("Topics", topics);
+        }
+
+        // Event source access configurations (SourceAccessConfigurations)
+        JsonNode sourceAccessConfigurations = props.get("SourceAccessConfigurations");
+        if (sourceAccessConfigurations != null && !sourceAccessConfigurations.isNull()) {
+            req.put("SourceAccessConfigurations", objectMapper.convertValue(sourceAccessConfigurations, List.class));
+        }
+
         var esm = lambdaService.createEventSourceMapping(region, req);
         r.setPhysicalId(esm.getUuid());
         r.getAttributes().put("Id", esm.getUuid());
