@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -33,6 +34,7 @@ import java.security.cert.X509Certificate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -44,6 +46,133 @@ class PostgresProtocolHandlerTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void rejectsStartupMessageAboveTheHandshakeLimitBeforeReadingPayload() throws Exception {
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(input);
+        out.writeInt(1_048_577);
+        out.writeInt(STARTUP_PROTOCOL_VERSION);
+
+        IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
+                new MemorySocket(input.toByteArray()), mock(Socket.class),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testTlsCertificates(),
+                (user, pass) -> true));
+
+        assertEquals("PostgreSQL startup message length exceeds the 1048576 byte limit: 1048577",
+                error.getMessage());
+    }
+
+    @Test
+    void acceptsStartupMessageAtTheHandshakeLimit() throws Exception {
+        byte[] startup = new byte[1_048_576];
+        ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(headerBytes);
+        out.writeInt(startup.length);
+        out.writeInt(STARTUP_PROTOCOL_VERSION);
+        byte[] header = headerBytes.toByteArray();
+        System.arraycopy(header, 0, startup, 0, header.length);
+
+        MemorySocket client = new MemorySocket(startup);
+        assertNull(PostgresProtocolHandler.authenticate(
+                client, new MemorySocket(new byte[0]),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testTlsCertificates(),
+                (user, pass) -> true));
+    }
+
+    @Test
+    void rejectsNegativeStartupMessageLength() throws Exception {
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(input);
+        out.writeInt(-1);
+        out.writeInt(STARTUP_PROTOCOL_VERSION);
+
+        IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
+                new MemorySocket(input.toByteArray()), new MemorySocket(new byte[0]),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testTlsCertificates(),
+                (user, pass) -> true));
+
+        assertEquals("PostgreSQL startup message length is below the 8 byte minimum: -1",
+                error.getMessage());
+    }
+
+    @Test
+    void rejectsPasswordMessageBelowItsProtocolMinimum() throws Exception {
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(input);
+        writeStartup(out, "dbadmin", "postgres");
+        out.writeByte('p');
+        out.writeInt(4);
+
+        IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
+                new MemorySocket(input.toByteArray()), new MemorySocket(new byte[0]),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testTlsCertificates(),
+                (user, pass) -> true));
+
+        assertEquals("PostgreSQL password message length is below the 5 byte minimum: 4",
+                error.getMessage());
+    }
+
+    @Test
+    void rejectsOversizedBackendAuthenticationMessage() throws Exception {
+        ByteArrayOutputStream backendInput = new ByteArrayOutputStream();
+        DataOutputStream backendOut = new DataOutputStream(backendInput);
+        backendOut.writeByte('R');
+        backendOut.writeInt(1_048_577);
+
+        IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
+                new MemorySocket(startupAndPassword()), new MemorySocket(backendInput.toByteArray()),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testTlsCertificates(),
+                (user, pass) -> true));
+
+        assertEquals("PostgreSQL backend authentication message length exceeds the 1048576 byte limit: 1048577",
+                error.getMessage());
+    }
+
+    @Test
+    void rejectsOversizedBackendMessageBeforeBufferingIt() throws Exception {
+        ByteArrayOutputStream backendInput = new ByteArrayOutputStream();
+        DataOutputStream backendOut = new DataOutputStream(backendInput);
+        backendOut.writeByte('R');
+        backendOut.writeInt(8);
+        backendOut.writeInt(0);
+        backendOut.writeByte('Z');
+        backendOut.writeInt(1_048_577);
+
+        IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
+                new MemorySocket(startupAndPassword()), new MemorySocket(backendInput.toByteArray()),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testTlsCertificates(),
+                (user, pass) -> true));
+
+        assertEquals("PostgreSQL backend message length exceeds the 1048576 byte limit: 1048577",
+                error.getMessage());
+    }
+
+    @Test
+    void rejectsOversizedSaslContinuationMessage() throws Exception {
+        ByteArrayOutputStream backendInput = new ByteArrayOutputStream();
+        DataOutputStream backendOut = new DataOutputStream(backendInput);
+        backendOut.writeByte('R');
+        backendOut.writeInt(8);
+        backendOut.writeInt(10);
+        backendOut.writeByte('R');
+        backendOut.writeInt(1_048_577);
+
+        IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
+                new MemorySocket(startupAndPassword()), new MemorySocket(backendInput.toByteArray()),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testTlsCertificates(),
+                (user, pass) -> true));
+
+        assertEquals("PostgreSQL SASL continue message length exceeds the 1048576 byte limit: 1048577",
+                error.getMessage());
+    }
 
     @ParameterizedTest
     @CsvSource({
@@ -595,6 +724,14 @@ class PostgresProtocolHandlerTest {
         assertEquals('I', in.readByte());
     }
 
+    private static byte[] startupAndPassword() throws IOException {
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(input);
+        writeStartup(out, "dbadmin", "postgres");
+        writePassword(out, "adminpass");
+        return input.toByteArray();
+    }
+
     private static void writeErrorResponse(DataOutputStream out, String severity, String sqlState,
                                            String message) throws IOException {
         ByteArrayOutputStream fields = new ByteArrayOutputStream();
@@ -641,6 +778,25 @@ class PostgresProtocolHandlerTest {
             params.put(key, value);
         }
         return params;
+    }
+
+    private static final class MemorySocket extends Socket {
+        private final ByteArrayInputStream input;
+        private final ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        private MemorySocket(byte[] input) {
+            this.input = new ByteArrayInputStream(input);
+        }
+
+        @Override
+        public ByteArrayInputStream getInputStream() {
+            return input;
+        }
+
+        @Override
+        public ByteArrayOutputStream getOutputStream() {
+            return output;
+        }
     }
 
 }
