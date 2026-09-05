@@ -213,6 +213,43 @@ class TlsCertificateManagerTest extends TlsCertificateManagerFixture {
     }
 
     @Test
+    void aNameWhoseReloadFailedIsCarriedIntoTheNextReissue() throws Exception {
+        when(defaultTls.reload()).thenReturn(false);
+        TlsCertificateManager m = manager();
+        m.ensureHost(NEW_HOST);
+        assertFalse(m.knownHostnames().contains(NEW_HOST));
+
+        when(defaultTls.reload()).thenReturn(true);
+        m.ensureHost("auth.example.localhost.floci.io");
+
+        Set<String> sans = sans(read("floci-server.crt"));
+        assertTrue(sans.contains(NEW_HOST), "the name written to disk is not dropped by the next reissue: " + sans);
+        assertTrue(sans.contains("auth.example.localhost.floci.io"), sans.toString());
+        assertTrue(m.knownHostnames().containsAll(List.of(NEW_HOST, "auth.example.localhost.floci.io")));
+        assertEquals(List.of(NEW_HOST, "auth.example.localhost.floci.io"), readMetadata().getLearnedHostnames());
+        verify(defaultTls, times(2)).reload();
+        verify(events, times(1)).fire(any());
+    }
+
+    @Test
+    void aResetWhoseReloadFailedIsRetriedByTheNextReset() throws Exception {
+        TlsCertificateManager m = manager();
+        m.ensureHost(NEW_HOST);
+
+        when(defaultTls.reload()).thenReturn(false);
+        m.clear();
+        assertEquals(List.of(), readMetadata().getLearnedHostnames(), "the files are reset");
+        assertTrue(m.knownHostnames().contains(NEW_HOST), "the listener still serves the name");
+
+        when(defaultTls.reload()).thenReturn(true);
+        m.clear();
+
+        verify(defaultTls, times(3)).reload();
+        assertFalse(m.knownHostnames().contains(NEW_HOST));
+        assertFalse(sans(read("floci-server.crt")).contains(NEW_HOST));
+    }
+
+    @Test
     void aMissingDefaultTlsConfigurationIsRetriedByTheNextCall() throws Exception {
         when(registry.getDefault()).thenReturn(Optional.empty());
         TlsCertificateManager m = manager();
