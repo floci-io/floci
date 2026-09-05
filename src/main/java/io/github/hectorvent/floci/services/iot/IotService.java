@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotJob;
@@ -22,7 +23,13 @@ import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
 import io.github.hectorvent.floci.services.iot.model.IotThingType;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.iot.model.Thing;
+import io.github.hectorvent.floci.services.iot.rules.RuleSql;
+import io.github.hectorvent.floci.services.iot.rules.RuleSqlEvaluator;
+import io.github.hectorvent.floci.services.iot.rules.RuleSqlParseException;
+import io.github.hectorvent.floci.services.iot.rules.RuleSqlParser;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -33,10 +40,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -58,6 +67,12 @@ public class IotService {
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
+    /** The {@code FirehoseSeparator} shape of the IoT API model. */
+    private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
+    public static final int MAX_POLICY_VERSIONS = 5;
+
+    /** One lock for every policy version write and the policy delete, so a cap check, an append and a delete cannot interleave. */
+    private final Object policyWriteLock = new Object();
 
     private final StorageBackend<String, Thing> thingStore;
     private final StorageBackend<String, IotCertificate> certificateStore;
@@ -83,6 +98,9 @@ public class IotService {
     private final KinesisService kinesisService;
     private final DynamoDbService dynamoDbService;
     private final LambdaService lambdaService;
+    private final FirehoseService firehoseService;
+    private final CloudWatchLogsService cloudWatchLogsService;
+    private final RuleSqlEvaluator ruleSqlEvaluator;
 
     @Inject
     public IotService(StorageFactory storageFactory,
@@ -96,7 +114,9 @@ public class IotService {
                         S3Service s3Service,
                         KinesisService kinesisService,
                         DynamoDbService dynamoDbService,
-                        LambdaService lambdaService) {
+                        LambdaService lambdaService,
+                        FirehoseService firehoseService,
+                        CloudWatchLogsService cloudWatchLogsService) {
         this(storageFactory.create("iot", "iot-things.json", new TypeReference<Map<String, Thing>>() {}),
                 storageFactory.create("iot", "iot-certificates.json", new TypeReference<Map<String, IotCertificate>>() {}),
                 storageFactory.create("iot", "iot-policies.json", new TypeReference<Map<String, IotPolicy>>() {}),
@@ -111,7 +131,7 @@ public class IotService {
                 storageFactory.create("iot", "iot-thing-groups.json", new TypeReference<Map<String, IotThingGroup>>() {}),
                 storageFactory.create("iot", "iot-thing-group-memberships.json", new TypeReference<Map<String, Set<String>>>() {}),
                 config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService, snsService,
-                s3Service, kinesisService, dynamoDbService, lambdaService);
+                s3Service, kinesisService, dynamoDbService, lambdaService, firehoseService, cloudWatchLogsService);
     }
 
     IotService(StorageBackend<String, Thing> thingStore,
@@ -137,7 +157,9 @@ public class IotService {
                   S3Service s3Service,
                   KinesisService kinesisService,
                   DynamoDbService dynamoDbService,
-                  LambdaService lambdaService) {
+                  LambdaService lambdaService,
+                  FirehoseService firehoseService,
+                  CloudWatchLogsService cloudWatchLogsService) {
         this.thingStore = thingStore;
         this.certificateStore = certificateStore;
         this.policyStore = policyStore;
@@ -162,6 +184,9 @@ public class IotService {
         this.kinesisService = kinesisService;
         this.dynamoDbService = dynamoDbService;
         this.lambdaService = lambdaService;
+        this.firehoseService = firehoseService;
+        this.cloudWatchLogsService = cloudWatchLogsService;
+        this.ruleSqlEvaluator = new RuleSqlEvaluator(objectMapper);
     }
 
     public String describeEndpoint(String endpointType) {
@@ -358,34 +383,42 @@ public class IotService {
     }
 
     public void deletePolicy(String policyName, String region) {
-        getPolicy(policyName, region);
-        if (!policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()).isEmpty()) {
-            throw new AwsException("InvalidRequestException", "Cannot delete attached policy", 400);
+        synchronized (policyWriteLock) {
+            getPolicy(policyName, region);
+            if (!policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()).isEmpty()) {
+                throw new AwsException("InvalidRequestException", "Cannot delete attached policy", 400);
+            }
+            policyStore.delete(policyKey(region, policyName));
+            policyAttachmentStore.delete(policyAttachmentKey(region, policyName));
         }
-        policyStore.delete(policyKey(region, policyName));
-        policyAttachmentStore.delete(policyAttachmentKey(region, policyName));
     }
 
     public IotPolicy.PolicyVersion createPolicyVersion(String policyName, String policyDocument, boolean setAsDefault, String region) {
-        IotPolicy policy = getPolicy(policyName, region);
-        int next = policy.getVersions().stream()
-                .map(IotPolicy.PolicyVersion::getVersionId)
-                .mapToInt(Integer::parseInt)
-                .max()
-                .orElse(0) + 1;
-        IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
-        version.setVersionId(Integer.toString(next));
-        version.setDocument(policyDocument);
-        version.setCreateDate(Instant.now());
-        List<IotPolicy.PolicyVersion> versions = new java.util.ArrayList<>(policy.getVersions());
-        versions.add(version);
-        policy.setVersions(versions);
-        if (setAsDefault) {
-            policy.setDefaultVersionId(version.getVersionId());
-            policy.setPolicyDocument(policyDocument);
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            if (policy.getVersions().size() >= MAX_POLICY_VERSIONS) {
+                throw new AwsException("VersionsLimitExceededException", "The policy " + policyName
+                        + " already has the maximum number of versions (" + MAX_POLICY_VERSIONS + ")", 409);
+            }
+            int next = policy.getVersions().stream()
+                    .map(IotPolicy.PolicyVersion::getVersionId)
+                    .mapToInt(Integer::parseInt)
+                    .max()
+                    .orElse(0) + 1;
+            IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
+            version.setVersionId(Integer.toString(next));
+            version.setDocument(policyDocument);
+            version.setCreateDate(Instant.now());
+            List<IotPolicy.PolicyVersion> versions = new ArrayList<>(policy.getVersions());
+            versions.add(version);
+            policy.setVersions(versions);
+            if (setAsDefault) {
+                policy.setDefaultVersionId(version.getVersionId());
+                policy.setPolicyDocument(policyDocument);
+            }
+            policyStore.put(policyKey(region, policyName), policy);
+            return version;
         }
-        policyStore.put(policyKey(region, policyName), policy);
-        return version;
     }
 
     public IotPolicy.PolicyVersion getPolicyVersion(String policyName, String versionId, String region) {
@@ -403,26 +436,55 @@ public class IotService {
     }
 
     public void setDefaultPolicyVersion(String policyName, String versionId, String region) {
-        IotPolicy policy = getPolicy(policyName, region);
-        IotPolicy.PolicyVersion version = getPolicyVersion(policyName, versionId, region);
-        policy.setDefaultVersionId(versionId);
-        policy.setPolicyDocument(version.getDocument());
-        policyStore.put(policyKey(region, policyName), policy);
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            IotPolicy.PolicyVersion version = getPolicyVersion(policyName, versionId, region);
+            policy.setDefaultVersionId(versionId);
+            policy.setPolicyDocument(version.getDocument());
+            policyStore.put(policyKey(region, policyName), policy);
+        }
     }
 
     public void deletePolicyVersion(String policyName, String versionId, String region) {
-        IotPolicy policy = getPolicy(policyName, region);
-        if (versionId.equals(policy.getDefaultVersionId())) {
-            throw new AwsException("InvalidRequestException", "Cannot delete default policy version", 400);
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            if (versionId.equals(policy.getDefaultVersionId())) {
+                throw new AwsException("InvalidRequestException", "Cannot delete default policy version", 400);
+            }
+            List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
+                    .filter(version -> !versionId.equals(version.getVersionId()))
+                    .toList();
+            if (versions.size() == policy.getVersions().size()) {
+                throw new AwsException("ResourceNotFoundException", "Policy version not found: " + versionId, 404);
+            }
+            policy.setVersions(versions);
+            policyStore.put(policyKey(region, policyName), policy);
         }
-        List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
-                .filter(version -> !versionId.equals(version.getVersionId()))
-                .toList();
-        if (versions.size() == policy.getVersions().size()) {
-            throw new AwsException("ResourceNotFoundException", "Policy version not found: " + versionId, 404);
+    }
+
+    /**
+     * Deletes the oldest versions until one more fits under the cap, which is what the AWS
+     * CloudFormation handler means to do once the service refuses a sixth (it sorts version ids as
+     * text, so past nine it picks another one). A policy persisted before the cap can hold more
+     * than five, so this deletes as many as it takes. A default version cannot be deleted, so when
+     * the oldest is the default the newest becomes the default first. One step under the policy
+     * write lock, so nothing else can move the selection in between.
+     */
+    public void makeRoomForPolicyVersion(String policyName, String region) {
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            while (policy.getVersions().size() >= MAX_POLICY_VERSIONS) {
+                List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
+                        .sorted(Comparator.comparingInt(version -> Integer.parseInt(version.getVersionId())))
+                        .toList();
+                String oldest = versions.get(0).getVersionId();
+                if (oldest.equals(policy.getDefaultVersionId())) {
+                    setDefaultPolicyVersion(policyName, versions.get(versions.size() - 1).getVersionId(), region);
+                }
+                deletePolicyVersion(policyName, oldest, region);
+                policy = getPolicy(policyName, region);
+            }
         }
-        policy.setVersions(versions);
-        policyStore.put(policyKey(region, policyName), policy);
     }
 
     public void attachPolicy(String policyName, String target, String region) {
@@ -867,13 +929,48 @@ public class IotService {
         rule.setDescription(payload.path("description").asText(null));
         rule.setRuleDisabled(payload.path("ruleDisabled").asBoolean(false));
         JsonNode actions = payload.path("actions");
+        actions.forEach(IotService::validateAction);
         rule.setActionsJson(actions.isArray() ? actions.toString() : "[]");
         rule.setAwsIotSqlVersion(payload.path("awsIotSqlVersion").asText(null));
         JsonNode errorAction = payload.path("errorAction");
+        validateAction(errorAction);
         rule.setErrorActionJson(errorAction.isObject() ? errorAction.toString() : null);
         rule.setCreatedAt(createdAt == null ? Instant.now() : createdAt);
+        rule.setCompiledSql(compileSql(ruleName, rule.getSql(), config.services().iot().ruleSqlStrict()));
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
         return rule;
+    }
+
+    /** The API model restricts the firehose {@code separator} to a newline, tab, Windows newline or comma. */
+    private static void validateAction(JsonNode action) {
+        JsonNode separator = action.path("firehose").path("separator");
+        if (separator.isMissingNode() || separator.isNull()) {
+            return;
+        }
+        if (!FIREHOSE_SEPARATOR.matcher(separator.asText()).matches()) {
+            throw new AwsException("InvalidRequestException",
+                    "Invalid firehose separator. Valid values are: '\\n' (newline), '\\t' (tab), '\\r\\n' (Windows newline), ',' (comma)", 400);
+        }
+    }
+
+    /**
+     * Parses a rule's SQL. A statement outside the subset Floci evaluates is not rejected by
+     * default: it is stored as it was sent and keeps the behaviour it had before this parser
+     * existed, firing on every publish matching its topic filter with the whole payload.
+     * Setting {@code floci.services.iot.rule-sql-strict} rejects it the way AWS does.
+     */
+    private RuleSql.Compilation compileSql(String ruleName, String sql, boolean strict) {
+        try {
+            return RuleSql.Compilation.of(RuleSqlParser.parse(sql));
+        } catch (RuleSqlParseException e) {
+            if (strict) {
+                throw new AwsException("SqlParseException",
+                        "Invalid topic rule SQL for " + ruleName + ": " + e.getMessage(), 400);
+            }
+            LOG.warnv("Topic rule {0} is not evaluated: its SQL is outside the subset Floci understands ({1}). "
+                    + "It keeps firing on every matching topic with the whole payload.", ruleName, e.getMessage());
+            return RuleSql.Compilation.PASSTHROUGH;
+        }
     }
 
     public IotTopicRule getTopicRule(String ruleName, String region) {
@@ -906,10 +1003,41 @@ public class IotService {
             return;
         }
         for (IotTopicRule rule : rulesForPublish(region)) {
-            if (!rule.isRuleDisabled() && topicMatches(extractTopicPattern(rule.getSql()), topic)) {
-                executeTopicRule(rule, topic, eventPayload);
+            if (!rule.isRuleDisabled()) {
+                matchAndProject(rule, topic, eventPayload)
+                        .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
             }
         }
+    }
+
+    /**
+     * Returns the document the rule's actions should receive, or empty when the rule does not
+     * fire for this message. Rules whose SQL could not be parsed take the pre-parser path: the
+     * topic filter is read straight out of the SQL and the payload is forwarded untouched.
+     */
+    private Optional<byte[]> matchAndProject(IotTopicRule rule, String topic, byte[] payload) {
+        RuleSql query = ruleQuery(rule);
+        if (query == null) {
+            return topicMatches(extractTopicPattern(rule.getSql()), topic) ? Optional.of(payload) : Optional.empty();
+        }
+        if (!topicMatches(query.topicFilter(), topic)) {
+            return Optional.empty();
+        }
+        return ruleSqlEvaluator.evaluate(rule.getRuleName(), query, topic, payload);
+    }
+
+    /**
+     * The rule's parsed statement, or null when its SQL is outside the subset. A rule restored
+     * from storage is parsed here on its first publish; one written through the API already
+     * carries its parse.
+     */
+    private RuleSql ruleQuery(IotTopicRule rule) {
+        RuleSql.Compilation compiled = rule.getCompiledSql();
+        if (compiled == null) {
+            compiled = compileSql(rule.getRuleName(), rule.getSql(), false);
+            rule.setCompiledSql(compiled);
+        }
+        return compiled.query();
     }
 
     private List<IotTopicRule> rulesForPublish(String region) {
@@ -1010,11 +1138,12 @@ public class IotService {
     }
 
     /**
-     * Runs the actions of a matching rule. One failing action never fails the publish or the actions
-     * after it, as on AWS: the failure is logged, and once every action ran the rule's error action,
-     * if it has one, receives the failure document listing every action that failed.
+     * Runs the actions of a matching rule on the document its SQL produced. One failing action never
+     * fails the publish or the actions after it, as on AWS: the failure is logged, and once every
+     * action ran the rule's error action, if it has one, receives the failure document listing every
+     * action that failed, with the original payload as published.
      */
-    private void executeTopicRule(IotTopicRule rule, String topic, byte[] payload) {
+    private void executeTopicRule(IotTopicRule rule, String topic, byte[] originalPayload, byte[] document) {
         String ruleRegion = AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion());
         List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode action : storedJson(rule.getRuleName(), rule.getActionsJson())) {
@@ -1025,7 +1154,7 @@ public class IotService {
             }
             JsonNode config = action.get(type);
             try {
-                runAction(type, config, payload, ruleRegion);
+                runAction(rule, type, config, document, ruleRegion);
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Action {0} of topic rule {1} failed", type, rule.getRuleName());
                 failures.add(failure(type, config, e));
@@ -1041,7 +1170,7 @@ public class IotService {
             return;
         }
         try {
-            runAction(type, errorAction.get(type), failureDocument(rule, topic, payload, failures), ruleRegion);
+            runAction(rule, type, errorAction.get(type), failureDocument(rule, topic, originalPayload, failures), ruleRegion);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Error action {0} of topic rule {1} failed", type, rule.getRuleName());
         }
@@ -1071,7 +1200,7 @@ public class IotService {
         return null;
     }
 
-    private void runAction(String type, JsonNode action, byte[] payload, String region) {
+    private void runAction(IotTopicRule rule, String type, JsonNode action, byte[] payload, String region) {
         switch (type) {
             case "republish" -> {
                 String targetTopic = action.path("topic").asText(null);
@@ -1121,6 +1250,18 @@ public class IotService {
                     lambdaService.invoke(region, functionArn, payload, InvocationType.Event);
                 }
             }
+            case "firehose" -> {
+                String deliveryStreamName = action.path("deliveryStreamName").asText(null);
+                if (deliveryStreamName != null && !deliveryStreamName.isBlank()) {
+                    deliverToFirehose(deliveryStreamName, action, payload);
+                }
+            }
+            case "cloudwatchLogs" -> {
+                String logGroupName = action.path("logGroupName").asText(null);
+                if (logGroupName != null && !logGroupName.isBlank()) {
+                    putLogEvents(logGroupName, rule.getRuleName(), action, payload, region);
+                }
+            }
             default -> LOG.debugv("Topic rule action {0} is not supported and was skipped", type);
         }
     }
@@ -1143,6 +1284,8 @@ public class IotService {
             case "kinesis" -> action.path("streamName").asText("");
             case "dynamoDBv2" -> action.path("putItem").path("tableName").asText("");
             case "lambda" -> action.path("functionArn").asText("");
+            case "firehose" -> action.path("deliveryStreamName").asText("");
+            case "cloudwatchLogs" -> action.path("logGroupName").asText("");
             default -> "";
         };
     }
@@ -1155,6 +1298,90 @@ public class IotService {
         ArrayNode list = document.putArray("failures");
         failures.forEach(list::add);
         return document.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * The firehose action appends {@code separator} to every record. With {@code batchMode} a JSON
+     * array payload becomes one record per element, as the rule's SQL result would on AWS; any other
+     * payload is one record either way.
+     */
+    private void deliverToFirehose(String deliveryStreamName, JsonNode action, byte[] payload) {
+        byte[] separator = action.path("separator").asText("").getBytes(StandardCharsets.UTF_8);
+        JsonNode batch = action.path("batchMode").asBoolean(false) ? jsonArrayOrNull(payload) : null;
+        if (batch == null) {
+            firehoseService.putRecord(deliveryStreamName, new Record(withSeparator(payload, separator)));
+            return;
+        }
+        List<Record> records = new ArrayList<>();
+        for (JsonNode element : batch) {
+            records.add(new Record(withSeparator(element.toString().getBytes(StandardCharsets.UTF_8), separator)));
+        }
+        if (!records.isEmpty()) {
+            firehoseService.putRecordBatch(deliveryStreamName, records);
+        }
+    }
+
+    /**
+     * The cloudwatchLogs action writes the payload as one log event to a stream named after the
+     * rule, creating the stream in the given group on first use. The group itself must exist, as
+     * on AWS. With {@code batchMode} a JSON array payload becomes one event per element, each
+     * element carrying its own {@code timestamp} and {@code message} as the AWS message format
+     * for batched device logs requires.
+     */
+    private void putLogEvents(String logGroupName, String logStreamName, JsonNode action, byte[] payload, String region) {
+        JsonNode batch = action.path("batchMode").asBoolean(false) ? jsonArrayOrNull(payload) : null;
+        long now = Instant.now().toEpochMilli();
+        List<Map<String, Object>> events = new ArrayList<>();
+        if (batch == null) {
+            events.add(Map.of("timestamp", now, "message", new String(payload, StandardCharsets.UTF_8)));
+        } else {
+            batch.forEach(element -> events.add(batchedLogEvent(element, now)));
+        }
+        if (events.isEmpty()) {
+            return;
+        }
+        try {
+            cloudWatchLogsService.createLogStream(logGroupName, logStreamName, region);
+        } catch (AwsException e) {
+            if (!"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Log stream {0}/{1} already exists", logGroupName, logStreamName);
+        }
+        cloudWatchLogsService.putLogEvents(logGroupName, logStreamName, events, region);
+    }
+
+    /**
+     * One batched element is {@code {"timestamp": <epoch milliseconds>, "message": "<text>"}}. An
+     * element without a numeric timestamp is stamped with the publish time and one without a
+     * message is logged as its own JSON text, so a batch that ignores the format still reaches
+     * the log group instead of failing the action.
+     */
+    private static Map<String, Object> batchedLogEvent(JsonNode element, long now) {
+        JsonNode timestamp = element.path("timestamp");
+        JsonNode message = element.path("message");
+        String text = message.isMissingNode() ? element.toString()
+                : message.isValueNode() ? message.asText() : message.toString();
+        return Map.of("timestamp", timestamp.isNumber() ? timestamp.asLong() : now, "message", text);
+    }
+
+    private JsonNode jsonArrayOrNull(byte[] payload) {
+        try {
+            JsonNode node = objectMapper.readTree(payload);
+            return node != null && node.isArray() ? node : null;
+        } catch (IOException e) {
+            LOG.debugv("Payload is not JSON and is delivered as one record: {0}", e.getMessage());
+            return null;
+        }
+    }
+
+    private static byte[] withSeparator(byte[] data, byte[] separator) {
+        if (separator.length == 0) {
+            return data;
+        }
+        byte[] record = Arrays.copyOf(data, data.length + separator.length);
+        System.arraycopy(separator, 0, record, data.length, separator.length);
+        return record;
     }
 
     private ObjectNode toDynamoDbItem(byte[] payload) {
