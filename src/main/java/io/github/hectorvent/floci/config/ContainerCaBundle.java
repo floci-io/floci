@@ -120,6 +120,19 @@ public final class ContainerCaBundle {
         return Optional.of(bundle);
     }
 
+    /**
+     * The certificate blocks of a PEM text, re-encoded one after the other; a private key or any
+     * other PEM object in the text is dropped. What Floci hands out from a user-provided certificate
+     * file, for the bundle and for {@code GET /_floci/ca.pem}, goes through here.
+     */
+    public static String certificatePem(String pem) throws IOException, GeneralSecurityException {
+        StringBuilder certificates = new StringBuilder();
+        for (X509Certificate certificate : parseCertificates(pem)) {
+            certificates.append(toPem(certificate));
+        }
+        return certificates.toString();
+    }
+
     /** The {@code KEY=value} entries that make each runtime read {@link #CONTAINER_PATH}. */
     public static List<String> env() {
         return appendEnv(null);
