@@ -2824,12 +2824,18 @@ public class S3Controller {
         String credential = fields.get("x-amz-credential");
         String signature = fields.get("x-amz-signature");
         String algorithm = fields.get("x-amz-algorithm");
+        String date = fields.get("x-amz-date");
         if (policy == null || policy.isEmpty()
                 || credential == null || credential.isEmpty()
-                || signature == null || signature.isEmpty()) {
+                || signature == null || signature.isEmpty()
+                || algorithm == null || algorithm.isEmpty()
+                || date == null || date.isEmpty()) {
             throw new AwsException("AccessDenied", "Access Denied", 403);
         }
-        if (algorithm != null && !algorithm.isEmpty() && !"AWS4-HMAC-SHA256".equals(algorithm)) {
+        if (!"AWS4-HMAC-SHA256".equals(algorithm)) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+        if (!S3PostPolicySigner.isValidS3CredentialScope(credential)) {
             throw new AwsException("AccessDenied", "Access Denied", 403);
         }
 
@@ -2851,12 +2857,14 @@ public class S3Controller {
             byte[] decoded = java.util.Base64.getDecoder().decode(policyBase64);
             JsonNode policy = OBJECT_MAPPER.readTree(decoded);
             JsonNode expirationNode = policy.get("expiration");
-            if (expirationNode != null && !expirationNode.isNull()) {
-                Instant expiration = Instant.parse(expirationNode.asText());
-                if (Instant.now().isAfter(expiration)) {
-                    throw new AwsException("AccessDenied",
-                            "Invalid according to Policy: Policy expired.", 403);
-                }
+            if (expirationNode == null || expirationNode.isNull()) {
+                throw new AwsException("AccessDenied",
+                        "Invalid according to Policy: Policy is missing required field expiration.", 403);
+            }
+            Instant expiration = Instant.parse(expirationNode.asText());
+            if (Instant.now().isAfter(expiration)) {
+                throw new AwsException("AccessDenied",
+                        "Invalid according to Policy: Policy expired.", 403);
             }
         } catch (AwsException e) {
             throw e;

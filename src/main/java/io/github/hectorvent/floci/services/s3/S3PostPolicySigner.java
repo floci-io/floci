@@ -33,14 +33,25 @@ final class S3PostPolicySigner {
     }
 
     /**
+     * Verifies that {@code credential} is a well-formed S3 SigV4 credential scope:
+     * exactly {@code accessKeyId/date/region/s3/aws4_request}, with the service and
+     * terminator fixed, matching what a real S3 presigned POST requires.
+     */
+    static boolean isValidS3CredentialScope(String credential) {
+        String[] parts = credential.split("/");
+        return parts.length == 5 && "s3".equals(parts[3]) && "aws4_request".equals(parts[4]);
+    }
+
+    /**
      * Verifies that {@code signatureHex} is the SigV4 signature of {@code policyBase64},
-     * derived from {@code secretKey} using the date/region/service in {@code credential}
-     * (an {@code accessKeyId/date/region/service/aws4_request} credential scope).
+     * derived from {@code secretKey} using the date/region in {@code credential}
+     * (an {@code accessKeyId/date/region/s3/aws4_request} credential scope; validate with
+     * {@link #isValidS3CredentialScope(String)} before calling this).
      */
     static boolean verifySignature(String policyBase64, String credential, String signatureHex, String secretKey) {
         try {
             String[] parts = credential.split("/");
-            if (parts.length < 5) {
+            if (!isValidS3CredentialScope(credential)) {
                 return false;
             }
             String date = parts[1];

@@ -80,6 +80,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request")
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
             .multiPart("x-amz-signature",
                     "0000000000000000000000000000000000000000000000000000000000dead")
             .multiPart("file", "fabricated-signature.txt",
@@ -111,6 +112,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "unknown-key.txt",
                     "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
@@ -119,6 +121,55 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
         .then()
             .statusCode(403)
             .body("Error.Code", org.hamcrest.Matchers.equalTo("SignatureDoesNotMatch"));
+    }
+
+    @Test
+    @Order(13)
+    void rejectsUploadMissingRequiredFormFields() {
+        String key = "missing-date.txt";
+        String policyBase64 = buildPolicyBase64(BUCKET, key);
+        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+
+        // Missing x-amz-date entirely, even though the policy and signature are otherwise genuine.
+        given()
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-signature", signature)
+            .multiPart("file", "missing-date.txt",
+                    "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+    }
+
+    @Test
+    @Order(14)
+    void rejectsUploadWithMalformedCredentialScope() {
+        String key = "malformed-scope.txt";
+        String policyBase64 = buildPolicyBase64(BUCKET, key);
+        // Wrong service ("ec2" instead of "s3") in an otherwise well-formed credential scope.
+        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/ec2/aws4_request";
+        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+
+        given()
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-signature", signature)
+            .multiPart("file", "malformed-scope.txt",
+                    "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
     }
 
     @Test
@@ -135,6 +186,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "genuine.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
         .when()
@@ -177,8 +229,41 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
             .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
             .multiPart("x-amz-signature", signature)
             .multiPart("file", "expired.txt",
+                    "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+    }
+
+    @Test
+    @Order(22)
+    void rejectsPolicyWithNoExpirationEvenWithGenuineSignature() {
+        String key = "uploads/no-expiration.txt";
+        String policy = """
+                {
+                  "conditions": [
+                    {"bucket": "%s"},
+                    {"key": "%s"}
+                  ]
+                }
+                """.formatted(BUCKET, key);
+        String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
+        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+
+        given()
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-signature", signature)
+            .multiPart("file", "no-expiration.txt",
                     "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
         .when()
             .post("/" + BUCKET)
