@@ -63,10 +63,10 @@ AWS::ECS::Service	EcsCfnProvisioner
 AWS::ECS::TaskDefinition	EcsCfnProvisioner
 AWS::EKS::Cluster	LEGACY_SWITCH
 AWS::EKS::Nodegroup	LEGACY_SWITCH
-AWS::ElasticLoadBalancingV2::Listener	LEGACY_SWITCH
-AWS::ElasticLoadBalancingV2::ListenerRule	LEGACY_SWITCH
-AWS::ElasticLoadBalancingV2::LoadBalancer	LEGACY_SWITCH
-AWS::ElasticLoadBalancingV2::TargetGroup	LEGACY_SWITCH
+AWS::ElasticLoadBalancingV2::Listener	ElbV2CfnProvisioner
+AWS::ElasticLoadBalancingV2::ListenerRule	ElbV2CfnProvisioner
+AWS::ElasticLoadBalancingV2::LoadBalancer	ElbV2CfnProvisioner
+AWS::ElasticLoadBalancingV2::TargetGroup	ElbV2CfnProvisioner
 AWS::Events::EventBus	LEGACY_SWITCH
 AWS::Events::EventBusPolicy	LEGACY_SWITCH
 AWS::Events::Rule	LEGACY_SWITCH

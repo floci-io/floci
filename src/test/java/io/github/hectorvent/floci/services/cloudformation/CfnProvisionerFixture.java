@@ -39,6 +39,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2VpcGat
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcrCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ElbV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.FirehoseCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamUserCfnProvisioner;
@@ -237,6 +238,9 @@ final class CfnProvisionerFixture {
             if (iamService != null) {
                 discovered.add(new IamRoleCfnProvisioner(iamService));
                 discovered.add(new IamUserCfnProvisioner(iamService));
+            }
+            if (elbV2Service != null) {
+                discovered.add(new ElbV2CfnProvisioner(elbV2Service));
             }
             if (ecsService != null) {
                 discovered.add(new EcsCapacityCfnProvisioner(ecsService));
@@ -568,7 +572,6 @@ final class CfnProvisionerFixture {
                     objectMapper,
                     customResourceResponseStore,
                     reachableEndpoint,
-                    elbV2Service,
                     stepFunctionsService,
                     batchService,
                     ec2Service,
