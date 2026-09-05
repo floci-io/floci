@@ -52,6 +52,8 @@ public final class FlociCertificateAuthority {
     public static final Instant DEVICE_CERTIFICATE_NOT_AFTER = Instant.parse("2049-12-31T23:59:59Z");
     /** A new CA outlives every device certificate it will sign, so a chain never expires before its leaf. */
     static final Instant CA_NOT_AFTER = Instant.parse("2050-12-31T23:59:59Z");
+    private static final long TEN_YEARS_IN_DAYS = 3650;
+    private static final long ONE_YEAR_IN_DAYS = 365;
 
     private final Path certificatePath;
     private final X509Certificate certificate;
@@ -104,7 +106,7 @@ public final class FlociCertificateAuthority {
             }
             Files.createDirectories(tlsDir);
             restrictToOwnerOnly(tlsDir, "rwx------");
-            CertificateGenerator.GeneratedCertificate generated = generator.generateCaCertificate(COMMON_NAME, CA_NOT_AFTER);
+            CertificateGenerator.GeneratedCertificate generated = generator.generateCaCertificate(COMMON_NAME, caNotAfter(Instant.now()));
             Files.writeString(certFile, generated.certificatePem());
             writePrivateKey(keyFile, generated.privateKeyPem());
             FlociCertificateAuthority ca = new FlociCertificateAuthority(certFile,
@@ -176,11 +178,24 @@ public final class FlociCertificateAuthority {
     /**
      * The end of validity for a device certificate: AWS's fixed 2049 date, capped at the CA's own
      * expiry so a CA created before that date was adopted (ten years) never signs a leaf that
-     * outlives it.
+     * outlives it. Once 2049 has passed, one year from now, the same cap applied.
      */
     public Instant deviceCertificateNotAfter() {
+        return deviceCertificateNotAfter(Instant.now());
+    }
+
+    Instant deviceCertificateNotAfter(Instant now) {
         Instant caNotAfter = certificate.getNotAfter().toInstant();
-        return caNotAfter.isBefore(DEVICE_CERTIFICATE_NOT_AFTER) ? caNotAfter : DEVICE_CERTIFICATE_NOT_AFTER;
+        Instant wanted = DEVICE_CERTIFICATE_NOT_AFTER.isAfter(now)
+                ? DEVICE_CERTIFICATE_NOT_AFTER
+                : now.plus(ONE_YEAR_IN_DAYS, java.time.temporal.ChronoUnit.DAYS);
+        return caNotAfter.isBefore(wanted) ? caNotAfter : wanted;
+    }
+
+    /** A new CA ends in 2050, or ten years from now when that is later, so it is never born expired. */
+    static Instant caNotAfter(Instant now) {
+        Instant tenYears = now.plus(TEN_YEARS_IN_DAYS, java.time.temporal.ChronoUnit.DAYS);
+        return tenYears.isAfter(CA_NOT_AFTER) ? tenYears : CA_NOT_AFTER;
     }
 
     /**
