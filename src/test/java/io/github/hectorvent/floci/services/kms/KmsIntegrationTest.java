@@ -1183,6 +1183,19 @@ class KmsIntegrationTest {
                 .body("KeyMetadata.KeySpec", equalTo("ECC_NIST_P256"));
     }
 
+    @Test
+    void createSm2KeyReportsRegionUnsupportedOperation() {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"SM2\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("UnsupportedOperationException"))
+                .body("message", equalTo("KeySpec SM2 is not supported in this Region"));
+    }
+
     // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
 
     @Test

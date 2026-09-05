@@ -43,6 +43,7 @@ import org.bouncycastle.crypto.params.ParametersWithRandom;
 import org.bouncycastle.crypto.signers.ECDSASigner;
 import org.bouncycastle.crypto.signers.Ed25519phSigner;
 import org.bouncycastle.crypto.signers.PSSSigner;
+import org.bouncycastle.crypto.signers.SM2Signer;
 import org.bouncycastle.crypto.util.PrivateKeyFactory;
 import org.bouncycastle.crypto.util.PublicKeyFactory;
 import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPrivateKey;
@@ -169,7 +170,7 @@ public class KmsService implements ResourceProvider {
         key.setPolicy(policy != null ? policy : buildDefaultKeyPolicy());
         key.getTags().putAll(ReservedTags.stripReservedTags(tags));
 
-        generateKeyMaterial(key);
+        generateKeyMaterial(key, region);
 
         keyStore.put(region + "::" + keyId, key);
         LOG.infov("Created KMS key: {0} ({1}/{2}) in {3}", keyId, key.getKeyUsage(), key.getKeySpec(), region);
@@ -192,7 +193,7 @@ public class KmsService implements ResourceProvider {
         return normalized;
     }
 
-    private void generateKeyMaterial(KmsKey key) {
+    private void generateKeyMaterial(KmsKey key, String region) {
         KmsKeySpec spec = key.getKeySpec();
         try {
             switch (spec.getKeyType()) {
@@ -228,6 +229,17 @@ public class KmsService implements ResourceProvider {
                             ? new KeyPairGeneratorSpi.EC()
                             : KeyPairGenerator.getInstance("EC");
                     generator.initialize(new ECGenParameterSpec(curveName));
+                    KeyPair pair = generator.generateKeyPair();
+                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
+                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
+                }
+                case SM2 -> {
+                    if (!region.equals("cn-north-1") && !region.equals("cn-northwest-1")) {
+                        throw new AwsException("UnsupportedOperationException",
+                                "KeySpec SM2 is not supported in this Region", 400);
+                    }
+                    KeyPairGenerator generator = new KeyPairGeneratorSpi.EC();
+                    generator.initialize(new ECGenParameterSpec("sm2p256v1"));
                     KeyPair pair = generator.generateKeyPair();
                     key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
                     key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
@@ -1107,14 +1119,21 @@ public class KmsService implements ResourceProvider {
         }
 
         var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
+        var sm2 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.SM2;
         if (ed25519) {
             validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
+        }
+        if (sm2) {
+            validateSm2Request(kmsKey.getKeySpec(), algorithm, messageType);
         }
 
         try {
             PrivateKey privateKey = loadPrivateKey(kmsKey.getPrivateKeyEncoded(), kmsKey.getKeySpec());
             if (ed25519) {
                 return signEd25519(privateKey, message, algorithm);
+            }
+            if (sm2) {
+                return signSm2(privateKey, message);
             }
             if (messageType == DIGEST && isRsaPssRequest(kmsKey.getKeySpec(), algorithm)) {
                 return signRsaPssDigest(privateKey, message, algorithm);
@@ -1155,14 +1174,21 @@ public class KmsService implements ResourceProvider {
         }
 
         var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
+        var sm2 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.SM2;
         if (ed25519) {
             validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
+        }
+        if (sm2) {
+            validateSm2Request(kmsKey.getKeySpec(), algorithm, messageType);
         }
 
         try {
             PublicKey publicKey = loadPublicKey(kmsKey.getPublicKeyEncoded(), kmsKey.getKeySpec());
             if (ed25519) {
                 return verifyEd25519(publicKey, message, signature, algorithm);
+            }
+            if (sm2) {
+                return verifySm2(publicKey, message, signature);
             }
             String jcaAlgo = KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName();
 
@@ -1282,7 +1308,7 @@ public class KmsService implements ResourceProvider {
 
     private PrivateKey loadPrivateKey(String encoded, KmsKeySpec spec) throws Exception {
         byte[] decoded = Base64.getDecoder().decode(encoded);
-        if (isSecgP256k1(spec)) {
+        if (isSecgP256k1(spec) || isSm2(spec)) {
             // For secp256k1, use BC's KeyFactorySpi.EC directly as AsymmetricKeyInfoConverter.
             // This bypasses JCA and ClassLoader.loadClass; the allocation is live (generatePrivate
             // is called), so GraalVM's escape analysis keeps the class in the native image.
@@ -1294,7 +1320,7 @@ public class KmsService implements ResourceProvider {
 
     private PublicKey loadPublicKey(String encoded, KmsKeySpec spec) throws Exception {
         byte[] decoded = Base64.getDecoder().decode(encoded);
-        if (isSecgP256k1(spec)) {
+        if (isSecgP256k1(spec) || isSm2(spec)) {
             AsymmetricKeyInfoConverter converter = new KeyFactorySpi.EC();
             return converter.generatePublic(SubjectPublicKeyInfo.getInstance(decoded));
         }
@@ -1364,6 +1390,43 @@ public class KmsService implements ResourceProvider {
 
     private static boolean isSecgP256k1(KmsKeySpec spec) {
         return KmsKeySpec.ECC_SECG_P256K1 == spec;
+    }
+
+    private static boolean isSm2(KmsKeySpec spec) {
+        return KmsKeySpec.SM2 == spec;
+    }
+
+    private static void validateSm2Request(KmsKeySpec spec, String algorithm, KmsMessageType messageType) {
+        if (KmsKeySpec.getSignVerifyAlgorithm(algorithm) != KmsKeySpec.Algorithm.SM2_DSA) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "Algorithm " + algorithm + " is incompatible with key spec " + spec.name() + ".", 400);
+        }
+        if (messageType != RAW) {
+            throw new AwsException("ValidationException",
+                    "Message type " + messageType + " is incompatible with key spec " + spec.name() + ".", 400);
+        }
+    }
+
+    private static byte[] signSm2(PrivateKey privateKey, byte[] message) throws Exception {
+        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("sm2p256v1");
+        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
+        ECPrivateKeyParameters parameters = new ECPrivateKeyParameters(((BCECPrivateKey) privateKey).getD(), domain);
+
+        var signer = new SM2Signer();
+        signer.init(true, new ParametersWithRandom(parameters, SECURE_RANDOM));
+        signer.update(message, 0, message.length);
+        return signer.generateSignature();
+    }
+
+    private static boolean verifySm2(PublicKey publicKey, byte[] message, byte[] signature) {
+        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("sm2p256v1");
+        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
+        ECPublicKeyParameters parameters = new ECPublicKeyParameters(((BCECPublicKey) publicKey).getQ(), domain);
+
+        var verifier = new SM2Signer();
+        verifier.init(false, parameters);
+        verifier.update(message, 0, message.length);
+        return verifier.verifySignature(signature);
     }
 
     /**

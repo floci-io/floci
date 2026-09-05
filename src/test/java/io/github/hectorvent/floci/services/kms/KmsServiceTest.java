@@ -69,6 +69,31 @@ class KmsServiceTest {
         assertEquals("Enabled", key.getKeyState());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "cn-fake-1"})
+    void createSm2KeyReportsRegionUnsupportedOperation(String region) {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.createKey(null, "SIGN_VERIFY", "SM2", null, Map.of(), region));
+
+        assertEquals("UnsupportedOperationException", exception.getErrorCode());
+        assertEquals("KeySpec SM2 is not supported in this Region", exception.getMessage());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cn-north-1", "cn-northwest-1"})
+    void createSm2KeySucceedsInChinaRegions(String region) {
+        KmsKey key = kmsService.createKey(null, "SIGN_VERIFY", "SM2", null, Map.of(), region);
+        byte[] message = "SM2 regional signing".getBytes(StandardCharsets.UTF_8);
+        byte[] signature = kmsService.sign(key.getKeyId(), message, "SM2_DSA", region);
+
+        assertEquals(KmsKeySpec.SM2, key.getKeySpec());
+        assertEquals(KmsKeyUsage.SIGN_VERIFY, key.getKeyUsage());
+        assertNotNull(key.getPrivateKeyEncoded());
+        assertNotNull(key.getPublicKeyEncoded());
+        assertTrue(kmsService.verify(key.getKeyId(), message, signature, "SM2_DSA", region));
+    }
+
     @Test
     void updateKeyDescriptionPersistsDescription() {
         KmsKey key = kmsService.createKey("old description", REGION);
