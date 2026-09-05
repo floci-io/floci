@@ -134,6 +134,7 @@ final class ProjectionEvaluator {
                 while (i < rest.length() && rest.charAt(i) == '[') {
                     int close = rest.indexOf(']', i);
                     if (close < 0) break;
+                    validateListIndex(rest.substring(i + 1, close));
                     segments.add(rest.substring(i, close + 1)); // e.g. "[0]"
                     i = close + 1;
                 }
@@ -142,6 +143,30 @@ final class ProjectionEvaluator {
             }
         }
         return segments;
+    }
+
+    // DynamoDB rejects a non-numeric bracket segment as a syntax error and a numeric
+    // index above 4294967294 as out of the allowable range, both at expression level.
+    // Characterised on real DynamoDB (us-east-1, 2026-09-05).
+    private static void validateListIndex(String content) {
+        for (int i = 0; i < content.length(); i++) {
+            if (!Character.isDigit(content.charAt(i))) {
+                throw new AwsException("ValidationException",
+                        "Invalid ProjectionExpression: Syntax error; token: \"" + content.charAt(i)
+                        + "\", near: \"[" + content + "]\"", 400);
+            }
+        }
+        if (content.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Invalid ProjectionExpression: Syntax error; token: \"]\", near: \"[]\"", 400);
+        }
+        var canonical = content.replaceFirst("^0+(?=.)", "");
+        if (canonical.length() > 10
+                || (canonical.length() == 10 && canonical.compareTo("4294967294") > 0)) {
+            throw new AwsException("ValidationException",
+                    "Invalid ProjectionExpression: List index is not within the allowable range; "
+                    + "index: [" + content + "]", 400);
+        }
     }
 
     private static String resolveSegment(String seg, JsonNode exprAttrNames) {
@@ -163,13 +188,14 @@ final class ProjectionEvaluator {
     private static final class PathTrie {
         private boolean terminal;
         private final Map<String, PathTrie> names = new LinkedHashMap<>();
-        private final TreeMap<Integer, PathTrie> indices = new TreeMap<>();
+        // Long keys: the allowable index range (up to 4294967294) exceeds Integer.MAX_VALUE.
+        private final TreeMap<Long, PathTrie> indices = new TreeMap<>();
 
         void insert(List<String> segments) {
             PathTrie node = this;
             for (String seg : segments) {
                 if (seg.startsWith("[")) {
-                    int idx = Integer.parseInt(seg.substring(1, seg.length() - 1));
+                    long idx = Long.parseLong(seg.substring(1, seg.length() - 1));
                     node = node.indices.computeIfAbsent(idx, k -> new PathTrie());
                 } else {
                     node = node.names.computeIfAbsent(seg, k -> new PathTrie());
@@ -190,10 +216,10 @@ final class ProjectionEvaluator {
         if (!node.indices.isEmpty() && src.has("L")) {
             JsonNode list = src.get("L");
             ArrayNode projectedList = MAPPER.createArrayNode();
-            for (Map.Entry<Integer, PathTrie> entry : node.indices.entrySet()) {
-                int idx = entry.getKey();
-                if (idx < 0 || idx >= list.size()) continue;
-                JsonNode projected = projectValue(list.get(idx), entry.getValue());
+            for (Map.Entry<Long, PathTrie> entry : node.indices.entrySet()) {
+                long idx = entry.getKey();
+                if (idx >= list.size()) continue;
+                JsonNode projected = projectValue(list.get((int) idx), entry.getValue());
                 if (projected != null) {
                     projectedList.add(projected);
                 }

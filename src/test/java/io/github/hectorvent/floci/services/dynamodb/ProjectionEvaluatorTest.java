@@ -114,6 +114,52 @@ class ProjectionEvaluatorTest {
         assertNull(list.get(1).get("M").get("a"));
     }
 
+    // Malformed and out-of-range list indices, characterised on real DynamoDB
+    // (us-east-1, 2026-09-05): non-digit content is a syntax error, and a numeric
+    // index above 4294967294 is rejected as out of the allowable range.
+
+    @Test
+    void rejectsNonNumericListIndexAsSyntaxError() {
+        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> ProjectionEvaluator.project(listItem(), "l[a]", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: Syntax error; token: \"a\", near: \"[a]\"",
+                ex.getMessage());
+    }
+
+    @Test
+    void rejectsEmptyListIndexAsSyntaxError() {
+        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> ProjectionEvaluator.project(listItem(), "l[]", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: Syntax error; token: \"]\", near: \"[]\"",
+                ex.getMessage());
+    }
+
+    @Test
+    void rejectsListIndexAboveTheAllowableRange() {
+        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> ProjectionEvaluator.project(listItem(), "l[999999999999999999999]", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: List index is not within the allowable range; "
+                + "index: [999999999999999999999]", ex.getMessage());
+    }
+
+    @Test
+    void rejectsFirstListIndexPastTheAllowableRange() {
+        var ex = assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> ProjectionEvaluator.project(listItem(), "l[4294967295]", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: List index is not within the allowable range; "
+                + "index: [4294967295]", ex.getMessage());
+    }
+
+    @Test
+    void allowableIndexBeyondTheListJustDropsTheAttribute() {
+        var result = ProjectionEvaluator.project(listItem(), "l[4294967294]", null);
+        assertNull(result.get("l"), "an in-range index past the list end matches nothing");
+    }
+
     private static ObjectNode readValue(String json) {
         try {
             return (ObjectNode) mapper.readTree(json);
