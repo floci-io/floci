@@ -1968,6 +1968,7 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", dcb.getResponseHeadersPolicyId())
                 .elem("Compress", dcb.isCompress());
 
+        xml.raw(xmlTrustedSigners());
         xml.raw(xmlTrustedKeyGroups(
                 dcb.isTrustedKeyGroupsEnabled(), dcb.getTrustedKeyGroups()));
 
@@ -1997,6 +1998,7 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", cb.getResponseHeadersPolicyId())
                 .elem("Compress", cb.isCompress());
 
+        xml.raw(xmlTrustedSigners());
         xml.raw(xmlTrustedKeyGroups(
                 cb.isTrustedKeyGroupsEnabled(), cb.getTrustedKeyGroups()));
 
@@ -2066,6 +2068,18 @@ public class CloudFrontController {
             xml.end("Items");
         }
         return xml.end("TrustedKeyGroups").build();
+    }
+
+    // AWS always echoes a (usually empty) TrustedSigners object in every cache behavior. Floci models
+    // only the modern TrustedKeyGroups, but the Terraform AWS provider reads TrustedSigners.Items with
+    // no nil guard, so an omitted object segfaults it on read-back. Emit the disabled form AWS returns.
+    private String xmlTrustedSigners() {
+        return new XmlBuilder()
+                .start("TrustedSigners")
+                .elem("Enabled", false)
+                .elem("Quantity", 0)
+                .end("TrustedSigners")
+                .build();
     }
 
     private String xmlActiveTrustedKeyGroups(DistributionConfig config) {
