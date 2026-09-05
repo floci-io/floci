@@ -69,7 +69,53 @@ class RedshiftQueryHandlerTest {
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<ClusterIdentifier>test-cluster</ClusterIdentifier>"));
     }
-    
+
+    @Test
+    void testDescribeClustersIncludesAvailabilityStatuses() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setClusterStatus("available");
+        when(service.describeClusters(any())).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeClusters", params);
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<ClusterAvailabilityStatus>Available</ClusterAvailabilityStatus>"));
+        assertTrue(xml.contains("<AvailabilityZoneRelocationStatus>disabled</AvailabilityZoneRelocationStatus>"));
+    }
+
+    @Test
+    void testClusterAvailabilityStatusMapsTransientStatesToModifying() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setClusterStatus("creating");
+        when(service.createCluster(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
+
+        Response response = handler.handle("CreateCluster", params);
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<ClusterAvailabilityStatus>Modifying</ClusterAvailabilityStatus>"));
+    }
+
+    @Test
+    void testClusterAvailabilityStatusMapsFailed() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setClusterStatus("failed");
+        when(service.describeClusters(any())).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeClusters", params);
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<ClusterAvailabilityStatus>Failed</ClusterAvailabilityStatus>"));
+    }
+
     @Test
     void testDeleteCluster() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
