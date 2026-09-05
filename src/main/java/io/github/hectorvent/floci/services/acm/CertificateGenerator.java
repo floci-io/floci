@@ -35,12 +35,14 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigInteger;
 import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.Security;
+import java.security.Signature;
 import java.security.cert.X509Certificate;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
@@ -149,22 +151,43 @@ public class CertificateGenerator {
     /**
      * A leaf signed by {@code issuer}. {@code subjectKeyPair} may be {@code null} to mint a new
      * one; pass the previous pair to reissue with an updated SAN list and an unchanged public key.
+     * The result is checked before it is returned: the leaf must verify against the issuer's
+     * certificate, and a supplied key pair must be a pair, so a caller can never get back a
+     * certificate its own issuer rejects or a private key that does not fit it.
      */
     public GeneratedCertificate generateIssuedCertificate(String domainName, List<String> sans,
                                                           KeyAlgorithm keyAlgorithm, KeyPair subjectKeyPair,
                                                           Issuer issuer, LeafUsage usage) {
         try {
+            if (subjectKeyPair != null && !isPair(subjectKeyPair.getPrivate(), subjectKeyPair.getPublic())) {
+                throw new IllegalArgumentException("supplied private key does not match its public key");
+            }
             KeyPair keyPair = subjectKeyPair != null ? subjectKeyPair : generateKeyPair(keyAlgorithm);
             X500Name subject = new X500Name("CN=" + domainName);
             X500Name issuerDn = X500Name.getInstance(issuer.certificate().getSubjectX500Principal().getEncoded());
             X509Certificate cert = signCertificate(subject, keyPair.getPublic(), issuerDn, issuer.key(),
                     withDomainFirst(domainName, sans), false, usage, 365);
+            cert.verify(issuer.certificate().getPublicKey());
             return toGenerated(cert, keyPair.getPrivate(), subject.toString(),
                     issuer.certificate().getSubjectX500Principal().getName());
         } catch (Exception e) {
             LOG.error("Failed to generate issued certificate", e);
             throw new CertificateGenerationException("Certificate generation failed: " + e.getMessage(), e);
         }
+    }
+
+    /** True when {@code privateKey} signs what {@code publicKey} verifies. */
+    public static boolean isPair(PrivateKey privateKey, PublicKey publicKey) throws Exception {
+        String algorithm = "EC".equals(privateKey.getAlgorithm()) ? "SHA256withECDSA" : "SHA256withRSA";
+        byte[] probe = "floci".getBytes(StandardCharsets.US_ASCII);
+        Signature signer = Signature.getInstance(algorithm);
+        signer.initSign(privateKey);
+        signer.update(probe);
+        byte[] signature = signer.sign();
+        Signature verifier = Signature.getInstance(algorithm);
+        verifier.initVerify(publicKey);
+        verifier.update(probe);
+        return verifier.verify(signature);
     }
 
     private GeneratedCertificate buildCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm,

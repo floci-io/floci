@@ -122,6 +122,35 @@ class CertificateGeneratorIssuerTest {
     }
 
     @Test
+    void anIssuerWhoseKeyDoesNotMatchItsCertificateIsRefused() {
+        var one = generator.generateCaCertificate("One");
+        var other = generator.generateCaCertificate("Other");
+        var mismatched = new CertificateGenerator.Issuer(
+                generator.parseCertificate(one.certificatePem()), generator.parsePrivateKey(other.privateKeyPem()));
+
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+                () -> generator.generateIssuedCertificate("x.example.test", List.of(), KeyAlgorithm.RSA_2048, null,
+                        mismatched, CertificateGenerator.LeafUsage.SERVER));
+        assertTrue(refused.getMessage().contains("Signature"), refused.getMessage());
+    }
+
+    @Test
+    void aSuppliedKeyPairThatIsNotAPairIsRefused() {
+        var issuer = newIssuer();
+        var a = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
+                CertificateGenerator.LeafUsage.CLIENT);
+        var b = generator.generateIssuedCertificate("b", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
+                CertificateGenerator.LeafUsage.CLIENT);
+        var notAPair = new KeyPair(generator.parseCertificate(a.certificatePem()).getPublicKey(),
+                generator.parsePrivateKey(b.privateKeyPem()));
+
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+                () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, notAPair, issuer,
+                        CertificateGenerator.LeafUsage.CLIENT));
+        assertTrue(refused.getMessage().contains("does not match"), refused.getMessage());
+    }
+
+    @Test
     void duplicateSansAreWrittenOnce() throws Exception {
         var leaf = generator.generateIssuedCertificate("dup.example.test", List.of("dup.example.test", "other.example.test",
                 "other.example.test"), KeyAlgorithm.RSA_2048, null, newIssuer(), CertificateGenerator.LeafUsage.SERVER);
