@@ -37,14 +37,18 @@ public class MacieService {
 
     public synchronized void enableMacie(String region) {
         MacieState state = state(region);
-        if (state.isEnabled()) throw conflict("Macie is already enabled for this account.");
+        if (state.isEnabled()) {
+            throw conflict("Macie is already enabled for this account.");
+        }
         state.setEnabled(true);
         states.put(region, state);
     }
 
     public MacieState requireSession(String region) {
         MacieState state = state(region);
-        if (!state.isEnabled()) throw notFound("Macie is not enabled for this account.");
+        if (!state.isEnabled()) {
+            throw notFound("Macie is not enabled for this account.");
+        }
         return state;
     }
 
