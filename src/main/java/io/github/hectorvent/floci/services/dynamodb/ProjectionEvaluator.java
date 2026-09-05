@@ -152,17 +152,20 @@ final class ProjectionEvaluator {
         if (content.isEmpty()) {
             throw syntaxError("ProjectionExpression", "]", "[]");
         }
-        for (int i = 0; i < content.length(); i++) {
-            if (!Character.isDigit(content.charAt(i))) {
-                throw syntaxError("ProjectionExpression",
-                        String.valueOf(content.charAt(i)), "[" + content + "]");
+        final var contentLength = content.length();
+        for (var i = 0; i < contentLength; i++) {
+            var c = content.charAt(i);
+            if (c < '0' || '9' < c) {
+                var near = "[" + content + "]";
+                throw syntaxError("ProjectionExpression", String.valueOf(c),
+                        near.substring(0, Math.min(3, near.length())));
             }
         }
-        if (content.length() > 1 && content.charAt(0) == '0') {
+        if (contentLength > 1 && content.charAt(0) == '0') {
             throw syntaxError("ProjectionExpression", "0",
-                    content.substring(0, Math.min(3, content.length())));
+                    content.substring(0, Math.min(3, contentLength)));
         }
-        if (content.length() > 10 || Long.parseLong(content) > MAX_LIST_INDEX) {
+        if (contentLength > 10 || Long.parseLong(content) > MAX_LIST_INDEX) {
             throw new AwsException("ValidationException",
                     "Invalid ProjectionExpression: List index is not within the allowable range; "
                     + "index: [" + content + "]", 400);

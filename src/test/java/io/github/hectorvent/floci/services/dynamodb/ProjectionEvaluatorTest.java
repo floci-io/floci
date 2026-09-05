@@ -151,6 +151,15 @@ class ProjectionEvaluatorTest {
     }
 
     @Test
+    void rejectsUnicodeDigitListIndexAsSyntaxError() {
+        var ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[１２３]", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: Syntax error; token: \"１\", near: \"[１２\"",
+                ex.getMessage());
+    }
+
+    @Test
     void rejectsLeadingZeroListIndexAsSyntaxError() {
         var ex = assertThrows(AwsException.class,
                 () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[001]", null));
