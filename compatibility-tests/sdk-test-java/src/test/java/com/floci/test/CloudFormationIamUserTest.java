@@ -20,6 +20,8 @@ import software.amazon.awssdk.services.iam.model.User;
 
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,6 +29,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("CloudFormation AWS::IAM::User")
 class CloudFormationIamUserTest {
+
+    private static final Logger LOG = Logger.getLogger(CloudFormationIamUserTest.class.getName());
 
     private static CloudFormationClient cloudFormation;
     private static IamClient iam;
@@ -48,7 +52,7 @@ class CloudFormationIamUserTest {
                 cloudFormation.deleteStack(
                         DeleteStackRequest.builder().stackName(stackName).build());
             } catch (Exception e) {
-                System.err.println("CloudFormation IAM user cleanup skipped: " + e.getMessage());
+                LOG.log(Level.WARNING, "Failed to delete CloudFormation IAM user test stack: " + stackName, e);
             }
             cloudFormation.close();
         }
@@ -56,7 +60,7 @@ class CloudFormationIamUserTest {
             try {
                 iam.deleteUser(DeleteUserRequest.builder().userName(userName).build());
             } catch (Exception e) {
-                System.err.println("IAM user direct cleanup skipped: " + e.getMessage());
+                LOG.log(Level.WARNING, "Failed to delete IAM user directly during cleanup: " + userName, e);
             }
             iam.close();
         }
