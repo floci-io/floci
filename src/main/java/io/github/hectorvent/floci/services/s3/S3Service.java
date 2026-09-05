@@ -3928,7 +3928,8 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withGrantWriteAcp(effectiveOptions.getGrantWriteAcp())
                         .withChecksumAlgorithm(copyChecksumAlgorithm != null ? copyChecksumAlgorithm.name() : null)
                         .withTagging(effectiveTags));
-        copy.setETag(source.getETag());
+        // A copy is written as one object, so it keeps the ETag storeObject computed (the MD5 of the
+        // whole content) instead of the source's, which for a multipart source ends in "-N". As on S3.
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
         fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
         return copy;

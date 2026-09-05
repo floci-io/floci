@@ -1119,8 +1119,29 @@ class S3MultipartIntegrationTest {
     }
 
     @Test
+    @Order(34)
+    void copyOfMultipartObjectGetsItsOwnEtag() {
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/" + KEY)
+        .when()
+            .put("/" + BUCKET + "/copy-of-multipart.bin")
+        .then()
+            .statusCode(200)
+            // the copy is a single object: a plain MD5 ETag, not the "-2" of the multipart source
+            .body(matchesPattern("(?s).*<ETag>&quot;[0-9a-f]{32}&quot;</ETag>.*"));
+
+        given()
+        .when()
+            .head("/" + BUCKET + "/copy-of-multipart.bin")
+        .then()
+            .statusCode(200)
+            .header("ETag", matchesPattern("\"[0-9a-f]{32}\""));
+    }
+
+    @Test
     @Order(40)
     void cleanUp() {
+        given().when().delete("/" + BUCKET + "/copy-of-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
         given().when().delete("/" + BUCKET + "/composite-match-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/crc64-multipart.bin").then().statusCode(204);

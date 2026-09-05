@@ -20,6 +20,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -479,6 +482,29 @@ class S3ServiceTest {
         assertEquals("application/json", copy.getContentType());
         assertEquals("STANDARD_IA", copy.getStorageClass());
         assertEquals("dest", copy.getMetadata().get("owner"));
+    }
+
+    @Test
+    void copyOfMultipartObjectGetsTheEtagOfTheWholeContent() throws NoSuchAlgorithmException {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        byte[] part1 = "Part1Data-Hello".getBytes(StandardCharsets.UTF_8);
+        byte[] part2 = "Part2Data-World".getBytes(StandardCharsets.UTF_8);
+        var upload = s3Service.initiateMultipartUpload("test-bucket", "multipart.bin", "application/octet-stream");
+        s3Service.uploadPart("test-bucket", "multipart.bin", upload.getUploadId(), 1, part1);
+        s3Service.uploadPart("test-bucket", "multipart.bin", upload.getUploadId(), 2, part2);
+        S3Object source = s3Service.completeMultipartUpload("test-bucket", "multipart.bin", upload.getUploadId(),
+                List.of(1, 2), null, null);
+        assertTrue(source.getETag().endsWith("-2\""), source.getETag());
+
+        S3Object copy = s3Service.copyObject("test-bucket", "multipart.bin", "test-bucket", "multipart-copy.bin");
+
+        byte[] whole = new byte[part1.length + part2.length];
+        System.arraycopy(part1, 0, whole, 0, part1.length);
+        System.arraycopy(part2, 0, whole, part1.length, part2.length);
+        String expected = "\"" + HexFormat.of().formatHex(MessageDigest.getInstance("MD5").digest(whole)) + "\"";
+        assertEquals(expected, copy.getETag());
+        assertNotEquals(source.getETag(), copy.getETag());
+        assertEquals(expected, s3Service.getObject("test-bucket", "multipart-copy.bin").getETag());
     }
 
     @Test
