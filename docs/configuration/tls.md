@@ -85,6 +85,10 @@ services:
 
 The generated certificate will include `floci` in its SANs, so TLS validation succeeds when `app` connects to `https://floci:4566`. Fetch `ca.pem` from Floci into `app` (an entrypoint `curl`, or a shared volume mounted from `{persistent-path}/tls/`) so the bundle path above exists.
 
+### Containers Floci Launches
+
+Every container Floci launches, from Lambda functions and ECS or Batch tasks to the Docker backends behind RDS, ElastiCache, MWAA and Flink, and the Kubernetes Lambda pods, receives `/etc/floci-ca-bundle.pem`: the public root CAs the Floci JVM trusts, followed by the Floci CA (or your certificate file when you provide one). `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `AWS_CA_BUNDLE` point at it, so curl, Python, Node.js, Go, the AWS CLI and the AWS SDKs that read `AWS_CA_BUNDLE` reach both Floci and public HTTPS sites with no setup in the workload. A variable you set on the function or task definition wins over the injected one. The JVM ignores all of these variables, so a Java workload still needs its own trust store, as shown under SDK Configuration Examples. The bundle is written to `{persistent-path}/tls/floci-ca-bundle.pem` at startup; when it is missing, containers start without it and Floci logs a warning.
+
 ## User-Provided Certificates
 
 To use your own certificate (e.g., from a corporate CA or mkcert):
