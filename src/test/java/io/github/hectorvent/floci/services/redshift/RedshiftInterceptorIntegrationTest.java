@@ -27,6 +27,9 @@ class RedshiftInterceptorIntegrationTest {
     @Inject
     RedshiftService service;
 
+    @Inject
+    io.github.hectorvent.floci.services.s3.S3Service s3;
+
     private String clusterId;
 
     @BeforeAll
@@ -104,6 +107,61 @@ class RedshiftInterceptorIntegrationTest {
                 assertEquals(1, rs.getInt(1));
                 assertEquals("test-note", rs.getString(2));
             }
+        }
+    }
+
+    @Test
+    void copyFromS3SingleObjectLoadsRows() throws Exception {
+        clusterId = "it-copy-single";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-it";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "people/p1.txt",
+                "1|alice\n2|bob\n".getBytes(java.nio.charset.StandardCharsets.UTF_8), "text/plain", java.util.Map.of());
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE people (id int, name text)");
+            c.createStatement().execute("COPY people FROM 's3://redshift-copy-it/people/p1.txt'");
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*) FROM people")) {
+                assertTrue(rs.next());
+                assertEquals(2, rs.getInt(1));
+            }
+        }
+    }
+
+    @Test
+    void copyFromS3PrefixConcatenatesObjects() throws Exception {
+        clusterId = "it-copy-prefix";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-it-prefix";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "d/a", "1|a\n".getBytes(java.nio.charset.StandardCharsets.UTF_8), "text/plain", java.util.Map.of());
+        s3.putObject(bucket, "d/b", "2|b\n".getBytes(java.nio.charset.StandardCharsets.UTF_8), "text/plain", java.util.Map.of());
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE t (id int, v text)");
+            c.createStatement().execute("COPY t FROM 's3://redshift-copy-it-prefix/d/'");
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*) FROM t")) {
+                assertTrue(rs.next());
+                assertEquals(2, rs.getInt(1));
+            }
+        }
+    }
+
+    @Test
+    void copyFromMissingObjectSurfacesASqlError() throws Exception {
+        clusterId = "it-copy-missing";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE t2 (id int)");
+            SQLException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                    SQLException.class,
+                    () -> c.createStatement().execute("COPY t2 FROM 's3://redshift-copy-it/does/not/exist'"));
+            assertTrue(
+                    ex.getMessage().toLowerCase().contains("not found"), ex.getMessage());
         }
     }
 }
