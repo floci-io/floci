@@ -122,7 +122,8 @@ class FlociCertificateAuthorityTest {
 
     @Test
     void aLeafInPlaceOfTheCaIsRegenerated() throws Exception {
-        var leaf = new CertificateGenerator().generateCertificate("localhost", List.of(), KeyAlgorithm.RSA_2048);
+        var leaf = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("another-ca"))
+                .issueServerCertificate("localhost", List.of(), KeyAlgorithm.RSA_2048, null);
         Files.writeString(tempDir.resolve("floci-root-ca.crt"), leaf.certificatePem());
         Files.writeString(tempDir.resolve("floci-root-ca.key"), leaf.privateKeyPem());
 

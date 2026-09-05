@@ -190,7 +190,7 @@ class TlsCertificateHostnameTest {
 
         // Generate certificate without metadata
         CertificateGenerator gen = new CertificateGenerator();
-        CertificateGenerator.GeneratedCertificate generated = gen.generateCertificate(
+        CertificateGenerator.GeneratedCertificate generated = gen.generateSelfSignedCertificate(
             "localhost", 
             List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost", "localhost.floci.io", "*.localhost.floci.io"), 
             KeyAlgorithm.RSA_2048);
@@ -276,7 +276,7 @@ class TlsCertificateHostnameTest {
         Path userKeyFile = tempDir.resolve("user-key.key");
         
         CertificateGenerator gen = new CertificateGenerator();
-        CertificateGenerator.GeneratedCertificate userCert = gen.generateCertificate(
+        CertificateGenerator.GeneratedCertificate userCert = gen.generateSelfSignedCertificate(
             "user-domain.com",
             List.of("user-domain.com", "*.user-domain.com"),
             KeyAlgorithm.RSA_2048);
@@ -390,7 +390,7 @@ class TlsCertificateHostnameTest {
 
         Path userCert = tempDir.resolve("user.crt");
         Path userKey = tempDir.resolve("user.key");
-        var user = new CertificateGenerator().generateCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+        var user = new CertificateGenerator().generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
         Files.writeString(userCert, user.certificatePem());
         Files.writeString(userKey, user.privateKeyPem());
         System.setProperty("floci.tls.enabled", "true");

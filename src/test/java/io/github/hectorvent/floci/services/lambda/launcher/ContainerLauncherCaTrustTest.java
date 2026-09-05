@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -84,9 +85,7 @@ class ContainerLauncherCaTrustTest {
     void resolveCaCertPath_acceptsButWarnsForUserLeafCert() throws Exception {
         // A leaf/server cert (issuer != subject, not a CA) is still accepted so trust injection
         // proceeds; the warning is logged. Here we assert it is accepted and is NOT a self-signed CA.
-        Path leaf = writeCert(tempDir.resolve("leaf.crt"),
-                new CertificateGenerator().generateCertificate(
-                        "floci-leaf", List.of(), KeyAlgorithm.RSA_2048).certificatePem());
+        Path leaf = writeLeaf("leaf.crt", "floci-leaf");
 
         Optional<Path> resolved = ContainerLauncher.resolveFlociCaCertPath(
                 true, Optional.of(leaf.toString()), tempDir.toString());
@@ -127,9 +126,7 @@ class ContainerLauncherCaTrustTest {
 
     @Test
     void isSelfSignedCaCertificate_falseForLeafCert() throws Exception {
-        Path leaf = writeCert(tempDir.resolve("leaf2.crt"),
-                new CertificateGenerator().generateCertificate(
-                        "floci-leaf2", List.of(), KeyAlgorithm.RSA_2048).certificatePem());
+        Path leaf = writeLeaf("leaf2.crt", "floci-leaf2");
 
         assertFalse(ContainerLauncher.isSelfSignedCaCertificate(leaf));
     }
@@ -143,5 +140,12 @@ class ContainerLauncherCaTrustTest {
 
     private static Path writeCert(Path path, String pem) throws Exception {
         return Files.writeString(path, pem);
+    }
+
+    /** A server leaf issued by a throwaway CA: its issuer differs from its subject and it is not a CA. */
+    private Path writeLeaf(String fileName, String commonName) throws Exception {
+        FlociCertificateAuthority throwawayCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("throwaway-ca"));
+        return writeCert(tempDir.resolve(fileName),
+                throwawayCa.issueServerCertificate(commonName, List.of(), KeyAlgorithm.RSA_2048, null).certificatePem());
     }
 }
