@@ -375,7 +375,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get", "watch"]
-  # Only needed when FLOCI_TLS_ENABLED=true (CA cert is shared via a ConfigMap)
+  # Only needed when FLOCI_TLS_ENABLED=true (the CA bundle is shared via a ConfigMap)
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get", "update", "patch"]
