@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -19,6 +20,7 @@ import io.github.hectorvent.floci.services.iot.model.IotShadow;
 import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
 import io.github.hectorvent.floci.services.iot.model.IotThingType;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.iot.model.Thing;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -32,10 +34,13 @@ import jakarta.inject.Inject;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -76,6 +81,7 @@ public class IotService {
     private final KinesisService kinesisService;
     private final DynamoDbService dynamoDbService;
     private final LambdaService lambdaService;
+    private final FlociCertificateAuthority certificateAuthority;
 
     @Inject
     public IotService(StorageFactory storageFactory,
@@ -89,7 +95,8 @@ public class IotService {
                         S3Service s3Service,
                         KinesisService kinesisService,
                         DynamoDbService dynamoDbService,
-                        LambdaService lambdaService) {
+                        LambdaService lambdaService,
+                        FlociCertificateAuthority certificateAuthority) {
         this(storageFactory.create("iot", "iot-things.json", new TypeReference<Map<String, Thing>>() {}),
                 storageFactory.create("iot", "iot-certificates.json", new TypeReference<Map<String, IotCertificate>>() {}),
                 storageFactory.create("iot", "iot-policies.json", new TypeReference<Map<String, IotPolicy>>() {}),
@@ -104,7 +111,7 @@ public class IotService {
                 storageFactory.create("iot", "iot-thing-groups.json", new TypeReference<Map<String, IotThingGroup>>() {}),
                 storageFactory.create("iot", "iot-thing-group-memberships.json", new TypeReference<Map<String, Set<String>>>() {}),
                 config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService, snsService,
-                s3Service, kinesisService, dynamoDbService, lambdaService);
+                s3Service, kinesisService, dynamoDbService, lambdaService, certificateAuthority);
     }
 
     IotService(StorageBackend<String, Thing> thingStore,
@@ -130,7 +137,8 @@ public class IotService {
                   S3Service s3Service,
                   KinesisService kinesisService,
                   DynamoDbService dynamoDbService,
-                  LambdaService lambdaService) {
+                  LambdaService lambdaService,
+                  FlociCertificateAuthority certificateAuthority) {
         this.thingStore = thingStore;
         this.certificateStore = certificateStore;
         this.policyStore = policyStore;
@@ -155,6 +163,7 @@ public class IotService {
         this.kinesisService = kinesisService;
         this.dynamoDbService = dynamoDbService;
         this.lambdaService = lambdaService;
+        this.certificateAuthority = certificateAuthority;
     }
 
     public String describeEndpoint(String endpointType) {
@@ -275,17 +284,51 @@ public class IotService {
 
     private IotCertificate createCertificate(boolean setAsActive, String certificateSigningRequest, String region) {
         startMqttIfEnabled();
-        String id = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "");
         IotCertificate certificate = new IotCertificate();
-        certificate.setCertificateId(id);
-        certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + id));
-        certificate.setCertificatePem("-----BEGIN CERTIFICATE-----\n" + id + "\n-----END CERTIFICATE-----");
-        certificate.setPublicKey("-----BEGIN PUBLIC KEY-----\n" + (certificateSigningRequest == null ? id : certificateSigningRequest.hashCode()) + "\n-----END PUBLIC KEY-----");
-        certificate.setPrivateKey("-----BEGIN PRIVATE KEY-----\n" + id + "\n-----END PRIVATE KEY-----");
+        if (certificateSigningRequest == null) {
+            issueFromLocalCa(certificate);
+        } else {
+            issueFromCsr(certificate, certificateSigningRequest);
+        }
+        certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + certificate.getCertificateId()));
         certificate.setStatus(setAsActive ? "ACTIVE" : "INACTIVE");
         certificate.setCreationDate(Instant.now());
-        certificateStore.put(certificateKey(region, id), certificate);
+        certificateStore.put(certificateKey(region, certificate.getCertificateId()), certificate);
         return certificate;
+    }
+
+    /** As on AWS: a fresh RSA 2048 pair, the subject {@code AWS IoT Certificate}, and the private key returned once. */
+    private void issueFromLocalCa(IotCertificate certificate) {
+        CertificateGenerator.GeneratedCertificate issued = certificateAuthority.issueClientCertificate("AWS IoT Certificate");
+        try {
+            fill(certificate, new CertificateGenerator().parseCertificate(issued.certificatePem()));
+            certificate.setPrivateKey(issued.privateKeyPem());
+        } catch (Exception e) {
+            throw new AwsException("InternalFailureException", "Could not issue device certificate: " + e.getMessage(), 500);
+        }
+    }
+
+    /** The device keeps its key: only the certificate and its public key are stored. */
+    private void issueFromCsr(IotCertificate certificate, String csrPem) {
+        X509Certificate x509;
+        try {
+            x509 = certificateAuthority.signClientCsr(csrPem);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+        try {
+            fill(certificate, x509);
+        } catch (Exception e) {
+            throw new AwsException("InternalFailureException", "Could not encode device certificate: " + e.getMessage(), 500);
+        }
+    }
+
+    /** AWS IoT's certificateId is the lowercase hex SHA-256 of the certificate's DER encoding. */
+    private static void fill(IotCertificate certificate, X509Certificate x509) throws Exception {
+        CertificateGenerator pem = new CertificateGenerator();
+        certificate.setCertificateId(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(x509.getEncoded())));
+        certificate.setCertificatePem(pem.toPem(x509));
+        certificate.setPublicKey(pem.toPem(x509.getPublicKey()));
     }
 
     public IotCertificate describeCertificate(String certificateId, String region) {
