@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -43,7 +45,10 @@ class LambdaServiceTest {
         CodeStore codeStore = new CodeStore(Path.of("target/test-data/lambda-code"));
         ZipExtractor zipExtractor = new ZipExtractor();
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        service = new LambdaService(store, warmPool, codeStore, zipExtractor, regionResolver);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        service = new LambdaService(store, warmPool, codeStore, zipExtractor, null, regionResolver, storageFactory);
     }
 
     private Map<String, Object> baseRequest(String name) {
@@ -1207,7 +1212,7 @@ class LambdaServiceTest {
                 () -> service.createEventSourceMapping(REGION, request));
         assertEquals("InvalidParameterValueException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
-        assertTrue(ex.getMessage().contains("Topics must not be empty"));
+        assertTrue(ex.getMessage().contains("Topics"));
     }
 
     @Test
@@ -1250,5 +1255,90 @@ class LambdaServiceTest {
         assertEquals("InvalidParameterValueException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
         assertTrue(ex.getMessage().contains("AT_TIMESTAMP is only supported for Amazon Kinesis"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_crossRegionFunctionArn_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-cross-region"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:kafka-fn-cross-region",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Region 'us-west-2' in ARN does not match request region 'us-east-1'"));
+    }
+
+    @Test
+    void createEventSourceMapping_mixedSources_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-mixed"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-mixed",
+                "EventSourceArn", "arn:aws:sqs:us-east-1:000000000000:my-queue",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Cannot specify both EventSourceArn and SelfManagedEventSource/Topics"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_malformedTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-malformed-topics"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-malformed-topics",
+                "Topics", List.of(123),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateEventSourceMapping_malformedTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-update-topics"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-fn-update-topics",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of()
+        )));
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of(456)
+        )));
     }
 }

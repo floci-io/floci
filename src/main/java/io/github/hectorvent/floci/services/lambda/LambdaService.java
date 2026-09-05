@@ -162,7 +162,7 @@ public class LambdaService implements ResourceProvider {
         this.zipExtractor = zipExtractor;
         this.config = config;
         this.regionResolver = regionResolver;
-        this.esmStore = new EsmStore(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>());
+        this.esmStore = storageFactory != null ? new EsmStore(storageFactory) : null;
         this.aliasStore = null;
         this.s3Service = null;
         this.sqsService = null;
@@ -1055,7 +1055,10 @@ public class LambdaService implements ResourceProvider {
         LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(functionName);
         String resolvedName = fnRef.name();
 
-        boolean isSelfManagedKafka = request.containsKey("SelfManagedEventSource") || request.containsKey("Topics");
+        boolean hasKafkaSource = request.containsKey("SelfManagedEventSource") && request.get("SelfManagedEventSource") != null;
+        boolean hasTopics = request.containsKey("Topics") && request.get("Topics") != null;
+        boolean hasEventSourceArn = request.containsKey("EventSourceArn") && request.get("EventSourceArn") != null;
+        boolean isSelfManagedKafka = hasKafkaSource || hasTopics;
 
         String eventSourceArn;
         String resolvedRegion;
@@ -1064,7 +1067,22 @@ public class LambdaService implements ResourceProvider {
         List<Map<String, Object>> sourceAccessConfigurations = null;
 
         if (isSelfManagedKafka) {
-            eventSourceArn = (String) request.get("EventSourceArn");
+            if (hasEventSourceArn) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Cannot specify both EventSourceArn and SelfManagedEventSource/Topics", 400);
+            }
+            if (!hasKafkaSource) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource is required for self-managed Apache Kafka event sources", 400);
+            }
+            if (!hasTopics) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics is required for self-managed Apache Kafka event sources", 400);
+            }
+            eventSourceArn = null;
+
+            enforceRegion(region, fnRef);
+            resolvedRegion = region;
 
             Object rawSource = request.get("SelfManagedEventSource");
             if (!(rawSource instanceof Map<?, ?> sourceMap)) {
@@ -1081,6 +1099,12 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("InvalidParameterValueException",
                         "SelfManagedEventSource must contain KAFKA_BOOTSTRAP_SERVERS", 400);
             }
+            for (Object server : serverList) {
+                if (!(server instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "KAFKA_BOOTSTRAP_SERVERS elements must be non-blank strings", 400);
+                }
+            }
             @SuppressWarnings("unchecked")
             Map<String, Object> typedSource = (Map<String, Object>) rawSource;
             selfManagedEventSource = typedSource;
@@ -1088,22 +1112,38 @@ public class LambdaService implements ResourceProvider {
             Object rawTopics = request.get("Topics");
             if (!(rawTopics instanceof List<?> topicList) || topicList.isEmpty()) {
                 throw new AwsException("InvalidParameterValueException",
-                        "Topics must not be empty", 400);
+                        "Topics must be a non-empty list of strings", 400);
             }
-            @SuppressWarnings("unchecked")
-            List<String> typedTopics = (List<String>) rawTopics;
-            topics = typedTopics;
+            List<String> validatedTopics = new ArrayList<>();
+            for (Object item : topicList) {
+                if (!(item instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Topics elements must be non-blank strings", 400);
+                }
+                validatedTopics.add(s);
+            }
+            topics = validatedTopics;
 
             if (request.containsKey("SourceAccessConfigurations")) {
                 Object rawAccess = request.get("SourceAccessConfigurations");
-                if (rawAccess instanceof List<?> accessList) {
-                    @SuppressWarnings("unchecked")
-                    List<Map<String, Object>> typedAccess = (List<Map<String, Object>>) rawAccess;
+                if (rawAccess != null) {
+                    if (!(rawAccess instanceof List<?> accessList)) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "SourceAccessConfigurations must be a list", 400);
+                    }
+                    List<Map<String, Object>> typedAccess = new ArrayList<>();
+                    for (Object item : accessList) {
+                        if (!(item instanceof Map<?, ?> m)) {
+                            throw new AwsException("InvalidParameterValueException",
+                                    "SourceAccessConfiguration entries must be JSON objects", 400);
+                        }
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> typedMap = (Map<String, Object>) m;
+                        typedAccess.add(typedMap);
+                    }
                     sourceAccessConfigurations = typedAccess;
                 }
             }
-
-            resolvedRegion = fnRef.region() != null ? fnRef.region() : region;
         } else {
             eventSourceArn = (String) request.get("EventSourceArn");
             if (eventSourceArn == null || eventSourceArn.isBlank()) {
@@ -1605,21 +1645,51 @@ public class LambdaService implements ResourceProvider {
             esm.setFilterCriteria(parseFilterCriteria(request, objectMapper));
         }
 
+        if (request.containsKey("FunctionName")) {
+            String fnName = (String) request.get("FunctionName");
+            if (fnName != null && !fnName.isBlank()) {
+                LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(fnName);
+                esm.setFunctionArn(fnRef.name());
+            }
+        }
+
         if (request.containsKey("Topics")) {
             Object rawTopics = request.get("Topics");
-            if (rawTopics instanceof List<?> topicList) {
-                @SuppressWarnings("unchecked")
-                List<String> typedTopics = (List<String>) rawTopics;
-                esm.setTopics(typedTopics);
+            if (!(rawTopics instanceof List<?> topicList) || topicList.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics must be a non-empty list of strings", 400);
             }
+            List<String> validatedTopics = new ArrayList<>();
+            for (Object item : topicList) {
+                if (!(item instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Topics elements must be non-blank strings", 400);
+                }
+                validatedTopics.add(s);
+            }
+            esm.setTopics(validatedTopics);
         }
 
         if (request.containsKey("SourceAccessConfigurations")) {
             Object rawAccess = request.get("SourceAccessConfigurations");
-            if (rawAccess instanceof List<?> accessList) {
-                @SuppressWarnings("unchecked")
-                List<Map<String, Object>> typedAccess = (List<Map<String, Object>>) rawAccess;
+            if (rawAccess != null) {
+                if (!(rawAccess instanceof List<?> accessList)) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "SourceAccessConfigurations must be a list", 400);
+                }
+                List<Map<String, Object>> typedAccess = new ArrayList<>();
+                for (Object item : accessList) {
+                    if (!(item instanceof Map<?, ?> m)) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "SourceAccessConfiguration entries must be JSON objects", 400);
+                    }
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> typedMap = (Map<String, Object>) m;
+                    typedAccess.add(typedMap);
+                }
                 esm.setSourceAccessConfigurations(typedAccess);
+            } else {
+                esm.setSourceAccessConfigurations(null);
             }
         }
 

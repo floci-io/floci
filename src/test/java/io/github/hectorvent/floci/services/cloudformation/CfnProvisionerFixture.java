@@ -42,6 +42,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.IotDomain
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KinesisCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaAddressingCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEventSourceMappingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
@@ -245,6 +246,7 @@ final class CfnProvisionerFixture {
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
                 discovered.add(new LambdaVersionAliasCfnProvisioner(lambdaService));
+                discovered.add(new LambdaEventSourceMappingCfnProvisioner(lambdaService));
             }
             if (flowLogService != null) {
                 discovered.add(new Ec2FlowLogCfnProvisioner(flowLogService));
