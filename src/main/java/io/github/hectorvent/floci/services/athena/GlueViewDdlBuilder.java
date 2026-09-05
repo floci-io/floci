@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.athena;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Table;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -17,16 +16,10 @@ public class GlueViewDdlBuilder {
     private static final Logger LOG = Logger.getLogger(GlueViewDdlBuilder.class);
 
     private final GlueService glueService;
-    private final S3Service s3Service;
 
     @Inject
-    public GlueViewDdlBuilder(GlueService glueService, S3Service s3Service) {
+    public GlueViewDdlBuilder(GlueService glueService) {
         this.glueService = glueService;
-        this.s3Service = s3Service;
-    }
-
-    GlueViewDdlBuilder(GlueService glueService) {
-        this(glueService, null);
     }
 
     public String build(String contextDatabase) {
@@ -86,14 +79,6 @@ public class GlueViewDdlBuilder {
                     continue;
                 }
                 String location = t.getStorageDescriptor().getLocation();
-                if (s3Service != null) {
-                    String bucket = extractBucket(location);
-                    if (bucket != null && !s3Service.bucketExists(bucket)) {
-                        LOG.debugv("Skipping Glue table {0}.{1}: S3 bucket {2} does not exist",
-                                schemaOrNull, t.getName(), bucket);
-                        continue;
-                    }
-                }
                 String normalizedLocation = location.endsWith("/")
                         ? location.substring(0, location.length() - 1)
                         : location;
@@ -141,15 +126,6 @@ public class GlueViewDdlBuilder {
 
     static boolean containsIgnoreCase(String str, String sub) {
         return str != null && str.toLowerCase(Locale.ROOT).contains(sub);
-    }
-
-    static String extractBucket(String s3Path) {
-        if (s3Path == null || !s3Path.startsWith("s3://")) {
-            return null;
-        }
-        String without = s3Path.substring(5);
-        int slash = without.indexOf('/');
-        return slash < 0 ? without : without.substring(0, slash);
     }
 
     static String quote(String id) {
