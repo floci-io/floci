@@ -39,7 +39,7 @@ class AcmImportExportTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
 
         // Generate a valid test certificate using CertificateGenerator
-        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateCertificate(
+        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateSelfSignedCertificate(
             "test-import.example.com",
             List.of("www.test-import.example.com"),
             KeyAlgorithm.RSA_2048

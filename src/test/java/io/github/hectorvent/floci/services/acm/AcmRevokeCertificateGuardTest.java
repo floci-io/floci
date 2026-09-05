@@ -27,7 +27,7 @@ class AcmRevokeCertificateGuardTest {
 
     @Test
     void revokeCertificateRejectsImportedCertificateWithoutExportEnabled() {
-        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateCertificate(
+        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateSelfSignedCertificate(
             "revoke-guard-imported.example.com", List.of(), KeyAlgorithm.RSA_2048);
         String certJson = generated.certificatePem().replace("\r\n", "\n").replace("\n", "\\n");
         String keyJson = generated.privateKeyPem().replace("\r\n", "\n").replace("\n", "\\n");
