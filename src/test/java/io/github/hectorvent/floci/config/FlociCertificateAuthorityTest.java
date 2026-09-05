@@ -160,6 +160,26 @@ class FlociCertificateAuthorityTest {
         assertEquals("CN=AWS IoT Certificate", cert.getSubjectX500Principal().getName());
         assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage());
         assertTrue(ca.isIssuedByUs(cert));
+        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant(), "AWS's fixed expiry");
+        assertEquals(java.time.Instant.parse("2050-12-31T23:59:59Z"), ca.certificate().getNotAfter().toInstant(),
+                "a new CA outlives the device certificates it signs");
+    }
+
+    @Test
+    void deviceCertificateNeverOutlivesAShortLivedCa() throws Exception {
+        CertificateGenerator gen = new CertificateGenerator();
+        var shortLived = gen.generateCaCertificate(FlociCertificateAuthority.COMMON_NAME,
+                java.time.Instant.now().plus(30, java.time.temporal.ChronoUnit.DAYS));
+        Files.writeString(tempDir.resolve("floci-root-ca.crt"), shortLived.certificatePem());
+        Files.writeString(tempDir.resolve("floci-root-ca.key"), shortLived.privateKeyPem());
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        assertEquals(parse(shortLived.certificatePem()), ca.certificate(), "the short-lived CA is kept as is");
+
+        X509Certificate leaf = parse(ca.issueClientCertificate("device").certificatePem());
+        X509Certificate fromCsr = ca.signClientCsr(csrPem("CN=device", rsaKeyPair(2048)));
+
+        assertEquals(ca.certificate().getNotAfter(), leaf.getNotAfter(), "capped at the CA's expiry");
+        assertEquals(ca.certificate().getNotAfter(), fromCsr.getNotAfter(), "the CSR path is capped the same way");
     }
 
     @Test

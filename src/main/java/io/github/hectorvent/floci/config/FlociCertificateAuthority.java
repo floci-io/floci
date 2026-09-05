@@ -50,6 +50,8 @@ public final class FlociCertificateAuthority {
     static final String COMMON_NAME = "Floci Local CA";
     /** AWS IoT-issued client certificates all expire at this instant, whenever they were created. */
     public static final Instant DEVICE_CERTIFICATE_NOT_AFTER = Instant.parse("2049-12-31T23:59:59Z");
+    /** A new CA outlives every device certificate it will sign, so a chain never expires before its leaf. */
+    static final Instant CA_NOT_AFTER = Instant.parse("2050-12-31T23:59:59Z");
 
     private final Path certificatePath;
     private final X509Certificate certificate;
@@ -102,7 +104,7 @@ public final class FlociCertificateAuthority {
             }
             Files.createDirectories(tlsDir);
             restrictToOwnerOnly(tlsDir, "rwx------");
-            CertificateGenerator.GeneratedCertificate generated = generator.generateCaCertificate(COMMON_NAME);
+            CertificateGenerator.GeneratedCertificate generated = generator.generateCaCertificate(COMMON_NAME, CA_NOT_AFTER);
             Files.writeString(certFile, generated.certificatePem());
             writePrivateKey(keyFile, generated.privateKeyPem());
             FlociCertificateAuthority ca = new FlociCertificateAuthority(certFile,
@@ -164,11 +166,21 @@ public final class FlociCertificateAuthority {
 
     /**
      * A {@code clientAuth} leaf for an IoT device: a fresh RSA 2048 key pair and, as on AWS, validity
-     * until the end of 2049.
+     * until the end of 2049, never past the CA's own expiry.
      */
     public CertificateGenerator.GeneratedCertificate issueClientCertificate(String commonName) {
         return generator.generateIssuedCertificate(commonName, List.of(), KeyAlgorithm.RSA_2048, null, issuer(),
-                CertificateGenerator.LeafUsage.CLIENT, DEVICE_CERTIFICATE_NOT_AFTER);
+                CertificateGenerator.LeafUsage.CLIENT, deviceCertificateNotAfter());
+    }
+
+    /**
+     * The end of validity for a device certificate: AWS's fixed 2049 date, capped at the CA's own
+     * expiry so a CA created before that date was adopted (ten years) never signs a leaf that
+     * outlives it.
+     */
+    public Instant deviceCertificateNotAfter() {
+        Instant caNotAfter = certificate.getNotAfter().toInstant();
+        return caNotAfter.isBefore(DEVICE_CERTIFICATE_NOT_AFTER) ? caNotAfter : DEVICE_CERTIFICATE_NOT_AFTER;
     }
 
     /**
@@ -189,7 +201,7 @@ public final class FlociCertificateAuthority {
             }
             X500Name issuerDn = X500Name.getInstance(certificate.getSubjectX500Principal().getEncoded());
             return generator.signCertificate(csr.getSubject(), subjectKey, issuerDn, key, List.of(), false,
-                    CertificateGenerator.LeafUsage.CLIENT, Instant.now(), DEVICE_CERTIFICATE_NOT_AFTER);
+                    CertificateGenerator.LeafUsage.CLIENT, Instant.now(), deviceCertificateNotAfter());
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
