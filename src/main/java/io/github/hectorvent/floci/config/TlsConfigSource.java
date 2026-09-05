@@ -178,7 +178,7 @@ public class TlsConfigSource implements ConfigSource {
             Files.createDirectories(tlsDir);
             List<String> configured = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
             configured.addAll(extractCustomHostnames());
-            List<String> learned = readLearnedHostnames(tlsDir);
+            List<String> learned = readLearnedHostnames(tlsDir, certFile);
             List<String> allSans = new ArrayList<>(configured);
             for (String name : learned) {
                 if (!allSans.contains(name)) {
@@ -202,20 +202,48 @@ public class TlsConfigSource implements ConfigSource {
 
     /**
      * Hostnames {@link TlsCertificateManager} added at runtime. A boot that regenerates the
-     * certificate (changed configuration, expired or foreign leaf) must keep serving them.
+     * certificate (changed configuration, expired or foreign leaf) must keep serving them. The
+     * served certificate is the source of truth: a SAN it carries beyond the metadata's configured
+     * list was learned by a reissue whose metadata write did not complete, and is kept too.
      */
-    private List<String> readLearnedHostnames(Path tlsDir) {
+    private List<String> readLearnedHostnames(Path tlsDir, Path certFile) {
         Path metadataFile = tlsDir.resolve(SERVER_METADATA_NAME);
         if (!Files.exists(metadataFile)) {
             return List.of();
         }
         try {
-            return OBJECT_MAPPER.readValue(Files.readString(metadataFile), CertificateMetadata.class).getLearnedHostnames();
+            CertificateMetadata metadata = OBJECT_MAPPER.readValue(Files.readString(metadataFile), CertificateMetadata.class);
+            Set<String> learned = new LinkedHashSet<>(metadata.getLearnedHostnames());
+            if (metadata.getHostnames() != null && Files.exists(certFile)) {
+                Set<String> configured = new LinkedHashSet<>(metadata.getHostnames());
+                for (String san : servedSans(certFile)) {
+                    if (!configured.contains(san)) {
+                        learned.add(san);
+                    }
+                }
+            }
+            return new ArrayList<>(learned);
         } catch (IOException e) {
             LOG.warnv("TLS: could not read learned hostnames from {0} ({1}); the new certificate starts without them",
                     metadataFile, e.getMessage());
             return List.of();
         }
+    }
+
+    private static List<String> servedSans(Path certFile) {
+        List<String> sans = new ArrayList<>();
+        try {
+            X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
+            if (cert.getSubjectAlternativeNames() != null) {
+                for (List<?> entry : cert.getSubjectAlternativeNames()) {
+                    sans.add(String.valueOf(entry.get(1)));
+                }
+            }
+        } catch (Exception e) {
+            LOG.debugv("TLS: could not read the SAN list of {0} ({1}); learned names come from the metadata only",
+                    certFile, e.getMessage());
+        }
+        return sans;
     }
 
     private static void validateFileExists(String path, String description) {
