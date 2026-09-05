@@ -165,6 +165,24 @@ class FlociCertificateAuthorityTest {
     }
 
     @Test
+    void expiryRulesStayValidAfterTheFixedDates() {
+        java.time.Instant in2051 = java.time.Instant.parse("2051-06-01T00:00:00Z");
+        assertEquals(in2051.plus(3650, java.time.temporal.ChronoUnit.DAYS), FlociCertificateAuthority.caNotAfter(in2051),
+                "a CA created after 2050 lives ten years instead of being born expired");
+        assertEquals(java.time.Instant.parse("2050-12-31T23:59:59Z"),
+                FlociCertificateAuthority.caNotAfter(java.time.Instant.parse("2026-09-05T00:00:00Z")));
+
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        assertEquals(ca.certificate().getNotAfter().toInstant(),
+                ca.deviceCertificateNotAfter(java.time.Instant.parse("2050-06-01T00:00:00Z")),
+                "after 2049 a device certificate lives a year, capped at the CA's expiry: never born expired");
+        assertTrue(ca.deviceCertificateNotAfter(java.time.Instant.parse("2050-06-01T00:00:00Z"))
+                .isAfter(java.time.Instant.parse("2050-06-01T00:00:00Z")));
+        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"),
+                ca.deviceCertificateNotAfter(java.time.Instant.parse("2026-09-05T00:00:00Z")));
+    }
+
+    @Test
     void deviceCertificateNeverOutlivesAShortLivedCa() throws Exception {
         CertificateGenerator gen = new CertificateGenerator();
         var shortLived = gen.generateCaCertificate(FlociCertificateAuthority.COMMON_NAME,
