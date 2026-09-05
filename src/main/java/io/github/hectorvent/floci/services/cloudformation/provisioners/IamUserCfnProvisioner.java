@@ -293,57 +293,33 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         }
 
         for (String policyArn : new ArrayList<>(user.getAttachedPolicyArns())) {
-            try {
-                iamService.detachUserPolicy(physicalId, policyArn);
-            } catch (AwsException e) {
-                if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                    throw e;
-                }
-            }
+            CfnDeletes.safeDelete("attached policy " + policyArn + " on user", physicalId,
+                    () -> iamService.detachUserPolicy(physicalId, policyArn), "NoSuchEntity");
         }
 
         for (String policyName : new ArrayList<>(user.getInlinePolicies().keySet())) {
-            try {
-                iamService.deleteUserPolicy(physicalId, policyName);
-            } catch (AwsException e) {
-                if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                    throw e;
-                }
-            }
+            CfnDeletes.safeDelete("inline policy " + policyName + " on user", physicalId,
+                    () -> iamService.deleteUserPolicy(physicalId, policyName), "NoSuchEntity");
         }
 
         for (String groupName : new ArrayList<>(user.getGroupNames())) {
-            try {
-                iamService.removeUserFromGroup(groupName, physicalId);
-            } catch (AwsException e) {
-                if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                    throw e;
-                }
-            }
+            CfnDeletes.safeDelete("user " + physicalId + " membership in group " + groupName, physicalId,
+                    () -> iamService.removeUserFromGroup(groupName, physicalId), "NoSuchEntity");
         }
 
         try {
             for (AccessKey key : iamService.listAccessKeys(physicalId)) {
-                try {
-                    iamService.deleteAccessKey(physicalId, key.getAccessKeyId());
-                } catch (AwsException e) {
-                    if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                        throw e;
-                    }
-                }
+                CfnDeletes.safeDelete("access key " + key.getAccessKeyId() + " on user", physicalId,
+                        () -> iamService.deleteAccessKey(physicalId, key.getAccessKeyId()), "NoSuchEntity");
             }
         } catch (AwsException e) {
             if (!"NoSuchEntity".equals(e.getErrorCode())) {
                 throw e;
             }
+            LOG.debugv("IAM user access keys already gone, treating as deleted: {0}", physicalId);
         }
 
-        try {
-            iamService.deleteUser(physicalId);
-        } catch (AwsException e) {
-            if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                throw e;
-            }
-        }
+        CfnDeletes.safeDelete("IAM user", physicalId,
+                () -> iamService.deleteUser(physicalId), "NoSuchEntity");
     }
 }
