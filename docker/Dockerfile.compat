@@ -64,12 +64,21 @@ RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install --bin-dir /usr/bin --install-dir /usr/local/aws-cli \
     && rm -rf /tmp/awscliv2.zip /tmp/aws \
+    # The CLI's `aws <cmd> help` example pages are 26 MB of text nobody reads inside a container;
+    # the command reference itself (dist/awscli/data) stays. unzip exists only to unpack the CLI.
+    # pip stays: the image documents it and init hooks use it to install packages.
+    && rm -rf /usr/local/aws-cli/v2/*/dist/awscli/examples \
+    # Tab completion has no user inside a container: aws_completer and its 21 MB ac.index go.
+    # The system Python keeps pip, setuptools and what boto3 imports; the optimised .pyc
+    # variants, lib2to3 and ensurepip (pip is already installed) are build-time extras.
+    && rm -rf /usr/local/aws-cli/v2/*/dist/awscli/data/ac.index /usr/local/aws-cli/v2/*/dist/aws_completer /usr/bin/aws_completer \
+    && rm -rf /usr/lib64/python3.9/lib2to3 /usr/lib64/python3.9/ensurepip \
+    && python3 -c 'import pathlib; [p.unlink() for d in ("/usr/lib64/python3.9","/usr/lib/python3.9") for p in pathlib.Path(d).rglob("*.opt-[12].pyc")]' \
     && microdnf remove -y unzip \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
 
-COPY bin/awslocal /usr/local/bin/awslocal
-RUN chmod +x /usr/local/bin/awslocal
+COPY --chmod=755 bin/awslocal /usr/local/bin/awslocal
 
 # Pre-create the init-hook directories so archive-based copies (Testcontainers
 # withCopyFileToContainer / `docker cp`) can drop hooks straight into them.
