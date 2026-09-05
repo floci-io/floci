@@ -7,7 +7,9 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Provisions {@code AWS::KinesisFirehose::DeliveryStream}. */
@@ -31,10 +33,8 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "DeliveryStreamName");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), DELIVERY_STREAM_NAME_MAX_LENGTH, false);
-        }
+        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "DeliveryStreamName"),
+                r.getLogicalId(), DELIVERY_STREAM_NAME_MAX_LENGTH, false);
 
         DeliveryStreamDescription.S3Destination s3 = null;
         JsonNode s3Node = props != null && props.has("ExtendedS3DestinationConfiguration")
@@ -68,7 +68,27 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        String arn = firehoseService.createDeliveryStream(name, s3, tags);
+        // provision is also the update path. createDeliveryStream throws ResourceInUseException on
+        // an existing name, and stablePhysicalName now keeps that name steady across updates, so a
+        // second UpdateStack must reconcile the stream rather than recreate it. A replacing update
+        // derives a different name and still creates, hence reusesPriorEntity rather than isUpdate.
+        String arn;
+        if (ctx.reusesPriorEntity(name)) {
+            DeliveryStreamDescription existing = firehoseService.describeDeliveryStream(name);
+            arn = existing.getDeliveryStreamARN();
+            // Only the destination is updatable here; a template that declares none leaves the
+            // stored one alone rather than clearing it.
+            if (s3 != null) {
+                String destinationId =
+                        existing.getDestinations() != null && !existing.getDestinations().isEmpty()
+                                ? existing.getDestinations().get(0).getDestinationId()
+                                : null;
+                firehoseService.updateDestination(name, existing.getVersionId(), destinationId, s3);
+            }
+            reconcileTags(name, existing, tags);
+        } else {
+            arn = firehoseService.createDeliveryStream(name, s3, tags);
+        }
         // Ref returns the delivery stream name; Fn::GetAtt Arn returns the stream ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", arn);
@@ -77,6 +97,31 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         firehoseService.deleteDeliveryStream(physicalId);
+    }
+
+    /**
+     * UpdateDestination carries no tags, so on the update path the template's Tags are driven to
+     * their desired state through TagDeliveryStream and UntagDeliveryStream, the two calls the
+     * registry schema's update handler declares. A key the template dropped is untagged rather than
+     * left over from the previous revision.
+     */
+    private void reconcileTags(String name, DeliveryStreamDescription existing,
+                               List<DeliveryStreamDescription.Tag> desired) {
+        Map<String, String> desiredByKey = new LinkedHashMap<>();
+        for (DeliveryStreamDescription.Tag tag : desired) {
+            desiredByKey.put(tag.getKey(), tag.getValue());
+        }
+        Map<String, String> current = new LinkedHashMap<>();
+        for (DeliveryStreamDescription.Tag tag : existing.getTags()) {
+            current.put(tag.getKey(), tag.getValue());
+        }
+        List<String> stale = ProvisionContext.staleTagKeys(current, desiredByKey);
+        if (!stale.isEmpty()) {
+            firehoseService.untagDeliveryStream(name, stale);
+        }
+        if (!desired.isEmpty()) {
+            firehoseService.tagDeliveryStream(name, desired);
+        }
     }
 
     private static String blankToNull(String value) {

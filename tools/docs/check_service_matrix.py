@@ -16,6 +16,11 @@ resolves to neither - unless tools/docs/service_matrix.yaml says otherwise (an a
 for a key whose AWS signing name differs from its doc filename, or a time-boxed
 deferred entry for a service that is genuinely not documented yet).
 
+The reverse direction is checked too: every docs/services/*.md page must have a
+matrix row, unless listed under `facet_pages:` in the registry, so a page can no
+longer exist in the nav with no row (elb-classic.md did, hidden by the `elb` key
+exact-matching the v2 page).
+
 Run from anywhere in the repo:
     python3 tools/docs/check_service_matrix.py            # print warnings only
     python3 tools/docs/check_service_matrix.py --strict   # exit non-zero on warnings
@@ -53,6 +58,8 @@ ALL_DESCRIPTOR_CALLS_RE = re.compile(r"(?<!ServiceDescriptor )\bdescriptor\(")
 # The slug is everything up to `.md`; a trailing `#anchor` (e.g. `cloudwatch.md#metrics`)
 # is not part of the filename and is dropped by stopping the match at `.md` itself.
 MATRIX_LINK_RE = re.compile(r"\]\(([a-z0-9][a-z0-9\-]*)\.md")
+
+SERVICES_DIR = "docs/services"
 
 
 @dataclass(frozen=True)
@@ -96,16 +103,27 @@ def extract_matrix_slugs(md_source: str) -> set[str]:
     return set(MATRIX_LINK_RE.findall(table))
 
 
-def _load_registry(repo_root: Path) -> tuple[dict[str, str], list[DeferredEntry]]:
-    """Load service_matrix.yaml. Returns (aliases, deferred entries).
+def find_unlinked_pages(services_dir: Path, slugs: set[str], facet_pages: set[str]) -> list[str]:
+    """docs/services pages (by slug) that no matrix row links and no facet entry excuses.
+
+    index.md is the matrix page itself and is never expected to link to itself.
+    """
+    pages = sorted(p.stem for p in services_dir.glob("*.md") if p.name != "index.md")
+    return [page for page in pages if page not in slugs and page not in facet_pages]
+
+
+def _load_registry(repo_root: Path) -> tuple[dict[str, str], list[DeferredEntry], set[str]]:
+    """Load service_matrix.yaml. Returns (aliases, deferred entries, facet pages).
 
     Schema: `aliases:` maps an externalKey to the doc slug that documents it;
     `deferred:` lists externalKeys with no row yet, each requiring `reason` and a
     `by` expiry date (see service_matrix.yaml's header comment for why expiry is
-    mandatory rather than a permanent bypass).
+    mandatory rather than a permanent bypass); `facet_pages:` lists docs/services
+    slugs that deliberately have no matrix row of their own.
     """
     raw = yaml.safe_load((repo_root / REGISTRY).read_text(encoding="utf-8")) or {}
     aliases = dict(raw.get("aliases") or {})
+    facet_pages = set(raw.get("facet_pages") or [])
     deferred: list[DeferredEntry] = []
     for item in raw.get("deferred") or []:
         missing = [f for f in ("key", "reason", "by") if f not in item]
@@ -120,7 +138,7 @@ def _load_registry(repo_root: Path) -> tuple[dict[str, str], list[DeferredEntry]
                 by=date.fromisoformat(str(item["by"])),
             )
         )
-    return aliases, deferred
+    return aliases, deferred, facet_pages
 
 
 def find_undocumented(
@@ -171,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = _repo_root()
 
     try:
-        aliases, deferred = _load_registry(repo_root)
+        aliases, deferred, facet_pages = _load_registry(repo_root)
     except (ValueError, yaml.YAMLError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -217,6 +235,12 @@ def main(argv: list[str] | None = None) -> int:
         warnings.append(
             f"service '{key}' is registered in {CATALOG_SOURCE} but has no row in "
             f"{MATRIX_DOC} (add a row, an alias, or a time-boxed entry in {REGISTRY})"
+        )
+
+    for page in find_unlinked_pages(repo_root / SERVICES_DIR, slugs, facet_pages):
+        warnings.append(
+            f"{SERVICES_DIR}/{page}.md has no row in {MATRIX_DOC} (add a row, or list it "
+            f"under facet_pages in {REGISTRY} if it is a facet of another service's page)"
         )
 
     for w in warnings:

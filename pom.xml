@@ -147,12 +147,6 @@
             <artifactId>snappy-java</artifactId>
         </dependency>
 
-        <!-- Kubernetes client for the Lambda kubernetes executor -->
-        <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-kubernetes-client</artifactId>
-        </dependency>
-
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>
             <groupId>com.github.docker-java</groupId>
@@ -281,6 +275,20 @@
             <groupId>io.apicurio</groupId>
             <artifactId>apicurio-registry-schema-util-protobuf</artifactId>
             <version>${apicurio.version}</version>
+            <exclusions>
+                <!-- Glue schema-registry protobuf validation. Wire's schema parser drags in
+                     KotlinPoet, which exists to generate Kotlin source and pulls kotlin-reflect
+                     behind it. Floci only parses and canonicalizes .proto schemas. ICU4J comes
+                     along the same path and is only used by Wire's code generator too. -->
+                <exclusion>
+                    <groupId>com.squareup</groupId>
+                    <artifactId>kotlinpoet-jvm</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.ibm.icu</groupId>
+                    <artifactId>icu4j</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Testing -->
@@ -308,6 +316,15 @@
         <dependency>
             <groupId>io.fabric8</groupId>
             <artifactId>kubernetes-server-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- kubernetes-server-mock declares this as optional, so it must be pulled in
+             explicitly for the kubernetes Lambda executor's tests, which use it as a fake
+             API server (never shipped: KubernetesApiClient is a plain HTTP client, not a
+             Kubernetes SDK, see issue #2914). -->
+        <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-client</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

@@ -30,28 +30,28 @@ class SesServiceTemplateTest {
     void undefinedVariable_throwsMissingRenderingAttribute() {
         JsonNode data = MAPPER.createObjectNode().put("name", "Alice");
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.applyTemplateData("Hello {{name}}, team {{team}}", data));
+                () -> SesTemplateService.applyTemplateData("Hello {{name}}, team {{team}}", data));
         assertEquals("MissingRenderingAttribute", ex.getErrorCode());
     }
 
     @Test
     void spacedVariable_matchesCorrectly() {
         JsonNode data = MAPPER.createObjectNode().put("name", "Alice");
-        String result = SesService.applyTemplateData("Hello {{ name }}", data);
+        String result = SesTemplateService.applyTemplateData("Hello {{ name }}", data);
         assertEquals("Hello Alice", result);
     }
 
     @Test
     void hyphenatedVariableName() {
         JsonNode data = MAPPER.createObjectNode().put("first-name", "Alice");
-        String result = SesService.applyTemplateData("Hello {{first-name}}", data);
+        String result = SesTemplateService.applyTemplateData("Hello {{first-name}}", data);
         assertEquals("Hello Alice", result);
     }
 
     @Test
     void unclosedBraces_leftAsIs() {
         JsonNode data = MAPPER.createObjectNode().put("name", "Alice");
-        String result = SesService.applyTemplateData("Hello {{name}} and {{foo", data);
+        String result = SesTemplateService.applyTemplateData("Hello {{name}} and {{foo", data);
         assertEquals("Hello Alice and {{foo", result);
     }
 
@@ -62,80 +62,80 @@ class SesServiceTemplateTest {
         data.put("active", true);
         data.set("nested", MAPPER.readTree("{\"key\":\"val\"}"));
 
-        assertEquals("Items: 42", SesService.applyTemplateData("Items: {{count}}", data));
-        assertEquals("Active: true", SesService.applyTemplateData("Active: {{active}}", data));
-        assertEquals("Data: {\"key\":\"val\"}", SesService.applyTemplateData("Data: {{nested}}", data));
+        assertEquals("Items: 42", SesTemplateService.applyTemplateData("Items: {{count}}", data));
+        assertEquals("Active: true", SesTemplateService.applyTemplateData("Active: {{active}}", data));
+        assertEquals("Data: {\"key\":\"val\"}", SesTemplateService.applyTemplateData("Data: {{nested}}", data));
     }
 
     @Test
     void emptyTemplateData_throwsMissingRenderingAttribute() {
         JsonNode data = MAPPER.createObjectNode();
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.applyTemplateData("Hello {{name}}, {{team}}", data));
+                () -> SesTemplateService.applyTemplateData("Hello {{name}}, {{team}}", data));
         assertEquals("MissingRenderingAttribute", ex.getErrorCode());
     }
 
     @Test
     void nullTemplateData_throwsMissingRenderingAttribute() {
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.applyTemplateData("Hello {{name}}", null));
+                () -> SesTemplateService.applyTemplateData("Hello {{name}}", null));
         assertEquals("MissingRenderingAttribute", ex.getErrorCode());
     }
 
     @Test
     void nullText_returnsNull() {
-        assertNull(SesService.applyTemplateData(null, MAPPER.createObjectNode()));
+        assertNull(SesTemplateService.applyTemplateData(null, MAPPER.createObjectNode()));
     }
 
     @Test
     void emptyText_returnsEmpty() {
-        assertEquals("", SesService.applyTemplateData("", MAPPER.createObjectNode()));
+        assertEquals("", SesTemplateService.applyTemplateData("", MAPPER.createObjectNode()));
     }
 
     @Test
     void noVariables_textUnchanged() {
         JsonNode data = MAPPER.createObjectNode().put("name", "Alice");
-        assertEquals("Hello world", SesService.applyTemplateData("Hello world", data));
+        assertEquals("Hello world", SesTemplateService.applyTemplateData("Hello world", data));
     }
 
     @Test
     void duplicateVariables_allReplaced() {
         JsonNode data = MAPPER.createObjectNode().put("name", "Alice");
-        String result = SesService.applyTemplateData("{{name}} and {{name}}", data);
+        String result = SesTemplateService.applyTemplateData("{{name}} and {{name}}", data);
         assertEquals("Alice and Alice", result);
     }
 
     @Test
     void replacementWithRegexMetacharacters() {
         JsonNode data = MAPPER.createObjectNode().put("val", "price is $100 (50% off)");
-        String result = SesService.applyTemplateData("The {{val}}", data);
+        String result = SesTemplateService.applyTemplateData("The {{val}}", data);
         assertEquals("The price is $100 (50% off)", result);
     }
 
     @Test
     void variableNameCaseSensitive_matchesExact() {
         JsonNode data = MAPPER.createObjectNode().put("Name", "Alice");
-        assertEquals("Hello Alice", SesService.applyTemplateData("Hello {{Name}}", data));
+        assertEquals("Hello Alice", SesTemplateService.applyTemplateData("Hello {{Name}}", data));
     }
 
     @Test
     void variableNameCaseSensitive_throwsForCaseMismatch() {
         JsonNode data = MAPPER.createObjectNode().put("Name", "Alice");
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.applyTemplateData("Hello {{name}}", data));
+                () -> SesTemplateService.applyTemplateData("Hello {{name}}", data));
         assertEquals("MissingRenderingAttribute", ex.getErrorCode());
     }
 
     @Test
     void emptyStringValue() {
         JsonNode data = MAPPER.createObjectNode().put("name", "");
-        assertEquals("Hello ", SesService.applyTemplateData("Hello {{name}}", data));
+        assertEquals("Hello ", SesTemplateService.applyTemplateData("Hello {{name}}", data));
     }
 
     @Test
     void buildTestRenderMime_asciiBody_uses7bit() {
         java.time.ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesService.buildTestRenderMime("Hello", "Hi there", "<p>Hi</p>", date, "BOUND");
+        String mime = SesTemplateService.buildTestRenderMime("Hello", "Hi there", "<p>Hi</p>", date, "BOUND");
         assertTrue(mime.contains("Subject: Hello\r\n"));
         assertTrue(mime.contains("Content-Type: multipart/alternative; boundary=\"BOUND\""));
         assertTrue(mime.contains("Content-Transfer-Encoding: 7bit"));
@@ -146,7 +146,7 @@ class SesServiceTemplateTest {
     @Test
     void buildTestRenderMime_utf8Body_uses8bit() {
         java.time.ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesService.buildTestRenderMime("件名", "こんにちは", "<p>こんにちは</p>", date, "BOUND");
+        String mime = SesTemplateService.buildTestRenderMime("件名", "こんにちは", "<p>こんにちは</p>", date, "BOUND");
         assertTrue(mime.contains("Subject: 件名\r\n"));
         assertTrue(mime.contains("Content-Transfer-Encoding: 8bit"));
         assertTrue(mime.contains("こんにちは"));
@@ -155,7 +155,7 @@ class SesServiceTemplateTest {
     @Test
     void buildTestRenderMime_subjectStripsCRLF() {
         java.time.ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesService.buildTestRenderMime("Multi\r\nLine", "x", "x", date, "BOUND");
+        String mime = SesTemplateService.buildTestRenderMime("Multi\r\nLine", "x", "x", date, "BOUND");
         // CR and LF are both C0 controls and are replaced with spaces.
         assertTrue(mime.contains("Subject: Multi  Line\r\n"));
     }
@@ -163,7 +163,7 @@ class SesServiceTemplateTest {
     @ParameterizedTest(name = "{0} -> {1}")
     @MethodSource("pickTransferEncodingCases")
     void pickTransferEncoding_returnsExpected(String body, String expected) {
-        assertEquals(expected, SesService.pickTransferEncoding(body));
+        assertEquals(expected, SesTemplateService.pickTransferEncoding(body));
     }
 
     static Stream<Arguments> pickTransferEncodingCases() {
@@ -179,7 +179,7 @@ class SesServiceTemplateTest {
     @MethodSource("parseRenderingDataInvalidCases")
     void parseRenderingData_invalid_throwsInvalidRenderingParameter(String label, String raw) {
         AwsException ex = assertThrows(AwsException.class,
-                () -> SesService.parseRenderingData(MAPPER, raw));
+                () -> SesTemplateService.parseRenderingData(MAPPER, raw));
         assertEquals("InvalidRenderingParameter", ex.getErrorCode());
     }
 
@@ -195,13 +195,13 @@ class SesServiceTemplateTest {
 
     @Test
     void parseRenderingData_emptyObject_accepted() {
-        assertTrue(SesService.parseRenderingData(MAPPER, "{}").isObject());
+        assertTrue(SesTemplateService.parseRenderingData(MAPPER, "{}").isObject());
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("normalizeToCrlfCases")
     void normalizeToCrlf_normalizesAllVariants(String label, String input, String expected) {
-        assertEquals(expected, SesService.normalizeToCrlf(input));
+        assertEquals(expected, SesTemplateService.normalizeToCrlf(input));
     }
 
     static Stream<Arguments> normalizeToCrlfCases() {
@@ -216,7 +216,7 @@ class SesServiceTemplateTest {
     @Test
     void buildTestRenderMime_bodyWithBareLf_normalizedToCrlf() {
         java.time.ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesService.buildTestRenderMime("S", "line1\nline2", "<p>x\ny</p>", date, "BOUND");
+        String mime = SesTemplateService.buildTestRenderMime("S", "line1\nline2", "<p>x\ny</p>", date, "BOUND");
         assertTrue(mime.contains("line1\r\nline2"));
         assertTrue(mime.contains("x\r\ny"));
         assertFalse(mime.contains("line1\nline2"));
@@ -225,7 +225,7 @@ class SesServiceTemplateTest {
     @Test
     void buildTestRenderMime_bodyEndingWithNewline_noExtraBlankLine() {
         java.time.ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesService.buildTestRenderMime("S", "hello\n", "<p>hi</p>\n", date, "BOUND");
+        String mime = SesTemplateService.buildTestRenderMime("S", "hello\n", "<p>hi</p>\n", date, "BOUND");
         assertFalse(mime.contains("hello\r\n\r\n--BOUND"));
         assertTrue(mime.contains("hello\r\n--BOUND"));
         assertFalse(mime.contains("</p>\r\n\r\n--BOUND"));
@@ -235,7 +235,7 @@ class SesServiceTemplateTest {
     @Test
     void buildTestRenderMime_bodyWithoutTrailingNewline_addsCrlfBeforeBoundary() {
         java.time.ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesService.buildTestRenderMime("S", "hello", "<p>hi</p>", date, "BOUND");
+        String mime = SesTemplateService.buildTestRenderMime("S", "hello", "<p>hi</p>", date, "BOUND");
         assertTrue(mime.contains("hello\r\n--BOUND"));
         assertTrue(mime.contains("</p>\r\n--BOUND"));
     }
@@ -257,13 +257,13 @@ class SesServiceTemplateTest {
 
     @Test
     void sanitizeSubject_nullReturnsEmpty() {
-        assertEquals("", SesService.sanitizeSubject(null));
+        assertEquals("", SesTemplateService.sanitizeSubject(null));
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("sanitizeSubjectCases")
     void sanitizeSubject_returnsExpected(String label, String input, String expected) {
-        assertEquals(expected, SesService.sanitizeSubject(input));
+        assertEquals(expected, SesTemplateService.sanitizeSubject(input));
     }
 
     static Stream<Arguments> sanitizeSubjectCases() {
@@ -304,7 +304,7 @@ class SesServiceTemplateTest {
     @Test
     void buildTestRenderMime_subjectWithControlChars_replacedWithSpace() {
         java.time.ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesService.buildTestRenderMime(
+        String mime = SesTemplateService.buildTestRenderMime(
                 "Hello\u0001World", "x", "x", date, "BOUND");
         assertTrue(mime.contains("Subject: Hello World\r\n"));
         assertFalse(mime.contains("\u0001"));

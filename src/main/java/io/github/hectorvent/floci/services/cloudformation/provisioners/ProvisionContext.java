@@ -94,6 +94,73 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
         return values;
     }
 
+    /**
+     * The physical name for a resource whose name is create-only: the template's name when it gives
+     * one, otherwise the name this resource already had, and only failing both a freshly generated
+     * one.
+     *
+     * <p>Keeping the prior name is the part that matters. {@code provision} runs again on every
+     * {@code UpdateStack}, so generating unconditionally gives an unnamed resource a new random name
+     * each time, creating a second resource and orphaning the first with its data. The schemas make
+     * this explicit: for these types the name is a {@code createOnlyProperty}, so an unchanged
+     * template must keep the same physical id.
+     *
+     * <p>Only for types whose physical id <em>is</em> the name. Where it is something derived, such
+     * as an SNS topic's ARN, the prior name has to come from the stored attribute instead.
+     */
+    public String stablePhysicalName(String explicitName, String logicalId, int maxLength,
+                                     boolean lowercase) {
+        if (explicitName != null && !explicitName.isBlank()) {
+            return explicitName;
+        }
+        if (priorPhysicalId != null && !priorPhysicalId.isBlank()) {
+            return priorPhysicalId;
+        }
+        return generatePhysicalName(logicalId, maxLength, lowercase);
+    }
+
+    /**
+     * Whether {@code name} identifies the entity this resource already had, so the provisioner must
+     * update it rather than create it.
+     *
+     * <p>Deliberately not the same question as {@link #isUpdate()}. A <em>replacing</em> update also
+     * arrives with a prior physical id, but the provisioner has derived a different name for it and
+     * must create; treating that as an update would try to mutate a resource that does not exist.
+     * Comparing the derived name against the prior id is what separates the two, and it is the
+     * check a provisioner needs whenever its service rejects a duplicate name.
+     *
+     * <p>Pairs with {@link #stablePhysicalName}: that keeps the name steady across an update, and
+     * this tells the caller what the steady name now implies. Without it, a stable name turns the
+     * second UpdateStack into a duplicate-create against services that reject one.
+     */
+    public boolean reusesPriorEntity(String name) {
+        return isUpdate() && priorPhysicalId.equals(name);
+    }
+
+    /**
+     * Tag keys the stored resource carries that the template no longer declares, for the caller to
+     * untag before applying the desired set. CloudFormation drives a resource's tags to the
+     * template's desired state on update: a dropped key is untagged, and a template with no
+     * {@code Tags} at all leaves the resource untagged. A service's tag call alone never removes
+     * anything (ECR's TagResource, for one, documents that unspecified tags are left unchanged), so
+     * the removal has to be computed here.
+     *
+     * <p>Iterates a copy, because some services hand back their live tag map and untagging while
+     * walking it would modify the collection under iteration.
+     */
+    public static List<String> staleTagKeys(Map<String, String> current, Map<String, String> desired) {
+        List<String> stale = new ArrayList<>();
+        if (current == null) {
+            return stale;
+        }
+        for (String key : List.copyOf(current.keySet())) {
+            if (!desired.containsKey(key)) {
+                stale.add(key);
+            }
+        }
+        return stale;
+    }
+
     /** Generates a CloudFormation-style physical name: {@code <stack>-<logicalId>-<suffix>}. */
     public String generatePhysicalName(String logicalId, int maxLength, boolean lowercase) {
         String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);

@@ -11,4 +11,6 @@ public interface BedrockBackend {
     ObjectNode converse(String modelId, ObjectNode bedrockRequest);
 
     byte[] invokeModel(String modelId, byte[] body);
+
+    byte[] converseStream(String modelId, ObjectNode bedrockRequest);
 }

@@ -49,6 +49,8 @@ public class AutoScalingService {
     private Map<String, ScalingPolicy> policies = new ConcurrentHashMap<>();
     private Map<String, ScalingActivity> activities = new ConcurrentHashMap<>();
     private Map<String, InstanceRefresh> instanceRefreshes = new ConcurrentHashMap<>();
+    private Map<String, ScheduledAction> scheduledActions = new ConcurrentHashMap<>();
+    private Map<String, WarmPoolConfiguration> warmPools = new ConcurrentHashMap<>();
 
     @PostConstruct
     void initializeStorage()
@@ -62,6 +64,8 @@ public class AutoScalingService {
         this.policies = storageBacked("autoscaling-policies.json", new TypeReference<Map<String, ScalingPolicy>>() {});
         this.activities = storageBacked("autoscaling-activities.json", new TypeReference<Map<String, ScalingActivity>>() {});
         this.instanceRefreshes = storageBacked("autoscaling-instance-refreshes.json", new TypeReference<Map<String, InstanceRefresh>>() {});
+        this.scheduledActions = storageBacked("autoscaling-scheduled-actions.json", new TypeReference<Map<String, ScheduledAction>>() {});
+        this.warmPools = storageBacked("autoscaling-warm-pools.json", new TypeReference<Map<String, WarmPoolConfiguration>>() {});
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference)
@@ -302,6 +306,9 @@ public class AutoScalingService {
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
+        scheduledActions.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
+                && name.equals(e.getValue().getAutoScalingGroupName()));
+        warmPools.remove(warmPoolKey(region, name));
     }
 
     public List<AutoScalingGroup> describeAutoScalingGroups(String region, List<String> names) {
@@ -356,6 +363,38 @@ public class AutoScalingService {
                     "Unsupported tag resource type '" + resourceType + "'.", 400);
         }
         return requireGroup(region, resourceId);
+    }
+
+    // Real AWS suspends the named scaling processes ("Launch", "Terminate", "HealthCheck", ...)
+    // so they stop running until resumed; an empty list suspends all of them. Floci has no
+    // scaling loop for these processes to pause, so this only needs to record which processes
+    // are suspended for DescribeAutoScalingGroups to report back - the same "accept and
+    // remember" shape as terminationPolicies. The AWS provider calls this unconditionally
+    // around ASG creation whenever wait_for_capacity_timeout is non-zero (the default), so an
+    // unimplemented SuspendProcesses fails ASG creation outright, not just a feature gap.
+    private static final List<String> ALL_SCALING_PROCESSES = List.of(
+            "Launch", "Terminate", "AddToLoadBalancer", "AlarmNotification", "AZRebalance",
+            "HealthCheck", "InstanceRefresh", "ReplaceUnhealthy", "ScheduledActions");
+
+    public void suspendProcesses(String region, String name, List<String> processes) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        List<String> toSuspend = processes.isEmpty() ? ALL_SCALING_PROCESSES : processes;
+        Set<String> suspended = new LinkedHashSet<>(asg.getSuspendedProcesses());
+        suspended.addAll(toSuspend);
+        asg.setSuspendedProcesses(new ArrayList<>(suspended));
+        groups.put(asgKey(region, name), asg);
+    }
+
+    public void resumeProcesses(String region, String name, List<String> processes) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        if (processes.isEmpty()) {
+            asg.setSuspendedProcesses(new ArrayList<>());
+        } else {
+            List<String> remaining = new ArrayList<>(asg.getSuspendedProcesses());
+            remaining.removeAll(processes);
+            asg.setSuspendedProcesses(remaining);
+        }
+        groups.put(asgKey(region, name), asg);
     }
 
     // ── Instance management ────────────────────────────────────────────────────
@@ -604,6 +643,47 @@ public class AutoScalingService {
         groups.put(asgKey(region, name), asg);
     }
 
+    // ── Traffic sources ─────────────────────────────────────────────────────────────
+    // AttachTrafficSources/DetachTrafficSources/DescribeTrafficSources is the modern,
+    // unified ASG-to-load-balancer wiring API (elb, elbv2, vpc-lattice), which
+    // aws_autoscaling_traffic_source_attachment uses instead of the older
+    // AttachLoadBalancerTargetGroups. "accept and remember" like the target-group
+    // attachment above - Floci has no real health-checking loop, so every attached
+    // traffic source is reported InService immediately.
+
+    public record TrafficSourceIdentifier(String identifier, String type) {}
+
+    public void attachTrafficSources(String region, String name, List<TrafficSourceIdentifier> sources) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        for (TrafficSourceIdentifier source : sources) {
+            asg.getTrafficSourceTypeByIdentifier().put(source.identifier(),
+                    source.type() != null ? source.type() : "elbv2");
+        }
+        groups.put(asgKey(region, name), asg);
+    }
+
+    public void detachTrafficSources(String region, String name, List<TrafficSourceIdentifier> sources) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        for (TrafficSourceIdentifier source : sources) {
+            asg.getTrafficSourceTypeByIdentifier().remove(source.identifier());
+        }
+        groups.put(asgKey(region, name), asg);
+    }
+
+    public Map<String, String> describeTrafficSources(String region, String name, String trafficSourceType) {
+        Map<String, String> all = requireGroup(region, name).getTrafficSourceTypeByIdentifier();
+        if (trafficSourceType == null || trafficSourceType.isBlank()) {
+            return all;
+        }
+        Map<String, String> filtered = new LinkedHashMap<>();
+        all.forEach((identifier, type) -> {
+            if (trafficSourceType.equals(type)) {
+                filtered.put(identifier, type);
+            }
+        });
+        return filtered;
+    }
+
     // ── Lifecycle hooks ────────────────────────────────────────────────────────
 
     public void putLifecycleHook(String region, String asgName, String hookName,
@@ -751,6 +831,112 @@ public class AutoScalingService {
                 .filter(p -> asgName == null || asgName.equals(p.getAutoScalingGroupName()))
                 .filter(p -> policyNames == null || policyNames.isEmpty() || policyNames.contains(p.getPolicyName()))
                 .collect(Collectors.toList());
+    }
+
+    // ── Scheduled actions ───────────────────────────────────────────────────
+    // PutScheduledUpdateGroupAction/DescribeScheduledActions/DeleteScheduledAction -
+    // aws_autoscaling_schedule's whole lifecycle. Floci has no cron scheduler to
+    // actually run these, so - same "accept and remember" shape as scaling
+    // policies above - this only needs to record and read back the schedule
+    // definition itself; the AWS provider's own Read never expects a scheduled
+    // action to have fired inside an emulator.
+
+    public ScheduledAction putScheduledUpdateGroupAction(String region, String asgName, String actionName,
+                                                           Instant startTime, Instant endTime, String recurrence,
+                                                           String timeZone, Integer minSize, Integer maxSize,
+                                                           Integer desiredCapacity) {
+        requireGroup(region, asgName);
+        String key = scheduledActionKey(region, asgName, actionName);
+        ScheduledAction action = scheduledActions.computeIfAbsent(key, k -> new ScheduledAction());
+        action.setScheduledActionName(actionName);
+        action.setAutoScalingGroupName(asgName);
+        action.setScheduledActionArn(AwsArnUtils.Arn.of("autoscaling", region, regionResolver.getAccountId(),
+                "scheduledUpdateGroupAction:" + asgName + ":" + actionName).toString());
+        action.setStartTime(startTime);
+        action.setEndTime(endTime);
+        action.setRecurrence(recurrence);
+        action.setTimeZone(timeZone);
+        action.setMinSize(minSize);
+        action.setMaxSize(maxSize);
+        action.setDesiredCapacity(desiredCapacity);
+        action.setRegion(region);
+        scheduledActions.put(key, action);
+        return action;
+    }
+
+    public void deleteScheduledAction(String region, String asgName, String actionName) {
+        scheduledActions.remove(scheduledActionKey(region, asgName, actionName));
+    }
+
+    public List<ScheduledAction> describeScheduledActions(String region, String asgName, List<String> actionNames) {
+        return scheduledActions.values().stream()
+                .filter(a -> region.equals(a.getRegion()))
+                .filter(a -> asgName == null || asgName.equals(a.getAutoScalingGroupName()))
+                .filter(a -> actionNames == null || actionNames.isEmpty() || actionNames.contains(a.getScheduledActionName()))
+                .collect(Collectors.toList());
+    }
+
+    private static String scheduledActionKey(String region, String asgName, String actionName) {
+        return region + "::" + asgName + "::" + actionName;
+    }
+
+    // ── Warm pools ──────────────────────────────────────────────────────────
+    // PutWarmPool/DescribeWarmPool/DeleteWarmPool - aws_autoscaling_group's
+    // warm_pool block. Verified directly against botocore's
+    // autoscaling/2011-01-01/service-2.json wire model rather than docs prose:
+    // PutWarmPoolType/DeleteWarmPoolType/DescribeWarmPoolType
+    // and their *Answer response shapes, WarmPoolConfiguration, WarmPoolState,
+    // InstanceReusePolicy. PutWarmPool is a full replace: MinSize's own shape
+    // doc says "Defaults to 0 if not specified" and PoolState's says "Default is
+    // Stopped" - an omitted field resets to that default, it does not carry the
+    // prior value forward, which is why putWarmPool always rebuilds the
+    // configuration from scratch rather than mutating the stored one in place.
+    // MaxGroupPreparedCapacity has no default (absent unless set), and the shape
+    // doc calls out -1 as the caller's own documented sentinel for "clear a
+    // previously-set value" - not a real capacity, so it maps back to null and
+    // is never rendered as -1.
+    //
+    // Floci has no scaling loop that actually launches pre-initialized instances
+    // into the pool, so DescribeWarmPool's own Instances list is always empty
+    // and WarmPoolConfiguration.Status ("PendingDelete") is never set - the
+    // "accept and remember" shape scaling policies and scheduled actions above
+    // already use for AWS features with no local reconciler. DeleteWarmPool
+    // removes the stored configuration outright and is silently idempotent when
+    // no warm pool exists, matching deletePolicy above rather than throwing.
+
+    public WarmPoolConfiguration putWarmPool(String region, String asgName,
+                                              Integer maxGroupPreparedCapacity,
+                                              Integer minSize,
+                                              String poolState,
+                                              Boolean reuseOnScaleIn) {
+        requireGroup(region, asgName);
+        WarmPoolConfiguration pool = new WarmPoolConfiguration();
+        pool.setAutoScalingGroupName(asgName);
+        pool.setRegion(region);
+        // -1 is the wire model's own documented sentinel for "remove a
+        // previously-set value" - not a literal capacity.
+        pool.setMaxGroupPreparedCapacity(
+                maxGroupPreparedCapacity != null && maxGroupPreparedCapacity != -1
+                        ? maxGroupPreparedCapacity : null);
+        pool.setMinSize(minSize != null ? minSize : 0);
+        pool.setPoolState(poolState != null && !poolState.isBlank() ? poolState : "Stopped");
+        pool.setReuseOnScaleIn(Boolean.TRUE.equals(reuseOnScaleIn));
+        warmPools.put(warmPoolKey(region, asgName), pool);
+        return pool;
+    }
+
+    public WarmPoolConfiguration describeWarmPool(String region, String asgName) {
+        requireGroup(region, asgName);
+        return warmPools.get(warmPoolKey(region, asgName));
+    }
+
+    public void deleteWarmPool(String region, String asgName, boolean forceDelete) {
+        requireGroup(region, asgName);
+        warmPools.remove(warmPoolKey(region, asgName));
+    }
+
+    private static String warmPoolKey(String region, String asgName) {
+        return region + "::" + asgName;
     }
 
     // ── Scaling activities ─────────────────────────────────────────────────────

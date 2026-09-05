@@ -339,3 +339,58 @@ EOF
     assert_failure
     assert_output --partial "NoSuchConfiguration"
 }
+
+@test "S3: intelligent-tiering configurations round-trip and never touch the bucket" {
+    aws_cmd s3api create-bucket --bucket "$BUCKET" >/dev/null
+
+    run aws_cmd s3api put-bucket-intelligent-tiering-configuration \
+        --bucket "$BUCKET" --id EntireBucket \
+        --intelligent-tiering-configuration 'Id=EntireBucket,Status=Enabled,Tierings=[{AccessTier=ARCHIVE_ACCESS,Days=90}]'
+    assert_success
+
+    run aws_cmd s3api get-bucket-intelligent-tiering-configuration --bucket "$BUCKET" --id EntireBucket
+    assert_success
+    [ "$(json_get "$output" '.IntelligentTieringConfiguration.Id')" = "EntireBucket" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfiguration.Status')" = "Enabled" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfiguration.Tierings[0].AccessTier')" = "ARCHIVE_ACCESS" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfiguration.Tierings[0].Days')" = "90" ]
+
+    run aws_cmd s3api put-bucket-intelligent-tiering-configuration \
+        --bucket "$BUCKET" --id Filtered \
+        --intelligent-tiering-configuration 'Id=Filtered,Filter={And={Prefix=logs/,Tags=[{Key=env,Value=prod}]}},Status=Disabled,Tierings=[{AccessTier=ARCHIVE_ACCESS,Days=90},{AccessTier=DEEP_ARCHIVE_ACCESS,Days=180}]'
+    assert_success
+
+    run aws_cmd s3api list-bucket-intelligent-tiering-configurations --bucket "$BUCKET"
+    assert_success
+    [ "$(json_get "$output" '.IntelligentTieringConfigurationList | length')" = "2" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfigurationList[1].Filter.And.Prefix')" = "logs/" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfigurationList[1].Filter.And.Tags[0].Key')" = "env" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfigurationList[1].Status')" = "Disabled" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfigurationList[1].Tierings | length')" = "2" ]
+
+    # Putting the same id replaces rather than duplicates.
+    run aws_cmd s3api put-bucket-intelligent-tiering-configuration \
+        --bucket "$BUCKET" --id EntireBucket \
+        --intelligent-tiering-configuration 'Id=EntireBucket,Status=Disabled,Tierings=[{AccessTier=DEEP_ARCHIVE_ACCESS,Days=180}]'
+    assert_success
+
+    run aws_cmd s3api get-bucket-intelligent-tiering-configuration --bucket "$BUCKET" --id EntireBucket
+    assert_success
+    [ "$(json_get "$output" '.IntelligentTieringConfiguration.Status')" = "Disabled" ]
+    [ "$(json_get "$output" '.IntelligentTieringConfiguration.Tierings[0].AccessTier')" = "DEEP_ARCHIVE_ACCESS" ]
+
+    run aws_cmd s3api list-bucket-intelligent-tiering-configurations --bucket "$BUCKET"
+    assert_success
+    [ "$(json_get "$output" '.IntelligentTieringConfigurationList | length')" = "2" ]
+
+    # A sub-resource DELETE removes only that configuration; the bucket must survive it.
+    run aws_cmd s3api delete-bucket-intelligent-tiering-configuration --bucket "$BUCKET" --id EntireBucket
+    assert_success
+
+    run aws_cmd s3api head-bucket --bucket "$BUCKET"
+    assert_success
+
+    run aws_cmd s3api get-bucket-intelligent-tiering-configuration --bucket "$BUCKET" --id EntireBucket
+    assert_failure
+    assert_output --partial "NoSuchConfiguration"
+}

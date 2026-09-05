@@ -140,7 +140,7 @@ public class CloudFormationResourceProvisioner {
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
     static final String UPDATE_ROLLBACK_RESTORED_ATTR = CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR;
-    static final String UPDATE_ROLLBACK_FAILURE_ATTR = "__FlociUpdateRollbackFailure";
+    static final String UPDATE_ROLLBACK_FAILURE_ATTR = CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR;
     private static final String INLINE_CLEANUP_POLICY_NAME_ATTR = "__FlociInlineCleanupPolicyName";
     private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
     private static final String INLINE_CLEANUP_USER_TARGETS_ATTR = "__FlociInlineCleanupUserTargets";
@@ -374,7 +374,12 @@ public class CloudFormationResourceProvisioner {
 
     /**
      * Provisions a single resource. Returns the populated StackResource (physicalId + attributes set).
-     * Returns null and logs a warning for unsupported types.
+     *
+     * <p>A resource type with no provisioner is stubbed: a synthetic physical id, an
+     * {@code arn:aws:stub:::} ARN attribute and {@code CREATE_COMPLETE}, logged at warn and
+     * carrying a status reason saying nothing was created. With
+     * {@code floci.services.cloudformation.allow-stub-unsupported-resource-types} off it comes back
+     * {@code CREATE_FAILED} instead, with no physical id.
      */
     public StackResource provision(String logicalId, String resourceType, JsonNode properties,
                                    CloudFormationTemplateEngine engine, String region, String accountId,
@@ -516,8 +521,26 @@ public class CloudFormationResourceProvisioner {
                         throw new IllegalStateException("No switch arm for declared legacy type "
                                 + resourceType + " — remove its LEGACY_SWITCH_TYPES entry when it "
                                 + "moves to a per-service provisioner.");
+                    } else if (!stubUnsupportedResourceTypesAllowed()) {
+                        // Before the physical id below is assigned, so the Cloud Control path sees
+                        // a resource with none and reports this message rather than a success. On
+                        // the stack path the catch below turns it into CREATE_FAILED with the same
+                        // sentence, which rolls the stack back.
+                        throw new AwsException("ValidationError",
+                                unsupportedResourceTypeMessage(resourceType), 400);
                     } else {
-                        LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
+                        // Warn, not debug, and a status reason on the resource: the stub reports
+                        // CREATE_COMPLETE while creating nothing, so without both the stack is
+                        // indistinguishable from one where every resource was really provisioned.
+                        // The reason reaches DescribeStackEvents through the event
+                        // CloudFormationService already builds from it.
+                        LOG.warnv("Stubbing unsupported resource type {0} ({1}): nothing is created "
+                                        + "for it. Set floci.services.cloudformation."
+                                        + "allow-stub-unsupported-resource-types=false to fail the "
+                                        + "stack instead.",
+                                resourceType, logicalId);
+                        resource.setStatusReason(unsupportedResourceTypeMessage(resourceType)
+                                + " It was stubbed and nothing was created for it.");
                         resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
                         resource.getAttributes().put("Arn", "arn:aws:stub:::" + logicalId);
                     }
@@ -530,6 +553,20 @@ public class CloudFormationResourceProvisioner {
             resource.setStatusReason(e.getMessage());
         }
         return resource;
+    }
+
+    /**
+     * Whether a resource type with no provisioner may be stubbed. The provisioners hand-built in
+     * unit tests carry no config; absent configuration means the documented default, which here is
+     * the lenient behaviour, so the test reads {@code config == null ||}.
+     */
+    private boolean stubUnsupportedResourceTypesAllowed() {
+        return config == null || config.services().cloudformation().allowStubUnsupportedResourceTypes();
+    }
+
+    /** The one sentence Floci says about a resource type it has no provisioner for. */
+    static String unsupportedResourceTypeMessage(String resourceType) {
+        return "Resource type " + resourceType + " is not supported by Floci.";
     }
 
     /**
@@ -735,7 +772,13 @@ public class CloudFormationResourceProvisioner {
             case "AWS::AutoScaling::AutoScalingGroup" ->
                     autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
             case "AWS::CloudFront::Distribution" -> cloudFrontService.removeDistribution(physicalId);
-            default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
+            // Warn for the same reason the create path does: the delete reports success over a
+            // type nothing here removes, and at debug that is invisible at the default log level.
+            // The line names the physical id without claiming a resource survives it: this arm
+            // takes both a type the create switch provisioned and one it only stubbed, and only
+            // the first leaves something behind.
+            default -> LOG.warnv("No delete implemented for resource type {0}: {1} is not removed "
+                    + "here.", resourceType, physicalId);
         }
     }
 
@@ -4117,6 +4160,11 @@ public class CloudFormationResourceProvisioner {
             }
         }
 
+        List<String> functionResponseTypes = resolveStringList(props, "FunctionResponseTypes", engine);
+        if (!functionResponseTypes.isEmpty()) {
+            req.put("FunctionResponseTypes", functionResponseTypes);
+        }
+
         var esm = lambdaService.createEventSourceMapping(region, req);
         r.setPhysicalId(esm.getUuid());
         r.getAttributes().put("Id", esm.getUuid());
@@ -5984,6 +6032,16 @@ public class CloudFormationResourceProvisioner {
         // On Update, CloudFormation includes the previous ResourceProperties so the handler can diff.
         // The prior values were stashed at the last create/update; read them before we overwrite below.
         ObjectNode oldResourceProperties = isUpdate ? readStashedProperties(r) : null;
+
+        // CloudFormation invokes a custom resource's Update handler only when its resolved
+        // properties changed (UserGuide/template-custom-resources-sns.md: "During a stack update,
+        // if no changes are made to a custom resource, CloudFormation will not send any requests
+        // to it."). Replaying every custom resource during an unrelated stack update can repeat
+        // non-idempotent side effects. The prior resolved properties are already stashed on the
+        // resource, so an exact match is a safe no-op that preserves physical ID and attributes.
+        if (oldResourceProperties != null && oldResourceProperties.equals(resourceProperties)) {
+            return;
+        }
 
         JsonNode response = invokeCustomResourceHandler(serviceToken, requestType, r.getLogicalId(),
                 r.getResourceType(), priorPhysicalId, resourceProperties, oldResourceProperties,

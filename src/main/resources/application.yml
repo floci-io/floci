@@ -17,13 +17,6 @@ quarkus:
       max-body-size: ${floci.protocols.max-request-size}M
   datasource:
     active: false
-  kubernetes-client:
-    devservices:
-      # Never auto-start a test API server; the kubernetes Lambda executor
-      # connects to a real cluster (in-cluster config or kubeconfig) only.
-      enabled: false
-  security:
-     security-providers: BC
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
@@ -45,23 +38,37 @@ quarkus:
         - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
+      # snappy-java registers 27 JNI libraries, one per platform. Only the one
+      # for the running platform loads, so 23 are dropped. Linux x86_64 and
+      # aarch64 cover the published images, Mac covers a local native build.
+      excludes:
+        - org/xerial/snappy/native/AIX/**
+        - org/xerial/snappy/native/FreeBSD/**
+        - org/xerial/snappy/native/SunOS/**
+        - org/xerial/snappy/native/Windows/**
+        - org/xerial/snappy/native/Linux/android-aarch64/**
+        - org/xerial/snappy/native/Linux/android-arm/**
+        - org/xerial/snappy/native/Linux/arm/**
+        - org/xerial/snappy/native/Linux/armv6/**
+        - org/xerial/snappy/native/Linux/armv7/**
+        - org/xerial/snappy/native/Linux/loongarch64/**
+        - org/xerial/snappy/native/Linux/ppc/**
+        - org/xerial/snappy/native/Linux/ppc64/**
+        - org/xerial/snappy/native/Linux/ppc64le/**
+        - org/xerial/snappy/native/Linux/riscv64/**
+        - org/xerial/snappy/native/Linux/s390x/**
+        - org/xerial/snappy/native/Linux/x86/**
+        - org/xerial/snappy/native/Linux/x86_64-musl/**
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$Default
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV
-      - --initialize-at-run-time=org.bouncycastle.crypto.prng.SP800SecureRandom
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.rsa.KeyPairGeneratorSpi
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.x509.CertificateFactory
-      - --initialize-at-run-time=io.github.hectorvent.floci.core.common.BouncyCastleInitializer
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.ses.SesService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
@@ -250,6 +257,7 @@ floci:
       enabled: true
       ephemeral: false
       ecr-base-uri: public.ecr.aws            # FLOCI_SERVICES_LAMBDA_ECR_BASE_URI — registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
+      honour-architectures: false             # Select the Lambda architecture for Docker pull and create
       default-memory-mb: 128
       default-timeout-seconds: 3
       # 500 ports, not the former 100 (9200-9299): one port is held per running Lambda
@@ -386,6 +394,10 @@ floci:
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false
+      # Stub a resource whose type has no provisioner: synthetic physical id, arn:aws:stub:::
+      # ARN attribute, CREATE_COMPLETE, reported at warn with a resource status reason. Set
+      # false to fail such a resource instead, which rolls the stack back.
+      allow-stub-unsupported-resource-types: true
     acm:
       enabled: true
       validation-wait-seconds: 0
@@ -447,6 +459,7 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname
+      prefer-local-images: true
     ui:
       enabled: true
       image: "floci/floci-ui:latest"
@@ -475,7 +488,7 @@ floci:
       data-path: ./data/eks
       keep-running-on-shutdown: false
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
-      iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
+      iam-auth-webhook: true       # validate `aws eks get-token` SigV4 tokens through a k3s webhook
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
     mwaa:
@@ -596,6 +609,8 @@ floci:
     route53resolver:
       enabled: true
     connect:
+      enabled: true
+    cognitoidentity:
       enabled: true
     aps:
       enabled: true

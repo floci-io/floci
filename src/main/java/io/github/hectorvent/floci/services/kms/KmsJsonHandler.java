@@ -274,11 +274,14 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         byte[] plaintext = decodeBlob(request, "Plaintext");
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
-        byte[] ciphertext = service.encrypt(keyId, plaintext, context, region);
+        String algorithm = request.path("EncryptionAlgorithm").asText(null);
+
+        KmsService.EncryptResult result = service.encrypt(keyId, plaintext, context, algorithm, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("CiphertextBlob", Base64.getEncoder().encodeToString(ciphertext));
-        response.put("KeyId", service.describeKey(keyId, region).getArn());
+        response.put("CiphertextBlob", Base64.getEncoder().encodeToString(result.ciphertext()));
+        response.put("KeyId", result.keyArn());
+        response.put("EncryptionAlgorithm", result.encryptionAlgorithm());
         return Response.ok(response).build();
     }
 
@@ -286,14 +289,16 @@ public class KmsJsonHandler {
         byte[] ciphertext = decodeBlob(request, "CiphertextBlob");
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
         String requestKeyId = request.path("KeyId").asText(null);
+        String algorithm = request.path("EncryptionAlgorithm").asText(null);
 
-        KmsService.DecryptResult result = service.decryptAndResolveKey(ciphertext, context, region, requestKeyId);
+        KmsService.DecryptResult result = service.decryptAndResolveKey(ciphertext, context, region, requestKeyId, algorithm);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Plaintext", Base64.getEncoder().encodeToString(result.plaintext()));
         if (result.keyArn() != null) {
             response.put("KeyId", result.keyArn());
         }
+        response.put("EncryptionAlgorithm", result.encryptionAlgorithm());
         return Response.ok(response).build();
     }
 
@@ -331,15 +336,21 @@ public class KmsJsonHandler {
         String destKeyId = request.path("DestinationKeyId").asText();
         Map<String, String> sourceContext = readEncryptionContext(request.path("SourceEncryptionContext"));
         Map<String, String> destContext = readEncryptionContext(request.path("DestinationEncryptionContext"));
+        String sourceAlgorithm = request.path("SourceEncryptionAlgorithm").asText(null);
+        String destAlgorithm = request.path("DestinationEncryptionAlgorithm").asText(null);
 
         String sourceKeyId = request.path("SourceKeyId").asText(null);
-        KmsService.DecryptResult source = service.decryptAndResolveKey(ciphertext, sourceContext, region, sourceKeyId);
-        byte[] newCiphertext = service.encrypt(destKeyId, source.plaintext(), destContext, region);
+        KmsService.DecryptResult source = service.decryptAndResolveKey(
+                ciphertext, sourceContext, region, sourceKeyId, sourceAlgorithm);
+        KmsService.EncryptResult destination = service.encrypt(
+                destKeyId, source.plaintext(), destContext, destAlgorithm, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("CiphertextBlob", Base64.getEncoder().encodeToString(newCiphertext));
-        response.put("KeyId", service.describeKey(destKeyId, region).getArn());
+        response.put("CiphertextBlob", Base64.getEncoder().encodeToString(destination.ciphertext()));
+        response.put("KeyId", destination.keyArn());
         response.put("SourceKeyId", source.keyArn());
+        response.put("SourceEncryptionAlgorithm", source.encryptionAlgorithm());
+        response.put("DestinationEncryptionAlgorithm", destination.encryptionAlgorithm());
         return Response.ok(response).build();
     }
 

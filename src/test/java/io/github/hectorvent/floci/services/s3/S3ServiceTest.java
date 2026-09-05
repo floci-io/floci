@@ -976,4 +976,150 @@ class S3ServiceTest {
                     "configuration config-" + i + " was lost by a concurrent put");
         }
     }
+
+    @Test
+    void intelligentTieringConfigurationsOnABucketWithoutAnyBehaveAsEmpty() {
+        // A bucket persisted before this field existed deserializes with a null map, which is the
+        // same shape a freshly created bucket has, so neither may fault.
+        s3Service.createBucket("no-tiering", "us-east-1");
+
+        assertTrue(s3Service.listBucketIntelligentTieringConfigurations("no-tiering")
+                .contains("<IsTruncated>false</IsTruncated>"));
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.getBucketIntelligentTieringConfiguration("no-tiering", "any")).getErrorCode());
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.deleteBucketIntelligentTieringConfiguration("no-tiering", "any")).getErrorCode());
+
+        // And the first put still lands on it.
+        s3Service.putBucketIntelligentTieringConfiguration("no-tiering", "first", "<Id>first</Id>");
+        assertTrue(s3Service.getBucketIntelligentTieringConfiguration("no-tiering", "first")
+                .contains("<Id>first</Id>"));
+    }
+
+    @Test
+    void intelligentTieringPutReplacesTheConfigurationStoredUnderTheSameId() {
+        s3Service.createBucket("tiering-replace", "us-east-1");
+        s3Service.putBucketIntelligentTieringConfiguration("tiering-replace", "id",
+                "<Id>id</Id><Status>Enabled</Status>");
+        s3Service.putBucketIntelligentTieringConfiguration("tiering-replace", "id",
+                "<Id>id</Id><Status>Disabled</Status>");
+
+        String stored = s3Service.getBucketIntelligentTieringConfiguration("tiering-replace", "id");
+        assertTrue(stored.contains("<Status>Disabled</Status>"));
+        assertTrue(s3Service.listBucketIntelligentTieringConfigurations("tiering-replace")
+                .indexOf("<Id>id</Id>") == s3Service
+                        .listBucketIntelligentTieringConfigurations("tiering-replace")
+                        .lastIndexOf("<Id>id</Id>"));
+    }
+
+    @Test
+    void intelligentTieringConfigurationsAreIsolatedPerBucket() {
+        s3Service.createBucket("tiering-a", "us-east-1");
+        s3Service.createBucket("tiering-b", "us-east-1");
+        s3Service.putBucketIntelligentTieringConfiguration("tiering-a", "shared",
+                "<Id>shared</Id><Status>Enabled</Status>");
+        s3Service.putBucketIntelligentTieringConfiguration("tiering-b", "shared",
+                "<Id>shared</Id><Status>Disabled</Status>");
+
+        assertTrue(s3Service.getBucketIntelligentTieringConfiguration("tiering-a", "shared")
+                .contains("<Status>Enabled</Status>"));
+        assertTrue(s3Service.getBucketIntelligentTieringConfiguration("tiering-b", "shared")
+                .contains("<Status>Disabled</Status>"));
+
+        s3Service.deleteBucketIntelligentTieringConfiguration("tiering-a", "shared");
+
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.getBucketIntelligentTieringConfiguration("tiering-a", "shared")).getErrorCode());
+        assertTrue(s3Service.getBucketIntelligentTieringConfiguration("tiering-b", "shared")
+                .contains("<Status>Disabled</Status>"));
+    }
+
+    @Test
+    void intelligentTieringConfigurationsDoNotOutliveTheirBucket() {
+        s3Service.createBucket("recycled-tiering", "us-east-1");
+        s3Service.putBucketIntelligentTieringConfiguration("recycled-tiering", "old", "<Id>old</Id>");
+        s3Service.deleteBucket("recycled-tiering");
+
+        s3Service.createBucket("recycled-tiering", "us-east-1");
+
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.getBucketIntelligentTieringConfiguration("recycled-tiering", "old")).getErrorCode());
+    }
+
+    @Test
+    void intelligentTieringConfigurationsSurviveARestart() {
+        // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
+        // read back by a second service over the same file, the way a restart does it.
+        Path bucketsFile = tempDir.resolve("s3-buckets-tiering.json");
+        var beforeRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
+                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3b"), false);
+        before.createBucket("persisted-tiering", "us-east-1");
+        before.putBucketIntelligentTieringConfiguration("persisted-tiering", "EntireBucket",
+                "<Id>EntireBucket</Id>");
+        beforeRestart.flush();
+        beforeRestart.shutdown();
+
+        var afterRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
+                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        afterRestart.load();
+        try {
+            S3Service after = new S3Service(afterRestart, new InMemoryStorage<>(), tempDir.resolve("s3b"), false);
+            assertTrue(after.getBucketIntelligentTieringConfiguration("persisted-tiering", "EntireBucket")
+                    .contains("<Id>EntireBucket</Id>"));
+        } finally {
+            afterRestart.shutdown();
+        }
+    }
+
+    @Test
+    void intelligentTieringConfigurationsSurviveAJacksonRoundTrip() throws Exception {
+        // Bucket records are persisted as JSON, so the configurations have to come back after a
+        // restart, and a record written before the field existed has to still load.
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        Bucket bucket = new Bucket("persisted");
+        bucket.setIntelligentTieringConfigurations(new java.util.LinkedHashMap<>(
+                Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
+
+        Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
+        assertEquals("<Id>EntireBucket</Id>",
+                reloaded.getIntelligentTieringConfigurations().get("EntireBucket"));
+
+        Bucket legacy = mapper.readValue("{\"name\":\"legacy\"}", Bucket.class);
+        assertNull(legacy.getIntelligentTieringConfigurations());
+    }
+
+    @Test
+    void concurrentIntelligentTieringConfigurationPutsAllSurvive() throws Exception {
+        // Each put reads the configuration map, adds to it and writes it back, so without a shared
+        // monitor concurrent puts of different ids overwrite each other's work.
+        s3Service.createBucket("tiering-race", "us-east-1");
+        int count = 24;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            var submitted = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < count; i++) {
+                String id = "config-" + i;
+                submitted.add(pool.submit(() -> {
+                    start.await();
+                    s3Service.putBucketIntelligentTieringConfiguration("tiering-race", id,
+                            "<Id>" + id + "</Id>");
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var future : submitted) {
+                future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        String listed = s3Service.listBucketIntelligentTieringConfigurations("tiering-race");
+        for (int i = 0; i < count; i++) {
+            assertTrue(listed.contains("<Id>config-" + i + "</Id>"),
+                    "configuration config-" + i + " was lost by a concurrent put");
+        }
+    }
 }

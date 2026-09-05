@@ -51,12 +51,43 @@ public class ProxyBackend implements BedrockBackend {
     public ObjectNode converse(String modelId, ObjectNode bedrockRequest) {
         EmulatorConfig.BedrockProxyConfig proxyConfig = config.services().bedrockRuntime().proxy();
         String resolvedModel = resolveModel(modelId, proxyConfig);
+        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel, false);
+        ProxyResult result = send(modelId, proxyConfig, openAiRequest);
+
+        JsonNode openAiResponse;
+        try {
+            openAiResponse = objectMapper.readTree(result.body());
+        } catch (Exception e) {
+            throw new AwsException("ModelErrorException", "Proxy backend returned malformed JSON: " + e.getMessage(), 424);
+        }
+
+        return BedrockOpenAiTranslator.toBedrockResponse(objectMapper, openAiResponse, result.latencyMs());
+    }
+
+    @Override
+    public byte[] invokeModel(String modelId, byte[] body) {
+        throw new AwsException("ValidationException",
+                "InvokeModel is not supported by the bedrock-runtime proxy backend; use Converse.", 400);
+    }
+
+    @Override
+    public byte[] converseStream(String modelId, ObjectNode bedrockRequest) {
+        EmulatorConfig.BedrockProxyConfig proxyConfig = config.services().bedrockRuntime().proxy();
+        String resolvedModel = resolveModel(modelId, proxyConfig);
+        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel, true);
+        ProxyResult result = send(modelId, proxyConfig, openAiRequest);
+
+        return BedrockOpenAiTranslator.toBedrockStreamEvents(objectMapper, result.body(), result.latencyMs());
+    }
+
+    private record ProxyResult(String body, long latencyMs) {
+    }
+
+    private ProxyResult send(String modelId, EmulatorConfig.BedrockProxyConfig proxyConfig, ObjectNode openAiRequest) {
         String baseUrl = proxyConfig.url()
                 .filter(url -> !url.isBlank())
                 .orElseThrow(() -> new AwsException("ValidationException",
                         "floci.services.bedrock-runtime.proxy.url is required when backend=proxy.", 400));
-
-        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel);
 
         URI uri;
         HttpRequest.Builder builder;
@@ -102,20 +133,7 @@ public class ProxyBackend implements BedrockBackend {
                     424);
         }
 
-        JsonNode openAiResponse;
-        try {
-            openAiResponse = objectMapper.readTree(response.body());
-        } catch (Exception e) {
-            throw new AwsException("ModelErrorException", "Proxy backend returned malformed JSON: " + e.getMessage(), 424);
-        }
-
-        return BedrockOpenAiTranslator.toBedrockResponse(objectMapper, openAiResponse, latencyMs);
-    }
-
-    @Override
-    public byte[] invokeModel(String modelId, byte[] body) {
-        throw new AwsException("ValidationException",
-                "InvokeModel is not supported by the bedrock-runtime proxy backend; use Converse.", 400);
+        return new ProxyResult(response.body(), latencyMs);
     }
 
     String resolveModel(String bedrockModelId, EmulatorConfig.BedrockProxyConfig proxyConfig) {

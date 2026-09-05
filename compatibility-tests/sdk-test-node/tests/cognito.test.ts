@@ -22,6 +22,8 @@ import {
   AdminAddUserToGroupCommand,
   AdminRemoveUserFromGroupCommand,
   AdminListGroupsForUserCommand,
+  SetUserPoolMfaConfigCommand,
+  GetUserPoolMfaConfigCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { makeClient, uniqueName, ENDPOINT, fetchLatestSesVerificationCode } from './setup';
 
@@ -241,5 +243,62 @@ describe('Cognito', () => {
   it('should delete user pool', async () => {
     await cognito.send(new DeleteUserPoolCommand({ UserPoolId: poolId }));
     poolId = '';
+  });
+});
+
+describe('Cognito MFA configuration', () => {
+  let cognito: CognitoIdentityProviderClient;
+  let poolId: string;
+
+  beforeAll(async () => {
+    cognito = makeClient(CognitoIdentityProviderClient);
+    const pool = await cognito.send(
+      new CreateUserPoolCommand({ PoolName: `mfa-${uniqueName()}` })
+    );
+    poolId = pool.UserPool!.Id!;
+  });
+
+  afterAll(async () => {
+    if (poolId) {
+      await cognito
+        .send(new DeleteUserPoolCommand({ UserPoolId: poolId }))
+        .catch((error) => console.warn(`failed to delete MFA test pool ${poolId}`, error));
+    }
+  });
+
+  it('should report OFF and omit software-token config before it is set', async () => {
+    const config = await cognito.send(new GetUserPoolMfaConfigCommand({ UserPoolId: poolId }));
+    expect(config.MfaConfiguration).toBe('OFF');
+    // The live service returns only the factors that have been configured.
+    expect(config.SoftwareTokenMfaConfiguration).toBeUndefined();
+  });
+
+  it('should set and round-trip MFA configuration', async () => {
+    const set = await cognito.send(
+      new SetUserPoolMfaConfigCommand({
+        UserPoolId: poolId,
+        MfaConfiguration: 'OPTIONAL',
+        SoftwareTokenMfaConfiguration: { Enabled: true },
+      })
+    );
+    expect(set.MfaConfiguration).toBe('OPTIONAL');
+    expect(set.SoftwareTokenMfaConfiguration?.Enabled).toBe(true);
+
+    // What the Terraform provider reads back to decide whether
+    // mfa_configuration / software_token_mfa_configuration have drifted.
+    const got = await cognito.send(new GetUserPoolMfaConfigCommand({ UserPoolId: poolId }));
+    expect(got.MfaConfiguration).toBe('OPTIONAL');
+    expect(got.SoftwareTokenMfaConfiguration?.Enabled).toBe(true);
+  });
+
+  it('should reject an invalid MfaConfiguration', async () => {
+    await expect(
+      cognito.send(
+        new SetUserPoolMfaConfigCommand({
+          UserPoolId: poolId,
+          MfaConfiguration: 'SOMETIMES' as never,
+        })
+      )
+    ).rejects.toThrow();
   });
 });

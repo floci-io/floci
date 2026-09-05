@@ -22,6 +22,8 @@ import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Base64;
@@ -859,6 +861,309 @@ class KmsServiceTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    /**
+     * RSAES-OAEP on RSA keys, issue #3024. Expected ciphertext sizes, error codes and
+     * messages were measured against real AWS KMS in us-east-1.
+     */
+    @Nested
+    class RsaEncryptDecryptTests {
+
+        private static final byte[] PLAINTEXT = "secret payload".getBytes(StandardCharsets.UTF_8);
+
+        private KmsKey createRsaKey() {
+            return kmsService.createKey("rsa key", "ENCRYPT_DECRYPT", "RSA_2048", null, Map.of(), REGION);
+        }
+
+        @Test
+        void oaepSha256RoundTripProducesRawRsaCiphertext() {
+            KmsKey key = createRsaKey();
+
+            KmsService.EncryptResult encrypted =
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_256", REGION);
+
+            assertEquals(256, encrypted.ciphertext().length);
+            assertEquals(key.getArn(), encrypted.keyArn());
+            assertEquals("RSAES_OAEP_SHA_256", encrypted.encryptionAlgorithm());
+
+            KmsService.DecryptResult decrypted = kmsService.decryptAndResolveKey(
+                    encrypted.ciphertext(), Map.of(), REGION, key.getKeyId(), "RSAES_OAEP_SHA_256");
+
+            assertArrayEquals(PLAINTEXT, decrypted.plaintext());
+            assertEquals(key.getArn(), decrypted.keyArn());
+            assertEquals("RSAES_OAEP_SHA_256", decrypted.encryptionAlgorithm());
+        }
+
+        @Test
+        void oaepSha1RoundTripAllowsUpTo214Bytes() {
+            KmsKey key = createRsaKey();
+            byte[] plaintext = new byte[214];
+
+            KmsService.EncryptResult encrypted =
+                    kmsService.encrypt(key.getKeyId(), plaintext, Map.of(), "RSAES_OAEP_SHA_1", REGION);
+            KmsService.DecryptResult decrypted = kmsService.decryptAndResolveKey(
+                    encrypted.ciphertext(), Map.of(), REGION, key.getKeyId(), "RSAES_OAEP_SHA_1");
+
+            assertEquals(256, encrypted.ciphertext().length);
+            assertArrayEquals(plaintext, decrypted.plaintext());
+        }
+
+        @Test
+        void decryptAcceptsCiphertextMadeLocallyWithThePublicKey() throws Exception {
+            KmsKey key = createRsaKey();
+            var publicKey = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(
+                    Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded())));
+            var cipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding");
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
+                    "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, javax.crypto.spec.PSource.PSpecified.DEFAULT));
+            byte[] localCiphertext = cipher.doFinal(PLAINTEXT);
+
+            KmsService.DecryptResult decrypted = kmsService.decryptAndResolveKey(
+                    localCiphertext, Map.of(), REGION, key.getKeyId(), "RSAES_OAEP_SHA_256");
+
+            assertArrayEquals(PLAINTEXT, decrypted.plaintext());
+        }
+
+        @Test
+        void encryptWithDefaultAlgorithmThrowsInvalidKeyUsage() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), null, REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048.", ex.getMessage());
+        }
+
+        @Test
+        void encryptOnSymmetricKeyWithRsaAlgorithmThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey(null, REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm RSAES_OAEP_SHA_256 is incompatible with key spec SYMMETRIC_DEFAULT.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptWithSignVerifyKeyThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for Encrypt.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptWithEncryptionContextThrowsValidation() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of("foo", "bar"), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("EncryptionContext is not supported when encrypting/decrypting with asymmetric CMKs.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptOver190BytesWithOaepSha256ThrowsValidation() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), new byte[191], Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("Algorithm RSAES_OAEP_SHA_256 and key spec RSA_2048 cannot encrypt data larger than 190 bytes.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void decryptWithoutKeyIdThrowsValidation() {
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null, "RSAES_OAEP_SHA_256"));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("KeyId must not be null", ex.getMessage());
+        }
+
+        @Test
+        void decryptGarbageThrowsInvalidCiphertext() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(new byte[256], Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithWrongRsaKeyThrowsInvalidCiphertext() {
+            KmsKey key = createRsaKey();
+            KmsKey otherKey = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION,
+                            otherKey.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithWrongOaepHashThrowsInvalidCiphertext() {
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_1"));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptOnSymmetricKeyWithRsaAlgorithmThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm RSAES_OAEP_SHA_256 is incompatible with key spec SYMMETRIC_DEFAULT.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void symmetricDecryptStillReportsSymmetricDefaultAlgorithm() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, REGION);
+
+            KmsService.DecryptResult result =
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId(), null);
+
+            assertArrayEquals(PLAINTEXT, result.plaintext());
+            assertEquals("SYMMETRIC_DEFAULT", result.encryptionAlgorithm());
+        }
+
+        @Test
+        void decryptWithRsaKeyIdAndDefaultAlgorithmThrowsInvalidCiphertext() {
+            // Real KMS parses the ciphertext before comparing the defaulted SYMMETRIC_DEFAULT
+            // algorithm with the key spec, so raw RSA bytes fail as a bad ciphertext.
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId(), null));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithEncryptionContextThrowsValidation() {
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of("foo", "bar"), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("EncryptionContext is not supported when encrypting/decrypting with asymmetric CMKs.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void decryptWithSignVerifyKeyThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(new byte[256], Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for Decrypt.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptEmptyPlaintextThrowsValidation() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), new byte[0], Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("Plaintext must be between 1 and 4096 bytes for Encrypt.", ex.getMessage());
+        }
+
+        @Test
+        void encryptOver4096BytesThrowsValidation() {
+            KmsKey key = kmsService.createKey(null, REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), new byte[4097], REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void encryptWithUnknownAlgorithmOnMissingKeyThrowsValidation() {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt("no-such-key", PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_384", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptBlobWithMalformedPayloadThrowsInvalidCiphertext() {
+            byte[] ciphertext = "kms:v2:some-key:0011223344556677::@@@".getBytes(StandardCharsets.UTF_8);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null, null));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void generateDataKeyWithRsaKeyThrowsInvalidKeyUsage() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048.", ex.getMessage());
+        }
+
+        @Test
+        void generateDataKeyWithSignVerifyKeyThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for GenerateDataKey.",
+                    ex.getMessage());
+        }
+    }
+
     @Nested
     class DecryptAndReEncryptTests {
 
@@ -1256,6 +1561,53 @@ class KmsServiceTest {
         byte[] rawSig = kmsService.sign(key.getKeyId(), message,
                 "RSASSA_PKCS1_V1_5_SHA_256", KmsMessageType.RAW, REGION);
         assertArrayEquals(rawSig, digestSig);
+    }
+
+    @Test
+    void signWithDigestMessageTypePssVerifiesWithExternalVerifier() throws Exception {
+        KmsKey key = kmsService.createKey("rsa pss digest key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        byte[] message = "floci kms pss round-trip".getBytes(StandardCharsets.UTF_8);
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(message);
+
+        byte[] sig = kmsService.sign(key.getKeyId(), digest,
+                "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION);
+
+        // floci's own Verify round-trips, against the digest and against the raw message.
+        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+                "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION));
+        assertTrue(kmsService.verify(key.getKeyId(), message, sig,
+                "RSASSA_PSS_SHA_256", KmsMessageType.RAW, REGION));
+
+        // External verifier with the PSS parameters AWS documents for RSASSA_PSS_SHA_256.
+        byte[] der = Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded());
+        PublicKey pub = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
+        Signature verifier = Signature.getInstance("RSASSA-PSS");
+        verifier.setParameter(new PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1));
+        verifier.initVerify(pub);
+        verifier.update(message);
+        assertTrue(verifier.verify(sig), "DIGEST PSS signature must verify as real RSASSA-PSS");
+    }
+
+    @Test
+    void signWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.sign(key.getKeyId(), "sign me".getBytes(StandardCharsets.UTF_8), "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+    }
+
+    @Test
+    void verifyWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        var message = "sign me".getBytes(StandardCharsets.UTF_8);
+        var sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.verify(key.getKeyId(), message, sig, "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
     }
 
     @Test

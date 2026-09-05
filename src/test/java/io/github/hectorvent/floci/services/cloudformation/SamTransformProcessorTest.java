@@ -1944,4 +1944,70 @@ class SamTransformProcessorTest {
                         + "'Definition' or 'DefinitionUri' property and not both.",
                 exception.getMessage());
     }
+
+    @Test
+    void unexpandedSamResourceTypeWarns() throws Exception {
+        // A SAM type this processor cannot expand is left in the template, where the provisioner
+        // stubs it. Reported at debug that is the first of two stacked silences on one path, so
+        // the type reaches the stub arm with nothing said about the expansion that never happened.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyApp": {
+                  "Type": "AWS::Serverless::Application",
+                  "Properties": {
+                    "Location": "s3://example-templates/app.yaml"
+                  }
+                }
+              }
+            }
+            """);
+
+        java.util.List<java.util.logging.LogRecord> logged = new java.util.concurrent.CopyOnWriteArrayList<>();
+        java.util.logging.Logger logger =
+                java.util.logging.Logger.getLogger(SamTransformProcessor.class.getName());
+        java.util.logging.Level original = logger.getLevel();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord logRecord) {
+                logged.add(logRecord);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        logger.setLevel(java.util.logging.Level.ALL);
+        try {
+            processor.expandSamTemplate(template);
+        } finally {
+            logger.setLevel(original);
+            logger.removeHandler(handler);
+        }
+
+        String expected = "Unsupported SAM resource type AWS::Serverless::Application (MyApp): "
+                + "left in the template for the CloudFormation provisioner.";
+        assertTrue(logged.stream().anyMatch(r ->
+                        r.getLevel().intValue() >= java.util.logging.Level.WARNING.intValue()
+                                && expected.equals(text(r))),
+                "expected the unexpanded SAM type to be reported at warn, got: "
+                        + logged.stream().map(r -> r.getLevel() + " " + text(r)).toList());
+    }
+
+    /**
+     * The record's text. Which logging backend is in play decides whether the parameters are
+     * already substituted or still carried alongside the pattern.
+     */
+    private static String text(java.util.logging.LogRecord record) {
+        Object[] parameters = record.getParameters();
+        return parameters == null || parameters.length == 0
+                ? record.getMessage()
+                : java.text.MessageFormat.format(record.getMessage(), parameters);
+    }
 }

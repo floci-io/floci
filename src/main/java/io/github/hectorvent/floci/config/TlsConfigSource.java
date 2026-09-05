@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.eclipse.microprofile.config.spi.ConfigSource;
 import org.jboss.logging.Logger;
 
@@ -19,7 +18,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.security.Security;
 
 /**
  * A MicroProfile {@link ConfigSource} that dynamically provides Quarkus TLS/SSL
@@ -64,13 +62,6 @@ public class TlsConfigSource implements ConfigSource {
             LOG.debug("TLS disabled — TlsConfigSource inactive");
             return;
         }
-
-        // BouncyCastle may not be registered yet — this ConfigSource runs before CDI (@Startup beans)
-        // and before quarkus-security's runtime provider registration. Register it up front so BOTH
-        // certificate parsing (isSelfSigned/parseCertificate) and generation work; otherwise
-        // parseCertificate fails "no such provider: BC", isSelfSigned returns false, and the persisted
-        // self-signed certificate is needlessly regenerated on every restart.
-        ensureBouncyCastleRegistered();
 
         String certPath = resolveProperty("floci.tls.cert-path", "");
         String keyPath = resolveProperty("floci.tls.key-path", "");
@@ -171,16 +162,9 @@ public class TlsConfigSource implements ConfigSource {
         return defaultValue;
     }
 
-    private static void ensureBouncyCastleRegistered() {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(new BouncyCastleProvider());
-        }
-    }
-
     private void generateSelfSignedCert(Path tlsDir, Path certFile, Path keyFile) {
         try {
             Files.createDirectories(tlsDir);
-            ensureBouncyCastleRegistered();
 
             // Extract custom hostnames and combine with defaults
             List<String> customHostnames = extractCustomHostnames();

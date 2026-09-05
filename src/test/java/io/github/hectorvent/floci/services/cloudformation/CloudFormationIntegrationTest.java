@@ -866,6 +866,93 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void updateStack_unnamedQueueKeepsItsUrlAndReconcilesAttributes() {
+        // QueueName is createOnly, so an unnamed queue keeps its generated name across updates.
+        // The second UpdateStack then reaches SqsService with a name that exists, which answers
+        // QueueAlreadyExists once an attribute differs: the changed VisibilityTimeout must go
+        // through SetQueueAttributes against the same queue URL instead of a second create.
+        String stackName = "cfn-queue-stable-name-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": { "VisibilityTimeout": %d }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(30))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String createdResourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>MyQueue</LogicalResourceId>"))
+            .extract().asString();
+        String queueUrl = firstPhysicalResourceId(createdResourceXml);
+        assertThat(queueUrl, containsString("/" + stackName + "-MyQueue-"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(45))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        String updatedResourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(firstPhysicalResourceId(updatedResourceXml), equalTo(queueUrl));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("AttributeName.1", "VisibilityTimeout")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Name>VisibilityTimeout</Name>"))
+            .body(containsString("<Value>45</Value>"));
+    }
+
+    @Test
     void updateStack_lambdaMutableConfigurationUpdatesInPlace() {
         String stackName = "cfn-lambda-config-update-stack";
         String functionName = "cfn-lambda-config-update-func";
@@ -4403,7 +4490,8 @@ class CloudFormationIntegrationTest {
                     "FunctionName": { "Ref": "MyFunction" },
                     "EventSourceArn": { "Fn::GetAtt": ["MyQueue", "Arn"] },
                     "Enabled": true,
-                    "BatchSize": 5
+                    "BatchSize": 5,
+                    "FunctionResponseTypes": ["ReportBatchItemFailures"]
                   }
                 }
               }
@@ -4456,6 +4544,15 @@ class CloudFormationIntegrationTest {
 
         JsonNode esmList = OBJECT_MAPPER.readTree(esmJson);
         String esmUuid = esmList.path("EventSourceMappings").get(0).path("UUID").asText();
+
+        // github.com/floci-io/floci/issues/2848: the CloudFormation path never read
+        // FunctionResponseTypes, so a CFN-provisioned mapping always came back with an empty
+        // list even though the template declared it and the direct CreateEventSourceMapping API
+        // path already honored it.
+        JsonNode responseTypes = esmList.path("EventSourceMappings").get(0).path("FunctionResponseTypes");
+        assertTrue(responseTypes.isArray() && responseTypes.size() == 1
+                        && "ReportBatchItemFailures".equals(responseTypes.get(0).asText()),
+                "expected FunctionResponseTypes to carry through from the template but was: " + responseTypes);
 
         // 5. Delete stack and verify ESM is gone
         given()

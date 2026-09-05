@@ -390,4 +390,66 @@ final class DynamoDbAccessPathValidator {
     private static AwsException validationException(String message) {
         return new AwsException("ValidationException", message, 400);
     }
+    // DynamoDB requires an ExclusiveStartKey to exactly match the paged key schema's
+    // attribute names and scalar types. Query and Scan report different messages for faults.
+    static void validateExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
+                                          DynamoDbAccessPath accessPath, boolean isScan) {
+        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
+        Set<String> expected = new HashSet<>();
+        expected.add(table.getPartitionKeyName());
+        String sortKey = table.getSortKeyName();
+        if (sortKey != null) {
+            expected.add(sortKey);
+        }
+        if (accessPath.isIndex()) {
+            expected.addAll(accessPath.keyAttributeNames());
+        }
+        Set<String> actual = new HashSet<>();
+        exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected) || hasInvalidKeyValue(exclusiveStartKey, table, expected)) {
+            throw invalidStartingKey(isScan);
+        }
+    }
+
+    private static boolean hasInvalidKeyValue(JsonNode exclusiveStartKey, TableDefinition table,
+                                              Set<String> expected) {
+        if (table.getAttributeDefinitions() == null) {
+            return true;
+        }
+        for (String attribute : expected) {
+            String expectedType = table.getAttributeDefinitions().stream()
+                    .filter(definition -> attribute.equals(definition.getAttributeName()))
+                    .map(AttributeDefinition::getAttributeType)
+                    .findFirst()
+                    .orElse(null);
+            if (expectedType == null || hasInvalidScalarValue(exclusiveStartKey.get(attribute), expectedType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasInvalidScalarValue(JsonNode value, String expectedType) {
+        if (value == null || !value.isObject() || value.size() != 1 || !value.has(expectedType)) {
+            return true;
+        }
+        JsonNode payload = value.get(expectedType);
+        if (payload == null || !payload.isTextual() || payload.textValue().isEmpty()) {
+            return true;
+        }
+        if ("N".equals(expectedType)) {
+            DynamoDbNumberUtils.validateAndNormalize(payload.textValue());
+        }
+        if ("B".equals(expectedType)) {
+            return !payload.textValue().matches(
+                    "(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?");
+        }
+        return false;
+    }
+
+    private static AwsException invalidStartingKey(boolean isScan) {
+        return new AwsException("ValidationException", isScan
+                ? "The provided starting key is invalid: The provided key element does not match the schema"
+                : "The provided starting key is invalid", 400);
+    }
 }

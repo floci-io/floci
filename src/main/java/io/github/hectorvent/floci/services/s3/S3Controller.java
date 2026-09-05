@@ -332,6 +332,14 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "metrics")) {
                 return handlePutBucketMetricsConfiguration(bucket, uriInfo, body);
             }
+            // Same fall-through hazard as metrics: an intelligent-tiering PUT must not become a
+            // CreateBucket.
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+                s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
+                return handlePutBucketIntelligentTieringConfiguration(bucket, uriInfo, body);
+            }
 
             String locationConstraint = null;
             if (body != null && body.length > 0) {
@@ -374,7 +382,8 @@ public class S3Controller {
     @DELETE
     @Path("/{bucket}")
     public Response deleteBucket(@PathParam("bucket") String bucket,
-                                  @Context UriInfo uriInfo) {
+                                  @Context UriInfo uriInfo,
+                                  @Context HttpHeaders httpHeaders) {
         try {
             validateRawUri();
             if (hasQueryParam(uriInfo, "tagging")) {
@@ -416,6 +425,15 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "metrics")) {
                 // Likewise this must not fall through to deleting the bucket.
                 s3Service.deleteBucketMetricsConfiguration(bucket, requireMetricsId(uriInfo));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                // Likewise this must not fall through to deleting the bucket.
+                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+                s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
+                s3Service.deleteBucketIntelligentTieringConfiguration(bucket,
+                        requireIntelligentTieringId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "accelerate")) {
@@ -541,6 +559,17 @@ public class S3Controller {
                 String xml = id != null
                         ? s3Service.getBucketMetricsConfiguration(bucket, id)
                         : s3Service.listBucketMetricsConfigurations(bucket);
+                return Response.ok(xml).type("application/xml").build();
+            }
+            // GetBucketIntelligentTieringConfiguration and ListBucketIntelligentTieringConfigurations
+            // share ?intelligent-tiering and are told apart by the id, which only the
+            // single-configuration read carries.
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetIntelligentTieringConfiguration", authorization);
+                String id = uriInfo.getQueryParameters().getFirst("id");
+                String xml = id != null
+                        ? s3Service.getBucketIntelligentTieringConfiguration(bucket, id)
+                        : s3Service.listBucketIntelligentTieringConfigurations(bucket);
                 return Response.ok(xml).type("application/xml").build();
             }
 
@@ -1839,6 +1868,37 @@ public class S3Controller {
         return id;
     }
 
+    // --- Intelligent-Tiering Configurations ---
+
+    private Response handlePutBucketIntelligentTieringConfiguration(String bucket, UriInfo uriInfo,
+                                                                    byte[] body) {
+        String id = requireIntelligentTieringId(uriInfo);
+        String xml = body == null ? null : new String(body, StandardCharsets.UTF_8);
+        S3IntelligentTieringConfiguration configuration =
+                S3IntelligentTieringConfiguration.parse(xml);
+        // AWS rejects a body whose Id disagrees with the id in the query string.
+        if (!id.equals(configuration.id())) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our "
+                            + "published schema", 400);
+        }
+        s3Service.putBucketIntelligentTieringConfiguration(bucket, id, configuration.innerXml());
+        return Response.noContent().build();
+    }
+
+    /**
+     * The id identifies the configuration, so a request without one is refused rather than guessed
+     * at, mirroring the metrics subresource.
+     */
+    private String requireIntelligentTieringId(UriInfo uriInfo) {
+        String id = uriInfo.getQueryParameters().getFirst("id");
+        if (id == null) {
+            throw new AwsException("InvalidArgument",
+                    "The intelligent-tiering configuration id must be specified.", 400);
+        }
+        return id;
+    }
+
     // --- Object Tagging ---
 
     private Response handlePutObjectTagging(String bucket, String key, byte[] body) {
@@ -2485,6 +2545,18 @@ public class S3Controller {
                 .elem("Message", e.getMessage());
         if (condition != null) {
             xmlBuilder.elem("Condition", condition);
+        }
+        // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
+        // surface which input was rejected. They travel through AwsException.extendedData.
+        if (e.getExtendedData() != null) {
+            Object argumentName = e.getExtendedData().get("ArgumentName");
+            Object argumentValue = e.getExtendedData().get("ArgumentValue");
+            if (argumentName != null) {
+                xmlBuilder.elem("ArgumentName", argumentName.toString());
+            }
+            if (argumentValue != null) {
+                xmlBuilder.elem("ArgumentValue", argumentValue.toString());
+            }
         }
         String xml = xmlBuilder
                 .elem("RequestId", java.util.UUID.randomUUID().toString())

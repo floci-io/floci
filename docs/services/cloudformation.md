@@ -48,7 +48,7 @@ Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`.
 the backing service and sets a real physical ID plus the `Ref` / `Fn::GetAtt` attributes used by
 cross-resource references.
 
-> Adding a type? See [Adding a CloudFormation Resource Type](../../CONTRIBUTING.md#adding-a-cloudformation-resource-type).
+> Adding a type? See [Adding a CloudFormation Resource Type](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#adding-a-cloudformation-resource-type).
 > Types live in per-service provisioners under `services/cloudformation/provisioners/`. This table
 > is generated from the provisioner inventory by `make docs-sync`; edit that, not the table.
 
@@ -79,12 +79,14 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool`, `UserPoolClient` |
+| Cognito | `UserPool`, `UserPoolClient`, `UserPoolDomain` |
+| ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
+| IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string) |
 | CloudFront | `Distribution` |
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |
@@ -96,7 +98,18 @@ cross-resource references.
 
 All other resource types are accepted without error and assigned a synthetic physical ID (with an
 `arn:aws:stub:::<logicalId>` ARN attribute), so templates with unsupported types still reach
-`CREATE_COMPLETE` rather than failing.
+`CREATE_COMPLETE` rather than failing. Nothing is created for such a resource, so each one is
+logged at `WARN` and carries a resource status reason saying so, which `DescribeStackEvents`
+returns:
+
+```
+Resource type AWS::Fake::Thing is not supported by Floci. It was stubbed and nothing was created for it.
+```
+
+Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `false`
+(`FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES=false`) to fail such a
+resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
+must not pass over a resource it never got.
 
 ## EventBridge Event Buses
 
@@ -220,7 +233,7 @@ before provisioning:
 - `AWS::SSM::Parameter::Value<List<String>>` and `AWS::SSM::Parameter::Name` typed parameters are
   **not yet** resolved — they are passed through as their literal input.
 
-The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, and `Name` attributes through
+The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, `Name`, and `Arn` attributes through
 `Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
 
 ## AWS::Include (`Fn::Transform`)

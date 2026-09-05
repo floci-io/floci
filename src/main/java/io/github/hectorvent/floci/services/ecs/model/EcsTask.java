@@ -30,6 +30,8 @@ public class EcsTask {
     private Instant startedAt;
     private Instant stoppedAt;
     private String startedBy;
+    /** The owning service's deploymentId when this task was launched; null for RunTask/StartTask and legacy tasks. */
+    private String deploymentId;
     private String stoppedReason;
     private List<Container> containers;
     private String containerInstanceArn;
@@ -37,6 +39,40 @@ public class EcsTask {
     private Instant protectedUntil;
     private Map<String, String> tags = new HashMap<>();
     private NetworkConfiguration networkConfiguration;
+
+    public EcsTask() {
+    }
+
+    /**
+     * Shallow copy, used to synthesize a phase ladder of lifecycle events without mutating the
+     * shared task instance held in the live task map — that instance stays visible to concurrent
+     * DescribeTasks/ListTasks calls for the whole synthesis, so events must be built from a
+     * snapshot instead of toggling {@link #lastStatus} back and forth on the original.
+     */
+    public EcsTask(EcsTask other) {
+        this.taskArn = other.taskArn;
+        this.clusterArn = other.clusterArn;
+        this.taskDefinitionArn = other.taskDefinitionArn;
+        this.group = other.group;
+        this.owningServiceArn = other.owningServiceArn;
+        this.launchType = other.launchType;
+        this.lastStatus = other.lastStatus;
+        this.desiredStatus = other.desiredStatus;
+        this.cpu = other.cpu;
+        this.memory = other.memory;
+        this.createdAt = other.createdAt;
+        this.startedAt = other.startedAt;
+        this.stoppedAt = other.stoppedAt;
+        this.startedBy = other.startedBy;
+        this.deploymentId = other.deploymentId;
+        this.stoppedReason = other.stoppedReason;
+        this.containers = other.containers;
+        this.containerInstanceArn = other.containerInstanceArn;
+        this.protectionEnabled = other.protectionEnabled;
+        this.protectedUntil = other.protectedUntil;
+        this.tags = other.tags;
+        this.networkConfiguration = other.networkConfiguration;
+    }
 
     public String getTaskArn() { return taskArn; }
     public void setTaskArn(String taskArn) { this.taskArn = taskArn; }
@@ -79,6 +115,9 @@ public class EcsTask {
 
     public String getStartedBy() { return startedBy; }
     public void setStartedBy(String startedBy) { this.startedBy = startedBy; }
+
+    public String getDeploymentId() { return deploymentId; }
+    public void setDeploymentId(String deploymentId) { this.deploymentId = deploymentId; }
 
     /** The awsvpc network configuration the task was launched with, or null. Carried through from
      *  the RunTask request (including the ecs:runTask Step Functions integration) so it survives the

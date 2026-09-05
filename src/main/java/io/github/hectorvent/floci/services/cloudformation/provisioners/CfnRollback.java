@@ -28,6 +28,14 @@ public final class CfnRollback {
      */
     public static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
 
+    /**
+     * Carries the reason a provisioner's own restoration attempt did not complete after a failed
+     * update. {@code CloudFormationService} copies it onto the committed resource so the rollback
+     * walker reports UPDATE_ROLLBACK_FAILED with that reason instead of claiming the prior entity
+     * is live. Lives here for the same reason as the marker above.
+     */
+    public static final String UPDATE_ROLLBACK_FAILURE_ATTR = "__FlociUpdateRollbackFailure";
+
     private CfnRollback() {
     }
 

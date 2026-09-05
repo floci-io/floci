@@ -67,12 +67,16 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -127,6 +131,14 @@ public class AslExecutor {
     // ecs:runTask.sync polling — wait up to ~60s for the task to reach STOPPED.
     private static final int ECS_SYNC_POLL_ATTEMPTS = 600;
     private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
+
+    // AWS caps the string input of States.Base64Encode/Base64Decode/Hash at 10,000 characters
+    // (measured here in Unicode code points).
+    private static final int INTRINSIC_MAX_INPUT_LENGTH = 10_000;
+    // Must mirror the identical private set in JsonataEvaluator ($hash): both query languages
+    // expose exactly these five algorithms, case-sensitively.
+    private static final Set<String> HASH_ALGORITHMS =
+            Set.of("MD5", "SHA-1", "SHA-256", "SHA-384", "SHA-512");
 
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
     private static final String AWS_SDK_SFN_PREFIX = "arn:aws:states:::aws-sdk:sfn:";
@@ -666,7 +678,8 @@ public class AslExecutor {
             try {
                 taskResult = mockedSteps != null
                         ? mockedTaskResult(mockedSteps, stateName, attempt)
-                        : invokeResource(effectiveResource, effectiveInput, sm, taskToken, executionDeadlineNanos);
+                        : invokeResource(effectiveResource, effectiveInput, sm, taskToken,
+                                executionDeadlineNanos, jsonata ? null : stateDef.path("Parameters"));
                 if (tokenFuture != null) {
                     taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos);
                 }
@@ -847,7 +860,7 @@ public class AslExecutor {
     }
 
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
-                                    long executionDeadlineNanos) throws Exception {
+                                    long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         JsonNode lambdaPayload = input;
@@ -998,7 +1011,7 @@ public class AslExecutor {
         if (resource.startsWith("arn:aws:states:::states:startExecution")) {
             String mode = resource.substring("arn:aws:states:::states:startExecution".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeNestedStateMachine(mode, input, region, executionDeadlineNanos);
+            return invokeNestedStateMachine(mode, input, region, executionDeadlineNanos, rawParameters);
         }
 
         // Activity resource: arn:aws:states:{region}:{account}:activity:{name}
@@ -1332,17 +1345,35 @@ public class AslExecutor {
     }
 
     private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region,
-                                              long executionDeadlineNanos) throws Exception {
+                                              long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
         if (smArn == null || smArn.isBlank()) {
             throw new FailStateException("States.TaskFailed",
                     "StateMachineArn is required for nested state machine execution");
         }
-        JsonNode inputNode = input.path("Input");
-        String childInput = inputNode.isMissingNode() ? "{}" : objectMapper.writeValueAsString(inputNode);
+        // Preserve provenance: an Input produced by States.JsonToString is JSON text whose content is the
+        // child's wire input (so the child parses it back to an object); any other value is serialized as
+        // a JSON value. Also honor Name/Name.$ instead of always generating a random execution name.
+        boolean fromJsonToString = NestedExecutionInput.isJsonToStringInput(rawParameters);
+        String childInput = NestedExecutionInput.childInput(input.path("Input"), fromJsonToString, objectMapper);
+
+        // Honor Name/Name.$ without coercion: use it only when it resolves to a non-empty string. A Name
+        // that was SUPPLIED (Name or Name.$ in the raw Parameters) but did not resolve to such a string is
+        // a runtime error, not a silent fall-through to a generated name; a truly omitted Name generates one.
+        JsonNode nameNode = input.path("Name");
+        String childName;
+        if (nameNode.isTextual() && !nameNode.asText().isBlank()) {
+            childName = nameNode.asText();
+        } else if (rawParameters != null && rawParameters.isObject()
+                && (rawParameters.has("Name") || rawParameters.has("Name.$"))) {
+            throw new FailStateException("States.Runtime",
+                    "Nested StartExecution 'Name' must resolve to a non-empty string");
+        } else {
+            childName = null;
+        }
 
         io.github.hectorvent.floci.services.stepfunctions.model.Execution exec =
-                sfnService.get().startExecution(smArn, null, childInput, region);
+                sfnService.get().startExecution(smArn, childName, childInput, region);
         String execArn = exec.getExecutionArn();
 
         if ("".equals(mode)) {
@@ -1867,87 +1898,15 @@ public class AslExecutor {
     }
 
     private boolean evaluateCondition(JsonNode rule, JsonNode input) throws Exception {
-        // Logical operators
-        if (rule.has("And")) {
-            for (JsonNode sub : rule.get("And")) {
-                if (!evaluateCondition(sub, input)) return false;
-            }
-            return true;
+        // Comparator inventory, type-strict evaluation, and the missing-path/unknown-operator rules
+        // live in ChoiceOperators so the runtime and the CreateStateMachine validator share one source
+        // of truth. An undefined reference path or an unsupported comparator is a runtime error on AWS,
+        // not a silently-false fallthrough to the Default branch.
+        try {
+            return ChoiceOperators.evaluate(rule, path -> resolvePathNode(path, input));
+        } catch (ChoiceOperators.ChoiceEvaluationException e) {
+            throw new FailStateException("States.Runtime", e.getMessage());
         }
-        if (rule.has("Or")) {
-            for (JsonNode sub : rule.get("Or")) {
-                if (evaluateCondition(sub, input)) return true;
-            }
-            return false;
-        }
-        if (rule.has("Not")) {
-            return !evaluateCondition(rule.get("Not"), input);
-        }
-
-        String variable = rule.path("Variable").asText();
-        JsonNode value = resolvePath(variable, input);
-
-        if (rule.has("StringEquals")) {
-            return value.asText().equals(rule.get("StringEquals").asText());
-        }
-        if (rule.has("StringEqualsPath")) {
-            return value.asText().equals(resolvePath(rule.get("StringEqualsPath").asText(), input).asText());
-        }
-        if (rule.has("StringMatches")) {
-            return value.asText().matches(globToRegex(rule.get("StringMatches").asText()));
-        }
-        if (rule.has("NumericEquals")) {
-            return value.asDouble() == rule.get("NumericEquals").asDouble();
-        }
-        if (rule.has("NumericEqualsPath")) {
-            return value.asDouble() == resolvePath(rule.get("NumericEqualsPath").asText(), input).asDouble();
-        }
-        if (rule.has("NumericLessThan")) {
-            return value.asDouble() < rule.get("NumericLessThan").asDouble();
-        }
-        if (rule.has("NumericLessThanPath")) {
-            return value.asDouble() < resolvePath(rule.get("NumericLessThanPath").asText(), input).asDouble();
-        }
-        if (rule.has("NumericGreaterThan")) {
-            return value.asDouble() > rule.get("NumericGreaterThan").asDouble();
-        }
-        if (rule.has("NumericGreaterThanPath")) {
-            return value.asDouble() > resolvePath(rule.get("NumericGreaterThanPath").asText(), input).asDouble();
-        }
-        if (rule.has("NumericLessThanEquals")) {
-            return value.asDouble() <= rule.get("NumericLessThanEquals").asDouble();
-        }
-        if (rule.has("NumericGreaterThanEquals")) {
-            return value.asDouble() >= rule.get("NumericGreaterThanEquals").asDouble();
-        }
-        if (rule.has("BooleanEquals")) {
-            return value.asBoolean() == rule.get("BooleanEquals").asBoolean();
-        }
-        if (rule.has("BooleanEqualsPath")) {
-            return value.asBoolean() == resolvePath(rule.get("BooleanEqualsPath").asText(), input).asBoolean();
-        }
-        if (rule.has("IsNull")) {
-            boolean expectNull = rule.get("IsNull").asBoolean();
-            return value.isNull() == expectNull;
-        }
-        if (rule.has("IsPresent")) {
-            boolean expectPresent = rule.get("IsPresent").asBoolean();
-            // A field that exists with an explicit null value still counts as present in AWS, so
-            // resolve without collapsing missing into null: only a truly absent path is "not present".
-            boolean present = !resolvePathNode(variable, input).isMissingNode();
-            return present == expectPresent;
-        }
-        if (rule.has("IsString")) {
-            return value.isTextual() == rule.get("IsString").asBoolean();
-        }
-        if (rule.has("IsNumeric")) {
-            return value.isNumber() == rule.get("IsNumeric").asBoolean();
-        }
-        if (rule.has("IsBoolean")) {
-            return value.isBoolean() == rule.get("IsBoolean").asBoolean();
-        }
-
-        return false;
     }
 
     private StateResult executeWaitState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -2857,19 +2816,13 @@ public class AslExecutor {
             return result;
         }
         String resultPath = stateDef.get("ResultPath").asText();
-        if (resultPath == null || resultPath.equals("null")) {
-            return input;
+        try {
+            return ResultPathMerge.merge(input, resultPath, result, objectMapper);
+        } catch (ResultPathMerge.ResultPathMatchException e) {
+            // AWS fails a non-applicable ResultPath with States.ResultPathMatchFailure rather than
+            // silently discarding the state input.
+            throw new FailStateException("States.ResultPathMatchFailure", e.getMessage());
         }
-        if ("$".equals(resultPath)) {
-            return result;
-        }
-        // Merge result into input at the given path
-        if (!input.isObject()) {
-            return result;
-        }
-        ObjectNode merged = input.deepCopy();
-        setPath(merged, resultPath, result);
-        return merged;
     }
 
     private JsonNode applyOutputPath(JsonNode stateDef, JsonNode input, JsonNode output) {
@@ -3379,7 +3332,9 @@ public class AslExecutor {
     /**
      * Evaluate a JSONPath-mode intrinsic function (States.*).
      * Supports: States.StringToJson, States.JsonToString, States.Format,
-     *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID.
+     *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID,
+     *           States.JsonMerge, States.Base64Encode, States.Base64Decode, States.StringSplit,
+     *           States.ArrayGetItem, States.Hash.
      * Throws FailStateException("States.Runtime") for unrecognized functions.
      *
      * <p>An argument that matches nothing fails the execution, and the cause names the whole
@@ -3403,7 +3358,7 @@ public class AslExecutor {
         if (parenOpen < 0 || parenClose < 0) {
             throw new FailStateException("States.Runtime", "Malformed intrinsic function: " + expr);
         }
-        String fnName = expr.substring(0, parenOpen).trim();
+        String fnName = NestedExecutionInput.intrinsicFunctionName(expr);
         String argsStr = expr.substring(parenOpen + 1, parenClose).trim();
 
         return switch (fnName) {
@@ -3528,6 +3483,165 @@ public class AslExecutor {
                 b.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
                 yield merged;
             }
+            case "States.Base64Encode" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 1 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Encode requires exactly 1 argument");
+                }
+                JsonNode dataArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                if (!dataArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Encode requires a string argument");
+                }
+                String data = dataArg.asText();
+                if (data.codePointCount(0, data.length()) > INTRINSIC_MAX_INPUT_LENGTH) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Encode input exceeds " + INTRINSIC_MAX_INPUT_LENGTH + " characters");
+                }
+                // Basic (RFC 4648) encoder: AWS documents "MIME" but its real output is unwrapped;
+                // Java's MIME encoder would insert CRLF line breaks every 76 characters.
+                yield objectMapper.getNodeFactory().textNode(
+                        Base64.getEncoder().encodeToString(data.getBytes(StandardCharsets.UTF_8)));
+            }
+            case "States.Base64Decode" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 1 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode requires exactly 1 argument");
+                }
+                JsonNode encodedArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                if (!encodedArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode requires a string argument");
+                }
+                String encoded = encodedArg.asText();
+                if (encoded.codePointCount(0, encoded.length()) > INTRINSIC_MAX_INPUT_LENGTH) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode input exceeds " + INTRINSIC_MAX_INPUT_LENGTH + " characters");
+                }
+                byte[] decoded;
+                try {
+                    // Basic decoder, deliberately not MIME: the MIME decoder silently ignores
+                    // non-alphabet characters, which would turn invalid input into garbage output
+                    // instead of the required States.IntrinsicFailure.
+                    decoded = Base64.getDecoder().decode(encoded);
+                } catch (IllegalArgumentException e) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Base64Decode input is not valid base64");
+                }
+                // Bytes that are not valid UTF-8 become U+FFFD replacement characters.
+                yield objectMapper.getNodeFactory().textNode(new String(decoded, StandardCharsets.UTF_8));
+            }
+            case "States.StringSplit" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.StringSplit requires exactly 2 arguments");
+                }
+                JsonNode valueArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode delimitersArg = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                if (!valueArg.isTextual() || !delimitersArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.StringSplit requires two string arguments");
+                }
+                String delimiters = delimitersArg.asText();
+                if (delimiters.isEmpty()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.StringSplit delimiter must not be empty");
+                }
+                // The second argument is a set of splitting characters. Membership is tested by
+                // Unicode code point so a supplementary delimiter (e.g. an emoji) never matches the
+                // lone surrogate halves of a different supplementary character in the input.
+                Set<Integer> delimiterCodePoints = delimiters.codePoints().boxed().collect(Collectors.toSet());
+                String value = valueArg.asText();
+                ArrayNode result = objectMapper.createArrayNode();
+                StringBuilder current = new StringBuilder();
+                for (int i = 0; i < value.length(); ) {
+                    int codePoint = value.codePointAt(i);
+                    if (delimiterCodePoints.contains(codePoint)) {
+                        if (!current.isEmpty()) {
+                            // Empty segments (consecutive/leading/trailing delimiters) are omitted.
+                            result.add(objectMapper.getNodeFactory().textNode(current.toString()));
+                            current.setLength(0);
+                        }
+                    } else {
+                        current.appendCodePoint(codePoint);
+                    }
+                    i += Character.charCount(codePoint);
+                }
+                if (!current.isEmpty()) {
+                    result.add(objectMapper.getNodeFactory().textNode(current.toString()));
+                }
+                yield result;
+            }
+            case "States.ArrayGetItem" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem requires exactly 2 arguments");
+                }
+                JsonNode array = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode indexNode = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                if (!array.isArray()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem first argument must be an array");
+                }
+                // isIntegralNumber rejects non-numbers and floating point; canConvertToInt rejects
+                // integral values outside int range (a path-supplied BigInteger whose asInt() would
+                // otherwise silently wrap and return the wrong element).
+                if (!indexNode.isIntegralNumber() || !indexNode.canConvertToInt()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem index must be a non-negative integer");
+                }
+                int index = indexNode.asInt();
+                if (index < 0 || index >= array.size()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.ArrayGetItem index " + index + " is out of bounds for length " + array.size());
+                }
+                yield array.get(index);
+            }
+            case "States.Hash" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2 || argsStr.stripTrailing().endsWith(",")) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash requires exactly 2 arguments");
+                }
+                JsonNode dataArg = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                if (!dataArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash first argument must be a string");
+                }
+                JsonNode algorithmArg = resolveIntrinsicArg(parts.get(1).trim(), root, context);
+                if (!algorithmArg.isTextual()) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash second argument must be a string");
+                }
+                String data = dataArg.asText();
+                if (data.codePointCount(0, data.length()) > INTRINSIC_MAX_INPUT_LENGTH) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash input exceeds " + INTRINSIC_MAX_INPUT_LENGTH + " characters");
+                }
+                String algorithm = algorithmArg.asText();
+                // Explicit allow-list checked before getInstance: never a silent default, and the
+                // caller's string is never passed to MessageDigest for an algorithm AWS rejects.
+                if (!HASH_ALGORITHMS.contains(algorithm)) {
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash algorithm '" + algorithm
+                                    + "' must be one of MD5, SHA-1, SHA-256, SHA-384, SHA-512");
+                }
+                try {
+                    MessageDigest digest = MessageDigest.getInstance(algorithm);
+                    // HexFormat: lowercase, fixed-width (preserves leading zeros, unlike BigInteger).
+                    yield objectMapper.getNodeFactory().textNode(
+                            HexFormat.of().formatHex(digest.digest(data.getBytes(StandardCharsets.UTF_8))));
+                } catch (NoSuchAlgorithmException e) {
+                    // Unreachable after the allow-list check; defensive so a JDK regression could
+                    // never escape as an uncatchable States.Runtime.
+                    throw new FailStateException("States.IntrinsicFailure",
+                            "States.Hash algorithm '" + algorithm + "' is not available");
+                }
+            }
             default -> throw new FailStateException("States.Runtime",
                     "Unsupported intrinsic function: " + fnName);
         };
@@ -3650,32 +3764,6 @@ public class AslExecutor {
             return s.substring(1, s.length() - 1);
         }
         return s;
-    }
-
-    private void setPath(ObjectNode root, String path, JsonNode value) {
-        if (!path.startsWith("$.") && !"$".equals(path)) {
-            return;
-        }
-        if ("$".equals(path)) {
-            return;
-        }
-        String[] parts = path.substring(2).split("\\.");
-        ObjectNode current = root;
-        for (int i = 0; i < parts.length - 1; i++) {
-            JsonNode next = current.path(parts[i]);
-            if (!next.isObject()) {
-                ObjectNode newNode = objectMapper.createObjectNode();
-                current.set(parts[i], newNode);
-                current = newNode;
-            } else {
-                current = (ObjectNode) next;
-            }
-        }
-        current.set(parts[parts.length - 1], value);
-    }
-
-    private String globToRegex(String glob) {
-        return "\\Q" + glob.replace("*", "\\E.*\\Q") + "\\E";
     }
 
     // ──────────────────────────── History helpers ────────────────────────────

@@ -68,6 +68,34 @@ class ProvisionContextTest {
     }
 
     @Test
+    void stablePhysicalNamePrefersTheTemplatesName() {
+        assertEquals("chosen",
+                context("prior").stablePhysicalName("chosen", "Bucket", 63, true));
+    }
+
+    /**
+     * The reason this helper exists: provision runs again on every UpdateStack, so generating
+     * unconditionally would give an unnamed resource a new name each time, creating a second
+     * resource and orphaning the first. These names are createOnly in the schemas, so an unchanged
+     * template must keep its physical id.
+     */
+    @Test
+    void stablePhysicalNameKeepsThePriorNameWhenTheTemplateGivesNone() {
+        assertEquals("my-stack-Bucket-abc123def456",
+                context("my-stack-Bucket-abc123def456").stablePhysicalName(null, "Bucket", 63, true));
+        assertEquals("my-stack-Bucket-abc123def456",
+                context("my-stack-Bucket-abc123def456").stablePhysicalName("  ", "Bucket", 63, true));
+    }
+
+    @Test
+    void stablePhysicalNameGeneratesOnlyForAFirstCreate() {
+        String generated = context(null).stablePhysicalName(null, "Bucket", 63, true);
+
+        assertTrue(generated.startsWith("my-stack-bucket-"), generated);
+        assertEquals(generated.toLowerCase(), generated, "lowercase was requested");
+    }
+
+    @Test
     void resolveTagsKeepsTemplateOrderAndDefaultsAMissingValue() {
         Map<String, String> tags = context(null).resolveTags(
                 props("""
@@ -135,5 +163,33 @@ class ProvisionContextTest {
         when(engine.resolveNode(wrapped.get("Tags"))).thenReturn(chosenBranch);
 
         assertEquals(Map.of("env", "prod"), context(null).resolveTags(wrapped, "Tags"));
+    }
+    @Test
+    void reusesPriorEntityIsTrueOnlyWhenTheDerivedNameMatchesThePriorId() {
+        ProvisionContext create = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+        assertFalse(create.reusesPriorEntity("anything"),
+                "a create has no prior entity to reuse");
+
+        ProvisionContext update = context("my-stack-Pipe-0123456789ab");
+        assertTrue(update.reusesPriorEntity("my-stack-Pipe-0123456789ab"),
+                "the same name means the same entity, so the provisioner must update it");
+        assertFalse(update.reusesPriorEntity("explicitly-named"),
+                "a replacing update derives a different name and must still create");
+    }
+
+
+    @Test
+    void staleTagKeysListsTheCurrentKeysTheTemplateDropped() {
+        Map<String, String> current = new java.util.LinkedHashMap<>();
+        current.put("Keep", "same");
+        current.put("Old", "value");
+        current.put("Gone", "too");
+
+        assertEquals(List.of("Old", "Gone"),
+                ProvisionContext.staleTagKeys(current, Map.of("Keep", "same", "New", "added")));
+        assertEquals(List.of(), ProvisionContext.staleTagKeys(null, Map.of("Keep", "same")),
+                "no stored tags means nothing to untag");
+        assertEquals(List.of("Keep", "Old", "Gone"), ProvisionContext.staleTagKeys(current, Map.of()),
+                "a template with no Tags leaves the resource untagged");
     }
 }

@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
             compatibility-tests
@@ -103,11 +103,22 @@ jobs:
         run: python3 .github/ci/compat-opentofu-drift-check.py
 
   build-native:
-    name: Build native floci image
-    runs-on: ubuntu-24.04-arm
+    name: Build native floci image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # Both published architectures. The native image is the only place an
+    # arch-specific resource can go missing (snappy-java's JNI library is
+    # registered per platform), and one arch cannot prove the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2 # v1
         with:
@@ -125,11 +136,11 @@ jobs:
       # reads the ~/.m2 that ci.yml's shard 1 saves on every push to main. ci.yml
       # stays the single owner of the save; a second writer would just race it.
       # Two known partial-hit caveats, both cheap: `runner.os` is Linux for both
-      # but ci.yml runs x64 while this runs arm64 (Maven artifacts are
+      # but ci.yml runs x64 while the arm64 leg here does not (Maven artifacts are
       # arch-neutral, so only classifier-based natives re-download), and
       # `-Dnative` pulls native-image plugins that ci.yml's `mvn test` never
       # fetches. Expect most of the ~66s of cold resolution back, not all of it.
-      - uses: actions/cache/restore@v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
@@ -138,12 +149,44 @@ jobs:
       - name: Build native executable (quick build)
         run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-Ob"
 
+      # Quarkus always writes GraalVM's build-output JSON next to the native source jar. Surfacing
+      # it here gives every PR a size record for both architectures: code area, image heap, total
+      # image size and reachable type/method counts, plus the gzip size of the binary, which tracks
+      # the compressed layer Docker Hub will report. No extra build flags, a few seconds.
+      - name: Record native build size
+        run: |
+          python3 - "$GITHUB_STEP_SUMMARY" "${{ matrix.arch }}" <<'PY'
+          import glob, json, subprocess, sys
+          summary, arch = sys.argv[1], sys.argv[2]
+          stats = json.load(open(glob.glob("target/*-native-image-source-jar/*-build-output-stats.json")[0]))
+          d, a = stats["image_details"], stats["analysis_results"]
+          runner = glob.glob("target/*-runner")[0]
+          gz = int(subprocess.run(f"gzip -c '{runner}' | wc -c", shell=True, capture_output=True, text=True).stdout)
+          mib = lambda b: f"{b / 2**20:.1f} MiB"
+          rows = [("total image", mib(d["total_bytes"])), ("code area", mib(d["code_area"]["bytes"])),
+                  ("image heap", mib(d["image_heap"]["bytes"])),
+                  ("resources in heap", f"{mib(d['image_heap']['resources']['bytes'])} ({d['image_heap']['resources']['count']} files)"),
+                  ("binary gzip (Hub layer estimate)", f"{gz / 1e6:.2f} MB"),
+                  ("reachable types / methods", f"{a['types']['reachable']} / {a['methods']['reachable']}")]
+          with open(summary, "a") as f:
+              f.write(f"### Native build size ({arch}, quick build)\n\n| metric | value |\n|---|---|\n")
+              f.writelines(f"| {k} | {v} |\n" for k, v in rows)
+          print("\n".join(f"{k}: {v}" for k, v in rows))
+          PY
+
+      - name: Upload native build stats
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-build-stats-${{ matrix.arch }}
+          path: target/*-native-image-source-jar/*-build-output-stats.json
+          retention-days: 30
+
       - name: Stage native binary for packaging
         run: |
-          mkdir -p native/arm64
-          cp target/*-runner native/arm64/application
+          mkdir -p native/${{ matrix.arch }}
+          cp target/*-runner native/${{ matrix.arch }}/application
           # include any sidecar .so the runtime image may need (matches nightly artifact set)
-          cp target/*.so native/arm64/ 2>/dev/null || true
+          cp target/*.so native/${{ matrix.arch }}/ 2>/dev/null || true
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -167,20 +210,30 @@ jobs:
         run: gzip /tmp/floci-native-image.tar
 
       - name: Upload native floci image
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: floci-native-image
+          name: floci-native-image-${{ matrix.arch }}
           path: /tmp/floci-native-image.tar.gz
           retention-days: 1
 
   native-compat-test:
-    name: native / ${{ matrix.test }}
+    name: native ${{ matrix.arch }} / ${{ matrix.test }}
     needs: build-native
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    # The suites run against the arm64 image only. What they check is
+    # arch-neutral, and running all eight on both arches (16 jobs per PR) left
+    # them queued for the shared runner pools for longer than they take to run.
+    # The amd64 image is still built above so both published arches are proven
+    # to link and package, and one amd64 suite stays: sdk-test-python carries
+    # the Firehose compression delivery test that proves the x86_64 snappy JNI
+    # library survived the native build (the resource that can go missing per
+    # platform, see the build-native comment).
     strategy:
       fail-fast: false
       matrix:
+        arch:
+          - arm64
         test:
           - sdk-test-node
           - sdk-test-python
@@ -190,12 +243,18 @@ jobs:
           - compat-cdk
           - compat-terraform
           - compat-opentofu
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            test: sdk-test-python
+            runner: ubuntu-latest
 
     steps:
       - name: Download native floci image
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: floci-native-image
+          name: floci-native-image-${{ matrix.arch }}
           path: /tmp
 
       - name: Load native floci image
@@ -225,7 +284,7 @@ jobs:
         run: timeout 60 bash -c 'until curl -sf http://localhost:4566/ >/dev/null 2>&1; do sleep 1; done'
 
       - name: Checkout repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
             compatibility-tests
@@ -299,9 +358,9 @@ jobs:
 
       - name: Upload test results
         if: always() && steps.tests.outcome != 'skipped'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: compat-results-${{ matrix.test }}
+          name: compat-results-${{ matrix.arch }}-${{ matrix.test }}
           path: test-results/
           if-no-files-found: warn
 

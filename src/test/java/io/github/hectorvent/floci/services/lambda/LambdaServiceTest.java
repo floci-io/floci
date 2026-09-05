@@ -592,6 +592,125 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createFunctionRejectsUnsupportedArchitectureWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("unsupported-create-architecture");
+        request.put("Architectures", List.of("sparc"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertUnsupportedArchitecture(error);
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsMultipleArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("multiple-create-architectures");
+        request.put("Architectures", List.of("arm64", "x86_64"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '[arm64, x86_64]' at 'architectures' "
+                + "failed to satisfy constraint: Member must have length less than or equal to 1",
+                error.getMessage());
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsEmptyArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("empty-create-architectures");
+        request.put("Architectures", List.of());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '[]' at 'architectures' "
+                + "failed to satisfy constraint: Member must have length greater than or equal to 1",
+                error.getMessage());
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsScalarArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("scalar-create-architectures");
+        request.put("Architectures", "arm64");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertMalformedArchitectures(error, "arm64");
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void updateFunctionCodeRejectsUnsupportedArchitectureBeforeMutation() {
+        service.createFunction(REGION, baseRequest("unsupported-code-architecture"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "unsupported-code-architecture",
+                        Map.of("ImageUri", "example.invalid/changed:latest",
+                                "Architectures", List.of("sparc"))));
+
+        assertUnsupportedArchitecture(error);
+        LambdaFunction unchanged = service.getFunction(REGION, "unsupported-code-architecture");
+        assertNull(unchanged.getImageUri());
+        assertNull(unchanged.getArchitectures());
+    }
+
+    @Test
+    void updateFunctionCodeRejectsObjectArchitecturesBeforeMutation() {
+        service.createFunction(REGION, baseRequest("object-code-architectures"));
+        String revisionId = service.getFunction(REGION, "object-code-architectures").getRevisionId();
+        Map<String, String> malformedArchitectures = Map.of("Architecture", "arm64");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "object-code-architectures",
+                        Map.of("ImageUri", "example.invalid/changed:latest",
+                                "Architectures", malformedArchitectures)));
+
+        assertMalformedArchitectures(error, malformedArchitectures);
+        LambdaFunction unchanged = service.getFunction(REGION, "object-code-architectures");
+        assertNull(unchanged.getImageUri());
+        assertNull(unchanged.getArchitectures());
+        assertEquals(revisionId, unchanged.getRevisionId());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsUnsupportedArchitectureBeforeMutation() {
+        service.createFunction(REGION, baseRequest("unsupported-config-architecture"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "unsupported-config-architecture",
+                        Map.of("Description", "changed", "Architectures", List.of("sparc"))));
+
+        assertUnsupportedArchitecture(error);
+        LambdaFunction unchanged = service.getFunction(REGION, "unsupported-config-architecture");
+        assertNull(unchanged.getDescription());
+        assertNull(unchanged.getArchitectures());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsScalarArchitecturesBeforeMutation() {
+        service.createFunction(REGION, baseRequest("scalar-config-architectures"));
+        String revisionId = service.getFunction(REGION, "scalar-config-architectures").getRevisionId();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "scalar-config-architectures",
+                        Map.of("Description", "changed", "Architectures", 64)));
+
+        assertMalformedArchitectures(error, 64);
+        LambdaFunction unchanged = service.getFunction(REGION, "scalar-config-architectures");
+        assertNull(unchanged.getDescription());
+        assertNull(unchanged.getArchitectures());
+        assertEquals(revisionId, unchanged.getRevisionId());
+    }
+
+    @Test
     void updateFunctionCodeWithoutArchitecturesKeepsExisting() {
         Map<String, Object> req = baseRequest("arch-keep-fn");
         req.put("Architectures", List.of("arm64"));
@@ -599,6 +718,22 @@ class LambdaServiceTest {
 
         LambdaFunction updated = service.updateFunctionCode(REGION, "arch-keep-fn", Map.of());
         assertEquals(List.of("arm64"), updated.getArchitectures());
+    }
+
+    private static void assertUnsupportedArchitecture(AwsException error) {
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value 'sparc' at 'architectures.1.member' "
+                + "failed to satisfy constraint: Member must satisfy enum value set: [x86_64, arm64]",
+                error.getMessage());
+    }
+
+    private static void assertMalformedArchitectures(AwsException error, Object value) {
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '" + value + "' at 'architectures' "
+                + "failed to satisfy constraint: Member must be a list",
+                error.getMessage());
     }
 
     @Test

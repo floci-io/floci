@@ -1,22 +1,14 @@
 package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
-import io.fabric8.kubernetes.api.model.Container;
-import io.fabric8.kubernetes.api.model.ContainerBuilder;
-import io.fabric8.kubernetes.api.model.EnvVar;
-import io.fabric8.kubernetes.api.model.Pod;
-import io.fabric8.kubernetes.api.model.PodBuilder;
-import io.fabric8.kubernetes.api.model.Quantity;
-import io.fabric8.kubernetes.api.model.Volume;
-import io.fabric8.kubernetes.api.model.VolumeBuilder;
-import io.fabric8.kubernetes.api.model.VolumeMount;
-import io.fabric8.kubernetes.api.model.VolumeMountBuilder;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -24,10 +16,10 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Builds the Pod manifest for one Lambda execution environment. Code cannot be
- * copied into a pod before it starts (no docker-cp equivalent), so an init
- * container downloads the deployment package (and layers) from Floci's S3 over
- * HTTP into an emptyDir mounted at /var/task before the runtime starts.
+ * Builds the Pod manifest for one Lambda execution environment, as a plain JSON tree (see
+ * {@link KubernetesApiClient}). Code cannot be copied into a pod before it starts (no docker-cp
+ * equivalent), so an init container downloads the deployment package (and layers) from Floci's
+ * S3 over HTTP into an emptyDir mounted at /var/task before the runtime starts.
  */
 @ApplicationScoped
 public class LambdaPodSpecFactory {
@@ -70,7 +62,7 @@ public class LambdaPodSpecFactory {
      * @param imageConfig      Image-package-type entrypoint/command/workingdir; empty lists/null when unset
      * @param caConfigMapName  ConfigMap holding Floci's CA cert, mounted at /etc/floci-ca.crt when present
      */
-    public Pod buildPod(String podName,
+    public ObjectNode buildPod(String podName,
                         String functionName,
                         String image,
                         List<String> env,
@@ -83,94 +75,102 @@ public class LambdaPodSpecFactory {
                         Optional<String> caConfigMapName) {
         var hasCode = codeDownloadUrl != null;
         var hasLayers = !layerDownloadUrls.isEmpty();
+        var nodes = JsonNodeFactory.instance;
 
-        var volumes = new ArrayList<Volume>();
-        var runtimeMounts = new ArrayList<VolumeMount>();
+        var volumes = nodes.arrayNode();
+        var runtimeMounts = nodes.arrayNode();
         if (hasCode) {
-            volumes.add(new VolumeBuilder().withName("task").withNewEmptyDir().endEmptyDir().build());
-            runtimeMounts.add(mount("task", TASK_DIR));
+            volumes.add(emptyDirVolume(nodes, "task"));
+            runtimeMounts.add(mount(nodes, "task", TASK_DIR));
         }
         if (hasLayers) {
-            volumes.add(new VolumeBuilder().withName("opt").withNewEmptyDir().endEmptyDir().build());
-            runtimeMounts.add(mount("opt", OPT_DIR));
+            volumes.add(emptyDirVolume(nodes, "opt"));
+            runtimeMounts.add(mount(nodes, "opt", OPT_DIR));
         }
         // The provided.* base images exec /var/runtime/bootstrap with no /var/task
         // fallback, and their /var/runtime ships empty, so masking it with an emptyDir
         // that the init container copies bootstrap into is safe and required.
         var needsRuntimeDir = providedRuntime && hasCode;
         if (needsRuntimeDir) {
-            volumes.add(new VolumeBuilder().withName("runtime").withNewEmptyDir().endEmptyDir().build());
-            runtimeMounts.add(mount("runtime", RUNTIME_DIR));
+            volumes.add(emptyDirVolume(nodes, "runtime"));
+            runtimeMounts.add(mount(nodes, "runtime", RUNTIME_DIR));
         }
         caConfigMapName.ifPresent(cm -> {
-            volumes.add(new VolumeBuilder().withName("floci-ca")
-                    .withNewConfigMap().withName(cm).endConfigMap().build());
-            runtimeMounts.add(new VolumeMountBuilder()
-                    .withName("floci-ca")
-                    .withMountPath(ContainerLauncher.FLOCI_CA_CONTAINER_PATH)
-                    .withSubPath(KubernetesPodLauncher.CA_CONFIG_MAP_KEY)
-                    .withReadOnly(true)
-                    .build());
+            volumes.add(nodes.objectNode().put("name", "floci-ca")
+                    .set("configMap", nodes.objectNode().put("name", cm)));
+            runtimeMounts.add(nodes.objectNode()
+                    .put("name", "floci-ca")
+                    .put("mountPath", ContainerLauncher.FLOCI_CA_CONTAINER_PATH)
+                    .put("subPath", KubernetesPodLauncher.CA_CONFIG_MAP_KEY)
+                    .put("readOnly", true));
         });
 
-        var runtime = new ContainerBuilder()
-                .withName("runtime")
-                .withImage(image)
+        var resources = nodes.objectNode();
+        var memory = memoryMb + "Mi";
+        resources.set("requests", nodes.objectNode().put("memory", memory));
+        resources.set("limits", nodes.objectNode().put("memory", memory));
+
+        var runtime = nodes.objectNode()
+                .put("name", "runtime")
+                .put("image", image)
                 // Explicit IfNotPresent: the default for :latest/untagged is Always,
                 // which breaks images pre-loaded onto nodes (kind load docker-image).
-                .withImagePullPolicy("IfNotPresent")
-                .withEnv(toEnvVars(env))
-                .withVolumeMounts(runtimeMounts)
-                .withNewResources()
-                .addToRequests("memory", new Quantity(memoryMb + "Mi"))
-                .addToLimits("memory", new Quantity(memoryMb + "Mi"))
-                .endResources();
+                .put("imagePullPolicy", "IfNotPresent");
+        runtime.set("env", toEnvVars(nodes, env));
+        runtime.set("volumeMounts", runtimeMounts);
+        runtime.set("resources", resources);
 
         if (imageConfig != null && !imageConfig.entryPoint().isEmpty()) {
-            runtime.withCommand(escapeDollars(imageConfig.entryPoint()));
+            runtime.set("command", stringArray(nodes, escapeDollars(imageConfig.entryPoint())));
         }
         if (imageConfig != null && !imageConfig.command().isEmpty()) {
-            runtime.withArgs(escapeDollars(imageConfig.command()));
+            runtime.set("args", stringArray(nodes, escapeDollars(imageConfig.command())));
         } else if (handlerOrNull != null && !handlerOrNull.isBlank()) {
-            runtime.withArgs(escapeDollar(handlerOrNull));
+            runtime.set("args", stringArray(nodes, List.of(escapeDollar(handlerOrNull))));
         }
         if (imageConfig != null && imageConfig.workingDirectory() != null
                 && !imageConfig.workingDirectory().isBlank()) {
-            runtime.withWorkingDir(imageConfig.workingDirectory());
+            runtime.put("workingDir", imageConfig.workingDirectory());
         }
 
-        var initContainers = new ArrayList<Container>();
+        var initContainers = nodes.arrayNode();
         if (hasCode) {
-            var initMounts = new ArrayList<VolumeMount>();
-            initMounts.add(mount("task", TASK_DIR));
+            var initMounts = nodes.arrayNode();
+            initMounts.add(mount(nodes, "task", TASK_DIR));
             if (hasLayers) {
-                initMounts.add(mount("opt", OPT_DIR));
+                initMounts.add(mount(nodes, "opt", OPT_DIR));
             }
             if (needsRuntimeDir) {
-                initMounts.add(mount("runtime", RUNTIME_DIR));
+                initMounts.add(mount(nodes, "runtime", RUNTIME_DIR));
             }
-            initContainers.add(new ContainerBuilder()
-                    .withName("code-download")
-                    .withImage(config.services().lambda().kubernetes().initImage())
-                    .withImagePullPolicy("IfNotPresent")
-                    .withCommand("sh", "-c", initScript(codeDownloadUrl, layerDownloadUrls, providedRuntime))
-                    .withVolumeMounts(initMounts)
-                    .build());
+            var init = nodes.objectNode()
+                    .put("name", "code-download")
+                    .put("image", config.services().lambda().kubernetes().initImage())
+                    .put("imagePullPolicy", "IfNotPresent");
+            init.set("command", stringArray(nodes,
+                    List.of("sh", "-c", initScript(codeDownloadUrl, layerDownloadUrls, providedRuntime))));
+            init.set("volumeMounts", initMounts);
+            initContainers.add(init);
         }
 
-        return new PodBuilder()
-                .withNewMetadata()
-                .withName(podName)
-                .withLabels(podLabels(functionName))
-                .endMetadata()
-                .withNewSpec()
-                .withRestartPolicy("Never")
-                .withTerminationGracePeriodSeconds(5L)
-                .withInitContainers(initContainers)
-                .withContainers(runtime.build())
-                .withVolumes(volumes)
-                .endSpec()
-                .build();
+        var metadata = nodes.objectNode().put("name", podName);
+        var labels = nodes.objectNode();
+        podLabels(functionName).forEach(labels::put);
+        metadata.set("labels", labels);
+
+        var spec = nodes.objectNode()
+                .put("restartPolicy", "Never")
+                .put("terminationGracePeriodSeconds", 5);
+        spec.set("initContainers", initContainers);
+        spec.set("containers", nodes.arrayNode().add(runtime));
+        spec.set("volumes", volumes);
+
+        var pod = nodes.objectNode()
+                .put("apiVersion", "v1")
+                .put("kind", "Pod");
+        pod.set("metadata", metadata);
+        pod.set("spec", spec);
+        return pod;
     }
 
     /** Entrypoint/command/workingdir of an Image-package-type function. */
@@ -262,8 +262,18 @@ public class LambdaPodSpecFactory {
         return sanitized;
     }
 
-    private static VolumeMount mount(String name, String path) {
-        return new VolumeMountBuilder().withName(name).withMountPath(path).build();
+    private static ObjectNode emptyDirVolume(JsonNodeFactory nodes, String name) {
+        return nodes.objectNode().put("name", name).set("emptyDir", nodes.objectNode());
+    }
+
+    private static ObjectNode mount(JsonNodeFactory nodes, String name, String path) {
+        return nodes.objectNode().put("name", name).put("mountPath", path);
+    }
+
+    private static ArrayNode stringArray(JsonNodeFactory nodes, List<String> values) {
+        var array = nodes.arrayNode();
+        values.forEach(array::add);
+        return array;
     }
 
     private static List<String> escapeDollars(List<String> values) {
@@ -276,8 +286,8 @@ public class LambdaPodSpecFactory {
         return value.replace("$", "$$");
     }
 
-    private static List<EnvVar> toEnvVars(List<String> env) {
-        var vars = new ArrayList<EnvVar>(env.size());
+    private static ArrayNode toEnvVars(JsonNodeFactory nodes, List<String> env) {
+        var vars = nodes.arrayNode();
         for (var entry : env) {
             var eq = entry.indexOf('=');
             var key = eq >= 0 ? entry.substring(0, eq) : entry;
@@ -289,7 +299,7 @@ public class LambdaPodSpecFactory {
             }
             // Kubernetes expands $(VAR) in env values and collapses $$ to $.
             // Escaping every $ delivers values byte-for-byte like the docker executor.
-            vars.add(new EnvVar(key, value.replace("$", "$$"), null));
+            vars.add(nodes.objectNode().put("name", key).put("value", value.replace("$", "$$")));
         }
         return vars;
     }

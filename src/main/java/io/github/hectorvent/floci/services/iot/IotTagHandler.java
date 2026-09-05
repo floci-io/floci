@@ -11,10 +11,12 @@ import java.util.Map;
 public class IotTagHandler implements TagHandler {
 
     private final IotService iotService;
+    private final IotDomainConfigurationService domainConfigurationService;
 
     @Inject
-    public IotTagHandler(IotService iotService) {
+    public IotTagHandler(IotService iotService, IotDomainConfigurationService domainConfigurationService) {
         this.iotService = iotService;
+        this.domainConfigurationService = domainConfigurationService;
     }
 
     @Override
@@ -29,16 +31,31 @@ public class IotTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        return iotService.listTagsForResource(arn);
+        return isDomainConfiguration(arn)
+                ? domainConfigurationService.listTagsForResource(arn)
+                : iotService.listTagsForResource(arn);
     }
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        iotService.tagResource(arn, tags);
+        if (isDomainConfiguration(arn)) {
+            domainConfigurationService.tagResource(arn, tags);
+        } else {
+            iotService.tagResource(arn, tags);
+        }
     }
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        iotService.untagResource(arn, tagKeys);
+        if (isDomainConfiguration(arn)) {
+            domainConfigurationService.untagResource(arn, tagKeys);
+        } else {
+            iotService.untagResource(arn, tagKeys);
+        }
+    }
+
+    /** Domain configurations have their own service; every other IoT resource is tagged through IotService. */
+    private static boolean isDomainConfiguration(String arn) {
+        return arn != null && arn.contains(":domainconfiguration/");
     }
 }

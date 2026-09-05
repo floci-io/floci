@@ -211,10 +211,19 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
 ## Configuration
 
+!!! warning "Lambda container architecture"
+    Floci uses the Docker host architecture by default. Set
+    `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES=true` to run each function with
+    its declared `arm64` or `x86_64` architecture. The Docker host must support
+    the selected architecture. Foreign architectures require Docker Desktop or
+    host emulation such as `binfmt_misc` with QEMU. Floci does not fall back to
+    the host architecture when this setting is enabled.
+
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove containers after each invocation |
+| `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES` | `false` | Select each function's declared architecture for Docker image pulls and containers |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API range |
@@ -313,7 +322,12 @@ environment as a Kubernetes pod instead of a Docker container. This is designed
 for CI/CD clusters where privileged containers and `docker.sock` access are not
 allowed. Floci talks to the cluster through the standard Kubernetes API: when
 running inside the cluster it uses its ServiceAccount, and when running outside
-it uses your local kubeconfig.
+it uses your local kubeconfig. An inline static bearer `token`, a
+client-certificate/client-key credential with a PKCS#8 private key, or the
+`aws eks get-token --cluster-name <name> [--region <region>]` exec plugin
+(what `aws eks update-kubeconfig` generates) is supported. `--role-arn`,
+`tokenFile`, any other exec command, and auth-provider credential plugins
+(gcloud, etc.) are not, and fail with a named error.
 
 How an invocation works:
 
@@ -645,6 +659,10 @@ When unset (default), Floci injects execution-role credentials for a known role.
     files, not the environment. Floci logs a `WARN` carrying the forwarded access-key prefix the
     first time it happens. Give the function a role Floci knows, or set `aws-config-path`, to keep
     host credentials out of the container.
+
+### Locally built images
+
+A container image function whose `ImageUri` names an image already present on the Docker daemon runs that image directly. This includes AWS-shaped `<account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>` URIs, which are otherwise rewritten to [Floci's emulated ECR registry](ecr.md) at pull time: build the image under the exact URI the function declares (`docker build -t <ImageUri> .`) and no push is needed. With `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` set, tag it as `<base>/<ImageUri>` instead, since that is the reference Floci launches. Set `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES=false` to always resolve AWS-shaped URIs through the emulated registry.
 
 ### Private registry authentication
 
