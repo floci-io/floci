@@ -91,7 +91,9 @@ class AcmPaginationTest {
         Set<String> allArns = new HashSet<>();
         String nextToken = null;
         int pageCount = 0;
-        int maxPages = 10; // Safety limit
+        // Safety limit against a NextToken that never ends. The store is shared with every other ACM
+        // test class in the JVM, so the real page count grows with the suite.
+        int maxPages = 200;
 
         do {
             String body = nextToken == null
