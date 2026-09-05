@@ -2239,6 +2239,11 @@ public class S3Controller {
         return response.build();
     }
 
+    // GetObjectAttributes is the one S3 response whose ETag comes without the surrounding quotes.
+    private static String unquoted(String eTag) {
+        return eTag == null ? null : eTag.replace("\"", "");
+    }
+
     private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
                                            String uploadId, int partNumber, HttpHeaders httpHeaders) {
         CopySourceRef sourceObject = parseCopySource(copySource);
@@ -2286,7 +2291,7 @@ public class S3Controller {
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("GetObjectAttributesResponse", AwsNamespaces.S3)
-                .elem("ETag", result.getETag());
+                .elem("ETag", unquoted(result.getETag()));
         appendChecksum(xml, result.getChecksum());
         appendObjectParts(xml, result.getObjectParts());
         if (result.getStorageClass() != null) {

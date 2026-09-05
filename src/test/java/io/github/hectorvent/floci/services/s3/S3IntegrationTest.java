@@ -106,6 +106,8 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<GetObjectAttributesResponse"))
+            // S3 returns this ETag without the quotes HeadObject carries
+            .body(matchesPattern("(?s).*<ETag>[0-9a-f]{32}</ETag>.*"))
             .body(containsString("<StorageClass>STANDARD_IA</StorageClass>"))
             .body(containsString("<ObjectSize>20</ObjectSize>"))
             .body(containsString("<ChecksumCRC64NVME>"));
