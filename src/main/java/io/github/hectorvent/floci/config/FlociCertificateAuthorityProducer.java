@@ -32,9 +32,10 @@ public class FlociCertificateAuthorityProducer {
     /**
      * The one TLS directory. {@link TlsConfigSource} runs before CDI and resolves
      * {@code floci.storage.persistent-path} from system properties and environment only; when it
-     * laid down the CA, every CDI consumer must use exactly that directory, or a persistent path set
+     * ran with TLS on, every CDI consumer must use exactly that directory, or a persistent path set
      * in application.yml alone would produce a second CA (served leaf signed by one, ca.pem from
-     * the other). With TLS off the bootstrap never ran and the configured path is the only truth.
+     * the other) and lose the container CA bundle it wrote there. With TLS off the bootstrap laid
+     * nothing down and the configured path is the only truth.
      */
     static Path tlsDir(EmulatorConfig config) {
         Path fromBootstrap = TlsConfigSource.resolvedTlsDir();
