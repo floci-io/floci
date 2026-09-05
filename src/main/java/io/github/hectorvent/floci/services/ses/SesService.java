@@ -1553,14 +1553,12 @@ public class SesService {
         }
     }
 
-    // A tenant tag ARN carries two path segments (tenant/<name>/<tenantId>), so parseSesArn's
-    // first-slash split leaves "<name>/<tenantId>" as the resource name; the tenant domain owns
-    // that remainder's decomposition and the id-only resolution (see SesTenantService.TenantTagArn).
-
     public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
         identityService.setTags(identityValue, region, tags);
     }
 
+    // name is everything after the type's first slash and may itself contain one: a tenant ARN's
+    // <name>/<tenantId> remainder passes through whole, decomposed by the tenant domain.
     private record ResourceRef(String account, String region, String type, String name) {}
 
     /**
