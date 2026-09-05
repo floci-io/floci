@@ -63,9 +63,13 @@ class ContainerLifecycleManagerLabelsTest {
     @Mock
     EmulatorConfig.DockerConfig dockerConfig;
 
+    @Mock
+    EmulatorConfig.TlsConfig tlsConfig;
+
     @BeforeEach
     void setUp() {
         lenient().when(config.docker()).thenReturn(dockerConfig);
+        lenient().when(config.tls()).thenReturn(tlsConfig);
         lenient().when(dockerConfig.resourceNamespace()).thenReturn(Optional.empty());
         lenient().when(imageCacheService.ensureImageExists(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
