@@ -61,7 +61,9 @@ public class LambdaEventSourceMappingCfnProvisioner implements CfnResourceProvis
         if (batchSize != null) {
             try {
                 req.put("BatchSize", Integer.parseInt(batchSize));
-            } catch (NumberFormatException ignored) {
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError",
+                        "Value of property BatchSize must be an integer.", 400);
             }
         }
 
@@ -101,11 +103,13 @@ public class LambdaEventSourceMappingCfnProvisioner implements CfnResourceProvis
             req.put("Topics", topics);
         }
 
-        if (props != null && props.has("SourceAccessConfigurations")) {
+        if (props != null && props.has("SourceAccessConfigurations") && !props.get("SourceAccessConfigurations").isNull()) {
             JsonNode resolvedAccess = ctx.engine().resolveNode(props.get("SourceAccessConfigurations"));
             if (resolvedAccess != null && !resolvedAccess.isNull()) {
                 req.put("SourceAccessConfigurations", MAPPER.convertValue(resolvedAccess, List.class));
             }
+        } else if (ctx.isUpdate()) {
+            req.put("SourceAccessConfigurations", null);
         }
 
         if (ctx.isUpdate() && ctx.priorPhysicalId() != null) {

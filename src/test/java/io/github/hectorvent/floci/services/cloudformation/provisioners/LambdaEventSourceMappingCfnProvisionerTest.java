@@ -18,7 +18,9 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -232,5 +234,38 @@ class LambdaEventSourceMappingCfnProvisionerTest {
         StackResource r = new StackResource();
         r.setResourceType("AWS::Lambda::Function");
         assertThrows(IllegalStateException.class, () -> provisioner.provision(r, mapper.createObjectNode(), ctx()));
+    }
+
+    @Test
+    void provisionRejectsInvalidBatchSize() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("FunctionName", "my-function");
+        props.put("BatchSize", "not-a-number");
+
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("Value of property BatchSize must be an integer.", ex.getMessage());
+    }
+
+    @Test
+    void provisionUpdatesClearsSourceAccessConfigurationsWhenRemoved() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+        r.setPhysicalId("existing-esm-uuid");
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("FunctionName", "my-function");
+
+        provisioner.provision(r, props, ctx(true, "existing-esm-uuid"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(lambdaService).updateEventSourceMapping(eq("existing-esm-uuid"), captor.capture());
+        Map<String, Object> req = captor.getValue();
+        assertTrue(req.containsKey("SourceAccessConfigurations"));
+        assertNull(req.get("SourceAccessConfigurations"));
     }
 }

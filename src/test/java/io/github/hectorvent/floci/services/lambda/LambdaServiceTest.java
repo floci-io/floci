@@ -1341,4 +1341,37 @@ class LambdaServiceTest {
                 "Topics", List.of(456)
         )));
     }
+
+    @Test
+    void updateEventSourceMapping_functionTargetValidation() {
+        service.createFunction(REGION, baseRequest("fn-esm-target-1"));
+        service.createFunction(REGION, baseRequest("fn-esm-target-2"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "fn-esm-target-1",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        // Valid function update
+        EventSourceMapping updated = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2"
+        ));
+        assertEquals("fn-esm-target-2", updated.getFunctionName());
+        assertTrue(updated.getFunctionArn().contains("fn-esm-target-2"));
+
+        // Non-existent function throws
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "non-existent-fn"
+        )));
+
+        // Cross-region function ARN throws
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:other-region-fn"
+        )));
+    }
 }

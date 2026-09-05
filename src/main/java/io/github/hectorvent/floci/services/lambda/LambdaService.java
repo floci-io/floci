@@ -1649,7 +1649,13 @@ public class LambdaService implements ResourceProvider {
             String fnName = (String) request.get("FunctionName");
             if (fnName != null && !fnName.isBlank()) {
                 LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(fnName);
-                esm.setFunctionArn(fnRef.name());
+                if (fnRef.region() != null && !fnRef.region().equals(esm.getRegion())) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Function ARN region '" + fnRef.region() + "' does not match event source region '" + esm.getRegion() + "'", 400);
+                }
+                LambdaFunction fn = getFunction(esm.getRegion(), fnRef.name());
+                esm.setFunctionArn(fn.getFunctionArn());
+                esm.setFunctionName(fnRef.name());
             }
         }
 
