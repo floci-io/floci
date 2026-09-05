@@ -1,16 +1,37 @@
 ARG VERSION=latest
-# This must be the UBI-based image produced by Dockerfile.native-package.
-# Release and nightly tags use VERSION; reusable builds override BASE_IMAGE
-# with the digest-qualified native image they just published.
+# BASE_IMAGE is the image produced by Dockerfile.native-package. Release and nightly
+# tags use VERSION; reusable builds override BASE_IMAGE with the digest-qualified
+# native image they just published.
+#
+# That image is ubi9-micro and has no package manager, so this image cannot extend
+# it. It starts from ubi9-minimal, copies /app and the entrypoint scripts out of the
+# native image, and repeats what the native image declares (user, env, volume,
+# healthcheck, entrypoint, labels).
 ARG BASE_IMAGE=floci/floci:${VERSION}
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS native
+
+FROM registry.access.redhat.com/ubi9-minimal:9.7
+
+ARG VERSION
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
 LABEL org.opencontainers.image.title="Floci (compat)" \
       org.opencontainers.image.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
       org.opencontainers.image.url="https://floci.io" \
       org.opencontainers.image.source="https://github.com/floci-io/floci" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="Floci"
+      org.opencontainers.image.vendor="Floci" \
+      description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
+      io.k8s.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
+      io.k8s.display-name="Floci (compat)" \
+      io.openshift.expose-services="4566:tcp" \
+      io.openshift.tags="floci aws-emulator" \
+      maintainer="Floci <https://github.com/floci-io/floci>" \
+      name="floci/floci" \
+      summary="Floci compatibility image with AWS CLI and boto3 pre-installed" \
+      url="https://floci.io" \
+      vendor="Floci"
 
 ENV AWS_DEFAULT_REGION=us-east-1
 ENV AWS_ACCESS_KEY_ID=test
@@ -36,8 +57,8 @@ ENV AWS_PAGER=""
 # a v2 install against real AWS. A hook passing raw bytes (e.g.
 # aws lambda invoke --payload) needs --cli-binary-format raw-in-base64-out.
 ARG AWSCLI_VERSION=2.36.24
-USER root
-RUN microdnf install -y --nodocs python3 python3-pip unzip \
+RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
+    && microdnf install -y --nodocs python3 python3-pip unzip \
     && pip3 install --no-cache-dir boto3 \
     && case "$(uname -m)" in \
          x86_64)  arch=x86_64 ;; \
@@ -63,5 +84,24 @@ RUN chmod +x /usr/local/bin/awslocal
 RUN mkdir -p /etc/localstack/init/boot.d /etc/localstack/init/start.d /etc/localstack/init/ready.d \
              /etc/floci/init/boot.d /etc/floci/init/start.d /etc/floci/init/ready.d \
     && chown -R 1001:root /etc/localstack /etc/floci
+
+WORKDIR /app
+# Ownership and group bits go on the empty directory first. A chmod after the copy
+# would rewrite the 200 MB binary into a second layer.
+RUN mkdir -p /app/data \
+    && chown -R 1001:root /app \
+    && chmod -R g+rwX /app
+COPY --from=native --chown=1001:root /app/ /app/
+VOLUME /app/data
+
+COPY --from=native /usr/local/bin/docker-entrypoint.sh /usr/local/bin/localstack-parity.sh /usr/local/bin/
+
+EXPOSE 4566
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+    CMD curl -f http://localhost:4566/_floci/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]
 
 USER 1001
