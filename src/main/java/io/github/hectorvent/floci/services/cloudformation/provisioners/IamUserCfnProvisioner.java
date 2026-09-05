@@ -32,6 +32,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
     private static final String INLINE_NAMES_ATTR = "__FlociInlinePolicyNames";
     private static final String MANAGED_ARNS_ATTR = "__FlociManagedPolicyArns";
     private static final String GROUPS_ATTR = "__FlociGroups";
+    private static final String USER_ID_ATTR = "__FlociUserId";
 
     private final IamService iamService;
 
@@ -77,7 +78,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
                 throw e;
             }
             user = iamService.getUser(resolvedUserName);
-            String existingUserId = r.getAttributes().get("UserId");
+            String existingUserId = r.getAttributes().get(USER_ID_ATTR);
             if (existingUserId == null || existingUserId.isBlank()
                     || !existingUserId.equals(user.getUserId())) {
                 r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
@@ -93,7 +94,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(resolvedUserName);
         r.getAttributes().put("Arn", user.getArn());
-        r.getAttributes().put("UserId", user.getUserId());
+        r.getAttributes().put(USER_ID_ATTR, user.getUserId());
 
         Set<String> previousInlineNames = readTrackedSet(r, INLINE_NAMES_ATTR);
         Set<String> previousManagedArns = readTrackedSet(r, MANAGED_ARNS_ATTR);

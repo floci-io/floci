@@ -512,12 +512,6 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>efs</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.jboss.logging</groupId>
-            <artifactId>jboss-logging</artifactId>
-            <version>3.6.3.Final</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>
