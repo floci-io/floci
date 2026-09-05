@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.lifecycle;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
@@ -15,8 +16,11 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.POST;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 @Path("{prefix:(_floci|_localstack)}")
 @Produces(MediaType.APPLICATION_JSON)
@@ -29,18 +33,21 @@ public class EmulatorInfoController {
     private final StorageFactory storageFactory;
     private final Instance<Resettable> resettables;
     private final FlociCertificateAuthority certificateAuthority;
+    private final EmulatorConfig config;
 
     @Inject
     public EmulatorInfoController(ServiceRegistry serviceRegistry,
                                   InitLifecycleState initLifecycleState,
                                   StorageFactory storageFactory,
                                   Instance<Resettable> resettables,
-                                  FlociCertificateAuthority certificateAuthority) {
+                                  FlociCertificateAuthority certificateAuthority,
+                                  EmulatorConfig config) {
         this.serviceRegistry = serviceRegistry;
         this.initLifecycleState = initLifecycleState;
         this.storageFactory = storageFactory;
         this.resettables = resettables;
         this.certificateAuthority = certificateAuthority;
+        this.config = config;
         this.version = resolveVersion();
     }
 
@@ -95,14 +102,29 @@ public class EmulatorInfoController {
     }
 
     /**
-     * The local root CA in PEM. Trust this once ({@code AWS_CA_BUNDLE}, {@code NODE_EXTRA_CA_CERTS},
-     * a keychain) and every certificate Floci issues validates.
+     * The trust anchor for Floci's HTTPS endpoint in PEM. With the default configuration that is
+     * the local root CA: trust it once ({@code AWS_CA_BUNDLE}, {@code NODE_EXTRA_CA_CERTS}, a
+     * keychain) and every certificate Floci issues validates. With a user-provided certificate
+     * ({@code floci.tls.cert-path}) it is that certificate file, the same file the Lambda launcher
+     * mounts into containers, so no local CA is created that could not validate the endpoint.
      */
     @GET
     @Path("/ca.pem")
     @Produces(MediaType.TEXT_PLAIN)
-    public String caPem() {
+    public String caPem() throws IOException {
+        Optional<String> userCertificate = userCertificatePath();
+        if (userCertificate.isPresent()) {
+            return Files.readString(java.nio.file.Path.of(userCertificate.get()));
+        }
         return certificateAuthority.caPem();
+    }
+
+    /** Set when TLS serves a user-provided certificate, the same condition {@code TlsConfigSource} applies. */
+    private Optional<String> userCertificatePath() {
+        if (!config.tls().enabled() || config.tls().keyPath().filter(p -> !p.isBlank()).isEmpty()) {
+            return Optional.empty();
+        }
+        return config.tls().certPath().filter(p -> !p.isBlank());
     }
 
     @POST

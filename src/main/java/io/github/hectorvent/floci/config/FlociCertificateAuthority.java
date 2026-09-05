@@ -5,16 +5,16 @@ import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyPair;
 import java.security.PrivateKey;
+import java.security.MessageDigest;
 import java.security.PublicKey;
-import java.security.Signature;
 import java.security.cert.X509Certificate;
+import java.util.HexFormat;
 import java.util.List;
 
 /**
@@ -69,13 +69,15 @@ public final class FlociCertificateAuthority {
                     }
                     cert.verify(cert.getPublicKey());
                     cert.checkValidity();
-                    if (!keyMatches(key, cert.getPublicKey())) {
+                    if (!CertificateGenerator.isPair(key, cert.getPublicKey())) {
                         throw new IllegalStateException("private key does not match the certificate");
                     }
                     restrictToOwnerOnly(tlsDir, "rwx------");
                     restrictToOwnerOnly(keyFile, "rw-------");
-                    LOG.infov("TLS: using local CA {0} ({1})", certFile, cert.getSubjectX500Principal().getName());
-                    return new FlociCertificateAuthority(certFile, cert, key, pem, generator);
+                    FlociCertificateAuthority ca = new FlociCertificateAuthority(certFile, cert, key, pem, generator);
+                    LOG.infov("TLS: using local CA {0} ({1}), SHA256 fingerprint {2}", certFile,
+                            cert.getSubjectX500Principal().getName(), ca.fingerprint());
+                    return ca;
                 } catch (Exception e) {
                     LOG.warnv(e, "TLS: local CA at {0} is unusable ({1}); generating a new one. Clients that trusted "
                             + "the old CA must re-import {2}", tlsDir, e.getMessage(), CA_CERT_NAME);
@@ -86,11 +88,13 @@ public final class FlociCertificateAuthority {
             CertificateGenerator.GeneratedCertificate generated = generator.generateCaCertificate(COMMON_NAME);
             Files.writeString(certFile, generated.certificatePem());
             writePrivateKey(keyFile, generated.privateKeyPem());
-            LOG.infov("TLS: generated local CA {0}. Trust it once: GET /_floci/ca.pem", certFile);
-            return new FlociCertificateAuthority(certFile,
+            FlociCertificateAuthority ca = new FlociCertificateAuthority(certFile,
                     generator.parseCertificate(generated.certificatePem()),
                     generator.parsePrivateKey(generated.privateKeyPem()),
                     generated.certificatePem(), generator);
+            LOG.infov("TLS: generated local CA {0}, SHA256 fingerprint {1}. Trust it once: GET /_floci/ca.pem",
+                    certFile, ca.fingerprint());
+            return ca;
         } catch (IOException e) {
             throw new IllegalStateException("Failed to create local CA under " + tlsDir, e);
         }
@@ -111,6 +115,19 @@ public final class FlociCertificateAuthority {
 
     public Path certificatePath() {
         return certificatePath;
+    }
+
+    /**
+     * SHA-256 fingerprint of the CA certificate in the form {@code openssl x509 -fingerprint -sha256}
+     * prints, so a copy obtained out of band can be checked against the startup log.
+     */
+    public String fingerprint() {
+        try {
+            return HexFormat.ofDelimiter(":").withUpperCase()
+                    .formatHex(MessageDigest.getInstance("SHA-256").digest(certificate.getEncoded()));
+        } catch (Exception e) {
+            throw new IllegalStateException("Cannot fingerprint the CA certificate", e);
+        }
     }
 
     public CertificateGenerator.Issuer issuer() {
@@ -148,19 +165,6 @@ public final class FlociCertificateAuthority {
         }
     }
 
-    private static boolean keyMatches(PrivateKey key, PublicKey publicKey) throws Exception {
-        String algorithm = "EC".equals(key.getAlgorithm()) ? "SHA256withECDSA" : "SHA256withRSA";
-        byte[] probe = "floci".getBytes(StandardCharsets.US_ASCII);
-        Signature signer = Signature.getInstance(algorithm);
-        signer.initSign(key);
-        signer.update(probe);
-        byte[] signature = signer.sign();
-        Signature verifier = Signature.getInstance(algorithm);
-        verifier.initVerify(publicKey);
-        verifier.update(probe);
-        return verifier.verify(signature);
-    }
-
     /**
      * Writes a private key so that no other user can read it at any point: the file is created
      * owner-only where the file system supports POSIX permissions, and re-tightened otherwise.
@@ -169,6 +173,9 @@ public final class FlociCertificateAuthority {
         Files.deleteIfExists(keyFile);
         if (Files.getFileAttributeView(keyFile.getParent(), PosixFileAttributeView.class) != null) {
             Files.createFile(keyFile, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        } else {
+            LOG.warnv("TLS: {0} is written with the file system's default permissions because it has no POSIX "
+                    + "permissions; restrict it to your own account yourself", keyFile);
         }
         Files.writeString(keyFile, pem);
         restrictToOwnerOnly(keyFile, "rw-------");

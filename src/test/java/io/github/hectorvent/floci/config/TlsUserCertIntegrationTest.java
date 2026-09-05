@@ -59,6 +59,24 @@ class TlsUserCertIntegrationTest {
     }
 
     @Test
+    void caPemReturnsTheUserCertificateAndCreatesNoLocalCa() throws Exception {
+        Path localCa = Path.of("/tmp/floci-tls-usercert-test-data/tls/floci-root-ca.crt");
+        Files.deleteIfExists(localCa);
+
+        String pem = given()
+            .when()
+                .get("/_floci/ca.pem")
+            .then()
+                .statusCode(200)
+                .contentType(org.hamcrest.Matchers.startsWith("text/plain"))
+                .extract().asString();
+
+        org.junit.jupiter.api.Assertions.assertEquals(Files.readString(UserCertProfile.CERT_FILE), pem,
+                "with a user certificate, ca.pem is that file: the local CA could not validate the endpoint");
+        org.junit.jupiter.api.Assertions.assertFalse(Files.exists(localCa), "no local CA is created in custom-cert mode");
+    }
+
+    @Test
     void ssmPutParameterOverHttps() {
         given()
             .baseUri("https://localhost:" + testSslPort)
@@ -74,7 +92,7 @@ class TlsUserCertIntegrationTest {
     public static final class UserCertProfile implements QuarkusTestProfile {
 
         private static final Path CERT_DIR = Path.of("/tmp/floci-tls-usercert-test");
-        private static final Path CERT_FILE = CERT_DIR.resolve("user-test.crt");
+        static final Path CERT_FILE = CERT_DIR.resolve("user-test.crt");
         private static final Path KEY_FILE = CERT_DIR.resolve("user-test.key");
 
         static {

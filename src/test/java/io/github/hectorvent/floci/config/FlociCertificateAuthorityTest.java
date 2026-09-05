@@ -36,6 +36,8 @@ class FlociCertificateAuthorityTest {
         assertEquals("CN=Floci Local CA", ca.certificate().getSubjectX500Principal().getName());
         assertTrue(ca.caPem().startsWith("-----BEGIN CERTIFICATE-----"));
         assertEquals(Files.readString(tempDir.resolve("floci-root-ca.crt")), ca.caPem(), "caPem is the file's bytes");
+        assertTrue(ca.fingerprint().matches("([0-9A-F]{2}:){31}[0-9A-F]{2}"), ca.fingerprint());
+        assertEquals(ca.fingerprint(), FlociCertificateAuthority.loadOrCreate(tempDir).fingerprint());
 
         Set<PosixFilePermission> keyPerms = Files.getPosixFilePermissions(tempDir.resolve("floci-root-ca.key"));
         assertEquals(PosixFilePermissions.fromString("rw-------"), keyPerms);

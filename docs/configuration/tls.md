@@ -26,6 +26,12 @@ export SSL_CERT_FILE=$PWD/floci-root-ca.pem
 
 Prefer these per-process variables, and scope them to the shell or the tool (a `.envrc`, a compose `environment:` block) that needs them. They cannot affect anything else on the machine.
 
+The download above is plain HTTP and carries no proof of who sent it, which is fine on loopback and nowhere else. For a client on another host, or over a network you do not control, copy the file out of band instead: read `{persistent-path}/tls/floci-root-ca.crt` from Floci's volume, or `docker cp` it out of the container. Either way, compare the fingerprint before trusting it. Floci logs it at startup as `TLS: ... SHA256 fingerprint AB:CD:...`, and the file's fingerprint is:
+
+```bash
+openssl x509 -in floci-root-ca.pem -noout -fingerprint -sha256
+```
+
 Installing the CA into the operating system trust store (macOS `security add-trusted-cert`, Linux `update-ca-certificates`) also works and is what Safari, Chrome and Go on macOS need, but understand what it does: every process on the machine then trusts anything signed by the key in `{persistent-path}/tls/floci-root-ca.key`. Keep that file private, treat the CA as a dev-machine secret, and remove it from the store when you stop using Floci:
 
 ```bash
@@ -93,7 +99,7 @@ docker run \
   floci/floci:latest
 ```
 
-When custom certificate paths are provided, `FLOCI_TLS_SELF_SIGNED` is ignored and no local CA or server certificate is generated.
+When custom certificate paths are provided, `FLOCI_TLS_SELF_SIGNED` is ignored: the HTTPS server uses your certificate, no server certificate or local CA is generated for it, and `GET /_floci/ca.pem` returns your certificate file instead of a local CA. Put the CA or the full chain in that file if clients fetch their trust anchor from Floci; a bare leaf only lets them pin that one certificate.
 
 ## WebSocket (wss://)
 
