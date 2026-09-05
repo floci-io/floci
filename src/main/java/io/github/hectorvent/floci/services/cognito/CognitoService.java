@@ -1097,7 +1097,7 @@ public class CognitoService implements ResourceProvider {
         if (domain == null || domain.isBlank()) {
             throw new AwsException("InvalidParameterException", "Domain is required", 400);
         }
-        if (domainStore.get(domain).isPresent()) {
+        if (!findDomains(domain).isEmpty()) {
             throw new AwsException("InvalidParameterException",
                     "Domain " + domain + " already associated with another user pool", 400);
         }
@@ -1145,12 +1145,29 @@ public class CognitoService implements ResourceProvider {
      * SigV4 account, so the lookup spans every account rather than the request's default one.
      */
     public Optional<UserPoolDomain> findCustomDomain(String hostname) {
-        if (hostname == null || hostname.isBlank()) {
+        List<UserPoolDomain> matches = findDomains(hostname).stream()
+                .filter(UserPoolDomain::isCustomDomain)
+                .toList();
+        if (matches.size() > 1) {
+            LOG.warnv("Custom domain {0} exists in {1} accounts and is not routed; delete the duplicates",
+                    hostname, matches.size());
             return Optional.empty();
         }
+        return matches.stream().findFirst();
+    }
+
+    /**
+     * Domain names are one namespace across every account on AWS, so this is also the
+     * uniqueness check {@link #createUserPoolDomain} runs. More than one match can only come
+     * from data persisted before that check spanned accounts.
+     */
+    private List<UserPoolDomain> findDomains(String name) {
+        if (name == null || name.isBlank()) {
+            return List.of();
+        }
         return allDomains().stream()
-                .filter(d -> d.isCustomDomain() && hostname.equalsIgnoreCase(d.getDomain()))
-                .findFirst();
+                .filter(d -> name.equalsIgnoreCase(d.getDomain()))
+                .toList();
     }
 
     public Optional<UserPoolDomain> findCustomDomainForPool(String poolId) {

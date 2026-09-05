@@ -3455,6 +3455,28 @@ class CognitoServiceTest {
                 service.findCustomDomainForPool(poolId).orElseThrow().getDomain());
     }
 
+    /** Two accounts holding the same name can only come from data persisted before names were global. */
+    @Test
+    void ambiguousCustomDomainIsNotRouted() {
+        InMemoryStorage<String, UserPoolDomain> domains = new InMemoryStorage<>();
+        domains.put("111111111111/auth.dup.localhost.floci.io", customDomain("auth.dup.localhost.floci.io", "us-east-1_a"));
+        domains.put("222222222222/auth.dup.localhost.floci.io", customDomain("auth.dup.localhost.floci.io", "us-east-1_b"));
+        CognitoService ambiguous = new CognitoService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), domains, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566", regionResolver, null,
+                acmService, null, null);
+
+        assertTrue(ambiguous.findCustomDomain("auth.dup.localhost.floci.io").isEmpty());
+    }
+
+    private static UserPoolDomain customDomain(String name, String poolId) {
+        UserPoolDomain domain = new UserPoolDomain();
+        domain.setDomain(name);
+        domain.setUserPoolId(poolId);
+        domain.setCertificateArn(CERTIFICATE_ARN);
+        return domain;
+    }
+
     @Test
     void findCustomDomainForPoolIgnoresPrefixDomainsAndOtherPools() {
         String prefixOnly = service.createUserPool(Map.of("PoolName", "prefix-only"), "us-east-1").getId();
@@ -3482,6 +3504,23 @@ class CognitoServiceTest {
                 .get("access_token"));
         assertNotNull(service.issueClientCredentialsToken(clientB.getClientId(), clientB.getClientSecret(), null, null)
                 .get("access_token"));
+    }
+
+    /** The pool check precedes the secret check, so a wrong domain never reveals whether a secret is right. */
+    @Test
+    void poolScopeIsCheckedBeforeTheClientSecret() {
+        String poolA = service.createUserPool(Map.of("PoolName", "pool-a"), "us-east-1").getId();
+        String poolB = service.createUserPool(Map.of("PoolName", "pool-b"), "us-east-1").getId();
+        UserPoolClient clientB = service.createUserPoolClient(poolB, "b", true, true,
+                List.of("client_credentials"), List.of("openid"));
+
+        AwsException wrongPool = assertThrows(AwsException.class, () -> service.issueClientCredentialsToken(
+                clientB.getClientId(), "wrong-secret", null, poolA));
+        assertEquals("ResourceNotFoundException", wrongPool.getErrorCode());
+
+        AwsException rightPool = assertThrows(AwsException.class, () -> service.issueClientCredentialsToken(
+                clientB.getClientId(), "wrong-secret", null, poolB));
+        assertNotEquals("ResourceNotFoundException", rightPool.getErrorCode());
     }
 
     @Test

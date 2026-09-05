@@ -111,9 +111,10 @@ GET  https://auth.example.localhost.floci.io/oauth2/userInfo
 ```
 
 Requests are matched on the `Host` header, so the name must resolve to Floci (any
-`*.localhost.floci.io` does) and, for `https`, TLS must be enabled. The domain pins its user pool: a
-`client_id` from another pool is refused with `invalid_client`, and an access token issued by
-another pool with `invalid_token`. The pool's `openid-configuration` advertises the custom-domain
+`*.localhost.floci.io` does) and, for `https`, TLS must be enabled. The domain pins its user pool and
+the account that created it, since these requests carry no AWS credential: a `client_id` from
+another pool is refused with `invalid_client`, and an access token issued by another pool with
+`invalid_token`. Domain names are unique across all accounts, as on AWS. The pool's `openid-configuration` advertises the custom-domain
 URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
 routed, since that hostname never reaches Floci. `/oauth2/authorize`, `/login` and `/logout` are not
 served on any host.

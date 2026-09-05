@@ -9,28 +9,39 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-
-import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.COGNITO;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.FLOCI_URL;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.awsActionAs;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.awsJsonAs;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.basic;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.confidentialClient;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.createPool;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.customDomain;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.expect;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.requestCertificate;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.requestCertificateAs;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.signInNewUser;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * A Cognito custom domain serves {@code https://<domain>/oauth2/token} and
  * {@code /oauth2/userInfo} on AWS. Floci resolves the request Host against the domain store and
  * routes those paths to the handlers behind {@code /cognito-idp/oauth2/...}, pinned to the pool
- * that owns the domain.
+ * and the account that own the domain. The OAuth contract on the routed endpoints is covered by
+ * {@link CognitoCustomDomainOAuthContractIntegrationTest}.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoCustomDomainRoutingIntegrationTest {
 
     private static final String DOMAIN = "auth-" + System.nanoTime() + ".teos.localhost.floci.io";
-    private static final String PASSWORD = "Perm1234!";
+    private static final String DOMAIN_B = "auth-b-" + System.nanoTime() + ".teos.localhost.floci.io";
+    private static final String ACCOUNT_B = "111122223333";
 
     private static String poolA;
     private static String poolB;
@@ -62,16 +73,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
         userTokenA = signInNewUser(poolA);
         userTokenB = signInNewUser(poolB);
 
-        String certificateArn = RestAssuredJsonUtils.awsActionJson("CertificateManager", "RequestCertificate", """
-                {"DomainName": "%s", "ValidationMethod": "DNS"}
-                """.formatted(DOMAIN)).path("CertificateArn").asText();
-        cognitoJson("CreateUserPoolDomain", """
-                {
-                  "Domain": "%s",
-                  "UserPoolId": "%s",
-                  "CustomDomainConfig": {"CertificateArn": "%s"}
-                }
-                """.formatted(DOMAIN, poolA, certificateArn));
+        cognitoJson("CreateUserPoolDomain", customDomain(DOMAIN, poolA, requestCertificate(DOMAIN)));
     }
 
     @Test
@@ -91,15 +93,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     @Test
     @Order(3)
     void hostWithPortAndMixedCaseStillMatches() {
-        given()
-                .header("Host", DOMAIN.toUpperCase() + ":4566")
-                .header("Authorization", basic(clientA, secretA))
-                .formParam("grant_type", "client_credentials")
-        .when()
-                .post("/oauth2/token")
-        .then()
-                .statusCode(200)
-                .body("token_type", equalTo("Bearer"));
+        assertNull(expect(200, DOMAIN.toUpperCase() + ":4566", clientA, secretA, "/oauth2/token"));
     }
 
     @Test
@@ -119,13 +113,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     @Test
     @Order(5)
     void sameClientStillWorksOnTheGenericPath() {
-        given()
-                .header("Authorization", basic(clientB, secretB))
-                .formParam("grant_type", "client_credentials")
-        .when()
-                .post("/cognito-idp/oauth2/token")
-        .then()
-                .statusCode(200);
+        assertNull(expect(200, null, clientB, secretB, "/cognito-idp/oauth2/token"));
     }
 
     @Test
@@ -177,6 +165,9 @@ class CognitoCustomDomainRoutingIntegrationTest {
                 .get("/oauth2/userInfo")
         .then()
                 .statusCode(200)
+                .contentType(containsString("application/json"))
+                .header("Cache-Control", containsString("no-store"))
+                .header("Pragma", equalTo("no-cache"))
                 .body("email_verified", equalTo("true"));
     }
 
@@ -208,6 +199,8 @@ class CognitoCustomDomainRoutingIntegrationTest {
                 .get("/" + poolA + "/.well-known/openid-configuration")
         .then()
                 .statusCode(200)
+                .body("issuer", equalTo(FLOCI_URL + "/" + poolA))
+                .body("jwks_uri", equalTo(FLOCI_URL + "/" + poolA + "/.well-known/jwks.json"))
                 .body("token_endpoint", equalTo("https://" + DOMAIN + "/oauth2/token"))
                 .body("userinfo_endpoint", equalTo("https://" + DOMAIN + "/oauth2/userInfo"));
 
@@ -216,12 +209,59 @@ class CognitoCustomDomainRoutingIntegrationTest {
                 .get("/" + poolB + "/.well-known/openid-configuration")
         .then()
                 .statusCode(200)
-                .body("token_endpoint", equalTo("http://localhost:4566/cognito-idp/oauth2/token"))
-                .body("userinfo_endpoint", equalTo("http://localhost:4566/cognito-idp/oauth2/userInfo"));
+                .body("token_endpoint", equalTo(FLOCI_URL + "/cognito-idp/oauth2/token"))
+                .body("userinfo_endpoint", equalTo(FLOCI_URL + "/cognito-idp/oauth2/userInfo"));
+    }
+
+    /** Domain names are one global namespace on AWS, whichever account asks. */
+    @Test
+    @Order(12)
+    void anotherAccountCannotReuseTheDomainName() throws Exception {
+        String poolInB = awsJsonAs(ACCOUNT_B, COGNITO, "CreateUserPool", "{\"PoolName\": \"RoutingPoolB2\"}")
+                .path("UserPool").path("Id").asText();
+
+        awsActionAs(ACCOUNT_B, COGNITO, "CreateUserPoolDomain",
+                customDomain(DOMAIN, poolInB, requestCertificateAs(ACCOUNT_B, DOMAIN)))
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    /** The domain's account, not the default one, serves a request on that domain. */
+    @Test
+    @Order(13)
+    void tokenOnAnotherAccountsDomainRunsInThatAccount() throws Exception {
+        String poolInB = awsJsonAs(ACCOUNT_B, COGNITO, "CreateUserPool", "{\"PoolName\": \"RoutingPoolB3\"}")
+                .path("UserPool").path("Id").asText();
+        JsonNode client = awsJsonAs(ACCOUNT_B, COGNITO, "CreateUserPoolClient", confidentialClient(poolInB))
+                .path("UserPoolClient");
+        String clientInB = client.path("ClientId").asText();
+        String secretInB = client.path("ClientSecret").asText();
+        awsJsonAs(ACCOUNT_B, COGNITO, "CreateUserPoolDomain",
+                customDomain(DOMAIN_B, poolInB, requestCertificateAs(ACCOUNT_B, DOMAIN_B)));
+
+        assertNull(expect(200, DOMAIN_B, clientInB, secretInB, "/oauth2/token"));
+
+        given()
+                .header("Authorization", basic(clientInB, secretInB))
+                .formParam("grant_type", "client_credentials")
+        .when()
+                .post("/cognito-idp/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_client"));
     }
 
     @Test
-    @Order(12)
+    @Order(14)
+    void replacingTheCertificateKeepsTheDomainRouted() throws Exception {
+        cognitoJson("UpdateUserPoolDomain", customDomain(DOMAIN, poolA, requestCertificate(DOMAIN)));
+
+        assertNull(expect(200, DOMAIN, clientA, secretA, "/oauth2/token"));
+    }
+
+    @Test
+    @Order(15)
     void deletedDomainIsNoLongerRouted() throws Exception {
         cognitoJson("DeleteUserPoolDomain", """
                 {"Domain": "%s", "UserPoolId": "%s"}
@@ -242,56 +282,23 @@ class CognitoCustomDomainRoutingIntegrationTest {
                 .get("/" + poolA + "/.well-known/openid-configuration")
         .then()
                 .statusCode(200)
-                .body("token_endpoint", equalTo("http://localhost:4566/cognito-idp/oauth2/token"));
+                .body("token_endpoint", equalTo(FLOCI_URL + "/cognito-idp/oauth2/token"));
     }
 
-    private static String createPool(String name) throws Exception {
-        return cognitoJson("CreateUserPool", "{\"PoolName\": \"" + name + "\"}").path("UserPool").path("Id").asText();
-    }
+    /** After a delete the name is free again, and it follows its new pool. */
+    @Test
+    @Order(16)
+    void domainNameFollowsItsNewPoolAfterReassignment() throws Exception {
+        cognitoJson("CreateUserPoolDomain", customDomain(DOMAIN, poolB, requestCertificate(DOMAIN)));
 
-    private static String confidentialClient(String poolId) {
-        return """
-                {
-                  "UserPoolId": "%s",
-                  "ClientName": "routing-client",
-                  "GenerateSecret": true,
-                  "AllowedOAuthFlowsUserPoolClient": true,
-                  "AllowedOAuthFlows": ["client_credentials"],
-                  "AllowedOAuthScopes": ["aws.cognito.signin.user.admin"]
-                }
-                """.formatted(poolId);
-    }
+        assertNull(expect(200, DOMAIN, clientB, secretB, "/oauth2/token"));
+        assertNull(expect(400, DOMAIN, clientA, secretA, "/oauth2/token"));
 
-    /** A public client, a confirmed user and the access token USER_PASSWORD_AUTH issues for it. */
-    private static String signInNewUser(String poolId) throws Exception {
-        String publicClient = cognitoJson("CreateUserPoolClient", """
-                {"UserPoolId": "%s", "ClientName": "routing-user-client"}
-                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
-        String username = "user-" + System.nanoTime() + "@example.com";
-        cognitoAction("AdminCreateUser", """
-                {
-                  "UserPoolId": "%s",
-                  "Username": "%s",
-                  "UserAttributes": [
-                    {"Name": "email", "Value": "%s"},
-                    {"Name": "email_verified", "Value": "true"}
-                  ]
-                }
-                """.formatted(poolId, username, username)).then().statusCode(200);
-        cognitoAction("AdminSetUserPassword", """
-                {"UserPoolId": "%s", "Username": "%s", "Password": "%s", "Permanent": true}
-                """.formatted(poolId, username, PASSWORD)).then().statusCode(200);
-        return cognitoJson("InitiateAuth", """
-                {
-                  "ClientId": "%s",
-                  "AuthFlow": "USER_PASSWORD_AUTH",
-                  "AuthParameters": {"USERNAME": "%s", "PASSWORD": "%s"}
-                }
-                """.formatted(publicClient, username, PASSWORD))
-                .path("AuthenticationResult").path("AccessToken").asText();
-    }
-
-    private static String basic(String clientId, String secret) {
-        return "Basic " + Base64.getEncoder().encodeToString((clientId + ":" + secret).getBytes(StandardCharsets.UTF_8));
+        given()
+        .when()
+                .get("/" + poolB + "/.well-known/openid-configuration")
+        .then()
+                .statusCode(200)
+                .body("token_endpoint", equalTo("https://" + DOMAIN + "/oauth2/token"));
     }
 }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import io.github.hectorvent.floci.core.common.AccountContextFilter;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
@@ -16,7 +17,8 @@ import java.util.Optional;
 /**
  * Routes Cognito custom-domain requests by Host. On AWS a custom domain serves
  * {@code https://<domain>/oauth2/token} and {@code /oauth2/userInfo}; Floci maps those onto
- * the {@code /cognito-idp/oauth2/...} handlers and pins the pool that owns the domain.
+ * the {@code /cognito-idp/oauth2/...} handlers and pins the pool and the account that own the
+ * domain, since the request itself carries no AWS credential.
  */
 @Provider
 @PreMatching
@@ -66,6 +68,7 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
                 .build();
         LOG.debugv("Cognito custom domain routing: {0}{1} -> {2}", host, path, newUri.getPath());
         requestContext.setProperty(POOL_PROPERTY, domain.get().getUserPoolId());
+        requestContext.setProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY, domain.get().getAwsAccountId());
         requestContext.setRequestUri(newUri);
     }
 

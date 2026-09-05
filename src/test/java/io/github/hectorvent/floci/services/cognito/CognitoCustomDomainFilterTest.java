@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import io.github.hectorvent.floci.core.common.AccountContextFilter;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.UriInfo;
@@ -18,6 +19,7 @@ import static org.mockito.Mockito.when;
 class CognitoCustomDomainFilterTest {
 
     private static final String DOMAIN = "auth.example.localhost.floci.io";
+    private static final String ACCOUNT = "111122223333";
 
     private final CognitoService cognitoService = mock(CognitoService.class);
     private final CognitoCustomDomainFilter filter = new CognitoCustomDomainFilter(cognitoService);
@@ -30,6 +32,7 @@ class CognitoCustomDomainFilterTest {
         filter.filter(request);
 
         verify(request).setProperty(CognitoCustomDomainFilter.POOL_PROPERTY, "us-east-1_abc");
+        verify(request).setProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY, ACCOUNT);
         verify(request).setRequestUri(URI.create("http://" + DOMAIN + ":4566/cognito-idp/oauth2/token?x=1"));
     }
 
@@ -79,6 +82,7 @@ class CognitoCustomDomainFilterTest {
         UserPoolDomain domain = new UserPoolDomain();
         domain.setDomain(DOMAIN);
         domain.setUserPoolId(poolId);
+        domain.setAwsAccountId(ACCOUNT);
         domain.setCertificateArn("arn:aws:acm:us-east-1:000000000000:certificate/abc");
         return domain;
     }
