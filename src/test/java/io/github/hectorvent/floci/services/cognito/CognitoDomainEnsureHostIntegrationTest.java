@@ -17,12 +17,14 @@ import static org.mockito.Mockito.verify;
 /**
  * CreateUserPoolDomain hands a custom domain to the TLS certificate manager on the real wire
  * path. A prefix domain lives under {@code auth.<region>.amazoncognito.com} on AWS, a name Floci
- * does not serve, so it is left alone.
+ * does not serve, so it is left alone. The certificate must be an issued ACM certificate, as on
+ * AWS, so each custom domain requests one first.
  */
 @QuarkusTest
 class CognitoDomainEnsureHostIntegrationTest {
 
-    private static final String CERTIFICATE_ARN = "arn:aws:acm:us-east-1:000000000000:certificate/abc";
+    private static final String UNKNOWN_CERTIFICATE_ARN =
+            "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000";
 
     @InjectMock
     TlsCertificateManager certificateManager;
@@ -43,9 +45,26 @@ class CognitoDomainEnsureHostIntegrationTest {
                   "UserPoolId": "%s",
                   "CustomDomainConfig": {"CertificateArn": "%s"}
                 }
-                """.formatted(domain, poolId, CERTIFICATE_ARN));
+                """.formatted(domain, poolId, requestCertificate(domain)));
 
         verify(certificateManager).ensureHost(domain);
+    }
+
+    @Test
+    void certificateUnknownToAcmRegistersNothing() throws Exception {
+        String poolId = createPool();
+
+        cognitoAction("CreateUserPoolDomain", """
+                {
+                  "Domain": "nocert-%s.dev.localhost.floci.io",
+                  "UserPoolId": "%s",
+                  "CustomDomainConfig": {"CertificateArn": "%s"}
+                }
+                """.formatted(System.nanoTime(), poolId, UNKNOWN_CERTIFICATE_ARN))
+                .then()
+                .statusCode(400);
+
+        verify(certificateManager, never()).ensureHost(anyString());
     }
 
     @Test
@@ -70,11 +89,16 @@ class CognitoDomainEnsureHostIntegrationTest {
                   "UserPoolId": "us-east-1_missing",
                   "CustomDomainConfig": {"CertificateArn": "%s"}
                 }
-                """.formatted(System.nanoTime(), CERTIFICATE_ARN))
+                """.formatted(System.nanoTime(), UNKNOWN_CERTIFICATE_ARN))
                 .then()
                 .statusCode(400);
 
         verify(certificateManager, never()).ensureHost(anyString());
+    }
+
+    private static String requestCertificate(String domain) throws Exception {
+        return RestAssuredJsonUtils.awsActionJson("CertificateManager", "RequestCertificate",
+                "{\"DomainName\": \"" + domain + "\", \"ValidationMethod\": \"DNS\"}").path("CertificateArn").asText();
     }
 
     private static String createPool() throws Exception {
