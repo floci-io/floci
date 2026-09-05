@@ -725,9 +725,53 @@ public class RuntimeApiServer {
         return close();
     }
 
+    /**
+     * Fan the INVOKE event out to every subscribed extension. Called from
+     * {@link #sendInvocation(RoutingContext, PendingInvocation)}, i.e. at the moment the runtime
+     * actually receives the invocation, not at enqueue() time. Nothing in the launch path waits for
+     * an internal extension to register, so an extension registering from inside the runtime process
+     * may not be in {@code extensions} yet when enqueue() runs; dispatching there dropped the event
+     * entirely (see #2573).
+     *
+     * <p>{@code stopped} is read under the lock for the same reason sendInvocation()'s failure path
+     * reads it: quiesce() may already have swept the extensions and queued SHUTDOWN, and an INVOKE
+     * offered afterwards would be drained ahead of that SHUTDOWN by /extension/event/next.
+     */
+    private void notifyExtensionsOfInvoke(PendingInvocation invocation) {
+        List<Runnable> dispatches = new ArrayList<>();
+        synchronized (lock) {
+            if (stopped || extensions.isEmpty()) {
+                return;
+            }
+            ExtensionEvent event = ExtensionEvent.invoke(
+                    invocation.getRequestId(), invocation.getDeadlineMs(), invocation.getFunctionArn());
+            for (RegisteredExtension ext : extensions.values()) {
+                if (!ext.isSubscribedTo(ExtensionEvent.Type.INVOKE)) {
+                    continue;
+                }
+                RoutingContext waitingCtx = ext.takeWaitingContext();
+                if (waitingCtx != null) {
+                    dispatches.add(() -> {
+                        if (!waitingCtx.response().ended()) {
+                            sendExtensionEvent(waitingCtx, event);
+                        } else {
+                            synchronized (lock) {
+                                ext.getPendingEvents().offer(event);
+                            }
+                        }
+                    });
+                } else {
+                    ext.getPendingEvents().offer(event);
+                }
+            }
+        }
+        for (Runnable dispatch : dispatches) {
+            vertx.runOnContext(v -> dispatch.run());
+        }
+    }
+
     public CompletableFuture<InvokeResult> enqueue(PendingInvocation invocation) {
         boolean rejected;
-        List<Runnable> dispatches = new ArrayList<>();
         RoutingContext waitingCtxForInvocation = null;
 
         synchronized (lock) {
@@ -738,30 +782,6 @@ public class RuntimeApiServer {
             // stays a single atomic step.
             rejected = stopped || faulted;
             if (!rejected) {
-                if (!extensions.isEmpty()) {
-                    ExtensionEvent event = ExtensionEvent.invoke(
-                            invocation.getRequestId(), invocation.getDeadlineMs(), invocation.getFunctionArn());
-                    for (RegisteredExtension ext : extensions.values()) {
-                        if (!ext.isSubscribedTo(ExtensionEvent.Type.INVOKE)) {
-                            continue;
-                        }
-                        RoutingContext waitingCtx = ext.takeWaitingContext();
-                        if (waitingCtx != null) {
-                            dispatches.add(() -> {
-                                if (!waitingCtx.response().ended()) {
-                                    sendExtensionEvent(waitingCtx, event);
-                                } else {
-                                    synchronized (lock) {
-                                        ext.getPendingEvents().offer(event);
-                                    }
-                                }
-                            });
-                        } else {
-                            ext.getPendingEvents().offer(event);
-                        }
-                    }
-                }
-
                 waitingCtxForInvocation = waitingContexts.poll();
                 if (waitingCtxForInvocation == null) {
                     pendingQueue.offer(invocation);
@@ -778,10 +798,6 @@ public class RuntimeApiServer {
             invocation.getResultFuture().complete(
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
             return invocation.getResultFuture();
-        }
-
-        for (Runnable dispatch : dispatches) {
-            vertx.runOnContext(v -> dispatch.run());
         }
 
         if (waitingCtxForInvocation != null) {
@@ -873,6 +889,9 @@ public class RuntimeApiServer {
         } catch (IllegalStateException alreadyEnded) {
             write = Future.failedFuture(alreadyEnded);
         }
+        // Gated on the successful write: onFailure below requeues the invocation, and a fan-out
+        // before the write would emit a second INVOKE for the same requestId on redelivery.
+        write.onSuccess(v -> notifyExtensionsOfInvoke(invocation));
         write.onFailure(err -> {
             // Requeue for the next /next poller; mirrors enqueue()'s ctx-ended branch.
             // Skip if quiesce() beat us — it already swept inFlight and settled the
