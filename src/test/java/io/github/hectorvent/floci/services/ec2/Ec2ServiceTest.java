@@ -838,6 +838,23 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesRejectsUnsupportedImageBeforeCreatingInstance() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        AwsException unsupported = new AwsException("UnsupportedOperation", "Windows AMIs are not supported", 400);
+        when(resolver.resolveImage("ami-windows")).thenThrow(unsupported);
+        Ec2Service service = liveService(containerManager, resolver);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-windows", "t3.micro", 1, 1,
+                        null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("UnsupportedOperation", error.getErrorCode());
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
+        verifyNoInteractions(containerManager);
+    }
+
+    @Test
     void createImageOnACatalogSourceCarriesItsRootDevice() {
         Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
         Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();

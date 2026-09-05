@@ -298,7 +298,9 @@ public class Ec2ContainerManager {
             String containerId = null;
             boolean recorded = false;
             try {
-                containerId = lifecycleManager.create(spec);
+                containerId = image.dockerPlatform() == null
+                        ? lifecycleManager.create(spec)
+                        : lifecycleManager.create(spec, image.dockerPlatform());
                 if (!recordCreatedContainer(instance, containerId, sshHostPort)) {
                     lifecycleManager.removeIfExists(containerId);
                     portAllocator.release(sshHostPort);

@@ -2321,6 +2321,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         validateArchitectureCompatibility(imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(imageId, effectiveInstanceType);
+        ResolvedAmiImage dockerImage = null;
+        if (!config.services().ec2().mock()) {
+            // A CreateImage AMI is not in the catalog, so resolve through its source.
+            dockerImage = amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
+        }
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
             String privateIp = suppliedEni != null
@@ -2420,9 +2425,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                // A CreateImage AMI is not in the catalog, so resolve through its source.
-                ResolvedAmiImage dockerImage =
-                        amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
