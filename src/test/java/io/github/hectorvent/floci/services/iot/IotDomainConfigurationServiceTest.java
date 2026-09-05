@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -39,7 +40,8 @@ class IotDomainConfigurationServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final IotDomainConfigurationService service = new IotDomainConfigurationService(
-            new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), endpointConfig());
+            new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), endpointConfig(),
+            mock(TlsCertificateManager.class));
 
     private static EmulatorConfig endpointConfig() {
         EmulatorConfig config = mock(EmulatorConfig.class);
