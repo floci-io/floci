@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssoadmin.model.Assignment;
@@ -23,7 +24,7 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class SsoAdminService {
+public class SsoAdminService implements Resettable {
     private static final String INSTANCE_ARN = "arn:aws:sso:::instance/ssoins-7223b02a5d9f7c8e";
     private static final String IDENTITY_STORE_ID = "d-9067f2a3c1";
     private static final Pattern PERMISSION_SET_NAME = Pattern.compile("[\\w+=,.@-]+");
@@ -68,6 +69,16 @@ public class SsoAdminService {
     public List<PermissionSet> listPermissionSets(String instanceArn) {
         requireInstance(instanceArn);
         return permissionSets.scan(key -> true).stream().sorted(Comparator.comparing(PermissionSet::name)).toList();
+    }
+
+    public PaginatedResult<Map.Entry<String, String>> listManagedPolicies(JsonNode request) {
+        PermissionSet permissionSet = getPermissionSet(
+                required(request, "InstanceArn"), required(request, "PermissionSetArn"));
+        List<Map.Entry<String, String>> policies = permissionSet.managedPolicies().entrySet().stream()
+                .map(entry -> Map.entry(entry.getKey(), entry.getValue()))
+                .toList();
+        return Pagination.paginate(policies, Map.Entry::getKey,
+                optionalMaxResults(request), text(request, "NextToken"), 50, 100, "ValidationException");
     }
 
     public synchronized PermissionSet createPermissionSet(JsonNode request) {
@@ -172,7 +183,9 @@ public class SsoAdminService {
         getPermissionSet(INSTANCE_ARN, permission);
         String principal = validatePrincipalId(required(request, "PrincipalId"));
         String principalType = required(request, "PrincipalType");
-        if (!PRINCIPAL_TYPES.contains(principalType)) throw validation("PrincipalType must be USER or GROUP.");
+        if (!PRINCIPAL_TYPES.contains(principalType)) {
+            throw validation("PrincipalType must be USER or GROUP.");
+        }
         String key = account + "::" + permission + "::" + principal;
         if (assignments.get(key).isPresent()) {
             throw conflict("The account assignment already exists.");
@@ -196,7 +209,9 @@ public class SsoAdminService {
 
     static String required(JsonNode request, String field) {
         String value = text(request, field);
-        if (value == null || value.isBlank()) throw validation(field + " must be a non-empty string.");
+        if (value == null || value.isBlank()) {
+            throw validation(field + " must be a non-empty string.");
+        }
         return value;
     }
 
@@ -207,8 +222,12 @@ public class SsoAdminService {
 
     private static Integer optionalMaxResults(JsonNode request) {
         JsonNode node = request == null ? null : request.get("MaxResults");
-        if (node == null || node.isNull()) return null;
-        if (!node.isIntegralNumber()) throw validation("MaxResults must be an integer.");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber()) {
+            throw validation("MaxResults must be an integer.");
+        }
         return node.intValue();
     }
 
@@ -220,7 +239,9 @@ public class SsoAdminService {
     }
 
     private static String optionalDescription(JsonNode request) {
-        if (!request.has("Description") || request.get("Description").isNull()) return null;
+        if (!request.has("Description") || request.get("Description").isNull()) {
+            return null;
+        }
         String description = text(request, "Description");
         if (description == null || description.length() < 1 || description.length() > 700) {
             throw validation("Description must be between 1 and 700 characters.");
@@ -229,7 +250,9 @@ public class SsoAdminService {
     }
 
     private static String validateSession(String value) {
-        if (value == null || value.length() > 100) throw validation("SessionDuration is invalid.");
+        if (value == null || value.length() > 100) {
+            throw validation("SessionDuration is invalid.");
+        }
         try {
             Duration duration = Duration.parse(value);
             if (duration.compareTo(Duration.ofHours(1)) < 0 || duration.compareTo(Duration.ofHours(12)) > 0) {
@@ -242,7 +265,9 @@ public class SsoAdminService {
     }
 
     private static void validatePermissionSetArn(String arn) {
-        if (arn == null || !PERMISSION_SET_ARN.matcher(arn).matches()) throw validation("PermissionSetArn is invalid.");
+        if (arn == null || !PERMISSION_SET_ARN.matcher(arn).matches()) {
+            throw validation("PermissionSetArn is invalid.");
+        }
     }
 
     private static void validateManagedPolicyArn(String arn) {
@@ -256,16 +281,22 @@ public class SsoAdminService {
             throw validation("InlinePolicy must be between 1 and 32768 bytes.");
         }
         long nonWhitespace = policy.chars().filter(ch -> !Character.isWhitespace(ch)).count();
-        if (nonWhitespace > MAX_INLINE_NON_WHITESPACE) throw quota("InlinePolicy exceeds the non-whitespace quota.");
+        if (nonWhitespace > MAX_INLINE_NON_WHITESPACE) {
+            throw quota("InlinePolicy exceeds the non-whitespace quota.");
+        }
     }
 
     private static String validateAccountId(String value) {
-        if (value == null || !value.matches("\\d{12}")) throw validation("AWS account identifiers must contain 12 digits.");
+        if (value == null || !value.matches("\\d{12}")) {
+            throw validation("AWS account identifiers must contain 12 digits.");
+        }
         return value;
     }
 
     private static String validatePrincipalId(String value) {
-        if (value == null || !PRINCIPAL_ID.matcher(value).matches()) throw validation("PrincipalId is invalid.");
+        if (value == null || !PRINCIPAL_ID.matcher(value).matches()) {
+            throw validation("PrincipalId is invalid.");
+        }
         return value;
     }
 
@@ -279,7 +310,16 @@ public class SsoAdminService {
     private static AwsException conflict(String message) { return new AwsException("ConflictException", message, 400); }
     private static AwsException quota(String message) { return new AwsException("ServiceQuotaExceededException", message, 400); }
     private static void requireInstance(String arn) {
-        if (arn == null || !arn.equals(INSTANCE_ARN)) throw notFound("IAM Identity Center instance not found: " + arn);
+        if (arn == null || !arn.equals(INSTANCE_ARN)) {
+            throw notFound("IAM Identity Center instance not found: " + arn);
+        }
+    }
+
+    @Override
+    public void clear() {
+        permissionSets.clear();
+        assignments.clear();
+        assignmentOperations.clear();
     }
 
 }

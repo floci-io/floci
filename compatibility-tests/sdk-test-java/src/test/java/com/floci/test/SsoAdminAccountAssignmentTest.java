@@ -5,8 +5,10 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
 import software.amazon.awssdk.services.ssoadmin.model.PrincipalType;
 import software.amazon.awssdk.services.ssoadmin.model.TargetType;
+import software.amazon.awssdk.services.ssoadmin.model.ValidationException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("IAM Identity Center account assignments")
@@ -50,6 +52,33 @@ class SsoAdminAccountAssignmentTest {
                         assertThat(assignment.principalType()).isEqualTo(PrincipalType.GROUP);
                         assertThat(assignment.principalId()).isEqualTo("11111111-2222-3333-4444-555555555555");
                     });
+
+            for (String policy : new String[] {"ReadOnlyAccess", "SecurityAudit", "ViewOnlyAccess"}) {
+                sso.attachManagedPolicyToPermissionSet(request -> request
+                        .instanceArn(instanceArn)
+                        .permissionSetArn(permissionSetArn)
+                        .managedPolicyArn("arn:aws:iam::aws:policy/" + policy));
+            }
+            var firstPolicies = sso.listManagedPoliciesInPermissionSet(request -> request
+                    .instanceArn(instanceArn)
+                    .permissionSetArn(permissionSetArn)
+                    .maxResults(1));
+            assertThat(firstPolicies.attachedManagedPolicies()).hasSize(1);
+            assertThat(firstPolicies.nextToken()).isNotBlank();
+            var secondPolicies = sso.listManagedPoliciesInPermissionSet(request -> request
+                    .instanceArn(instanceArn)
+                    .permissionSetArn(permissionSetArn)
+                    .maxResults(1)
+                    .nextToken(firstPolicies.nextToken()));
+            assertThat(secondPolicies.attachedManagedPolicies()).hasSize(1);
+            assertThat(secondPolicies.attachedManagedPolicies().get(0).arn())
+                    .isNotEqualTo(firstPolicies.attachedManagedPolicies().get(0).arn());
+
+            assertThatThrownBy(() -> sso.listManagedPoliciesInPermissionSet(request -> request
+                    .instanceArn(instanceArn)
+                    .permissionSetArn(permissionSetArn)
+                    .maxResults(101)))
+                    .isInstanceOf(ValidationException.class);
         }
     }
 }

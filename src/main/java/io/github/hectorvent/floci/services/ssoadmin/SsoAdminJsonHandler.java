@@ -58,7 +58,9 @@ public class SsoAdminJsonHandler {
         ObjectNode response = mapper.createObjectNode();
         ArrayNode arns = response.putArray("PermissionSets");
         page.items().forEach(p -> arns.add(p.arn()));
-        if (page.nextToken() != null) response.put("NextToken", page.nextToken());
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -83,11 +85,14 @@ public class SsoAdminJsonHandler {
     }
 
     private Response listManagedPolicies(JsonNode request) {
-        PermissionSet p = service.getPermissionSet(
-                SsoAdminService.required(request, "InstanceArn"), SsoAdminService.required(request, "PermissionSetArn"));
+        var page = service.listManagedPolicies(request);
         ObjectNode response = mapper.createObjectNode();
         ArrayNode policies = response.putArray("AttachedManagedPolicies");
-        p.managedPolicies().forEach((arn, name) -> policies.addObject().put("Arn", arn).put("Name", name));
+        page.items().forEach(policy -> policies.addObject()
+                .put("Arn", policy.getKey()).put("Name", policy.getValue()));
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -122,7 +127,9 @@ public class SsoAdminJsonHandler {
             array.addObject().put("AccountId", a.accountId()).put("PermissionSetArn", a.permissionSetArn())
                     .put("PrincipalId", a.principalId()).put("PrincipalType", a.principalType());
         }
-        if (page.nextToken() != null) response.put("NextToken", page.nextToken());
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -146,7 +153,9 @@ public class SsoAdminJsonHandler {
         ObjectNode node = mapper.createObjectNode();
         node.put("PermissionSetArn", p.arn());
         node.put("Name", p.name());
-        if (p.description() != null) node.put("Description", p.description());
+        if (p.description() != null) {
+            node.put("Description", p.description());
+        }
         node.put("SessionDuration", p.sessionDuration());
         return node;
     }
@@ -157,7 +166,9 @@ public class SsoAdminJsonHandler {
         node.put("TargetId", op.accountId()); node.put("TargetType", "AWS_ACCOUNT");
         node.put("PermissionSetArn", op.permissionSetArn()); node.put("PrincipalId", op.principalId());
         node.put("PrincipalType", op.principalType());
-        if (op.failureReason() != null) node.put("FailureReason", op.failureReason());
+        if (op.failureReason() != null) {
+            node.put("FailureReason", op.failureReason());
+        }
         return node;
     }
 }
