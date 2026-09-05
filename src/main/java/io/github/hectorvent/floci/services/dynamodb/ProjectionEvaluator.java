@@ -40,7 +40,9 @@ final class ProjectionEvaluator {
         PathTrie root = new PathTrie();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
             List<String> segments = resolvePath(rawPath.trim(), exprAttrNames);
-            if (segments.isEmpty()) continue;
+            if (segments.isEmpty()) {
+                continue;
+            }
             root.insert(segments);
         }
         ObjectNode projected = projectMapEntries(item, root);
@@ -217,7 +219,9 @@ final class ProjectionEvaluator {
             ArrayNode projectedList = MAPPER.createArrayNode();
             for (Map.Entry<Long, PathTrie> entry : node.indices.entrySet()) {
                 long idx = entry.getKey();
-                if (idx >= list.size()) continue;
+                if (idx >= list.size()) {
+                    continue;
+                }
                 JsonNode projected = projectValue(list.get((int) idx), entry.getValue());
                 if (projected != null) {
                     projectedList.add(projected);
@@ -250,7 +254,9 @@ final class ProjectionEvaluator {
         ObjectNode projectedMap = MAPPER.createObjectNode();
         for (Map.Entry<String, PathTrie> entry : node.names.entrySet()) {
             JsonNode child = map.get(entry.getKey());
-            if (child == null) continue;
+            if (child == null) {
+                continue;
+            }
             JsonNode projected = projectValue(child, entry.getValue());
             if (projected != null) {
                 projectedMap.set(entry.getKey(), projected);
