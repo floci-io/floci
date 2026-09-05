@@ -1235,7 +1235,7 @@ class LambdaServiceTest {
     }
 
     @Test
-    void createEventSourceMapping_selfManagedKafka_atTimestamp_throws() {
+    void createEventSourceMapping_selfManagedKafka_atTimestamp_succeeds() {
         service.createFunction(REGION, baseRequest("kafka-fn-at-timestamp"));
 
         Map<String, Object> request = new java.util.HashMap<>(Map.of(
@@ -1246,6 +1246,23 @@ class LambdaServiceTest {
                                 "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
                         )
                 ),
+                "StartingPosition", "AT_TIMESTAMP",
+                "StartingPositionTimestamp", 123456789
+        ));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, request);
+        assertNotNull(esm);
+        assertEquals("AT_TIMESTAMP", esm.getStartingPosition());
+        assertEquals(123456789000L, esm.getStartingPositionTimestamp());
+    }
+
+    @Test
+    void createEventSourceMapping_dynamoDb_atTimestamp_throws() {
+        service.createFunction(REGION, baseRequest("dynamo-fn-at-timestamp"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "dynamo-fn-at-timestamp",
+                "EventSourceArn", "arn:aws:dynamodb:us-east-1:000000000000:table/my-table/stream/2026-01-01T00:00:00.000",
                 "StartingPosition", "AT_TIMESTAMP",
                 "StartingPositionTimestamp", 123456789
         ));

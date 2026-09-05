@@ -131,6 +131,8 @@ class LambdaEventSourceMappingCfnProvisionerTest {
 
         assertEquals("test-esm-uuid-1234", r.getPhysicalId());
         assertEquals("test-esm-uuid-1234", r.getAttributes().get("Id"));
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:event-source-mapping:test-esm-uuid-1234",
+                r.getAttributes().get("EventSourceMappingArn"));
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
@@ -171,6 +173,8 @@ class LambdaEventSourceMappingCfnProvisionerTest {
 
         assertEquals("kafka-esm-uuid", r.getPhysicalId());
         assertEquals("kafka-esm-uuid", r.getAttributes().get("Id"));
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:event-source-mapping:kafka-esm-uuid",
+                r.getAttributes().get("EventSourceMappingArn"));
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
@@ -195,6 +199,11 @@ class LambdaEventSourceMappingCfnProvisionerTest {
         r.setPhysicalId("existing-esm-uuid");
         r.getAttributes().put("Id", "existing-esm-uuid");
 
+        EventSourceMapping existing = new EventSourceMapping();
+        existing.setUuid("existing-esm-uuid");
+        existing.setFunctionName("my-function");
+        when(lambdaService.getEventSourceMapping("existing-esm-uuid")).thenReturn(existing);
+
         ObjectNode props = mapper.createObjectNode();
         props.put("FunctionName", "my-function");
         props.put("BatchSize", "20");
@@ -204,6 +213,8 @@ class LambdaEventSourceMappingCfnProvisionerTest {
 
         assertEquals("existing-esm-uuid", r.getPhysicalId());
         assertEquals("existing-esm-uuid", r.getAttributes().get("Id"));
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:event-source-mapping:existing-esm-uuid",
+                r.getAttributes().get("EventSourceMappingArn"));
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
@@ -287,5 +298,95 @@ class LambdaEventSourceMappingCfnProvisionerTest {
         Map<String, Object> req = captor.getValue();
         assertTrue(req.containsKey("SourceAccessConfigurations"));
         assertNull(req.get("SourceAccessConfigurations"));
+    }
+
+    @Test
+    void provisionRejectsUpdatingSelfManagedEventSource() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+        r.setPhysicalId("existing-kafka-esm-uuid");
+
+        EventSourceMapping existing = new EventSourceMapping();
+        existing.setUuid("existing-kafka-esm-uuid");
+        existing.setSelfManagedEventSource(Map.of(
+                "Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092"))
+        ));
+        when(lambdaService.getEventSourceMapping("existing-kafka-esm-uuid")).thenReturn(existing);
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("FunctionName", "my-kafka-function");
+        ObjectNode selfManaged = mapper.createObjectNode();
+        ObjectNode endpoints = mapper.createObjectNode();
+        endpoints.set("KAFKA_BOOTSTRAP_SERVERS", mapper.createArrayNode().add("localhost:9093"));
+        selfManaged.set("Endpoints", endpoints);
+        props.set("SelfManagedEventSource", selfManaged);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx(true, "existing-kafka-esm-uuid")));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("Updating SelfManagedEventSource requires resource replacement, which is not supported.", ex.getMessage());
+    }
+
+    @Test
+    void provisionRejectsUpdatingEventSourceArn() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+        r.setPhysicalId("existing-esm-uuid");
+
+        EventSourceMapping existing = new EventSourceMapping();
+        existing.setUuid("existing-esm-uuid");
+        existing.setEventSourceArn("arn:aws:sqs:us-east-1:000000000000:old-queue");
+        when(lambdaService.getEventSourceMapping("existing-esm-uuid")).thenReturn(existing);
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("FunctionName", "my-function");
+        props.put("EventSourceArn", "arn:aws:sqs:us-east-1:000000000000:new-queue");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx(true, "existing-esm-uuid")));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("Updating EventSourceArn requires resource replacement, which is not supported.", ex.getMessage());
+    }
+
+    @Test
+    void provisionRejectsUpdatingStartingPosition() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+        r.setPhysicalId("existing-esm-uuid");
+
+        EventSourceMapping existing = new EventSourceMapping();
+        existing.setUuid("existing-esm-uuid");
+        existing.setStartingPosition("TRIM_HORIZON");
+        when(lambdaService.getEventSourceMapping("existing-esm-uuid")).thenReturn(existing);
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("FunctionName", "my-function");
+        props.put("StartingPosition", "LATEST");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx(true, "existing-esm-uuid")));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("Updating StartingPosition requires resource replacement, which is not supported.", ex.getMessage());
+    }
+
+    @Test
+    void provisionRejectsUpdatingStartingPositionTimestamp() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+        r.setPhysicalId("existing-esm-uuid");
+
+        EventSourceMapping existing = new EventSourceMapping();
+        existing.setUuid("existing-esm-uuid");
+        existing.setStartingPositionTimestamp(1000000000L);
+        when(lambdaService.getEventSourceMapping("existing-esm-uuid")).thenReturn(existing);
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("FunctionName", "my-function");
+        props.put("StartingPositionTimestamp", "2000000");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx(true, "existing-esm-uuid")));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("Updating StartingPositionTimestamp requires resource replacement, which is not supported.", ex.getMessage());
     }
 }

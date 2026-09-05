@@ -2,15 +2,18 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -115,14 +118,58 @@ public class LambdaEventSourceMappingCfnProvisioner implements CfnResourceProvis
 
         if (ctx.isUpdate() && ctx.priorPhysicalId() != null) {
             String uuid = ctx.priorPhysicalId();
+            EventSourceMapping existing = findExisting(uuid);
+            if (existing != null) {
+                rejectIfChanged("EventSourceArn", existing.getEventSourceArn(), (String) req.get("EventSourceArn"));
+                rejectIfChanged("StartingPosition", existing.getStartingPosition(), (String) req.get("StartingPosition"));
+
+                Long existingTs = existing.getStartingPositionTimestamp();
+                Long requestedTs = req.get("StartingPositionTimestamp") instanceof Number num
+                        ? Math.round(num.doubleValue() * 1000.0)
+                        : null;
+                if (!Objects.equals(existingTs, requestedTs)) {
+                    throw new AwsException("ValidationError",
+                            "Updating StartingPositionTimestamp requires resource replacement, which is not supported.", 400);
+                }
+
+                if (!Objects.equals(existing.getSelfManagedEventSource(), req.get("SelfManagedEventSource"))) {
+                    throw new AwsException("ValidationError",
+                            "Updating SelfManagedEventSource requires resource replacement, which is not supported.", 400);
+                }
+            }
             lambdaService.updateEventSourceMapping(uuid, req);
+            String esmArn = AwsArnUtils.Arn.of("lambda", ctx.region(), ctx.accountId(), "event-source-mapping:" + uuid).toString();
             r.setPhysicalId(uuid);
             r.getAttributes().put("Id", uuid);
+            r.getAttributes().put("EventSourceMappingArn", esmArn);
         } else {
             var esm = lambdaService.createEventSourceMapping(ctx.region(), req);
+            String esmArn = AwsArnUtils.Arn.of("lambda", ctx.region(), ctx.accountId(), "event-source-mapping:" + esm.getUuid()).toString();
             r.setPhysicalId(esm.getUuid());
             r.getAttributes().put("Id", esm.getUuid());
+            r.getAttributes().put("EventSourceMappingArn", esmArn);
         }
+    }
+
+    private EventSourceMapping findExisting(String uuid) {
+        try {
+            return lambdaService.getEventSourceMapping(uuid);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private void rejectIfChanged(String property, String existing, String requested) {
+        String a = existing == null || existing.isBlank() ? null : existing;
+        String b = requested == null || requested.isBlank() ? null : requested;
+        if (Objects.equals(a, b)) {
+            return;
+        }
+        throw new AwsException("ValidationError",
+                "Updating " + property + " requires resource replacement, which is not supported.", 400);
     }
 
     @Override

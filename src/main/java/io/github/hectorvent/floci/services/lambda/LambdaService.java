@@ -1214,7 +1214,7 @@ public class LambdaService implements ResourceProvider {
 
         EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
 
-        StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn);
+        StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn, isSelfManagedKafka);
 
         String queueUrl = (eventSourceArn != null && eventSourceArn.contains(":sqs:"))
                 ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config != null ? config.effectiveBaseUrl() : null)
@@ -1510,7 +1510,7 @@ public class LambdaService implements ResourceProvider {
      * requests that used to succeed. There is no update counterpart because AWS's
      * UpdateEventSourceMapping does not accept the field at all - it is replace-only.
      */
-    private StartingPositionSpec parseStartingPosition(Map<String, Object> request, String eventSourceArn) {
+    private StartingPositionSpec parseStartingPosition(Map<String, Object> request, String eventSourceArn, boolean isSelfManagedKafka) {
         Object raw = request.get("StartingPosition");
         if (raw == null) {
             return new StartingPositionSpec(null, null);
@@ -1526,12 +1526,13 @@ public class LambdaService implements ResourceProvider {
         if (!"AT_TIMESTAMP".equals(position)) {
             return new StartingPositionSpec(position, null);
         }
-        // AT_TIMESTAMP is Kinesis-only among the event sources Floci supports - DynamoDB Streams
-        // shard iterators have no timestamp form at all, so silently accepting it there would
-        // promise a starting point that can never be honoured.
-        if (eventSourceArn == null || !eventSourceArn.contains(":kinesis:")) {
+        // AT_TIMESTAMP is supported for Amazon Kinesis and self-managed Apache Kafka event sources -
+        // DynamoDB Streams shard iterators have no timestamp form at all, so silently accepting it there
+        // would promise a starting point that can never be honoured.
+        boolean isKinesis = eventSourceArn != null && eventSourceArn.contains(":kinesis:");
+        if (!isKinesis && !isSelfManagedKafka) {
             throw new AwsException("InvalidParameterValueException",
-                    "AT_TIMESTAMP is only supported for Amazon Kinesis event sources", 400);
+                    "AT_TIMESTAMP is only supported for Amazon Kinesis and self-managed Apache Kafka event sources", 400);
         }
         Object rawTimestamp = request.get("StartingPositionTimestamp");
         if (rawTimestamp == null) {

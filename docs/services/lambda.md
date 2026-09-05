@@ -720,7 +720,7 @@ aws lambda update-function-code \
 
 ## Event Source Mappings
 
-Connect Lambda to SQS, Kinesis, or DynamoDB Streams:
+Connect Lambda to SQS, Kinesis, or DynamoDB Streams. Self-managed Apache Kafka event source mappings are accepted, validated, persisted, and returned on the wire, but Floci does not run an active Kafka consumer poller:
 
 ```bash
 # SQS trigger
