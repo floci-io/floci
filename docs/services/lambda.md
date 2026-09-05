@@ -191,13 +191,24 @@ architecture. `Marker` is opaque and signed with a key generated at startup, so 
 edited or previous-run token is rejected with `InvalidParameterValueException` rather than
 applied as a cursor. One divergence: a parameter sent with an empty value
 (`?CompatibleRuntime=`) is treated as absent rather than rejected, because RESTEasy binds an
-empty query value as null. `CreateFunction`/`UpdateFunctionConfiguration`
-validate each `Layers` ARN eagerly against that storage, matching real AWS - an unresolvable ARN
-is rejected with `InvalidParameterValueException`, not silently accepted. Only resolves layers
-published into this same local Floci instance; a real AWS-owned layer ARN (e.g. the AWS AppConfig
-Extension or a Datadog-published layer) can never resolve here, since there's no mechanism in
-Floci for fetching real AWS content - publish your own copy of the layer's content locally under
-a name you control and reference that ARN instead.
+empty query value as null. Resolution honours the ARN's
+account and partition: an ARN naming another account resolves to nothing rather than to a
+same-named layer of the caller's own, matching the live service, which answers that case with
+`AccessDeniedException` and never substitutes. `CreateFunction`/`UpdateFunctionConfiguration`
+validate each `Layers` ARN in the caller's own account eagerly against that storage, matching
+real AWS - an unresolvable one is rejected with `InvalidParameterValueException: Layer version
+... does not exist.`, not silently accepted. An ARN in another account is accepted and recorded
+verbatim instead, which is how AWS-managed public layers (Powertools, the AppConfig extension, a
+Datadog-published layer) are consumed and how the live service answers them. One divergence
+follows from Floci implementing no layer permissions: it cannot tell a public layer from one the
+caller has no policy for, so it accepts both where AWS rejects the second with
+`AccessDeniedException`. Floci has no mechanism for fetching real AWS content, so a foreign
+layer's content is not mounted at `/opt` - a warning is logged at attach time and again at
+invoke. Publish your own copy of the content locally under a name you control if the handler
+needs it at runtime. A layer ARN outside the `aws` partition is rejected outright with
+`InvalidParameterValueException: Invalid layer version ...`, both on `GetLayerVersionByArn` and
+when attached to a function: partitions are isolated, so no resource policy can make such a layer
+readable, and Floci emulates the `aws` partition only.
 
 ## Not Implemented
 
