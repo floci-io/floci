@@ -12,6 +12,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
@@ -320,7 +322,8 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("diagnostics", hasSize(1))
                 .body("diagnostics[0].severity", equalTo("ERROR"))
                 .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
-                .body("diagnostics[0].location", equalTo("/States/X/InputPath"));
+                // AWS locates this message family at the state, with no field suffix.
+                .body("diagnostics[0].location", equalTo("/States/X"));
     }
 
     @Test
@@ -361,7 +364,8 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .then().statusCode(200)
                 .body("result", equalTo("FAIL"))
                 .body("diagnostics", hasSize(1))
-                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrencyPath"));
+                // Measured on AWS: /States/M, the state, not the field.
+                .body("diagnostics[0].location", equalTo("/States/M"));
     }
 
     @Test
@@ -1204,6 +1208,598 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("message", equalTo("Invalid State Machine Definition: "
                         + "'SCHEMA_VALIDATION_FAILED: Field 'TimeoutSeconds' is not supported "
                         + "at /States/P'"));
+    }
+
+    // ─────────────── QueryLanguage compatibility, measured against real AWS ───────────────
+    // Output, Arguments and Items exist only in JSONata. AWS rejects each of them on a JSONPath
+    // state with "The QueryLanguage is set to 'JSONPath', but field '<f>' is only supported for
+    // the 'JSONata' QueryLanguage", located at the state and not at the field.
+
+    private static final String JSONATA_ONLY_FIELD_ON_A_JSONPATH_STATE =
+            "The QueryLanguage is set to 'JSONPath', but field '%s' is only supported "
+                    + "for the 'JSONata' QueryLanguage";
+    private static final String JSONPATH_ONLY_FIELD_ON_A_JSONATA_STATE =
+            "The QueryLanguage is set to 'JSONata', but field '%s' is only supported "
+                    + "for the 'JSONPath' QueryLanguage";
+
+    /**
+     * A Map's own QueryLanguage is inert for the states inside its ItemProcessor: on AWS the two
+     * definitions below fail identically, so the equality of the two diagnostic lists is the
+     * assertion. A change that propagated the Map's language into ItemProcessor would separate
+     * them.
+     */
+    @Test
+    void mapDeclaringJsonataLeavesItsItemProcessorStateOnTheMachinesJsonPath() {
+        List<Map<String, Object>> whenTheMapDeclaresJsonata =
+                diagnosticsOf(mapOverAPassCarryingOutput("\"QueryLanguage\":\"JSONata\","));
+        List<Map<String, Object>> whenTheMapDeclaresNothing =
+                diagnosticsOf(mapOverAPassCarryingOutput(""));
+
+        Assertions.assertEquals(whenTheMapDeclaresNothing, whenTheMapDeclaresJsonata,
+                "the Map's QueryLanguage must not reach the states inside its ItemProcessor");
+        assertOutputRefusedOnTheItemProcessorPass(whenTheMapDeclaresJsonata, "the Map declares JSONata");
+        assertOutputRefusedOnTheItemProcessorPass(whenTheMapDeclaresNothing, "the Map declares nothing");
+    }
+
+    /**
+     * The literal shape both sides of the pair are held to. Asserted on each list separately, so
+     * neither side is pinned only by the other: two runs agreeing on the wrong answer is what the
+     * equality above cannot see.
+     */
+    private static void assertOutputRefusedOnTheItemProcessorPass(
+            List<Map<String, Object>> diagnostics, String when) {
+        Assertions.assertEquals(1, diagnostics.size(),
+                "expected exactly one diagnostic when " + when + ", got " + diagnostics);
+        Map<String, Object> diagnostic = diagnostics.get(0);
+        Assertions.assertEquals("ERROR", diagnostic.get("severity"), when);
+        Assertions.assertEquals("SCHEMA_VALIDATION_FAILED", diagnostic.get("code"), when);
+        Assertions.assertEquals(JSONATA_ONLY_FIELD_ON_A_JSONPATH_STATE.formatted("Output"),
+                diagnostic.get("message"), when);
+        Assertions.assertEquals("/States/M/ItemProcessor/States/P", diagnostic.get("location"), when);
+    }
+
+    @Test
+    void parallelDeclaringJsonataLeavesItsBranchStateOnTheMachinesJsonPath() {
+        String def = """
+                {"QueryLanguage":"JSONPath","StartAt":"PAR","States":{
+                  "PAR":{"Type":"Parallel","QueryLanguage":"JSONata",
+                    "Branches":[{"StartAt":"P","States":{
+                      "P":{"Type":"Pass","Output":{"doubled":"{% $states.input.n * 2 %}"},"End":true}}}],
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message",
+                        equalTo(JSONATA_ONLY_FIELD_ON_A_JSONPATH_STATE.formatted("Output")))
+                .body("diagnostics[0].location", equalTo("/States/PAR/Branches[0]/States/P"));
+    }
+
+    @Test
+    void jsonPathStateRejectsArguments() {
+        String def = """
+                {"StartAt":"T","States":{
+                  "T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke",
+                    "Arguments":{"payload":"literal"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message",
+                        equalTo(JSONATA_ONLY_FIELD_ON_A_JSONPATH_STATE.formatted("Arguments")))
+                .body("diagnostics[0].location", equalTo("/States/T"));
+    }
+
+    @Test
+    void jsonPathMapRejectsItems() {
+        String def = """
+                {"StartAt":"M","States":{
+                  "M":{"Type":"Map","Items":[{"n":1}],
+                    "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message",
+                        equalTo(JSONATA_ONLY_FIELD_ON_A_JSONPATH_STATE.formatted("Items")))
+                .body("diagnostics[0].location", equalTo("/States/M"));
+    }
+
+    /** AWS accepts Assign on a JSONPath state, so it is not a JSONata-only field. */
+    @Test
+    void jsonPathStateAcceptsAssign() {
+        String def = """
+                {"StartAt":"X","States":{
+                  "X":{"Type":"Pass","Assign":{"counter":1},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    /** The Map's own fields do use the Map's own language. */
+    @Test
+    void jsonataMapAcceptsOutputOnItself() {
+        String def = """
+                {"QueryLanguage":"JSONPath","StartAt":"M","States":{
+                  "M":{"Type":"Map","QueryLanguage":"JSONata","Items":"{% [1, 2] %}",
+                    "Output":{"count":"{% $count($states.result) %}"},
+                    "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    /** An explicit declaration on the state itself still wins, at any depth. */
+    @Test
+    void itemProcessorStateDeclaringJsonataAcceptsOutput() {
+        String def = """
+                {"QueryLanguage":"JSONPath","StartAt":"M","States":{
+                  "M":{"Type":"Map","QueryLanguage":"JSONata","Items":"{% [1, 2] %}",
+                    "ItemProcessor":{"StartAt":"P","States":{
+                      "P":{"Type":"Pass","QueryLanguage":"JSONata",
+                        "Output":{"doubled":"{% $states.input * 2 %}"},"End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    // A JSONata state machine cannot be reverted to JSONPath state by state, and the ItemProcessor
+    // or branch object is not a state: it carries no QueryLanguage of its own. Both measured.
+
+    @Test
+    void stateCannotDeclareJsonPathUnderAJsonataStateMachine() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"M","States":{
+                  "M":{"Type":"Map","QueryLanguage":"JSONPath",
+                    "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("'QueryLanguage' can not be 'JSONPath' "
+                        + "if set to 'JSONata' for whole state machine"))
+                .body("diagnostics[0].location", equalTo("/States/M"));
+    }
+
+    /** The guard reads the machine's language, not the mere presence of the field. */
+    @Test
+    void stateMayDeclareJsonPathUnderAJsonPathStateMachine() {
+        String def = """
+                {"StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"JSONPath","InputPath":"$.a","End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void stateMayDeclareJsonataUnderAJsonataStateMachine() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"JSONata","Output":{"v":"{% 1 %}"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void itemProcessorCannotDeclareQueryLanguage() {
+        String def = """
+                {"StartAt":"M","States":{
+                  "M":{"Type":"Map",
+                    "ItemProcessor":{"QueryLanguage":"JSONata","StartAt":"P",
+                      "States":{"P":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'QueryLanguage' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/M/ItemProcessor"));
+    }
+
+    @Test
+    void parallelBranchCannotDeclareQueryLanguage() {
+        String def = """
+                {"StartAt":"PAR","States":{
+                  "PAR":{"Type":"Parallel",
+                    "Branches":[{"QueryLanguage":"JSONata","StartAt":"P",
+                      "States":{"P":{"Type":"Pass","End":true}}}],
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message", equalTo("Field 'QueryLanguage' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/PAR/Branches[0]"));
+    }
+
+    // ─────────── The downgrade suppresses only the field check, and only for that state ───────────
+
+    private static final String QUERY_LANGUAGE_DOWNGRADED =
+            "'QueryLanguage' can not be 'JSONPath' if set to 'JSONata' for whole state machine";
+
+    /**
+     * Measured on AWS: the downgrade is the whole answer. The {@code Output} that the state's own
+     * JSONPath forbids is not reported on top of it, so the mixing guard suppresses the
+     * other-language field check for that state.
+     */
+    @Test
+    void downgradedStateReportsTheMixingDiagnosticAndNothingAboutItsOutput() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"JSONPath","Output":{"v":"{% 1 %}"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_DOWNGRADED))
+                .body("diagnostics[0].location", equalTo("/States/X"));
+    }
+
+    /**
+     * The suppression is scoped to the other-language field check. Measured on AWS: the same
+     * downgrade on a Map with a negative MaxConcurrency returns the mixing diagnostic and the range
+     * error together. AWS words the range error {@code Minimum value is 0}; this emulator's own
+     * wording predates this change and is not what this test is about.
+     */
+    @Test
+    void downgradedMapStillHasItsMaxConcurrencyValidated() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"M","States":{
+                  "M":{"Type":"Map","QueryLanguage":"JSONPath","MaxConcurrency":-1,
+                    "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_DOWNGRADED))
+                .body("diagnostics[0].location", equalTo("/States/M"))
+                .body("diagnostics[1].message",
+                        equalTo("The field 'MaxConcurrency' must be a non-negative integer"))
+                .body("diagnostics[1].location", equalTo("/States/M/MaxConcurrency"));
+    }
+
+    // ─────────── A QueryLanguage outside the enum, measured against real AWS ───────────
+    // AWS does two independent things with it: it reports the value against the enum, at the field
+    // and not at the state, and it still resolves the effective language case-insensitively.
+
+    private static final String QUERY_LANGUAGE_OUTSIDE_THE_ENUM =
+            "Value should be one of the following: [JSONPath, JSONata]";
+
+    @Test
+    void lowercaseJsonataOnAStateResolvesToJsonataAndIsStillReportedAgainstTheEnum() {
+        String def = """
+                {"StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"jsonata","Output":{"v":"{% 1 %}"},
+                    "InputPath":"$.a","End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                // The state resolved to JSONata, so InputPath is the offending field and Output is
+                // not mentioned at all.
+                .body("diagnostics[0].message", equalTo("The QueryLanguage is set to 'JSONata', "
+                        + "but field 'InputPath' is only supported for the 'JSONPath' QueryLanguage"))
+                .body("diagnostics[0].location", equalTo("/States/X"))
+                .body("diagnostics[1].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[1].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[1].location", equalTo("/States/X/QueryLanguage"));
+    }
+
+    @Test
+    void lowercaseJsonataUnderAJsonataMachineReportsOnlyTheEnumError() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"jsonata","Output":{"v":"{% 1 %}"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[0].location", equalTo("/States/X/QueryLanguage"));
+    }
+
+    @Test
+    void topLevelQueryLanguageOutsideTheEnumIsReportedAtItsOwnField() {
+        String def = """
+                {"QueryLanguage":"jsonata","StartAt":"X","States":{
+                  "X":{"Type":"Pass","Output":{"v":"{% 1 %}"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[0].location", equalTo("/QueryLanguage"));
+    }
+
+    @Test
+    void nonStringTopLevelQueryLanguageIsReportedAsATypeError() {
+        String def = """
+                {"QueryLanguage":5,"StartAt":"X","States":{"X":{"Type":"Pass","End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message", equalTo("Expected value of type [STRING]"))
+                .body("diagnostics[0].location", equalTo("/QueryLanguage"));
+    }
+
+    // ─────────── What a value outside the enum resolves to, measured against real AWS ───────────
+    // The effective language is JSONPath only when the field is exactly "JSONPath". Absent, it is
+    // inherited; present and anything else, wrong case, unknown string and non-string alike, the
+    // state is JSONata. The enum and type diagnostics are independent of that resolution.
+
+    @Test
+    void unrecognisedQueryLanguageOnAStateResolvesToJsonataAndRejectsInputPath() {
+        String def = """
+                {"StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"foo","InputPath":"$.a","End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].message",
+                        equalTo(JSONPATH_ONLY_FIELD_ON_A_JSONATA_STATE.formatted("InputPath")))
+                .body("diagnostics[0].location", equalTo("/States/X"))
+                .body("diagnostics[1].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[1].location", equalTo("/States/X/QueryLanguage"));
+    }
+
+    @Test
+    void unrecognisedQueryLanguageOnAStateAcceptsOutput() {
+        String def = """
+                {"StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"foo","Output":{"v":"{% 1 %}"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[0].location", equalTo("/States/X/QueryLanguage"));
+    }
+
+    /**
+     * Only the exact string is a downgrade. {@code "jsonpath"} resolves to JSONata, so there is
+     * nothing to report but the spelling, and the mixing diagnostic must not appear.
+     */
+    @Test
+    void lowercaseJsonPathUnderAJsonataMachineIsNotADowngrade() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":"jsonpath","End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[0].location", equalTo("/States/X/QueryLanguage"));
+    }
+
+    @Test
+    void lowercaseTopLevelQueryLanguageResolvesToJsonataAndAcceptsOutput() {
+        String def = """
+                {"QueryLanguage":"jsonpath","StartAt":"X","States":{
+                  "X":{"Type":"Pass","Output":{"v":"{% 1 %}"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[0].location", equalTo("/QueryLanguage"));
+    }
+
+    @Test
+    void lowercaseTopLevelQueryLanguageResolvesToJsonataAndRejectsInputPath() {
+        String def = """
+                {"QueryLanguage":"jsonpath","StartAt":"X","States":{
+                  "X":{"Type":"Pass","InputPath":"$.a","End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].message", equalTo(QUERY_LANGUAGE_OUTSIDE_THE_ENUM))
+                .body("diagnostics[0].location", equalTo("/QueryLanguage"))
+                .body("diagnostics[1].message",
+                        equalTo(JSONPATH_ONLY_FIELD_ON_A_JSONATA_STATE.formatted("InputPath")))
+                .body("diagnostics[1].location", equalTo("/States/X"));
+    }
+
+    @Test
+    void nonStringQueryLanguageOnAStateResolvesToJsonataAndRejectsInputPath() {
+        String def = """
+                {"StartAt":"X","States":{
+                  "X":{"Type":"Pass","QueryLanguage":5,"InputPath":"$.a","End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].message",
+                        equalTo(JSONPATH_ONLY_FIELD_ON_A_JSONATA_STATE.formatted("InputPath")))
+                .body("diagnostics[0].location", equalTo("/States/X"))
+                .body("diagnostics[1].message", equalTo("Expected value of type [STRING]"))
+                .body("diagnostics[1].location", equalTo("/States/X/QueryLanguage"));
+    }
+
+    // ─────────── One state, two disallowed fields: the emission order is fixed ───────────
+    // The order below is not AWS-observable, it is the one this validator commits to. What matters
+    // is that it is the same on every JVM: a salted iteration order makes a maxResults=1 caller
+    // receive a different diagnostic on each run.
+
+    @Test
+    void twoJsonataOnlyFieldsOnAJsonPathStateEmitInTheOrderTheListDeclares() {
+        String def = """
+                {"StartAt":"T","States":{
+                  "T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke",
+                    "Output":{"v":1},"Arguments":{"payload":"literal"},"End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].message",
+                        equalTo(JSONATA_ONLY_FIELD_ON_A_JSONPATH_STATE.formatted("Output")))
+                .body("diagnostics[0].location", equalTo("/States/T"))
+                .body("diagnostics[1].message",
+                        equalTo(JSONATA_ONLY_FIELD_ON_A_JSONPATH_STATE.formatted("Arguments")))
+                .body("diagnostics[1].location", equalTo("/States/T"));
+    }
+
+    @Test
+    void threeJsonPathOnlyFieldsOnAJsonataStateEmitInTheOrderTheListDeclares() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"X","States":{
+                  "X":{"Type":"Pass","InputPath":"$.a","OutputPath":"$.b","ResultPath":"$.c",
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(3))
+                .body("diagnostics[0].message",
+                        equalTo(JSONPATH_ONLY_FIELD_ON_A_JSONATA_STATE.formatted("InputPath")))
+                .body("diagnostics[1].message",
+                        equalTo(JSONPATH_ONLY_FIELD_ON_A_JSONATA_STATE.formatted("OutputPath")))
+                .body("diagnostics[2].message",
+                        equalTo(JSONPATH_ONLY_FIELD_ON_A_JSONATA_STATE.formatted("ResultPath")));
+    }
+
+    // ─────────── The legacy Iterator spelling, and a bare ItemProcessor Pass ───────────
+
+    /** Measured on AWS: Iterator carries no QueryLanguage either, and the location names Iterator. */
+    @Test
+    void legacyIteratorCannotDeclareQueryLanguage() {
+        String def = """
+                {"StartAt":"M","States":{
+                  "M":{"Type":"Map",
+                    "Iterator":{"QueryLanguage":"JSONata","StartAt":"P",
+                      "States":{"P":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'QueryLanguage' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/M/Iterator"));
+    }
+
+    /** The control: the same Iterator without the field is accepted, as AWS accepts it. */
+    @Test
+    void legacyIteratorWithoutQueryLanguageIsAccepted() {
+        String def = """
+                {"StartAt":"M","States":{
+                  "M":{"Type":"Map",
+                    "Iterator":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    /**
+     * A JSONata machine, a Map declaring nothing, an ItemProcessor Pass declaring nothing and
+     * carrying Output: the inner state inherits the machine's JSONata, so AWS accepts it. The
+     * mirror of {@link #mapDeclaringJsonataLeavesItsItemProcessorStateOnTheMachinesJsonPath} from
+     * the other side of the two-level rule.
+     */
+    @Test
+    void jsonataMachineAcceptsOutputOnABareItemProcessorPass() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"M","States":{
+                  "M":{"Type":"Map",
+                    "ItemProcessor":{"StartAt":"P","States":{
+                      "P":{"Type":"Pass","Output":{"doubled":"{% $states.input.n * 2 %}"},
+                        "End":true}}},
+                    "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    private static String mapOverAPassCarryingOutput(String mapQueryLanguage) {
+        return """
+                {"QueryLanguage":"JSONPath","StartAt":"M","States":{
+                  "M":{"Type":"Map",__MAP_QUERY_LANGUAGE__
+                    "ItemProcessor":{"StartAt":"P","States":{
+                      "P":{"Type":"Pass","Output":{"doubled":"{% $states.input.n * 2 %}"},"End":true}}},
+                    "End":true}}}
+                """.replace("__MAP_QUERY_LANGUAGE__", mapQueryLanguage);
+    }
+
+    private static List<Map<String, Object>> diagnosticsOf(String definition) {
+        return validateDefinition(definition).jsonPath().getList("diagnostics");
     }
 
     private static String mapDefinition(String topLevelFields, String concurrencyFields) {

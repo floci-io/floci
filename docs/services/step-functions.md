@@ -382,6 +382,39 @@ state absent from its container or a state nothing transitions to (`MISSING_TRAN
 and for a field the state type does not carry: `TimeoutSeconds` only on `Task`, and `Catch`/`Retry`
 only on `Task`, `Parallel` and `Map`.
 
+## A state's QueryLanguage, and the fields it may carry
+
+A state's query language is JSONPath when its `QueryLanguage` field is exactly the string
+`"JSONPath"`, the state machine's when the field is absent, and JSONata for any other value: the
+wrong case, an unknown string and a non-string alike. A state inside a `Map`'s `ItemProcessor` or `Iterator`, or
+inside one of a `Parallel`'s `Branches`, falls back to the **state machine's** language and not to
+the enclosing `Map`'s or `Parallel`'s, which the Amazon States Language calls independent of it. The
+enclosing state's own fields, `Items` and `MaxConcurrency` among them, do use its own language.
+
+Three more refusals, each measured against `ValidateStateMachineDefinition` on real AWS:
+
+- A field that belongs to the other query language, at the state's path with no field suffix:
+  `The QueryLanguage is set to 'JSONPath', but field 'Output' is only supported for the 'JSONata'
+  QueryLanguage`, and the mirror of it for `InputPath`, `OutputPath`, `ResultPath`,
+  `ResultSelector`, `Parameters`, `Result`, `ItemsPath` and `MaxConcurrencyPath` on a JSONata
+  state. `Assign` belongs to neither list: AWS accepts it on both.
+- A state declaring `"QueryLanguage": "JSONPath"` under a `JSONata` state machine:
+  `'QueryLanguage' can not be 'JSONPath' if set to 'JSONata' for whole state machine`, again at the
+  state's path. A JSONata machine cannot be reverted one state at a time; the upgrade in the other
+  direction is allowed. That diagnostic is the whole answer for that state, so the fields its
+  refused language forbids are not reported on top of it, while every other check still runs.
+- `QueryLanguage` on the `ItemProcessor`, `Iterator` or branch object itself, which is not a state:
+  `Field 'QueryLanguage' is not supported` at `/States/M/ItemProcessor`.
+
+A `QueryLanguage` value outside the enum is reported at the field, `/States/X/QueryLanguage` or
+`/QueryLanguage`, with `Value should be one of the following: [JSONPath, JSONata]`, and a
+non-string value with `Expected value of type [STRING]`. That diagnostic is independent of the
+resolution above, so `"jsonpath"` is a JSONata state that also carries it, and it is not a
+downgrade: only the exact string `"JSONPath"` under a JSONata machine is.
+
+Locations follow AWS: the two messages above point at the state, `/States/X`, while every other
+schema error points at the offending field, `/States/X/MaxConcurrency`.
+
 ## Mocked service integrations
 
 Floci supports the Step Functions Local mock configuration format
