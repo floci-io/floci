@@ -29,6 +29,8 @@
 | `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
 | `GetStackPolicy` | Accepted; returns an empty policy (stub) |
 | `DescribeStackResource` | Get a specific stack resource |
+| `DescribeOrganizationsAccess` | - |
+| `ActivateOrganizationsAccess` | - |
 | `CreateStackSet` | Create a stack set from a template |
 | `DescribeStackSet` | Get stack set details |
 | `ListStackSets` | List stack sets |
@@ -40,7 +42,16 @@
 | `DeleteStackInstances` | Remove instances and their resources |
 | `ListStackSetOperations` | List operations performed on a stack set |
 | `DescribeStackSetOperation` | - |
+| `ListStackSetAutoDeploymentTargets` | - |
 <!-- floci:actions:end -->
+
+## StackSets compatibility
+
+StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics.
+
+`CreateStackInstances` and `UpdateStackSet` execute the backing CloudFormation stacks in each target account. A failed resource can therefore drive the backing stack through rollback and leave the stack instance `INOPERABLE` with detailed status `FAILED`; the StackSet operation is reported as `FAILED` instead of being forced to success.
+
+Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlreadyExistsException`, missing stack sets return `StackSetNotFoundException`, and missing operation IDs return `OperationNotFoundException`. Invalid targets and request shapes use the CloudFormation query-protocol validation errors. Operations complete locally, so `OperationInProgressException` is only reachable when local operation state actually overlaps; Floci does not inject concurrency failures solely to exercise an error code.
 
 ## Supported Resource Types
 

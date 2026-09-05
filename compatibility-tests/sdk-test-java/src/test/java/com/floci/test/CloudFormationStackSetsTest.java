@@ -84,6 +84,7 @@ class CloudFormationStackSetsTest {
         assertThat(ss.stackSetName()).isEqualTo(stackSetName);
         assertThat(ss.status()).isEqualTo(StackSetStatus.ACTIVE);
         assertThat(ss.templateBody()).contains(queueName);
+        assertThat(ss.autoDeployment()).isNull();
     }
 
     @Test
