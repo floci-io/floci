@@ -163,7 +163,7 @@ public class LambdaService implements ResourceProvider {
         this.config = config;
         this.regionResolver = regionResolver;
         this.esmStore = storageFactory != null ? new EsmStore(storageFactory) : null;
-        this.aliasStore = null;
+        this.aliasStore = storageFactory != null ? new LambdaAliasStore(storageFactory) : null;
         this.s3Service = null;
         this.sqsService = null;
         this.poller = null;
@@ -553,6 +553,28 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("InvalidParameterValueException",
                     "Region '" + ref.region() + "' in ARN does not match request region '" + region + "'", 400);
         }
+    }
+
+    private record ResolvedFunctionTarget(String functionArn, String functionName) {}
+
+    private ResolvedFunctionTarget resolveFunctionTarget(String region, LambdaArnUtils.ResolvedFunctionRef fnRef) {
+        String name = fnRef.name();
+        LambdaFunction fn = getFunction(region, name);
+        String qualifier = fnRef.qualifier();
+        if (qualifier == null) {
+            return new ResolvedFunctionTarget(fn.getFunctionArn(), name);
+        }
+        if ("$LATEST".equals(qualifier)) {
+            return new ResolvedFunctionTarget(fn.getFunctionArn() + ":$LATEST", name);
+        }
+        if (qualifier.chars().allMatch(Character::isDigit)) {
+            LambdaFunction versionFn = functionStore.get(region, name, qualifier)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Function version not found: " + name + ":" + qualifier, 404));
+            return new ResolvedFunctionTarget(versionFn.getFunctionArn(), name);
+        }
+        LambdaAlias alias = getAlias(region, name, qualifier);
+        return new ResolvedFunctionTarget(alias.getAliasArn(), name);
     }
 
     public List<LambdaFunction> listFunctions(String region) {
@@ -1172,7 +1194,7 @@ public class LambdaService implements ResourceProvider {
             }
         }
 
-        LambdaFunction fn = getFunction(resolvedRegion, resolvedName);
+        ResolvedFunctionTarget target = resolveFunctionTarget(resolvedRegion, fnRef);
 
         int batchSize = toInt(request.get("BatchSize"), 10);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
@@ -1201,8 +1223,8 @@ public class LambdaService implements ResourceProvider {
         EventSourceMapping esm = new EventSourceMapping();
         esm.setUuid(UUID.randomUUID().toString());
         esm.setAccountId(regionResolver.getAccountId());
-        esm.setFunctionArn(fn.getFunctionArn());
-        esm.setFunctionName(resolvedName);
+        esm.setFunctionArn(target.functionArn());
+        esm.setFunctionName(target.functionName());
         esm.setEventSourceArn(eventSourceArn);
         esm.setQueueUrl(queueUrl);
         esm.setRegion(resolvedRegion);
@@ -1653,9 +1675,9 @@ public class LambdaService implements ResourceProvider {
                     throw new AwsException("InvalidParameterValueException",
                             "Function ARN region '" + fnRef.region() + "' does not match event source region '" + esm.getRegion() + "'", 400);
                 }
-                LambdaFunction fn = getFunction(esm.getRegion(), fnRef.name());
-                esm.setFunctionArn(fn.getFunctionArn());
-                esm.setFunctionName(fnRef.name());
+                ResolvedFunctionTarget target = resolveFunctionTarget(esm.getRegion(), fnRef);
+                esm.setFunctionArn(target.functionArn());
+                esm.setFunctionName(target.functionName());
             }
         }
 

@@ -1364,6 +1364,50 @@ class LambdaServiceTest {
         assertEquals("fn-esm-target-2", updated.getFunctionName());
         assertTrue(updated.getFunctionArn().contains("fn-esm-target-2"));
 
+        // Qualified version target update
+        service.publishVersion(REGION, "fn-esm-target-2", "v1");
+        EventSourceMapping updatedVersion = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:1"
+        ));
+        assertEquals("fn-esm-target-2", updatedVersion.getFunctionName());
+        assertTrue(updatedVersion.getFunctionArn().endsWith(":fn-esm-target-2:1"));
+
+        // Qualified alias target update
+        service.createAlias(REGION, "fn-esm-target-2", "live", "1", "production alias", null);
+        EventSourceMapping updatedAlias = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:live"
+        ));
+        assertEquals("fn-esm-target-2", updatedAlias.getFunctionName());
+        assertTrue(updatedAlias.getFunctionArn().endsWith(":fn-esm-target-2:live"));
+
+        // Qualified $LATEST target update
+        EventSourceMapping updatedLatest = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:$LATEST"
+        ));
+        assertEquals("fn-esm-target-2", updatedLatest.getFunctionName());
+        assertTrue(updatedLatest.getFunctionArn().endsWith(":fn-esm-target-2:$LATEST"));
+
+        // Create ESM with qualified function reference
+        EventSourceMapping esmQualified = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "fn-esm-target-2:live",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+        assertEquals("fn-esm-target-2", esmQualified.getFunctionName());
+        assertTrue(esmQualified.getFunctionArn().endsWith(":fn-esm-target-2:live"));
+
+        // Non-existent version or alias throws 404
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:99"
+        )));
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:non-existent-alias"
+        )));
+
         // Non-existent function throws
         assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
                 "FunctionName", "non-existent-fn"
