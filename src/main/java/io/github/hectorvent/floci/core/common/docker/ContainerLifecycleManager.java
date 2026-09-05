@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import com.github.dockerjava.api.DockerClient;
@@ -21,9 +22,15 @@ import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -136,8 +143,10 @@ public class ContainerLifecycleManager {
         if (spec.user() != null && !spec.user().isBlank()) {
             createCmd.withUser(spec.user());
         }
-        if (spec.env() != null && !spec.env().isEmpty()) {
-            createCmd.withEnv(spec.env());
+        Optional<Path> caBundle = ContainerCaBundle.hostPath(config);
+        List<String> env = caBundle.isPresent() ? ContainerCaBundle.appendEnv(spec.env()) : spec.env();
+        if (env != null && !env.isEmpty()) {
+            createCmd.withEnv(env);
         }
         if (spec.cmd() != null && !spec.cmd().isEmpty()) {
             createCmd.withCmd(spec.cmd());
@@ -158,8 +167,39 @@ public class ContainerLifecycleManager {
 
         CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
+        caBundle.ifPresent(bundle -> copyCaBundle(containerId, bundle));
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
+    }
+
+    /**
+     * Copies the CA bundle into the created, not yet started, container so runtimes that read
+     * {@code SSL_CERT_FILE} and friends at init find it. A copy rather than a bind mount because
+     * when Floci itself runs in Docker its persistent path is not a host path the daemon can mount.
+     * A failure is logged and the container still starts: an image without {@code /etc} is rare,
+     * and refusing every launch over trust plumbing would be worse than a workload that cannot
+     * verify Floci.
+     */
+    private void copyCaBundle(String containerId, Path bundle) {
+        try {
+            byte[] content = Files.readAllBytes(bundle);
+            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
+                TarArchiveEntry entry = new TarArchiveEntry(ContainerCaBundle.FILE_NAME);
+                entry.setSize(content.length);
+                tar.putArchiveEntry(entry);
+                tar.write(content);
+                tar.closeArchiveEntry();
+            }
+            dockerClient.copyArchiveToContainerCmd(containerId)
+                    .withRemotePath(ContainerCaBundle.CONTAINER_DIR)
+                    .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
+                    .exec();
+            LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
+        } catch (Exception e) {
+            LOG.warnv(e, "Could not copy the CA bundle into container {0}; its SSL_CERT_FILE points at a file "
+                    + "that does not exist, so it will not trust Floci HTTPS: {1}", containerId, e.getMessage());
+        }
     }
 
     /**
