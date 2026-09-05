@@ -342,6 +342,103 @@ class DynamoDbConsumedCapacityIntegrationTest {
             .body("ConsumedCapacity[0].GlobalSecondaryIndexes", nullValue());
     }
 
+    @Test
+    @Order(12)
+    void batchWriteItemRejectsAnInvalidReturnConsumedCapacity() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchWriteItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "RequestItems": {
+                        "%s": [{"PutRequest": {"Item": {"pk": {"S": "cc-bw-bad"}}}}]
+                    },
+                    "ReturnConsumedCapacity": "BOGUS"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("message", equalTo("1 validation error detected: Value 'BOGUS' at "
+                + "'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]"));
+    }
+
+    /**
+     * A read served by an LSI reports its units under LocalSecondaryIndexes with a
+     * zero Table entry, measured on real DynamoDB (us-east-1, 2026-09-05).
+     */
+    @Test
+    @Order(13)
+    void lsiReadReportsItsUnitsUnderLocalSecondaryIndexes() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "CapacityLsiTable",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "lsiSk", "AttributeType": "S"}
+                    ],
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "lsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "lsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "ALL"}
+                    }],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when().post("/").then().statusCode(200);
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "CapacityLsiTable",
+                    "Item": {"pk": {"S": "p1"}, "sk": {"S": "1"}, "lsiSk": {"S": "L1"}}
+                }
+                """)
+        .when().post("/").then().statusCode(200);
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "CapacityLsiTable",
+                    "IndexName": "lsi1",
+                    "KeyConditionExpression": "pk = :p",
+                    "ExpressionAttributeValues": {":p": {"S": "p1"}},
+                    "ConsistentRead": true,
+                    "ReturnConsumedCapacity": "INDEXES"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConsumedCapacity.CapacityUnits", equalTo(1.0f))
+            .body("ConsumedCapacity.Table.CapacityUnits", equalTo(0.0f))
+            .body("ConsumedCapacity.LocalSecondaryIndexes.lsi1.CapacityUnits", equalTo(1.0f))
+            .body("ConsumedCapacity.GlobalSecondaryIndexes", nullValue());
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(CT)
+            .body("""
+                {"TableName": "CapacityLsiTable"}
+                """)
+        .when().post("/").then().statusCode(200);
+    }
+
     private static void putItem(String itemJson) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.PutItem")

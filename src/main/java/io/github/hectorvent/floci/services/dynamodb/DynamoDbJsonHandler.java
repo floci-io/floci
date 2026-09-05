@@ -419,7 +419,7 @@ public class DynamoDbJsonHandler {
             response.set("Item", item);
         }
         addConsumedCapacity(response, request, tableName,
-                readCapacityUnits(itemBytes, request.path("ConsistentRead").asBoolean(false)));
+                readCapacityUnits(itemBytes, request.path("ConsistentRead").asBoolean(false)), null);
         return Response.ok(response).build();
     }
 
@@ -907,7 +907,7 @@ public class DynamoDbJsonHandler {
             response.set("LastEvaluatedKey", result.lastEvaluatedKey());
         }
         addConsumedCapacity(response, request, tableName,
-                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)));
+                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)), queryAccessPath);
         return Response.ok(response).build();
     }
 
@@ -1044,7 +1044,7 @@ public class DynamoDbJsonHandler {
             response.set("LastEvaluatedKey", result.lastEvaluatedKey());
         }
         addConsumedCapacity(response, request, tableName,
-                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)));
+                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
         return Response.ok(response).build();
     }
 
@@ -1101,6 +1101,12 @@ public class DynamoDbJsonHandler {
 
         // The per-table write cost needs the stored images from before the batch runs.
         var returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
+        if (!VALID_RETURN_CONSUMED_CAPACITY.contains(returnCCBatch)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + returnCCBatch
+                    + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
+        }
         Map<String, DynamoDbWriteCapacity.Cost> costs = null;
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
@@ -2045,7 +2051,7 @@ public class DynamoDbJsonHandler {
     }
 
     private void addConsumedCapacity(ObjectNode response, JsonNode request, String tableName,
-                                      double cu) {
+                                      double cu, DynamoDbAccessPath accessPath) {
         String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
         if ("NONE".equals(returnCC)) return;
 
@@ -2055,15 +2061,15 @@ public class DynamoDbJsonHandler {
 
         if ("INDEXES".equals(returnCC)) {
             ObjectNode tableCap = objectMapper.createObjectNode();
-            String indexName = request.path("IndexName").asText(null);
-            if (indexName != null) {
+            if (accessPath != null && accessPath.isIndex()) {
                 tableCap.put("CapacityUnits", 0.0);
                 cc.set("Table", tableCap);
-                ObjectNode gsiCaps = objectMapper.createObjectNode();
+                ObjectNode indexCaps = objectMapper.createObjectNode();
                 ObjectNode indexCap = objectMapper.createObjectNode();
                 indexCap.put("CapacityUnits", cu);
-                gsiCaps.set(indexName, indexCap);
-                cc.set("GlobalSecondaryIndexes", gsiCaps);
+                indexCaps.set(accessPath.indexName(), indexCap);
+                cc.set(accessPath.isGlobalSecondaryIndex()
+                        ? "GlobalSecondaryIndexes" : "LocalSecondaryIndexes", indexCaps);
             } else {
                 tableCap.put("CapacityUnits", cu);
                 cc.set("Table", tableCap);
