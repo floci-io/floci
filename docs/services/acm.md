@@ -30,7 +30,7 @@
 
 - **Auto-Issuance:** All requested certificates are immediately issued with status `ISSUED` (no DNS/email validation required)
 - **Real Cryptography:** Certificates are generated with real RSA/EC keys and valid X.509 structure
-- **Key Algorithms:** Supports `RSA_2048`, `RSA_3072`, `RSA_4096`, `EC_prime256v1`, `EC_secp384r1`, `EC_secp521r1`
+- **Key Algorithms:** `RequestCertificate` accepts `RSA_2048`, `EC_prime256v1`, and `EC_secp384r1` and rejects the rest with a `ValidationException`, matching real ACM; the wider list (`RSA_1024`, `RSA_3072`, `RSA_4096`, `EC_secp521r1`) remains valid for `ImportCertificate`
 - **Certificate Types:** `AMAZON_ISSUED` (default) and `PRIVATE` (when `CertificateAuthorityArn` is provided)
 - **Export:** Only `PRIVATE` type certificates can be exported with their private key
 
