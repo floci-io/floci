@@ -118,13 +118,15 @@ public class KinesisJsonHandler {
                 streamMode = mode;
             }
         }
-        service.createStream(streamName, shardCount, streamMode,
-                optionalMaxRecordSize(request), region);
         // CreateStream's optional Tags member was being dropped. That is invisible to a
         // hand-written script but not to Terraform: aws_kinesis_stream sets tags at create
         // time and then reads them back with ListTagsForStream, so an empty read produces a
         // permanent "tags will be updated in-place" diff on an unchanged configuration.
+        // Parsed before the stream exists so a malformed Tags member rejects the whole
+        // request instead of leaving an untagged stream behind.
         Map<String, String> tags = parseTags(request);
+        service.createStream(streamName, shardCount, streamMode,
+                optionalMaxRecordSize(request), region);
         if (!tags.isEmpty()) {
             service.addTagsToStream(streamName, tags, region);
         }
@@ -406,8 +408,19 @@ public class KinesisJsonHandler {
 
     private Response handleRemoveTagsFromStream(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        java.util.List<String> tagKeys = new java.util.ArrayList<>();
-        request.path("TagKeys").forEach(node -> tagKeys.add(node.asText()));
+        JsonNode tagKeysNode = request.path("TagKeys");
+        List<String> tagKeys = new ArrayList<>();
+        if (!tagKeysNode.isMissingNode() && !tagKeysNode.isNull()) {
+            if (!tagKeysNode.isArray()) {
+                throw new AwsException("SerializationException", "TagKeys must be a list of strings.", 400);
+            }
+            for (JsonNode node : tagKeysNode) {
+                if (!node.isTextual()) {
+                    throw new AwsException("SerializationException", "TagKeys must be a list of strings.", 400);
+                }
+                tagKeys.add(node.textValue());
+            }
+        }
         service.removeTagsFromStream(streamName, tagKeys, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -428,12 +441,24 @@ public class KinesisJsonHandler {
 
     // Shared by CreateStream and AddTagsToStream so the two paths cannot drift: the same
     // request shape has to produce the same stored tags whichever operation carries it.
-    // A missing or non-object Tags member yields an empty map rather than an error, which
-    // is what AddTagsToStream already did before CreateStream started calling this.
+    // A missing or null Tags member yields an empty map; anything else that is not a map
+    // of strings is a wire deserialization error rather than a value to coerce, so a
+    // number or boolean is rejected instead of being stored as its text.
     private Map<String, String> parseTags(JsonNode request) {
         Map<String, String> tags = new HashMap<>();
-        request.path("Tags").fields()
-                .forEachRemaining(entry -> tags.put(entry.getKey(), entry.getValue().asText()));
+        JsonNode tagsNode = request.path("Tags");
+        if (tagsNode.isMissingNode() || tagsNode.isNull()) {
+            return tags;
+        }
+        if (!tagsNode.isObject()) {
+            throw new AwsException("SerializationException", "Tags must be a map of string values.", 400);
+        }
+        tagsNode.fields().forEachRemaining(entry -> {
+            if (!entry.getValue().isTextual()) {
+                throw new AwsException("SerializationException", "Tags must be a map of string values.", 400);
+            }
+            tags.put(entry.getKey(), entry.getValue().textValue());
+        });
         return tags;
     }
 
