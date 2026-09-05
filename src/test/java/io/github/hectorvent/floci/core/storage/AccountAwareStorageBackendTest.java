@@ -6,8 +6,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AccountAwareStorageBackendTest {
@@ -209,5 +217,67 @@ class AccountAwareStorageBackendTest {
                 new AccountAwareStorageBackend.AccountEntry<>("123456789012", "us-east-1::api-a", "account-a"),
                 new AccountAwareStorageBackend.AccountEntry<>("000000000000", "us-east-1::legacy", "legacy")),
                 Set.copyOf(storage.scanAllAccountEntries(key -> key.startsWith("us-east-1::"))));
+    }
+
+    /**
+     * {@code get} and {@code getForAccountMigratingLegacy} both migrate a pre-multi-account entry, and
+     * both delete the legacy key once they have copied it. Unless they hold the same monitor, two readers
+     * resolving that key from different account contexts each copy it into their own partition and the two
+     * copies then diverge. Made deterministic by parking the first reader inside its legacy read, at the
+     * exact point where the unsynchronized version let the second reader in.
+     */
+    @Test
+    void concurrentLegacyMigrationsDoNotForkTheEntryAcrossAccounts() throws Exception {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("resource", "v");
+
+        CountDownLatch parked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        StorageBackend<String, String> parking = new StorageBackend<>() {
+            @Override public void put(String k, String v) { raw.put(k, v); }
+            @Override public void delete(String k) { raw.delete(k); }
+            @Override public List<String> scan(Predicate<String> f) { return raw.scan(f); }
+            @Override public Set<String> keys() { return raw.keys(); }
+            @Override public void flush() { raw.flush(); }
+            @Override public void load() { raw.load(); }
+            @Override public void clear() { raw.clear(); }
+            @Override public Optional<String> get(String k) {
+                if ("resource".equals(k) && parked.getCount() > 0) {
+                    parked.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return raw.get(k);
+            }
+        };
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(parking, null, "111111111111");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> ambient = pool.submit(() -> storage.get("resource"));
+            assertTrue(parked.await(2, TimeUnit.SECONDS), "the ambient reader reached its legacy read");
+
+            Future<?> owner = pool.submit(
+                    () -> storage.getForAccountMigratingLegacy("222222222222", "resource", v -> true));
+            // The owner must be unable to proceed: without a shared monitor it would migrate a second copy.
+            assertThrows(TimeoutException.class, () -> owner.get(300, TimeUnit.MILLISECONDS),
+                    "the second migration ran concurrently with the first");
+
+            release.countDown();
+            ambient.get(2, TimeUnit.SECONDS);
+            owner.get(2, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertTrue(raw.get("resource").isEmpty(), "the legacy key is consumed exactly once");
+        long copies = List.of("111111111111/resource", "222222222222/resource").stream()
+                .filter(k -> raw.get(k).isPresent())
+                .count();
+        assertEquals(1, copies, "the entry landed in exactly one account partition, not forked into both");
     }
 }

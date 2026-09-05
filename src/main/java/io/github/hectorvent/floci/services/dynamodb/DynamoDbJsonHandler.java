@@ -1771,6 +1771,8 @@ public class DynamoDbJsonHandler {
         existing.get().setDestinationStatus("DISABLED");
         existing.get().setDestinationStatusDescription("Kinesis streaming is disabled for this table");
         dynamoDbService.persistTable(resolvedTableName, table, region);
+        // Stop forwarding and discard buffered CDC records for this now-disabled destination.
+        dynamoDbService.onKinesisStreamingDestinationDisabled(resolvedTableName, streamArn, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("TableName", resolvedTableName);
