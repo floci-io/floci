@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.acm.model.Certificate;
+import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,16 +19,19 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * The contract between CreateUserPoolDomain and the TLS certificate manager: a custom domain is
  * handed over once, after it is stored; a prefix domain, a rejected request and every later
- * operation register nothing. The test-only constructor without a manager keeps working.
+ * operation register nothing. The test-only constructor without a manager keeps working. A
+ * certificate ACM does not know, or has not issued, is refused before the hook, as on AWS.
  */
 class CognitoDomainTlsServiceTest {
 
@@ -35,15 +41,23 @@ class CognitoDomainTlsServiceTest {
 
     private final RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
     private final TlsCertificateManager certificateManager = mock(TlsCertificateManager.class);
+    private final AcmService acmService = mock(AcmService.class);
     private CognitoService service;
     private String poolId;
 
     @BeforeEach
     void setUp() {
+        // Every certificate exists and is issued unless a test says otherwise.
+        when(acmService.describeCertificate(anyString(), eq(REGION))).thenAnswer(invocation -> {
+            Certificate certificate = new Certificate();
+            certificate.setArn(invocation.getArgument(0));
+            certificate.setStatus(CertificateStatus.ISSUED);
+            return certificate;
+        });
         service = new CognitoService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                "http://localhost:4566", regionResolver, null, null, null, certificateManager);
+                "http://localhost:4566", regionResolver, null, acmService, null, null, certificateManager);
         poolId = service.createUserPool(Map.of("PoolName", "tls-pool"), REGION).getId();
     }
 
@@ -72,6 +86,33 @@ class CognitoDomainTlsServiceTest {
                 () -> service.createUserPoolDomain("auth.dev.localhost.floci.io", poolId, noCertificate, null));
 
         assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(certificateManager);
+    }
+
+    @Test
+    void certificateUnknownToAcmIsRejectedBeforeTheHook() {
+        when(acmService.describeCertificate(anyString(), eq(REGION)))
+                .thenThrow(new AwsException("ResourceNotFoundException", "no such certificate", 400));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> service.createUserPoolDomain("auth.dev.localhost.floci.io", poolId, CUSTOM, null));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(certificateManager);
+    }
+
+    @Test
+    void certificateNotYetIssuedIsRejectedBeforeTheHook() {
+        when(acmService.describeCertificate(anyString(), eq(REGION))).thenAnswer(invocation -> {
+            Certificate pending = new Certificate();
+            pending.setArn(invocation.getArgument(0));
+            pending.setStatus(CertificateStatus.PENDING_VALIDATION);
+            return pending;
+        });
+
+        assertThrows(AwsException.class,
+                () -> service.createUserPoolDomain("auth.dev.localhost.floci.io", poolId, CUSTOM, null));
+
         verifyNoInteractions(certificateManager);
     }
 
@@ -126,7 +167,7 @@ class CognitoDomainTlsServiceTest {
     void constructorWithoutAManagerStillCreatesCustomDomains() {
         CognitoService bare = new CognitoService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566", regionResolver, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566", regionResolver, null, acmService);
         String pool = bare.createUserPool(Map.of("PoolName", "bare-pool"), REGION).getId();
 
         UserPoolDomain created = bare.createUserPoolDomain("auth.dev.localhost.floci.io", pool, CUSTOM, null);
