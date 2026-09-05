@@ -17,8 +17,14 @@ import java.util.List;
 import java.util.zip.GZIPInputStream;
 
 /**
- * Mô phỏng {@code COPY <table> FROM 's3://bucket/keyOrPrefix'} bằng cách đọc đối tượng S3
- * qua {@link S3Service} và stream sang PostgreSQL backend qua luồng {@code COPY <table> FROM STDIN}.
+ * Emulates {@code COPY <table> FROM 's3://bucket/keyOrPrefix'} by reading the S3 object (or every
+ * object under the prefix, in key order) through {@link S3Service} and streaming it into the
+ * backing PostgreSQL container over a fabricated {@code COPY <table> FROM STDIN} exchange.
+ *
+ * <p>The caller must own the backend socket exclusively for the whole call: this class writes a
+ * query and reads its response frames directly. Every exit path leaves the client with exactly one
+ * response for its original {@code 'Q'} (a {@code CommandComplete}/{@code ReadyForQuery} on success,
+ * a single {@code ErrorResponse}/{@code ReadyForQuery} on failure) and never closes the connection.
  */
 public final class S3CopySimulator {
 
@@ -33,12 +39,21 @@ public final class S3CopySimulator {
     private S3CopySimulator() {
     }
 
+    /**
+     * @param txStatus the transaction-status byte from the client's last {@code ReadyForQuery}
+     *                 ({@code 'I'} idle, {@code 'T'} in a block, {@code 'E'} failed block); a
+     *                 synthesized error reports {@code 'I'} outside a block and {@code 'E'} inside.
+     * @return {@code true} when the exchange was handled (success or a clean error sent to the
+     *         client). Part 4 always handles; the value exists so a later interceptor can decline.
+     */
     public static boolean runCopyFrom(Socket client, Socket backend,
-                                      CopyStatementParser.S3CopyFrom spec, S3Service s3) throws IOException {
+                                      CopyStatementParser.S3CopyFrom spec, S3Service s3,
+                                      char txStatus) throws IOException {
         try {
             s3.authorizeAnonymousListBucket(spec.bucket());
         } catch (AwsException e) {
-            sendAccessDenied(client, spec);
+            LOG.debugv(e, "ListBucket denied for COPY from s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
+            sendAccessDenied(client, spec, txStatus);
             return true;
         }
 
@@ -46,7 +61,9 @@ public final class S3CopySimulator {
         try {
             keys = resolveKeys(spec, s3);
         } catch (AwsException e) {
-            sendError(client, SQLSTATE_INTERNAL, "S3 error: " + e.getMessage());
+            LOG.warnv(e, "failed to list s3://{0}/{1} for COPY", spec.bucket(), spec.keyOrPrefix());
+            sendError(client, SQLSTATE_INTERNAL,
+                    "S3 COPY could not list s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus);
             return true;
         }
 
@@ -55,13 +72,14 @@ public final class S3CopySimulator {
                 s3.authorizeAnonymousGetObject(spec.bucket(), key);
             }
         } catch (AwsException e) {
-            sendAccessDenied(client, spec);
+            LOG.debugv(e, "GetObject denied for COPY from s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
+            sendAccessDenied(client, spec, txStatus);
             return true;
         }
 
         if (keys.isEmpty()) {
             sendError(client, SQLSTATE_INTERNAL,
-                    "S3 object s3://" + spec.bucket() + "/" + spec.keyOrPrefix() + " not found");
+                    "S3 object s3://" + spec.bucket() + "/" + spec.keyOrPrefix() + " not found", txStatus);
             return true;
         }
 
@@ -70,30 +88,52 @@ public final class S3CopySimulator {
         backendOut.flush();
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
-        PostgresWireDecoder.FrontendMessage first = nextNonAsync(backendDecoder);
+        PostgresWireDecoder.FrontendMessage first;
+        try {
+            first = nextNonAsync(backendDecoder, client);
+        } catch (IOException e) {
+            LOG.warnv(e, "backend read failed while awaiting CopyInResponse");
+            sendError(client, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed", txStatus);
+            return true;
+        }
         if (first == null) {
             LOG.warn("backend closed before answering the fabricated COPY");
+            sendError(client, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed before COPY started", txStatus);
             return true;
         }
         if (first.type() != 'G') {
+            // Backend rejected the COPY itself (e.g. no such table). Its ErrorResponse and the
+            // ReadyForQuery that follows are the client's one response.
             forward(client, first);
             drainToReadyForQuery(backendDecoder, client);
             return true;
         }
 
+        // The CopyIn stream is open. Any failure from here is resolved with exactly one response:
+        // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
+        // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
         try {
             streamObjects(spec, s3, keys, backendOut);
-        } catch (IOException e) {
-            LOG.warnv(e, "failed while streaming S3 objects into COPY; aborting");
-            writeCopyFail(backendOut, e.getMessage());
+            writeCopyDone(backendOut);
             drainToReadyForQuery(backendDecoder, client);
-            sendError(client, SQLSTATE_INTERNAL, "S3 COPY failed: " + e.getMessage());
-            return true;
+        } catch (RuntimeException | IOException e) {
+            LOG.warnv(e, "S3 COPY streaming failed; aborting the open CopyIn");
+            abortOpenCopyIn(client, backendOut, backendDecoder, e, txStatus);
         }
-
-        writeCopyDone(backendOut);
-        drainToReadyForQuery(backendDecoder, client);
         return true;
+    }
+
+    private static void abortOpenCopyIn(Socket client, OutputStream backendOut,
+                                        PostgresWireDecoder backendDecoder, Exception cause,
+                                        char txStatus) throws IOException {
+        try {
+            writeCopyFail(backendOut, cause.getMessage());
+            drainToReadyForQuery(backendDecoder, client);
+        } catch (IOException backendGone) {
+            LOG.debugv(backendGone, "backend unreachable while aborting CopyIn; synthesizing client error");
+            String detail = cause.getMessage() != null ? cause.getMessage() : cause.toString();
+            sendError(client, SQLSTATE_INTERNAL, "S3 COPY failed: " + detail, txStatus);
+        }
     }
 
     private static List<String> resolveKeys(CopyStatementParser.S3CopyFrom spec, S3Service s3) {
@@ -119,16 +159,21 @@ public final class S3CopySimulator {
         }
         sql.append(" FROM STDIN WITH (FORMAT ").append(spec.csv() ? "csv" : "text");
         String delimiter = spec.delimiter() != null ? spec.delimiter() : (spec.csv() ? "," : "|");
-        sql.append(", DELIMITER '").append(escape(delimiter)).append("'");
+        sql.append(", DELIMITER '").append(quoteLiteral(delimiter)).append("'");
         if (spec.nullAs() != null) {
-            sql.append(", NULL '").append(escape(spec.nullAs())).append("'");
+            sql.append(", NULL '").append(quoteLiteral(spec.nullAs())).append("'");
         }
         sql.append(")");
         return sql.toString();
     }
 
-    private static String escape(String value) {
-        return value.replace("'", "''").replace("\\", "\\\\");
+    /**
+     * Quote a value for a single-quoted SQL string literal. PostgreSQL defaults to
+     * {@code standard_conforming_strings = on}, where a backslash is an ordinary character, so only
+     * the quote itself is doubled: {@code NULL AS '\N'} must reach the backend as {@code '\N'}.
+     */
+    private static String quoteLiteral(String value) {
+        return value.replace("'", "''");
     }
 
     private static void streamObjects(CopyStatementParser.S3CopyFrom spec, S3Service s3,
@@ -193,7 +238,10 @@ public final class S3CopySimulator {
         out.flush();
     }
 
-    private static PostgresWireDecoder.FrontendMessage nextNonAsync(PostgresWireDecoder decoder) throws IOException {
+    /** Read the next backend message, relaying asynchronous messages to the client as it goes. */
+    private static PostgresWireDecoder.FrontendMessage nextNonAsync(PostgresWireDecoder decoder, Socket client)
+            throws IOException {
+        OutputStream clientOut = client.getOutputStream();
         while (true) {
             PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
             if (message == null) {
@@ -201,6 +249,8 @@ public final class S3CopySimulator {
             }
             char type = message.type();
             if (type == 'N' || type == 'A' || type == 'S') {
+                clientOut.write(message.toPacketBytes());
+                clientOut.flush();
                 continue;
             }
             return message;
@@ -227,18 +277,20 @@ public final class S3CopySimulator {
         client.getOutputStream().flush();
     }
 
-    private static void sendAccessDenied(Socket client, CopyStatementParser.S3CopyFrom spec) throws IOException {
+    private static void sendAccessDenied(Socket client, CopyStatementParser.S3CopyFrom spec, char txStatus)
+            throws IOException {
         sendError(client, SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix());
+                "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus);
     }
 
-    private static void sendError(Socket client, String sqlState, String message) throws IOException {
+    private static void sendError(Socket client, String sqlState, String message, char txStatus) throws IOException {
         OutputStream out = client.getOutputStream();
         byte[] body = errorBody(sqlState, message);
         out.write('E');
         out.write(intBytes(4 + body.length));
         out.write(body);
-        out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+        byte status = (txStatus == 'I' || txStatus == 0) ? (byte) 'I' : (byte) 'E';
+        out.write(new byte[]{'Z', 0, 0, 0, 5, status});
         out.flush();
     }
 

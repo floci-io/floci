@@ -157,11 +157,15 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
+- `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - S3 access is authorized as an unsigned request: with `FLOCI_SERVICES_S3_ENFORCE_AUTH` off it is
   unrestricted; with it on, bucket policy and public access settings apply.
-- Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `MAXERROR`, `DATEFORMAT`, `REGION`,
-  credentials, `MANIFEST`, and so on) is not recognized: the statement is forwarded unchanged and
-  PostgreSQL returns its own error.
+- Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
+  `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
+  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, credentials clauses, and so on) is not
+  recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.
+- A multi-statement query whose COPY is followed by another statement is not intercepted; send the
+  COPY on its own.
 - Extended Query protocol COPY (a JDBC `PreparedStatement`, or pgjdbc's default
   `preferQueryMode=extended`) is not intercepted. Use `preferQueryMode=simple`.
 

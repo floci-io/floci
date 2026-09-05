@@ -7,7 +7,8 @@ import java.util.regex.Pattern;
 
 /**
  * Recognises a Simple Query statement that is an S3 {@code COPY <table> FROM 's3://...'}.
- * Any other statement returns {@code null}, so the bridge falls back to DDL rewriting.
+ * Any other statement, or a COPY that uses an option this simulator cannot honour, returns
+ * {@code null} so the bridge falls back to DDL rewriting and PostgreSQL reports its own error.
  */
 public final class CopyStatementParser {
 
@@ -40,6 +41,22 @@ public final class CopyStatementParser {
     private static final Pattern HEADER_PATTERN = Pattern.compile("(?i)\\bHEADER\\b");
     private static final Pattern GZIP_PATTERN = Pattern.compile("(?i)\\bGZIP\\b");
     private static final Pattern CSV_PATTERN = Pattern.compile("(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?CSV\\b");
+
+    /**
+     * Options this simulator does not implement. A COPY carrying any of these is not intercepted:
+     * the original statement is forwarded so PostgreSQL rejects it, rather than the simulator
+     * silently loading the data with the wrong framing.
+     */
+    private static final Pattern UNSUPPORTED_CLAUSE = Pattern.compile(
+            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|JSON|SHAPEFILE|BZIP2|LZOP|ZSTD|MANIFEST|MAXERROR"
+                    + "|DATEFORMAT|TIMEFORMAT|ENCRYPTED|ENCODING|REGION|CREDENTIALS|IAM_ROLE"
+                    + "|ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
+                    + "|ACCEPTINVCHARS|ACCEPTANYDATE|BLANKSASNULL|EMPTYASNULL|FILLRECORD|TRIMBLANKS"
+                    + "|TRUNCATECOLUMNS|IGNOREBLANKLINES|ESCAPE|REMOVEQUOTES|EXPLICIT_IDS|COMPUPDATE"
+                    + "|STATUPDATE|NOLOAD|ROUNDEC|QUOTE|SSH|READRATIO|COMPROWS|DIMENSION)\\b");
+
+    /** A {@code ;} followed by another statement: only a lone trailing {@code ;} is tolerated. */
+    private static final Pattern TRAILING_STATEMENT = Pattern.compile(";\\s*\\S");
 
     private CopyStatementParser() {
     }
@@ -75,21 +92,28 @@ public final class CopyStatementParser {
         String keyOrPrefix = matcher.group(4) != null ? matcher.group(4) : "";
         String options = matcher.group(5) != null ? matcher.group(5) : "";
 
-        boolean csv = CSV_PATTERN.matcher(options).find();
-        boolean gzip = GZIP_PATTERN.matcher(options).find();
+        // Scan for keywords and separators on a copy with string literals blanked out, so a
+        // value like NULL AS 'json' or DELIMITER ';' cannot trip a keyword or the trailing check.
+        String flagScan = blankQuoted(options);
+        if (UNSUPPORTED_CLAUSE.matcher(flagScan).find() || TRAILING_STATEMENT.matcher(flagScan).find()) {
+            return null;
+        }
+
+        boolean csv = CSV_PATTERN.matcher(flagScan).find();
+        boolean gzip = GZIP_PATTERN.matcher(flagScan).find();
         String nullAs = firstGroup(NULL_AS_PATTERN.matcher(options));
         String delimiter = extractDelimiter(options, csv);
-        int headerLines = extractHeaderLines(options);
+        int headerLines = extractHeaderLines(flagScan);
 
         return new S3CopyFrom(table, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv, nullAs);
     }
 
-    private static int extractHeaderLines(String options) {
-        Matcher ignoreHeader = IGNOREHEADER_PATTERN.matcher(options);
+    private static int extractHeaderLines(String flagScan) {
+        Matcher ignoreHeader = IGNOREHEADER_PATTERN.matcher(flagScan);
         if (ignoreHeader.find()) {
             return Math.max(0, Integer.parseInt(ignoreHeader.group(1)));
         }
-        return HEADER_PATTERN.matcher(options).find() ? 1 : 0;
+        return HEADER_PATTERN.matcher(flagScan).find() ? 1 : 0;
     }
 
     private static String extractDelimiter(String options, boolean csv) {
@@ -119,6 +143,36 @@ public final class CopyStatementParser {
             return null;
         }
         return s.replace("\\\\", "\\");
+    }
+
+    /** Replace every character inside a single- or double-quoted run with a space. */
+    private static String blankQuoted(String s) {
+        StringBuilder out = new StringBuilder(s.length());
+        boolean inSingle = false;
+        boolean inDouble = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (inSingle) {
+                if (c == '\'') {
+                    inSingle = false;
+                }
+                out.append(' ');
+            } else if (inDouble) {
+                if (c == '"') {
+                    inDouble = false;
+                }
+                out.append(' ');
+            } else if (c == '\'') {
+                inSingle = true;
+                out.append(' ');
+            } else if (c == '"') {
+                inDouble = true;
+                out.append(' ');
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     private static String stripLeadingComments(String sql) {

@@ -1,13 +1,18 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,7 +32,7 @@ class RedshiftInterceptingBridgeTest {
     private Socket testBackendEnd;  // test reads what the bridge forwarded, writes backend replies
     private Thread bridgeThread;
 
-    private io.github.hectorvent.floci.services.s3.S3Service s3Stub;
+    private S3Service s3Stub;
 
     private void startBridge() throws IOException {
         clientListener = new ServerSocket(0);
@@ -38,7 +43,7 @@ class RedshiftInterceptingBridgeTest {
         bridgeBackendEnd = new Socket("localhost", backendListener.getLocalPort());
         testBackendEnd = backendListener.accept();
 
-        s3Stub = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.s3.S3Service.class);
+        s3Stub = Mockito.mock(S3Service.class);
         RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(bridgeClientEnd, bridgeBackendEnd, s3Stub);
         bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
     }
@@ -145,11 +150,11 @@ class RedshiftInterceptingBridgeTest {
     @Test
     void interceptsCopyFromS3AndDoesNotForwardTheOriginalQuery() throws Exception {
         startBridge();
-        org.mockito.Mockito.when(s3Stub.objectExists("wh", "k")).thenReturn(true);
-        org.mockito.Mockito.when(s3Stub.getObject("wh", "k")).thenReturn(
-                new io.github.hectorvent.floci.services.s3.model.S3Object(
-                        "wh", "k", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+        Mockito.when(s3Stub.objectExists("wh", "k")).thenReturn(true);
+        Mockito.when(s3Stub.getObject("wh", "k")).thenReturn(
+                new S3Object("wh", "k", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
 
+        AtomicReference<Throwable> backendFailure = new AtomicReference<>();
         // fake backend: expect a fabricated Query, answer 'G', then after CopyDone answer 'C'+'Z'
         Thread backend = Thread.ofVirtual().start(() -> {
             try {
@@ -157,7 +162,7 @@ class RedshiftInterceptingBridgeTest {
                 PostgresWireDecoder.FrontendMessage q = in.nextMessage();
                 assertEquals('Q', q.type());
                 assertTrue(q.getSql().contains("FROM STDIN"), q.getSql());
-                java.io.OutputStream out = testBackendEnd.getOutputStream();
+                OutputStream out = testBackendEnd.getOutputStream();
                 out.write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
                 out.flush();
                 while (true) {
@@ -168,12 +173,12 @@ class RedshiftInterceptingBridgeTest {
                 }
                 byte[] tag = "COPY 1\0".getBytes(StandardCharsets.US_ASCII);
                 out.write('C');
-                out.write(new byte[]{(byte) 0, 0, 0, (byte) (4 + tag.length)});
+                out.write(new byte[]{0, 0, 0, (byte) (4 + tag.length)});
                 out.write(tag);
                 out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
                 out.flush();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+            } catch (Throwable t) {
+                backendFailure.compareAndSet(null, t);
             }
         });
 
@@ -185,6 +190,9 @@ class RedshiftInterceptingBridgeTest {
                 new PostgresWireDecoder(testClientEnd.getInputStream()).nextMessage();
         assertEquals('C', toClient.type());
         backend.join();
+        if (backendFailure.get() != null) {
+            throw new AssertionError("fake backend failed", backendFailure.get());
+        }
     }
 
     @Test

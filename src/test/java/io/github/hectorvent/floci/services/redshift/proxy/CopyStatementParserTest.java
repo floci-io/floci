@@ -108,4 +108,35 @@ class CopyStatementParserTest {
         assertEquals("\t", c.delimiter());
         assertTrue(c.csv());
     }
+
+    @Test
+    void returnsNullForUnsupportedClauses() {
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FORMAT AS PARQUET"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' JSON 'auto'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FIXEDWIDTH 'a:1,b:2'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP MAXERROR 10"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' IAM_ROLE 'arn:aws:iam::0:role/r'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DATEFORMAT 'YYYY-MM-DD'"));
+    }
+
+    @Test
+    void returnsNullWhenAStatementFollowsTheCopy() {
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k'; DROP TABLE staging"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP; SELECT 1"));
+    }
+
+    @Test
+    void toleratesALoneTrailingSemicolon() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP;");
+        assertTrue(c.gzip());
+    }
+
+    @Test
+    void aQuotedKeywordInAnOptionValueDoesNotChangeParsing() {
+        CopyStatementParser.S3CopyFrom c = CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' NULL AS 'csv' DELIMITER ';'");
+        assertFalse(c.csv());
+        assertEquals(";", c.delimiter());
+        assertEquals("csv", c.nullAs());
+    }
 }

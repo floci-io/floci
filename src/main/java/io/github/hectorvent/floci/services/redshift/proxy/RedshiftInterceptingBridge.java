@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.s3.S3Service;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -9,7 +10,9 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.IntConsumer;
 
 /**
  * Replaces the transparent {@code bridge()} for Redshift connections so Simple Query ({@code 'Q'})
@@ -33,17 +36,22 @@ public class RedshiftInterceptingBridge {
     private static final int PUMP_READ_TIMEOUT_MS = 200;
     private static final int CLIENT_READ_TIMEOUT_MS = 10_000;
     private static final long PUMP_PARK_WAIT_MS = 2_000L;
+    /** Bounded read timeout while an exchange owns the backend, so a stalled backend cannot hang the session. */
+    private static final int EXCHANGE_READ_TIMEOUT_MS = 60_000;
+    private static final long BUSY_BACKOFF_NANOS = 2_000_000L;
 
     private final Socket client;
     private final Socket backend;
-    private final io.github.hectorvent.floci.services.s3.S3Service s3Service;
+    private final S3Service s3Service;
 
     private final ReentrantLock backendLock = new ReentrantLock(true);
     private volatile boolean pumpBetweenMessages = true;
     private final AtomicInteger outstandingResponses = new AtomicInteger(0);
     private volatile boolean pumpFinished = false;
+    /** Transaction-status byte from the backend's most recent {@code ReadyForQuery}; {@code 'I'} until one is seen. */
+    private volatile char lastBackendStatus = 'I';
 
-    public RedshiftInterceptingBridge(Socket client, Socket backend, io.github.hectorvent.floci.services.s3.S3Service s3Service) {
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
@@ -51,7 +59,8 @@ public class RedshiftInterceptingBridge {
 
     @FunctionalInterface
     interface BackendExchange {
-        void run() throws IOException;
+        /** @return {@code true} if the exchange handled the query; {@code false} to forward the original. */
+        boolean run() throws IOException;
     }
 
     public void run() {
@@ -103,7 +112,7 @@ public class RedshiftInterceptingBridge {
                 if (copyFrom != null) {
                     CopyStatementParser.S3CopyFrom spec = copyFrom;
                     boolean intercepted = runWithBackendOwned(
-                            () -> S3CopySimulator.runCopyFrom(client, backend, spec, s3Service));
+                            () -> S3CopySimulator.runCopyFrom(client, backend, spec, s3Service, lastBackendStatus));
                     if (intercepted) {
                         continue;
                     }
@@ -158,35 +167,37 @@ public class RedshiftInterceptingBridge {
                 }
                 continue;
             }
+            boolean backendBusy;
             try {
-                boolean backendBusy = !pumpBetweenMessages || outstandingResponses.get() > 0;
-                if (backendBusy && !pumpFinished) {
-                    if (System.nanoTime() >= deadlineNanos) {
-                        LOG.warn("backend did not go idle in time; forwarding the COPY unintercepted");
-                        return false;
-                    }
-                    continue;
-                }
-                backend.setSoTimeout(0);
-                try {
-                    exchange.run();
-                    return true;
-                } finally {
+                backendBusy = !pumpBetweenMessages || outstandingResponses.get() > 0;
+                if (!backendBusy || pumpFinished) {
+                    backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
                     try {
-                        backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
-                    } catch (IOException e) {
-                        LOG.debugv(e, "could not restore backend read timeout (socket closing)");
+                        return exchange.run();
+                    } finally {
+                        try {
+                            backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
+                        } catch (IOException e) {
+                            LOG.debugv(e, "could not restore backend read timeout (socket closing)");
+                        }
                     }
                 }
             } finally {
                 backendLock.unlock();
             }
+            if (System.nanoTime() >= deadlineNanos) {
+                LOG.warn("backend did not go idle in time; forwarding the COPY unintercepted");
+                return false;
+            }
+            LockSupport.parkNanos(BUSY_BACKOFF_NANOS);
         }
     }
 
     private void pumpBackendToClient() {
-        WireFrameTracker tracker = new WireFrameTracker(
-                () -> outstandingResponses.updateAndGet(v -> Math.max(0, v - 1)));
+        WireFrameTracker tracker = new WireFrameTracker(status -> {
+            lastBackendStatus = (char) status;
+            outstandingResponses.updateAndGet(v -> Math.max(0, v - 1));
+        });
         try {
             InputStream backendIn = backend.getInputStream();
             OutputStream clientOut = client.getOutputStream();
@@ -236,16 +247,16 @@ public class RedshiftInterceptingBridge {
      * Tracks PostgreSQL wire-message boundaries in a byte stream without buffering it. Each backend
      * message is {@code type(1) . length(int32, includes itself) . body}. {@link #betweenMessages()}
      * is true exactly when the next byte would begin a new message; {@code onReadyForQuery} fires
-     * once per completed {@code 'Z'}.
+     * once per completed {@code 'Z'} with its one-byte transaction-status payload.
      */
     static final class WireFrameTracker {
-        private final Runnable onReadyForQuery;
+        private final IntConsumer onReadyForQuery;
         private int headerBytesSeen = 0;
         private final byte[] header = new byte[5];
         private long bodyRemaining = 0;
         private char pendingType = 0;
 
-        WireFrameTracker(Runnable onReadyForQuery) {
+        WireFrameTracker(IntConsumer onReadyForQuery) {
             this.onReadyForQuery = onReadyForQuery;
         }
 
@@ -256,9 +267,10 @@ public class RedshiftInterceptingBridge {
         void consume(byte[] buf, int off, int len) {
             for (int i = off; i < off + len; i++) {
                 if (bodyRemaining > 0) {
+                    int current = buf[i] & 0xFF;
                     bodyRemaining--;
                     if (bodyRemaining == 0 && pendingType == 'Z') {
-                        onReadyForQuery.run();
+                        onReadyForQuery.accept(current);
                     }
                     continue;
                 }
@@ -270,7 +282,7 @@ public class RedshiftInterceptingBridge {
                     bodyRemaining = Math.max(0, msgLen - 4);
                     headerBytesSeen = 0;
                     if (bodyRemaining == 0 && pendingType == 'Z') {
-                        onReadyForQuery.run();
+                        onReadyForQuery.accept('I');
                     }
                 }
             }

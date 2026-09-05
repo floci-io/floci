@@ -12,12 +12,15 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -31,6 +34,8 @@ class S3CopySimulatorTest {
     private Socket testClient;  // test reads ErrorResponse / CommandComplete here
     private Socket testBackend; // test plays PostgreSQL here
     private S3Service s3;
+
+    private final AtomicReference<Throwable> backendFailure = new AtomicReference<>();
 
     @BeforeEach
     void setUp() throws IOException {
@@ -58,6 +63,30 @@ class S3CopySimulatorTest {
         }
     }
 
+    @FunctionalInterface
+    private interface BackendScript {
+        void run() throws IOException;
+    }
+
+    /** Run a fake-backend script on a virtual thread, capturing any failure for the test thread. */
+    private Thread backendThread(BackendScript script) {
+        return Thread.ofVirtual().start(() -> {
+            try {
+                script.run();
+            } catch (Throwable t) {
+                backendFailure.compareAndSet(null, t);
+            }
+        });
+    }
+
+    private void joinBackend(Thread t) throws InterruptedException {
+        t.join();
+        Throwable failure = backendFailure.get();
+        if (failure != null) {
+            throw new AssertionError("fake backend failed: " + failure, failure);
+        }
+    }
+
     private static byte[] gzip(String s) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (GZIPOutputStream gz = new GZIPOutputStream(bytes)) {
@@ -66,7 +95,10 @@ class S3CopySimulatorTest {
         return bytes.toByteArray();
     }
 
-    /** Read one backend message the simulator sent to the fake backend. */
+    private static byte[] intBytes(int v) {
+        return new byte[]{(byte) (v >>> 24), (byte) (v >>> 16), (byte) (v >>> 8), (byte) v};
+    }
+
     private PostgresWireDecoder.FrontendMessage nextFromSimulatorToBackend() throws IOException {
         return new PostgresWireDecoder(testBackend.getInputStream()).nextMessage();
     }
@@ -74,16 +106,14 @@ class S3CopySimulatorTest {
     /** Play a minimal happy-path PostgreSQL backend: 'G' then, after CopyDone, 'C' and 'Z'. */
     private void playHappyBackend(ByteArrayOutputStream capturedCopyData) throws IOException {
         OutputStream out = testBackend.getOutputStream();
-        // read the fabricated Query
-        PostgresWireDecoder.FrontendMessage query = nextFromSimulatorToBackend();
+        PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+        PostgresWireDecoder.FrontendMessage query = in.nextMessage();
         assertEquals('Q', query.type());
-        // CopyInResponse 'G': body = format(1) + columnCount(2) = 3 bytes, all zero
+        // CopyInResponse 'G': body = format(1) + columnCount(2) = 3 bytes, all zero => length 7
         out.write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
         out.flush();
-        // drain CopyData 'd' frames and CopyDone 'c'
-        PostgresWireDecoder backend = new PostgresWireDecoder(testBackend.getInputStream());
         while (true) {
-            PostgresWireDecoder.FrontendMessage m = backend.nextMessage();
+            PostgresWireDecoder.FrontendMessage m = in.nextMessage();
             if (m == null || m.type() == 'c') {
                 break;
             }
@@ -91,7 +121,6 @@ class S3CopySimulatorTest {
                 capturedCopyData.write(m.body());
             }
         }
-        // CommandComplete 'C' "COPY 1\0", then ReadyForQuery 'Z' 'I'
         byte[] tag = "COPY 1\0".getBytes(StandardCharsets.US_ASCII);
         out.write('C');
         out.write(intBytes(4 + tag.length));
@@ -100,30 +129,38 @@ class S3CopySimulatorTest {
         out.flush();
     }
 
-    private static byte[] intBytes(int v) {
-        return new byte[]{(byte) (v >>> 24), (byte) (v >>> 16), (byte) (v >>> 8), (byte) v};
+    private String captureFabricatedThenComplete() throws IOException {
+        OutputStream out = testBackend.getOutputStream();
+        PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+        PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+        assertEquals('Q', q.type());
+        out.write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
+        out.flush();
+        while (true) {
+            PostgresWireDecoder.FrontendMessage m = in.nextMessage();
+            if (m == null || m.type() == 'c') {
+                break;
+            }
+        }
+        out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+        out.flush();
+        return q.getSql();
     }
 
     @Test
     void loadsSingleKeyAsPipeTextAndForwardsCommandComplete() throws Exception {
         when(s3.objectExists("wh", "d/a.txt")).thenReturn(true);
-        S3Object obj = new S3Object("wh", "d/a.txt", "1|alice\n2|bob\n".getBytes(StandardCharsets.US_ASCII), "text/plain");
-        when(s3.getObject("wh", "d/a.txt")).thenReturn(obj);
+        when(s3.getObject("wh", "d/a.txt")).thenReturn(
+                new S3Object("wh", "d/a.txt", "1|alice\n2|bob\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
 
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "people", List.of(), "wh", "d/a.txt", "|", 0, false, false, null);
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
-        Thread backend = Thread.ofVirtual().start(() -> {
-            try {
-                playHappyBackend(copyData);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
+        Thread backend = backendThread(() -> playHappyBackend(copyData));
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
-        backend.join();
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
 
         assertTrue(handled);
         assertEquals("1|alice\n2|bob\n", copyData.toString(StandardCharsets.US_ASCII));
@@ -140,31 +177,13 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of("a", "b"), "wh", "k", "|", 0, false, false, null);
 
-        StringBuilder fabricated = new StringBuilder();
-        Thread backend = Thread.ofVirtual().start(() -> {
-            try {
-                PostgresWireDecoder.FrontendMessage q = nextFromSimulatorToBackend();
-                fabricated.append(q.getSql());
-                testBackend.getOutputStream().write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
-                testBackend.getOutputStream().flush();
-                PostgresWireDecoder b = new PostgresWireDecoder(testBackend.getInputStream());
-                while (true) {
-                    PostgresWireDecoder.FrontendMessage m = b.nextMessage();
-                    if (m == null || m.type() == 'c') {
-                        break;
-                    }
-                }
-                testBackend.getOutputStream().write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
-                testBackend.getOutputStream().flush();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
+        AtomicReference<String> fabricated = new AtomicReference<>();
+        Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
-        backend.join();
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
 
-        String sql = fabricated.toString();
+        String sql = fabricated.get();
         assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT TEXT"), sql);
         assertTrue(sql.contains("DELIMITER '|'"), sql);
@@ -179,34 +198,35 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of("a", "b"), "wh", "k", null, 0, false, true, null);
 
-        StringBuilder fabricated = new StringBuilder();
-        Thread backend = Thread.ofVirtual().start(() -> {
-            try {
-                PostgresWireDecoder.FrontendMessage q = nextFromSimulatorToBackend();
-                fabricated.append(q.getSql());
-                testBackend.getOutputStream().write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
-                testBackend.getOutputStream().flush();
-                PostgresWireDecoder b = new PostgresWireDecoder(testBackend.getInputStream());
-                while (true) {
-                    PostgresWireDecoder.FrontendMessage m = b.nextMessage();
-                    if (m == null || m.type() == 'c') {
-                        break;
-                    }
-                }
-                testBackend.getOutputStream().write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
-                testBackend.getOutputStream().flush();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
+        AtomicReference<String> fabricated = new AtomicReference<>();
+        Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
-        backend.join();
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
 
-        String sql = fabricated.toString();
+        String sql = fabricated.get();
         assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT CSV"), sql);
         assertTrue(sql.contains("DELIMITER ','"), sql);
+    }
+
+    @Test
+    void nullAsBackslashNIsPassedThroughLiterally() throws Exception {
+        when(s3.objectExists("wh", "k")).thenReturn(true);
+        when(s3.getObject("wh", "k")).thenReturn(
+                new S3Object("wh", "k", "x\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, "\\N");
+
+        AtomicReference<String> fabricated = new AtomicReference<>();
+        Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
+
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+
+        String sql = fabricated.get();
+        assertTrue(sql.contains("NULL '\\N'"), sql);
+        assertFalse(sql.contains("NULL '\\\\N'"), sql);
     }
 
     @Test
@@ -224,15 +244,9 @@ class S3CopySimulatorTest {
                 "t", List.of(), "wh", "p/", "|", 1, false, false, null);
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
-        Thread backend = Thread.ofVirtual().start(() -> {
-            try {
-                playHappyBackend(copyData);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
-        backend.join();
+        Thread backend = backendThread(() -> playHappyBackend(copyData));
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
 
         assertEquals("1|a\n2|b\n", copyData.toString(StandardCharsets.US_ASCII));
     }
@@ -246,15 +260,9 @@ class S3CopySimulatorTest {
                 "t", List.of(), "wh", "k.gz", "|", 0, true, false, null);
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
-        Thread backend = Thread.ofVirtual().start(() -> {
-            try {
-                playHappyBackend(copyData);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
-        backend.join();
+        Thread backend = backendThread(() -> playHappyBackend(copyData));
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
 
         assertEquals("1|a\n2|b\n", copyData.toString(StandardCharsets.US_ASCII));
     }
@@ -266,17 +274,14 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "k", "|", 0, false, false, null);
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
         assertTrue(handled);
 
-        byte[] header = testClient.getInputStream().readNBytes(1);
-        assertEquals('E', (char) header[0]);
-        PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClient.getInputStream());
-        // read length (4 bytes) and body
-        byte[] lenBytes = testClient.getInputStream().readNBytes(4);
-        int len = ((lenBytes[0] & 0xFF) << 24) | ((lenBytes[1] & 0xFF) << 16) | ((lenBytes[2] & 0xFF) << 8) | (lenBytes[3] & 0xFF);
-        String body = new String(testClient.getInputStream().readNBytes(len - 4), StandardCharsets.US_ASCII);
-        assertTrue(body.contains("42501"), body);
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage err = in.nextMessage();
+        assertEquals('E', err.type());
+        assertTrue(new String(err.body(), StandardCharsets.US_ASCII).contains("42501"));
+        assertEquals('Z', in.nextMessage().type());
     }
 
     @Test
@@ -286,11 +291,14 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "missing", "|", 0, false, false, null);
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
         assertTrue(handled);
 
-        byte[] header = testClient.getInputStream().readNBytes(1);
-        assertEquals('E', (char) header[0]);
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage err = in.nextMessage();
+        assertEquals('E', err.type());
+        assertTrue(new String(err.body(), StandardCharsets.US_ASCII).contains("not found"));
+        assertEquals('Z', in.nextMessage().type());
     }
 
     @Test
@@ -301,26 +309,99 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "nosuch", List.of(), "wh", "k", "|", 0, false, false, null);
 
-        Thread backend = Thread.ofVirtual().start(() -> {
-            try {
-                nextFromSimulatorToBackend();
-                byte[] msg = "SERROR\0C42P01\0Mrelation \"nosuch\" does not exist\0\0".getBytes(StandardCharsets.US_ASCII);
-                OutputStream out = testBackend.getOutputStream();
-                out.write('E');
-                out.write(intBytes(4 + msg.length));
-                out.write(msg);
-                out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
-                out.flush();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
+        Thread backend = backendThread(() -> {
+            new PostgresWireDecoder(testBackend.getInputStream()).nextMessage();
+            byte[] msg = "SERROR\0C42P01\0Mrelation \"nosuch\" does not exist\0\0".getBytes(StandardCharsets.US_ASCII);
+            OutputStream out = testBackend.getOutputStream();
+            out.write('E');
+            out.write(intBytes(4 + msg.length));
+            out.write(msg);
+            out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+            out.flush();
         });
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3);
-        backend.join();
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
         assertTrue(handled);
 
-        byte[] header = testClient.getInputStream().readNBytes(1);
-        assertEquals('E', (char) header[0]);
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        assertEquals('Z', in.nextMessage().type());
+    }
+
+    @Test
+    void midCopyFailureSendsExactlyOneErrorAndReadyForQuery() throws Exception {
+        when(s3.objectExists("wh", "k")).thenReturn(true);
+        when(s3.getObject("wh", "k")).thenThrow(new AwsException("InternalError", "boom", 500));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null);
+
+        Thread backend = backendThread(() -> {
+            OutputStream out = testBackend.getOutputStream();
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            assertEquals('Q', in.nextMessage().type());
+            out.write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
+            out.flush();
+            // wait for the simulator's CopyFail 'f'
+            PostgresWireDecoder.FrontendMessage m;
+            while ((m = in.nextMessage()) != null && m.type() != 'f') {
+                // discard any CopyData already buffered
+            }
+            assertEquals('f', m == null ? 0 : m.type());
+            byte[] err = "SERROR\0C57014\0MCOPY aborted\0\0".getBytes(StandardCharsets.US_ASCII);
+            out.write('E');
+            out.write(intBytes(4 + err.length));
+            out.write(err);
+            out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+            out.flush();
+        });
+
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        assertEquals('Z', in.nextMessage().type());
+        testClient.setSoTimeout(400);
+        assertThrows(SocketTimeoutException.class, () -> testClient.getInputStream().read(),
+                "no second response should follow");
+    }
+
+    @Test
+    void backendEofBeforeCopyInResponseSendsErrorToClient() throws Exception {
+        when(s3.objectExists("wh", "k")).thenReturn(true);
+        when(s3.getObject("wh", "k")).thenReturn(
+                new S3Object("wh", "k", "1\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null);
+
+        Thread backend = backendThread(() -> {
+            new PostgresWireDecoder(testBackend.getInputStream()).nextMessage();
+            testBackend.close();
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        assertEquals('Z', in.nextMessage().type());
+    }
+
+    @Test
+    void synthesizedErrorReportsFailedTransactionStatusWhenInABlock() throws Exception {
+        when(s3.objectExists("wh", "missing")).thenReturn(false);
+        when(s3.listObjects("wh", "missing", null, 10000)).thenReturn(List.of());
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
+
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'T');
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        PostgresWireDecoder.FrontendMessage ready = in.nextMessage();
+        assertEquals('Z', ready.type());
+        assertEquals('E', (char) ready.body()[0]);
     }
 }

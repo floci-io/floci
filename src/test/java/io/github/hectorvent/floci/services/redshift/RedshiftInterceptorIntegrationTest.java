@@ -151,15 +151,41 @@ class RedshiftInterceptorIntegrationTest {
     }
 
     @Test
+    void copyFromS3GzipObjectLoadsRows() throws Exception {
+        clusterId = "it-copy-gzip";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-it-gzip";
+        s3.createBucket(bucket, "us-east-1");
+        java.io.ByteArrayOutputStream raw = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(raw)) {
+            gz.write("10|x\n11|y\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        s3.putObject(bucket, "g/data.gz", raw.toByteArray(), "application/gzip", java.util.Map.of());
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE g (id int, v text)");
+            c.createStatement().execute("COPY g FROM 's3://redshift-copy-it-gzip/g/data.gz' GZIP");
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*) FROM g")) {
+                assertTrue(rs.next());
+                assertEquals(2, rs.getInt(1));
+            }
+        }
+    }
+
+    @Test
     void copyFromMissingObjectSurfacesASqlError() throws Exception {
         clusterId = "it-copy-missing";
         Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-it-missing";
+        s3.createBucket(bucket, "us-east-1");
 
         try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE t2 (id int)");
             SQLException ex = org.junit.jupiter.api.Assertions.assertThrows(
                     SQLException.class,
-                    () -> c.createStatement().execute("COPY t2 FROM 's3://redshift-copy-it/does/not/exist'"));
+                    () -> c.createStatement().execute("COPY t2 FROM 's3://redshift-copy-it-missing/does/not/exist'"));
             assertTrue(
                     ex.getMessage().toLowerCase().contains("not found"), ex.getMessage());
         }
