@@ -180,6 +180,7 @@ services:
       DisassociateVpcFromHostedZone: DisassociateVPCFromHostedZone
       CreateVpcAssociationAuthorization: CreateVPCAssociationAuthorization
       DeleteVpcAssociationAuthorization: DeleteVPCAssociationAuthorization
+      ListVpcAssociationAuthorizations: ListVPCAssociationAuthorizations
       ListHostedZonesByVpc: ListHostedZonesByVPC
       GetDnssec: GetDNSSEC
   - service: route53resolver

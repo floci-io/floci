@@ -884,6 +884,14 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
+
+        /**
+         * Optional control-plane processing window for VPC association mutations. A positive
+         * value makes documented Route 53 retryable overlap errors reproducible; zero preserves
+         * the default immediate-completion behavior.
+         */
+        @WithDefault("0")
+        long vpcAssociationControlPlaneDelayMs();
     }
 
     interface ConfigServiceConfig {

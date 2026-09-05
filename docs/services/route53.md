@@ -12,10 +12,11 @@ Route53 management-plane emulation. Supports hosted zones, resource record sets,
 | `DeleteHostedZone` | `DELETE /2013-04-01/hostedzone/{Id}` |
 | `ListHostedZones` | `GET /2013-04-01/hostedzone` |
 | `ListHostedZonesByName` | `GET /2013-04-01/hostedzonesbyname` |
-| `AssociateVPCWithHostedZone` | `POST /2013-04-01/hostedzone/{Id}/associatevpc`. Private zones only; re-associating an attached VPC is a no-op. |
+| `AssociateVPCWithHostedZone` | `POST /2013-04-01/hostedzone/{Id}/associatevpc`. Private zones only; cross-account associations require prior authorization. |
 | `DisassociateVPCFromHostedZone` | `POST /2013-04-01/hostedzone/{Id}/disassociatevpc`. Refuses to remove the last association (`LastVPCAssociation`). |
-| `CreateVPCAssociationAuthorization` | `POST /2013-04-01/hostedzone/{Id}/authorizevpcassociation`. Validates and echoes the VPC; zones are not account-scoped, so no authorization is enforced. |
-| `DeleteVPCAssociationAuthorization` | `POST /2013-04-01/hostedzone/{Id}/deauthorizevpcassociation` |
+| `CreateVPCAssociationAuthorization` | `POST /2013-04-01/hostedzone/{Id}/authorizevpcassociation`. Must be called by the hosted-zone owner. |
+| `DeleteVPCAssociationAuthorization` | `POST /2013-04-01/hostedzone/{Id}/deauthorizevpcassociation`. Must be called by the hosted-zone owner; success has an empty response body. |
+| `ListVPCAssociationAuthorizations` | `GET /2013-04-01/hostedzone/{Id}/authorizevpcassociation`. Paginates with `maxresults` / `nexttoken`. |
 | `ListHostedZonesByVPC` | `GET /2013-04-01/hostedzonesbyvpc?vpcid=…&vpcregion=…`. Paginates with `maxitems` / `nexttoken`. |
 | `GetHostedZoneCount` | `GET /2013-04-01/hostedzonecount` |
 | `ChangeResourceRecordSets` | `POST /2013-04-01/hostedzone/{Id}/rrset` |
@@ -47,6 +48,10 @@ Route53 management-plane emulation. Supports hosted zones, resource record sets,
 - A hosted zone is private when `CreateHostedZone` carries a `<VPC>` element; `HostedZoneConfig.PrivateZone` is response-only.
 - `AssociateVPCWithHostedZone` rejects public zones with `PublicZoneVPCAssociation`, and `DisassociateVPCFromHostedZone` rejects removing the last VPC with `LastVPCAssociation`.
 - Associating a VPC that is already attached to another zone with the same name fails with `ConflictingDomainExists`.
+- Cross-account association follows the Route 53 authorization lifecycle: the hosted-zone owner authorizes the VPC, the VPC account associates it, and the hosted-zone owner can then delete the authorization without removing the association.
+- A cross-account association without a matching authorization fails with `NotAuthorizedException`.
+- Private hosted zones support up to 300 VPC associations and up to 1000 outstanding cross-account VPC association authorizations, matching the documented Route 53 default quotas.
+- Set `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` above `0` to emulate a short in-flight control-plane window for retry testing. During that window, a subsequent `AssociateVPCWithHostedZone` for the same hosted zone returns `PriorRequestNotComplete`; overlapping create/delete authorization requests return `ConcurrentModification`. These are the retryable overlap errors documented by Route 53 for those operations.
 
 ## Default Nameservers
 
@@ -68,6 +73,7 @@ ns-4.awsdns-04.co.uk
 | `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER2` | `ns-2.awsdns-02.net` | Second default nameserver |
 | `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER3` | `ns-3.awsdns-03.com` | Third default nameserver |
 | `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER4` | `ns-4.awsdns-04.co.uk` | Fourth default nameserver |
+| `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Optional VPC association/auth processing window used to reproduce documented retryable overlap errors |
 
 ## CLI Examples
 
@@ -141,7 +147,6 @@ aws route53 delete-hosted-zone --id Z1PA6795UKMFR9
 
 - Reusable delegation sets
 - Traffic policies and traffic policy instances
-- Cross-account VPC association authorization (zones are not account-scoped, so `CreateVPCAssociationAuthorization` is accepted but not enforced)
 - Query logging configs
 - DNSSEC (key signing keys, enabling/disabling)
 - `TestDNSAnswer`

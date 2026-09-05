@@ -5411,6 +5411,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return vpcs.get(key(region, vpcId)).map(v -> new AccountAwareStorageBackend.OwnedEntry<>(null, v));
     }
 
+    /**
+     * Resolves the owning account of a VPC across account partitions when the VPC exists in Floci.
+     * Cross-service consumers such as Route 53 use this to enforce AWS ownership rules without
+     * changing the public EC2 API surface. An empty result means the VPC is not modelled locally.
+     */
+    public Optional<String> findVpcOwnerAccount(String region, String vpcId) {
+        return findAnyVpcEntry(region, vpcId).map(AccountAwareStorageBackend.OwnedEntry::account);
+    }
+
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
                                                                      Map<String, List<String>> filters) {
         ensureDefaultResources(region);

@@ -534,6 +534,7 @@ floci:
       enabled: true
     route53:
       enabled: true
+      vpc-association-control-plane-delay-ms: 0
     transfer:
       enabled: true
     textract:
