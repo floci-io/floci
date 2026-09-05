@@ -691,10 +691,15 @@ public final class TestFixtures {
     }
 
     public static Route53Client route53Client() {
+        return route53Client("test");
+    }
+
+    public static Route53Client route53Client(String accessKeyId) {
         return Route53Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(accessKeyId, "test")))
                 .build();
     }
 
@@ -840,10 +845,15 @@ public final class TestFixtures {
     }
 
     public static Ec2Client ec2Client() {
+        return ec2Client("test");
+    }
+
+    public static Ec2Client ec2Client(String accessKeyId) {
         return Ec2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(accessKeyId, "test")))
                 .build();
     }
 
