@@ -315,8 +315,21 @@ public class IotService {
         certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + certificate.getCertificateId()));
         certificate.setStatus(setAsActive ? "ACTIVE" : "INACTIVE");
         certificate.setCreationDate(Instant.now());
-        certificateStore.put(certificateKey(region, certificate.getCertificateId()), certificate);
+        certificateStore.put(certificateKey(region, certificate.getCertificateId()), withoutPrivateKey(certificate));
         return certificate;
+    }
+
+    /** As on AWS, the private key is returned once and never kept: the stored record has none. */
+    private static IotCertificate withoutPrivateKey(IotCertificate certificate) {
+        IotCertificate stored = new IotCertificate();
+        stored.setCertificateId(certificate.getCertificateId());
+        stored.setCertificateArn(certificate.getCertificateArn());
+        stored.setCertificatePem(certificate.getCertificatePem());
+        stored.setPublicKey(certificate.getPublicKey());
+        stored.setStatus(certificate.getStatus());
+        stored.setCreationDate(certificate.getCreationDate());
+        stored.setTags(certificate.getTags());
+        return stored;
     }
 
     /** As on AWS: a fresh RSA 2048 pair, the subject {@code AWS IoT Certificate}, and the private key returned once. */
