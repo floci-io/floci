@@ -71,7 +71,7 @@ public class TlsConfigSource implements ConfigSource {
         resolvedTlsDir = null;
         String enabled = resolveProperty("floci.tls.enabled", "false");
         if (!"true".equalsIgnoreCase(enabled)) {
-            LOG.debug("TLS disabled — TlsConfigSource inactive");
+            LOG.debug("TLS disabled, TlsConfigSource inactive");
             return;
         }
 
@@ -128,7 +128,7 @@ public class TlsConfigSource implements ConfigSource {
         properties.put("quarkus.http.port", "4510");
         properties.put("quarkus.http.ssl-port", "4511");
 
-        LOG.infov("TLS: HTTPS enabled — proxy will listen on port {0} (HTTP+HTTPS), cert={1}",
+        LOG.infov("TLS: HTTPS enabled, proxy will listen on port {0} (HTTP+HTTPS), cert={1}",
                 resolveProperty("floci.port", "4566"), certPath);
     }
 

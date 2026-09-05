@@ -71,6 +71,8 @@ public class TlsCertificateManager implements Resettable {
     private KeyPair keyPair;
     private KeyAlgorithm keyAlgorithm;
     private boolean loaded;
+    /** True between a successful file write and a successful listener swap. */
+    private boolean listenerBehindFiles;
 
     @Inject
     public TlsCertificateManager(EmulatorConfig config, FlociCertificateAuthority ca,
@@ -132,7 +134,7 @@ public class TlsCertificateManager implements Resettable {
             return;
         }
         synchronized (lock) {
-            if (!loadOnce() || learnedHostnames.isEmpty()) {
+            if (!loadOnce() || (learnedHostnames.isEmpty() && !listenerBehindFiles)) {
                 return;
             }
             try {
@@ -206,11 +208,13 @@ public class TlsCertificateManager implements Resettable {
         metadata.setLearnedHostnames(new ArrayList<>(learned));
         writeAtomically(dir.resolve(CERT_NAME), issued.certificatePem());
         writeAtomically(dir.resolve(METADATA_NAME), OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata));
-        reloadServer();
-
-        // Only a name the listener actually serves is known; a failed reload leaves the in-memory
-        // state untouched so the next call for that name writes and reloads again.
+        // The learned list follows the files, so a name whose reload fails below is still carried
+        // by every later reissue; the known set follows the listener, so that name is retried by
+        // its next ensureHost call instead of being reported as served.
         learnedHostnames = new LinkedHashSet<>(learned);
+        listenerBehindFiles = true;
+        reloadServer();
+        listenerBehindFiles = false;
         knownHostnames = sansOf(generator.parseCertificate(issued.certificatePem()));
     }
 
