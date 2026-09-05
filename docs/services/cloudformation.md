@@ -93,6 +93,7 @@ cross-resource references.
 | WAFv2 | `WebACL` |
 | Config | `ConfigRule` |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
+| CloudTrail | `Trail` |
 | CDK | `CDK::Metadata` (accepted; no-op) |
 <!-- floci:cfn-types:end -->
 

@@ -134,12 +134,14 @@ public class CloudTrailLogWriter {
             return;
         }
 
+        byte[] payload;
+        String objectKey;
         try {
-            byte[] payload = serializeAndGzip(records);
+            payload = serializeAndGzip(records);
             String accountId = regionResolver.getAccountId();
             // Use the event region for the S3 delivery path so multi-region trail
             // events from us-west-2 land under CloudTrail/us-west-2, not the trail's home region.
-            String objectKey = buildObjectKey(trail, accountId, key.eventRegion());
+            objectKey = buildObjectKey(trail, accountId, key.eventRegion());
             s3Service.putObject(trail.s3BucketName(), objectKey, payload,
                     "application/x-gzip", Map.of());
             LOG.debugv("CloudTrail wrote {0} records to s3://{1}/{2}",
@@ -150,6 +152,34 @@ public class CloudTrailLogWriter {
             LOG.warnv(e, "CloudTrail flush failed for trail {0} ({1} records re-queued)",
                     key.trailName(), records.size());
             throw e;
+        }
+
+        // The write above already succeeded and durably delivered the records —
+        // from here on, records must never be re-queued. Doing so on a failure
+        // in this block would deliver the same batch to S3 again next flush.
+        try {
+            // This write goes straight to S3Service, bypassing the HTTP-facing
+            // S3Controller that normally emits data events for API-driven puts.
+            // Any trail whose selector matches its own destination bucket must
+            // still see its own deliveries — that's the real circular-logging
+            // behavior (issue #1192 / PR #1194) this emulator exists to prove.
+            cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
+                    .region(key.eventRegion())
+                    .eventName("PutObject")
+                    .bucketName(trail.s3BucketName())
+                    .key(objectKey)
+                    .accessKeyId(null)
+                    .sourceIp(null)
+                    .userAgent("cloudtrail.amazonaws.com")
+                    .bytesIn(payload.length)
+                    .bytesOut(0)
+                    .errorCode(null)
+                    .errorMessage(null)
+                    .eventTimeMillis(System.currentTimeMillis())
+                    .build());
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "CloudTrail self-delivery event emission failed for trail {0} "
+                    + "(write already succeeded, records not re-queued)", key.trailName());
         }
     }
 

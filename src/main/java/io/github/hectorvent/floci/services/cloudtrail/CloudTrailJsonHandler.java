@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
@@ -41,6 +42,7 @@ public class CloudTrailJsonHandler {
             case "StopLogging" -> stopLogging(request, region);
             case "GetTrailStatus" -> getTrailStatus(request, region);
             case "LookupEvents" -> lookupEvents(request, region);
+            case "ListTrails" -> listTrails(request, region);
             case "AddTags" -> addTags(request);
             case "RemoveTags" -> removeTags(request);
             case "ListTags" -> listTags(request);
@@ -129,28 +131,56 @@ public class CloudTrailJsonHandler {
 
     private Response putEventSelectors(JsonNode req, String region) {
         String trailName = req.path("TrailName").asText(null);
-        List<EventSelector> selectors = parseEventSelectors(req.path("EventSelectors"));
-        List<EventSelector> stored = service.putEventSelectors(region, trailName, selectors);
+        boolean hasBasic = req.has("EventSelectors") && req.path("EventSelectors").isArray()
+                && !req.path("EventSelectors").isEmpty();
+        boolean hasAdvanced = req.has("AdvancedEventSelectors") && req.path("AdvancedEventSelectors").isArray()
+                && !req.path("AdvancedEventSelectors").isEmpty();
+        if (hasBasic && hasAdvanced) {
+            throw new AwsException("InvalidParameterCombinationException",
+                    "EventSelectors and AdvancedEventSelectors are mutually exclusive on a single trail.", 400);
+        }
 
         ObjectNode resp = mapper.createObjectNode();
-        Trail trail = firstTrail(service.describeTrails(region, List.of(trailName)));
+        Trail trail = trailName != null ? firstTrail(service.describeTrails(region, List.of(trailName))) : null;
         if (trail != null) {
             resp.put("TrailARN", trail.trailArn());
         }
-        resp.set("EventSelectors", mapper.valueToTree(stored));
+
+        if (hasAdvanced) {
+            List<AdvancedEventSelector> advanced =
+                    CloudTrailSelectorJson.parseAdvancedEventSelectors(req.path("AdvancedEventSelectors"));
+            List<AdvancedEventSelector> stored = service.putAdvancedEventSelectors(region, trailName, advanced);
+            resp.set("AdvancedEventSelectors", mapper.valueToTree(stored));
+        } else {
+            List<EventSelector> selectors = parseEventSelectors(req.path("EventSelectors"));
+            List<EventSelector> stored = service.putEventSelectors(region, trailName, selectors);
+            resp.set("EventSelectors", mapper.valueToTree(stored));
+        }
         return Response.ok(resp).build();
     }
 
     private Response getEventSelectors(JsonNode req, String region) {
         String trailName = req.path("TrailName").asText(null);
-        List<EventSelector> selectors = service.getEventSelectors(region, trailName);
+        List<AdvancedEventSelector> advancedSelectors = service.getAdvancedEventSelectors(region, trailName);
 
         ObjectNode resp = mapper.createObjectNode();
-        Trail trail = firstTrail(service.describeTrails(region, List.of(trailName)));
+        Trail trail = trailName != null ? firstTrail(service.describeTrails(region, List.of(trailName))) : null;
         if (trail != null) {
             resp.put("TrailARN", trail.trailArn());
         }
-        resp.set("EventSelectors", mapper.valueToTree(selectors));
+        if (!advancedSelectors.isEmpty()) {
+            resp.set("AdvancedEventSelectors", mapper.valueToTree(advancedSelectors));
+        } else {
+            List<EventSelector> selectors = service.getEventSelectors(region, trailName);
+            resp.set("EventSelectors", mapper.valueToTree(selectors));
+        }
+        return Response.ok(resp).build();
+    }
+
+    private Response listTrails(JsonNode req, String region) {
+        List<CloudTrailService.TrailInfo> trails = service.listTrails(region);
+        ObjectNode resp = mapper.createObjectNode();
+        resp.set("Trails", mapper.valueToTree(trails));
         return Response.ok(resp).build();
     }
 
