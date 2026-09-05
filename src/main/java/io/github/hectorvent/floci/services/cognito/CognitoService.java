@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.services.cognito.model.EmailMfaSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -129,6 +130,7 @@ public class CognitoService implements ResourceProvider {
     private final AcmService acmService;
     private final VerificationCodeService verificationCodeService;
     private final CognitoMessageDispatcher messageDispatcher;
+    private final TlsCertificateManager certificateManager;
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
@@ -136,7 +138,8 @@ public class CognitoService implements ResourceProvider {
     @Inject
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
             RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
-            SesService sesService, SnsService snsService, Clock clock) {
+            SesService sesService, SnsService snsService, Clock clock,
+            TlsCertificateManager certificateManager) {
         this(
                 storageFactory.create("cognito", "cognito-pools.json",
                         new TypeReference<Map<String, UserPool>>() {}),
@@ -159,7 +162,8 @@ public class CognitoService implements ResourceProvider {
                 lambdaService,
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
-                new CognitoMessageDispatcher(sesService, snsService)
+                new CognitoMessageDispatcher(sesService, snsService),
+                certificateManager
         );
     }
 
@@ -175,7 +179,7 @@ public class CognitoService implements ResourceProvider {
                    AcmService acmService) {
         this(poolStore, clientStore, resourceServerStore, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), userStore, groupStore, revokedTokenStore, baseUrl,
-                regionResolver, lambdaService, acmService, null, null);
+                regionResolver, lambdaService, acmService, null, null, null);
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -189,7 +193,8 @@ public class CognitoService implements ResourceProvider {
             String baseUrl,
             RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
             VerificationCodeService verificationCodeService,
-            CognitoMessageDispatcher messageDispatcher) {
+            CognitoMessageDispatcher messageDispatcher,
+            TlsCertificateManager certificateManager) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -204,6 +209,7 @@ public class CognitoService implements ResourceProvider {
         this.acmService = acmService;
         this.verificationCodeService = verificationCodeService;
         this.messageDispatcher = messageDispatcher;
+        this.certificateManager = certificateManager;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
     }
 
@@ -1136,6 +1142,11 @@ public class CognitoService implements ResourceProvider {
                 registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
             }
             domainStore.put(domain, userPoolDomain);
+        }
+        // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
+        // A prefix domain is served under amazoncognito.com on AWS, not by Floci; a custom domain is.
+        if (customDomainConfig != null && certificateManager != null) {
+            certificateManager.ensureHost(domain);
         }
         LOG.infov("Created User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
