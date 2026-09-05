@@ -225,9 +225,9 @@ class LambdaPodSpecFactoryTest {
     }
 
     @Test
-    void tlsMountsCaCertAndStillDownloadsWithPlainWget() {
+    void tlsMountsTheCaBundleAndStillDownloadsWithPlainWget() {
         // Downloads stay plain HTTP even in TLS mode (busybox wget cannot TLS-handshake
-        // with Floci); the CA mount is for SDK calls made from inside the function.
+        // with Floci); the CA bundle mount is for HTTPS calls made from inside the function.
         when(tls.enabled()).thenReturn(true);
         var pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
                 "public.ecr.aws/lambda/python:3.12",
@@ -245,7 +245,7 @@ class LambdaPodSpecFactoryTest {
         assertThat(elements(elements(spec.path("containers")).getFirst().path("volumeMounts")))
                 .anySatisfy(volumeMount -> {
                     assertThat(volumeMount.path("name").asText()).isEqualTo("floci-ca");
-                    assertThat(volumeMount.path("mountPath").asText()).isEqualTo("/etc/floci-ca.crt");
+                    assertThat(volumeMount.path("mountPath").asText()).isEqualTo("/etc/floci-ca-bundle.pem");
                     assertThat(volumeMount.path("subPath").asText())
                             .isEqualTo(KubernetesPodLauncher.CA_CONFIG_MAP_KEY);
                 });

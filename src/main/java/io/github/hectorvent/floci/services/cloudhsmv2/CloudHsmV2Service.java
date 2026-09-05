@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Certificates;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Cluster;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.ClusterState;
@@ -11,9 +12,7 @@ import io.github.hectorvent.floci.services.cloudhsmv2.model.Hsm;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.bouncycastle.asn1.x500.X500Name;
-import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
@@ -27,15 +26,11 @@ import org.jboss.logging.Logger;
 
 import java.io.StringReader;
 import java.io.StringWriter;
-import java.math.BigInteger;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
-import java.security.PrivateKey;
-import java.security.PublicKey;
 import java.time.temporal.ChronoUnit;
 import java.util.stream.Collectors;
 import java.time.Instant;
@@ -64,20 +59,24 @@ public class CloudHsmV2Service {
     private final StorageBackend<String, Cluster> clusters;
     private final StorageBackend<String, Backup> backups;
     private final Ec2Service ec2Service;
+    private final CertificateGenerator certificateGenerator;
 
     @Inject
-    public CloudHsmV2Service(StorageFactory storageFactory, Ec2Service ec2Service) {
-        this.clusters = storageFactory.create("cloudhsmv2", "cloudhsmv2-clusters.json",
-                new TypeReference<Map<String, Cluster>>() {});
-        this.backups = storageFactory.create("cloudhsmv2", "cloudhsmv2-backups.json",
-                new TypeReference<Map<String, Backup>>() {});
-        this.ec2Service = ec2Service;
+    public CloudHsmV2Service(StorageFactory storageFactory, Ec2Service ec2Service,
+                             CertificateGenerator certificateGenerator) {
+        this(storageFactory.create("cloudhsmv2", "cloudhsmv2-clusters.json",
+                        new TypeReference<Map<String, Cluster>>() {}),
+                storageFactory.create("cloudhsmv2", "cloudhsmv2-backups.json",
+                        new TypeReference<Map<String, Backup>>() {}),
+                ec2Service, certificateGenerator);
     }
 
-    CloudHsmV2Service(StorageBackend<String, Cluster> clusters, StorageBackend<String, Backup> backups, Ec2Service ec2Service) {
+    CloudHsmV2Service(StorageBackend<String, Cluster> clusters, StorageBackend<String, Backup> backups,
+                      Ec2Service ec2Service, CertificateGenerator certificateGenerator) {
         this.clusters = clusters;
         this.backups = backups;
         this.ec2Service = ec2Service;
+        this.certificateGenerator = certificateGenerator;
     }
 
     // ──────────────────────────── CreateCluster ────────────────────────────
@@ -173,15 +172,18 @@ public class CloudHsmV2Service {
         try {
             KeyPair mfrKeyPair = generateKeyPair();
             X500Name mfrName = new X500Name("CN=HSM Manufacturer CA,O=AWS,C=US");
-            certs.setManufacturerHardwareCertificate(generateCert(mfrName, mfrName, mfrKeyPair.getPublic(), mfrKeyPair.getPrivate()));
+            certs.setManufacturerHardwareCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
+                    mfrName, mfrKeyPair.getPublic(), mfrName, mfrKeyPair.getPrivate(), List.of(), true, null, 365)));
 
             KeyPair awsKeyPair = generateKeyPair();
             X500Name awsName = new X500Name("CN=AWS CloudHSM Hardware CA,O=AWS,C=US");
-            certs.setAwsHardwareCertificate(generateCert(awsName, mfrName, awsKeyPair.getPublic(), mfrKeyPair.getPrivate()));
+            certs.setAwsHardwareCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
+                    awsName, awsKeyPair.getPublic(), mfrName, mfrKeyPair.getPrivate(), List.of(), true, null, 365)));
 
             KeyPair hsmKeyPair = generateKeyPair();
             X500Name hsmName = new X500Name("CN=HSM Instance " + clusterId + ",O=AWS,C=US");
-            certs.setHsmCertificate(generateCert(hsmName, awsName, hsmKeyPair.getPublic(), awsKeyPair.getPrivate()));
+            certs.setHsmCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
+                    hsmName, hsmKeyPair.getPublic(), awsName, awsKeyPair.getPrivate(), List.of(), false, null, 365)));
         } catch (Exception e) {
             LOG.warnv("Failed to generate emulated hardware certs: {0}", e.getMessage());
         }
@@ -532,25 +534,6 @@ public class CloudHsmV2Service {
         KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
         keyGen.initialize(2048, SECURE_RANDOM);
         return keyGen.generateKeyPair();
-    }
-
-    private String generateCert(X500Name subject, X500Name issuer, PublicKey pubKey, PrivateKey signerKey) throws Exception {
-        BigInteger serial = new BigInteger(128, SECURE_RANDOM);
-        Instant now = Instant.now();
-        X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                issuer, serial, Date.from(now), Date.from(now.plusSeconds(365L * 24 * 3600)), subject, pubKey);
-
-        ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
-                .build(signerKey);
-        X509CertificateHolder holder = certBuilder.build(signer);
-        X509Certificate cert = new JcaX509CertificateConverter()
-                .getCertificate(holder);
-
-        StringWriter sw = new StringWriter();
-        try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
-            pemWriter.writeObject(cert);
-        }
-        return sw.toString();
     }
 
     private void validatePemCertificate(String pem, String fieldName) {

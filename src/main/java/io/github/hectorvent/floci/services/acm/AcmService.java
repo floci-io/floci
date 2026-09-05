@@ -404,11 +404,11 @@ public class AcmService implements ResourceProvider {
         cert.setIssuedAt(now);
         cert.setNotBefore(x509Cert.getNotBefore().toInstant());
         cert.setNotAfter(x509Cert.getNotAfter().toInstant());
-        cert.setSerial(x509Cert.getSerialNumber().toString());
+        cert.setSerial(CertificateGenerator.colonHex(x509Cert.getSerialNumber()));
         cert.setSubject(x509Cert.getSubjectX500Principal().getName());
         cert.setIssuer(x509Cert.getIssuerX500Principal().getName());
         cert.setKeyAlgorithm(keyAlg);
-        cert.setSignatureAlgorithm(x509Cert.getSigAlgName());
+        cert.setSignatureAlgorithm(x509Cert.getSigAlgName().toUpperCase(Locale.ROOT));
         cert.setCertificateBody(certificatePem);
         cert.setPrivateKey(privateKeyPem);
         cert.setCertificateChain(chainPem);
