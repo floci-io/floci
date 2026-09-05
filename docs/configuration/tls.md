@@ -87,7 +87,7 @@ The generated certificate will include `floci` in its SANs, so TLS validation su
 
 ### Containers Floci Launches
 
-Every container Floci launches, from Lambda functions and ECS or Batch tasks to the Docker backends behind RDS, ElastiCache, MWAA and Flink, and the Kubernetes Lambda pods, receives `/etc/floci-ca-bundle.pem`: the public root CAs the Floci JVM trusts, followed by the Floci CA (or your certificate file when you provide one). `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `AWS_CA_BUNDLE` point at it, so curl, Python, Node.js, Go, the AWS CLI and the AWS SDKs that read `AWS_CA_BUNDLE` reach both Floci and public HTTPS sites with no setup in the workload. A variable you set on the function or task definition wins over the injected one. The JVM ignores all of these variables, so a Java workload still needs its own trust store, as shown under SDK Configuration Examples. The bundle is written to `{persistent-path}/tls/floci-ca-bundle.pem` at startup; when it is missing, containers start without it and Floci logs a warning.
+Every container Floci launches, from Lambda functions and ECS or Batch tasks to the Docker backends behind RDS, ElastiCache, MWAA and Flink, and the Kubernetes Lambda pods, receives `/etc/floci-ca-bundle.pem`: the public root CAs the Floci JVM trusts, followed by the Floci CA (or your certificate file when you provide one). `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `AWS_CA_BUNDLE` point at it, so curl, Python, Node.js, Go, the AWS CLI and the AWS SDKs that read `AWS_CA_BUNDLE` reach both Floci and public HTTPS sites with no setup in the workload. A variable you set on the function or task definition wins over the injected one. The JVM ignores all of these variables, so a Java workload still needs its own trust store, as shown under SDK Configuration Examples. The bundle is written to `{persistent-path}/tls/floci-ca-bundle.pem` at startup; when it is missing, or when an image has no `/etc` to copy it into, the container starts without the variables and Floci logs a warning.
 
 ## User-Provided Certificates
 
@@ -103,7 +103,7 @@ docker run \
   floci/floci:latest
 ```
 
-When custom certificate paths are provided, `FLOCI_TLS_SELF_SIGNED` is ignored and the HTTPS server uses your certificate; no server certificate is generated. `GET /_floci/ca.pem` then returns a PEM bundle: your certificate file first, then Floci's local CA, which is created on first use and signs the certificates Floci itself issues (IoT device certificates). Put the CA or the full chain in your certificate file if clients fetch their trust anchor from Floci; a bare leaf only lets them pin that one certificate.
+When custom certificate paths are provided, `FLOCI_TLS_SELF_SIGNED` is ignored and the HTTPS server uses your certificate; no server certificate is generated. `GET /_floci/ca.pem` then returns a PEM bundle: the certificates in your certificate file first (a private key kept in that file is never served), then Floci's local CA, which is created on first use and signs the certificates Floci itself issues (IoT device certificates). Put the CA or the full chain in your certificate file if clients fetch their trust anchor from Floci; a bare leaf only lets them pin that one certificate.
 
 ## WebSocket (wss://)
 
