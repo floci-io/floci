@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -39,6 +40,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @QuarkusTest
 class IotDeviceCertificateIntegrationTest {
+
+    @jakarta.inject.Inject
+    IotService iotService;
+
+    @org.junit.jupiter.api.BeforeAll
+    static void bouncyCastle() {
+        if (java.security.Security.getProvider(org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME) == null) {
+            java.security.Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
+        }
+    }
 
     @Test
     void createKeysAndCertificateIssuesARealClientCertificate() throws Exception {
@@ -84,6 +95,16 @@ class IotDeviceCertificateIntegrationTest {
         assertEquals(Base64.getEncoder().encodeToString(cert.getPublicKey().getEncoded()),
                 publicKeyPem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "")
                         .replaceAll("\\s", ""));
+    }
+
+    @Test
+    void thePrivateKeyIsReturnedOnceAndNeverStored() {
+        JsonPath created = create();
+
+        IotCertificate stored = iotService.describeCertificate(created.getString("certificateId"), "us-east-1");
+        assertNull(stored.getPrivateKey(), "AWS keeps no copy of a device's private key");
+        assertEquals(created.getString("certificatePem"), stored.getCertificatePem());
+        assertEquals(created.getString("keyPair.PublicKey"), stored.getPublicKey());
     }
 
     @Test
@@ -153,6 +174,22 @@ class IotDeviceCertificateIntegrationTest {
         X509Certificate cert = parse(body.getString("certificatePem"));
         assertEquals(deviceKey.getPublic(), cert.getPublicKey());
         assertEquals("EC", cert.getPublicKey().getAlgorithm());
+    }
+
+    @Test
+    void createCertificateFromCsrAcceptsP384AndRefusesSecp256k1() throws Exception {
+        JsonPath accepted = fromCsr(ecCsrPem("secp384r1", "CN=p384"));
+        assertEquals("EC", parse(accepted.getString("certificatePem")).getPublicKey().getAlgorithm());
+
+        given()
+            .contentType("application/json")
+            .body(Map.of("certificateSigningRequest", ecCsrPem("secp256k1", "CN=k1")))
+        .when()
+            .post("/certificates")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("InvalidRequestException"))
+            .body("message", containsString("P-256"));
     }
 
     @Test
@@ -262,6 +299,17 @@ class IotDeviceCertificateIntegrationTest {
         .then()
             .statusCode(200)
             .extract().jsonPath();
+    }
+
+    /** Built with the BouncyCastle provider so curves the JDK dropped (secp256k1) can be requested. */
+    private static String ecCsrPem(String curve, String subject) throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", "BC");
+        kpg.initialize(new java.security.spec.ECGenParameterSpec(curve));
+        KeyPair keyPair = kpg.generateKeyPair();
+        PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(
+                new X500Name(subject), keyPair.getPublic())
+                .build(new JcaContentSignerBuilder("SHA256withECDSA").setProvider("BC").build(keyPair.getPrivate()));
+        return toPem(csr);
     }
 
     private static KeyPair rsaKeyPair() throws Exception {

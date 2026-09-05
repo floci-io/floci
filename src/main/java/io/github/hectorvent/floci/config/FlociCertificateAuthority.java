@@ -2,7 +2,14 @@ package io.github.hectorvent.floci.config;
 
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.pkcs.RSAPublicKey;
+import org.bouncycastle.asn1.sec.SECObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.asn1.x9.X962Parameters;
+import org.bouncycastle.asn1.x9.X9ObjectIdentifiers;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.operator.jcajce.JcaContentVerifierProviderBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
@@ -20,8 +27,6 @@ import java.security.PrivateKey;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.cert.X509Certificate;
-import java.security.interfaces.ECPublicKey;
-import java.security.interfaces.RSAPublicKey;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
@@ -171,11 +176,11 @@ public final class FlociCertificateAuthority {
             if (!(parsed instanceof PKCS10CertificationRequest csr)) {
                 throw new IllegalArgumentException("certificateSigningRequest is not a PEM CERTIFICATE REQUEST");
             }
+            requireAcceptedKey(csr.getSubjectPublicKeyInfo());
             PublicKey subjectKey = new JcaPKCS10CertificationRequest(csr).getPublicKey();
             if (!csr.isSignatureValid(new JcaContentVerifierProviderBuilder().build(subjectKey))) {
                 throw new IllegalArgumentException("certificateSigningRequest signature does not verify");
             }
-            requireAcceptedKey(subjectKey);
             X500Name issuerDn = X500Name.getInstance(certificate.getSubjectX500Principal().getEncoded());
             return generator.signCertificate(csr.getSubject(), subjectKey, issuerDn, key, List.of(), false,
                     CertificateGenerator.LeafUsage.CLIENT, 365);
@@ -200,13 +205,25 @@ public final class FlociCertificateAuthority {
         }
     }
 
-    /** AWS IoT accepts an RSA key of at least 2048 bits or an EC key on NIST P-256, P-384 or P-521. */
-    private static void requireAcceptedKey(PublicKey key) {
-        if (key instanceof RSAPublicKey rsa && rsa.getModulus().bitLength() >= 2048) {
+    private static final Set<ASN1ObjectIdentifier> ACCEPTED_CURVES = Set.of(
+            SECObjectIdentifiers.secp256r1, SECObjectIdentifiers.secp384r1, SECObjectIdentifiers.secp521r1);
+
+    /**
+     * AWS IoT accepts an RSA key of at least 2048 bits or an EC key on NIST P-256, P-384 or P-521.
+     * The curve is read from the request's named-curve identifier, so a curve that merely shares a
+     * field size (secp256k1) or explicit curve parameters are refused as well.
+     */
+    private static void requireAcceptedKey(SubjectPublicKeyInfo key) throws Exception {
+        ASN1ObjectIdentifier algorithm = key.getAlgorithm().getAlgorithm();
+        if (PKCSObjectIdentifiers.rsaEncryption.equals(algorithm)
+                && RSAPublicKey.getInstance(key.parsePublicKey()).getModulus().bitLength() >= 2048) {
             return;
         }
-        if (key instanceof ECPublicKey ec && Set.of(256, 384, 521).contains(ec.getParams().getCurve().getField().getFieldSize())) {
-            return;
+        if (X9ObjectIdentifiers.id_ecPublicKey.equals(algorithm)) {
+            X962Parameters parameters = X962Parameters.getInstance(key.getAlgorithm().getParameters());
+            if (parameters.isNamedCurve() && ACCEPTED_CURVES.contains((ASN1ObjectIdentifier) parameters.getParameters())) {
+                return;
+            }
         }
         throw new IllegalArgumentException("certificateSigningRequest key must be RSA of at least 2048 bits "
                 + "or EC on NIST P-256, P-384 or P-521");
