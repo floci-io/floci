@@ -184,6 +184,61 @@ class FlociCertificateAuthorityTest {
         assertFalse(ca.isIssuedByUs(parse(forged.certificatePem())), "same issuer name, wrong signature");
     }
 
+    @Test
+    void signsACsrAsAClientLeafWithTheCsrSubjectAndKey() throws Exception {
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        java.security.KeyPair deviceKey = rsaKeyPair(2048);
+
+        X509Certificate cert = ca.signClientCsr(csrPem("CN=device-42,O=Example", deviceKey));
+
+        cert.verify(ca.certificate().getPublicKey());
+        assertEquals(deviceKey.getPublic(), cert.getPublicKey());
+        assertEquals(new javax.security.auth.x500.X500Principal(
+                new org.bouncycastle.asn1.x500.X500Name("CN=device-42,O=Example").getEncoded()), cert.getSubjectX500Principal());
+        assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage());
+        assertEquals(-1, cert.getBasicConstraints());
+        assertTrue(ca.isIssuedByUs(cert));
+    }
+
+    @Test
+    void refusesWhatIsNotACsr() throws Exception {
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+
+        var notPem = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ca.signClientCsr("hello"));
+        assertTrue(notPem.getMessage().contains("certificateSigningRequest"), notPem.getMessage());
+        var certificate = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ca.signClientCsr(ca.caPem()));
+        assertTrue(certificate.getMessage().contains("not a PEM CERTIFICATE REQUEST"), certificate.getMessage());
+    }
+
+    @Test
+    void refusesAWeakRsaKey() throws Exception {
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        String weak = csrPem("CN=weak", rsaKeyPair(1024));
+
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ca.signClientCsr(weak));
+        assertTrue(refused.getMessage().contains("2048"), refused.getMessage());
+    }
+
+    private static java.security.KeyPair rsaKeyPair(int bits) throws Exception {
+        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(bits);
+        return kpg.generateKeyPair();
+    }
+
+    private static String csrPem(String subject, java.security.KeyPair keyPair) throws Exception {
+        var csr = new org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder(
+                new org.bouncycastle.asn1.x500.X500Name(subject), keyPair.getPublic())
+                .build(new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(keyPair.getPrivate()));
+        java.io.StringWriter out = new java.io.StringWriter();
+        try (var writer = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(out)) {
+            writer.writeObject(csr);
+        }
+        return out.toString();
+    }
+
     private static X509Certificate parse(String pem) {
         return new CertificateGenerator().parseCertificate(pem);
     }

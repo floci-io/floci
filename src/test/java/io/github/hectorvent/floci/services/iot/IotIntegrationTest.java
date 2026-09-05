@@ -10,6 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -384,11 +385,11 @@ class IotIntegrationTest {
             .post("/keys-and-certificate")
         .then()
             .statusCode(200)
-            .body("certificateId", notNullValue())
+            .body("certificateId", matchesPattern("[0-9a-f]{64}"))
             .body("certificateArn", containsString(":iot:us-east-1:000000000000:cert/"))
             .body("certificatePem", containsString("BEGIN CERTIFICATE"))
             .body("keyPair.PublicKey", containsString("BEGIN PUBLIC KEY"))
-            .body("keyPair.PrivateKey", containsString("BEGIN PRIVATE KEY"))
+            .body("keyPair.PrivateKey", containsString("BEGIN RSA PRIVATE KEY"))
             .extract()
             .path("certificateArn");
         String certificateId = certificateArn.substring(certificateArn.lastIndexOf('/') + 1);
@@ -490,7 +491,7 @@ class IotIntegrationTest {
 
     @Test
     @Order(17)
-    void certificateDeleteCsrStatusAndTagsMatchMvpLifecycle() {
+    void certificateDeleteCsrStatusAndTagsMatchMvpLifecycle() throws Exception {
         String activeArn = given()
             .queryParam("setAsActive", true)
         .when()
@@ -563,7 +564,7 @@ class IotIntegrationTest {
         String csrArn = given()
             .contentType("application/json")
             .queryParam("setAsActive", false)
-            .body("{\"certificateSigningRequest\":\"-----BEGIN CERTIFICATE REQUEST-----\\nfloci\\n-----END CERTIFICATE REQUEST-----\"}")
+            .body(java.util.Map.of("certificateSigningRequest", csrPem()))
         .when()
             .post("/certificates")
         .then()
@@ -760,4 +761,18 @@ class IotIntegrationTest {
             .path("thingArn");
     }
 
+
+    private static String csrPem() throws Exception {
+        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        java.security.KeyPair kp = kpg.generateKeyPair();
+        var csr = new org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder(
+                new org.bouncycastle.asn1.x500.X500Name("CN=round-trip"), kp.getPublic())
+                .build(new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate()));
+        java.io.StringWriter out = new java.io.StringWriter();
+        try (var w = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(out)) {
+            w.writeObject(csr);
+        }
+        return out.toString();
+    }
 }
