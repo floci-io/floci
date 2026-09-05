@@ -13,8 +13,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,8 +31,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * The contract between CreateUserPoolDomain and the TLS certificate manager: a custom domain is
- * handed over once, after it is stored; a prefix domain, a rejected request and every later
- * operation register nothing. The test-only constructor without a manager keeps working. A
+ * handed over once, after it is stored and with no service lock held; a prefix domain, a rejected
+ * request and every later operation register nothing. The test-only constructor without a manager keeps working. A
  * certificate ACM does not know, or has not issued, is refused before the hook, as on AWS.
  */
 class CognitoDomainTlsServiceTest {
@@ -161,6 +163,29 @@ class CognitoDomainTlsServiceTest {
 
         verify(certificateManager).ensureHost("auth.dev.localhost.floci.io");
         verifyNoMoreInteractions(certificateManager);
+    }
+
+    /** The reissue blocks on the HTTPS listener; a concurrent create must not queue behind it. */
+    @Test
+    void noServiceLockIsHeldWhileTheCertificateReloads() throws Exception {
+        String otherPool = service.createUserPool(Map.of("PoolName", "other-pool"), REGION).getId();
+        AtomicBoolean nested = new AtomicBoolean();
+        Thread[] concurrent = new Thread[1];
+        doAnswer(invocation -> {
+            if (nested.compareAndSet(false, true)) {
+                concurrent[0] = new Thread(() -> service.createUserPoolDomain("other.dev.localhost.floci.io", otherPool, CUSTOM, null));
+                concurrent[0].start();
+                concurrent[0].join(5000);
+                assertFalse(concurrent[0].isAlive(), "a create must not wait for another create's TLS reload");
+            }
+            return null;
+        }).when(certificateManager).ensureHost(anyString());
+
+        service.createUserPoolDomain("auth.dev.localhost.floci.io", poolId, CUSTOM, null);
+
+        verify(certificateManager).ensureHost("auth.dev.localhost.floci.io");
+        verify(certificateManager).ensureHost("other.dev.localhost.floci.io");
+        assertNotNull(service.describeUserPoolDomain("other.dev.localhost.floci.io"));
     }
 
     @Test

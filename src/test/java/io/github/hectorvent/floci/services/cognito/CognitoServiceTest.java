@@ -3512,7 +3512,7 @@ class CognitoServiceTest {
         CognitoService ambiguous = new CognitoService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), domains, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566", regionResolver, null,
-                acmService, null, null);
+                acmService, null, null, mock(TlsCertificateManager.class));
 
         assertTrue(ambiguous.findCustomDomain("auth.dup.localhost.floci.io").isEmpty());
     }
