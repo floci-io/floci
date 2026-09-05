@@ -33,8 +33,8 @@ public class MacieController {
         this.objectMapper = objectMapper;
     }
 
-    public Response listAdminInternal(@Context HttpHeaders headers) {
-        MacieState state = macieService.state(region(headers));
+    public Response listAdminInternal(String region) {
+        MacieState state = macieService.state(region);
         var response = objectMapper.createObjectNode();
         var accounts = response.putArray("adminAccounts");
         if (state.getAdminAccountId() != null) {
@@ -70,13 +70,14 @@ public class MacieController {
         if (!request.has("autoEnable") || !request.get("autoEnable").isBoolean()) {
             throw new io.github.hectorvent.floci.core.common.AwsException("ValidationException", "autoEnable is required.", 400);
         }
-        macieService.updateOrganizationConfiguration(region(headers), request.path("autoEnable").asBoolean());
+        macieService.updateOrganizationConfiguration(
+                region(headers), regionResolver.getAccountId(), request.path("autoEnable").asBoolean());
         return empty();
     }
 
     @GET @Path("/admin/configuration")
     public Response describeOrganizationConfiguration(@Context HttpHeaders headers) {
-        MacieState state = macieService.requireSession(region(headers));
+        MacieState state = macieService.requireAdministratorSession(region(headers), regionResolver.getAccountId());
         var response = objectMapper.createObjectNode();
         response.put("autoEnable", state.isAutoEnable());
         return Response.ok(response).build();

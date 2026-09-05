@@ -16,6 +16,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -37,11 +38,19 @@ public class SecurityAdminController {
     @GET
     @Path("/admin")
     public Response listAdmin(@Context HttpHeaders headers,
+                              @Context UriInfo uriInfo,
                               @QueryParam("maxResults") String maxResults,
                               @QueryParam("nextToken") String nextToken) {
-        String service = SigV4CredentialScope.serviceName(headers.getHeaderString("Authorization")).orElse("");
+        String service = SigV4CredentialScope.serviceName(headers.getHeaderString("Authorization"))
+                .or(() -> SigV4CredentialScope.serviceNameFromCredential(
+                        uriInfo.getQueryParameters().getFirst("X-Amz-Credential")))
+                .orElse("");
         if ("macie2".equals(service)) {
-            return macieController.listAdminInternal(headers);
+            String region = headers.getHeaderString("Authorization") != null
+                    ? regionResolver.resolveRegion(headers)
+                    : regionResolver.resolveRegionFromPresignedCredential(
+                            uriInfo.getQueryParameters().getFirst("X-Amz-Credential"));
+            return macieController.listAdminInternal(region);
         }
         if ("guardduty".equals(service) || service.isBlank()) {
             GuardDutyService.Page<AdminAccount> page = guardDutyService.listOrganizationAdminAccounts(

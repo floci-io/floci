@@ -9,27 +9,30 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Macie organization administration")
 class MacieOrganizationAdministrationTest {
+    private static final String MANAGEMENT_ACCOUNT = "222222222222";
+    private static final String ADMIN_ACCOUNT = "111111111111";
 
     @Test
     @DisplayName("uses AWS SDK models for delegated administration and organization configuration")
     void organizationAdministrationUsesAwsSdk() {
         assumeFalse(TestFixtures.isRealAws(), "Avoids changing Macie organization settings in real AWS");
 
-        try (Macie2Client macie = TestFixtures.macie2Client()) {
-            assertThat(macie.listOrganizationAdminAccounts(request -> {}).adminAccounts()).isEmpty();
+        try (Macie2Client management = TestFixtures.macie2Client(MANAGEMENT_ACCOUNT);
+             Macie2Client administrator = TestFixtures.macie2Client(ADMIN_ACCOUNT)) {
+            assertThat(management.listOrganizationAdminAccounts(request -> {}).adminAccounts()).isEmpty();
 
-            macie.enableOrganizationAdminAccount(request -> request.adminAccountId("111111111111"));
+            management.enableOrganizationAdminAccount(request -> request.adminAccountId(ADMIN_ACCOUNT));
 
-            assertThat(macie.listOrganizationAdminAccounts(request -> {}).adminAccounts())
+            assertThat(management.listOrganizationAdminAccounts(request -> {}).adminAccounts())
                     .anySatisfy(account -> {
-                        assertThat(account.accountId()).isEqualTo("111111111111");
+                        assertThat(account.accountId()).isEqualTo(ADMIN_ACCOUNT);
                         assertThat(account.statusAsString()).isEqualTo("ENABLED");
                     });
 
-            macie.enableMacie(request -> {});
-            macie.updateOrganizationConfiguration(request -> request.autoEnable(true));
+            assertThat(administrator.getMacieSession(request -> {}).statusAsString()).isEqualTo("ENABLED");
+            administrator.updateOrganizationConfiguration(request -> request.autoEnable(true));
 
-            assertThat(macie.describeOrganizationConfiguration(request -> {}).autoEnable()).isTrue();
+            assertThat(administrator.describeOrganizationConfiguration(request -> {}).autoEnable()).isTrue();
         }
     }
 }
