@@ -43,6 +43,7 @@ public class PostgresProtocolHandler {
 
     private static final int SSL_REQUEST_CODE = 80877103;
     private static final int STARTUP_PROTOCOL_VERSION = 196608; // v3.0
+    private static final int MAX_HANDSHAKE_PACKET_LENGTH = 1_048_576;
 
     public static Socket authenticate(Socket client, Socket backend,
                                       String masterUsername, String masterPassword, String dbName,
@@ -153,10 +154,7 @@ public class PostgresProtocolHandler {
         while (true) {
             InputStream in = currentSocket.getInputStream();
             OutputStream out = currentSocket.getOutputStream();
-            int length = readInt32(in);
-            if (length < 8) {
-                return null;
-            }
+            int length = checkedPacketLength(readInt32(in), 8, "startup message");
             int proto = readInt32(in);
 
             if (proto == SSL_REQUEST_CODE) {
@@ -267,7 +265,7 @@ public class PostgresProtocolHandler {
             LOG.warnv("Expected PasswordMessage ('p'), got {0}", (char) type);
             return null;
         }
-        int length = readInt32(in);
+        int length = checkedPacketLength(readInt32(in), 5, "password message");
         byte[] data = new byte[length - 4];
         readFully(in, data);
         // Strip trailing null terminator
@@ -288,7 +286,7 @@ public class PostgresProtocolHandler {
             return false;
         }
 
-        int length = readInt32(in);
+        int length = checkedPacketLength(readInt32(in), 8, "backend authentication message");
         int authType = readInt32(in);
 
         if (authType == 0) {
@@ -354,7 +352,7 @@ public class PostgresProtocolHandler {
         if (in.read() != 'R') {
             return false;
         }
-        int len2 = readInt32(in);
+        int len2 = checkedPacketLength(readInt32(in), 8, "SASL continue message");
         if (readInt32(in) != 11) {
             return false;
         }
@@ -395,7 +393,7 @@ public class PostgresProtocolHandler {
         if (in.read() != 'R') {
             return false;
         }
-        int len3 = readInt32(in);
+        int len3 = checkedPacketLength(readInt32(in), 8, "SASL final message");
         if (readInt32(in) != 12) {
             return false;
         }
@@ -471,7 +469,7 @@ public class PostgresProtocolHandler {
             LOG.warnv("Expected AuthenticationOK from backend, got type={0}", type);
             return false;
         }
-        int length = readInt32(in);
+        int length = checkedPacketLength(readInt32(in), 8, "authentication response");
         int authType = readInt32(in);
         if (length > 8) {
             byte[] extra = new byte[length - 8];
@@ -511,7 +509,7 @@ public class PostgresProtocolHandler {
             if (type < 0) {
                 throw new EOFException("Connection closed before ReadyForQuery");
             }
-            int length = readInt32(in);
+            int length = checkedPacketLength(readInt32(in), 4, "backend message");
             byte[] payload = new byte[length - 4];
             readFully(in, payload);
 
@@ -642,6 +640,18 @@ public class PostgresProtocolHandler {
             throw new EOFException("Connection closed while reading Int32");
         }
         return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+    }
+
+    private static int checkedPacketLength(int length, int minimum, String packetName) throws IOException {
+        if (length < minimum) {
+            throw new IOException("PostgreSQL " + packetName + " length is below the "
+                    + minimum + " byte minimum: " + length);
+        }
+        if (length > MAX_HANDSHAKE_PACKET_LENGTH) {
+            throw new IOException("PostgreSQL " + packetName + " length exceeds the "
+                    + MAX_HANDSHAKE_PACKET_LENGTH + " byte limit: " + length);
+        }
+        return length;
     }
 
     private static void readFully(InputStream in, byte[] buf) throws IOException {
