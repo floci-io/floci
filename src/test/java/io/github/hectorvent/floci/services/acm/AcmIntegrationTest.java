@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -16,6 +17,8 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.PKIXParameters;
 import java.security.cert.TrustAnchor;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.RSAPublicKey;
 import java.util.List;
 import java.util.Set;
 
@@ -271,6 +274,8 @@ class AcmIntegrationTest {
         X509Certificate leaf = assertLeafChainsToLocalCa(response.getString("Certificate"),
                 response.getString("CertificateChain"));
         assertEquals("RSA", leaf.getPublicKey().getAlgorithm());
+        assertEquals(2048, ((RSAPublicKey) leaf.getPublicKey()).getModulus().bitLength(),
+                "RSA_2048 is the default KeyAlgorithm");
     }
 
     // ==================== User Story 2: ListCertificates ====================
@@ -359,6 +364,8 @@ class AcmIntegrationTest {
         X509Certificate leaf = assertLeafChainsToLocalCa(response.getString("Certificate"),
                 response.getString("CertificateChain"));
         assertEquals("EC", leaf.getPublicKey().getAlgorithm(), "the requested KeyAlgorithm is honoured");
+        assertEquals(256, ((ECPublicKey) leaf.getPublicKey()).getParams().getCurve().getField().getFieldSize(),
+                "EC_prime256v1 is a P-256 key");
     }
 
     // ==================== User Story 5: Tagging ====================
@@ -733,7 +740,7 @@ class AcmIntegrationTest {
             .body("__type", equalTo("UnsupportedOperation"));
     }
 
-    private static io.restassured.path.json.JsonPath getCertificatePems(String certificateArn) {
+    private static JsonPath getCertificatePems(String certificateArn) {
         return given()
             .header("X-Amz-Target", "CertificateManager.GetCertificate")
             .contentType(ACM_CONTENT_TYPE)
