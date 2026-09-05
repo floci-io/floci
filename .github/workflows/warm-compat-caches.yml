@@ -118,8 +118,9 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.compat
-          # Must match the consumer's build-args and target, or the layers key
-          # differently and the warm is silently useless (compatibility.yml:38).
+          # Must match the consumer's build-args, or the layers key differently
+          # and the warm is silently useless (compatibility.yml:38). The consumer
+          # builds the whole image; its tools layers key the same as this target.
           build-args: VERSION=latest
           target: tools
           # No `load:` — the image is discarded; only the cache is wanted.
