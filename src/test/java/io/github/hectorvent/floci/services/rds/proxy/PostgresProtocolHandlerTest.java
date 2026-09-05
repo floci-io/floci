@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
+import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -18,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -394,6 +396,305 @@ class PostgresProtocolHandlerTest {
                 assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
             }
         }
+    }
+
+    @Test
+    void iamSessionRunsAsTheRoleNamedInTheToken() throws Exception {
+        AtomicReference<String> backendUser = new AtomicReference<>();
+        AtomicReference<String> backendQuery = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, backendUser, backendQuery, "approle", true);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "approle", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+                readAuthenticationOk(clientIn);
+
+                Map<String, String> params = readParametersUntilReadyForQuery(clientIn);
+                assertEquals("approle", params.get("session_authorization"));
+                assertEquals("off", params.get("is_superuser"));
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+
+            assertEquals("dbadmin", backendUser.get(), "backend connection is still opened as master");
+            assertEquals("SET SESSION AUTHORIZATION \"approle\"", backendQuery.get());
+        }
+    }
+
+    @Test
+    void iamSessionIsRejectedWhenTheTokenRoleDoesNotExist() throws Exception {
+        AtomicReference<String> backendUser = new AtomicReference<>();
+        AtomicReference<String> backendQuery = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, backendUser, backendQuery, "nosuchrole", false);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "nosuchrole", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("nosuchrole"));
+
+                Map<Character, String> error = readErrorResponse(clientIn);
+                assertEquals("FATAL", error.get('S'));
+                assertEquals("28000", error.get('C'));
+                assertEquals("role \"nosuchrole\" does not exist", error.get('M'));
+
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+
+            assertEquals("SET SESSION AUTHORIZATION \"nosuchrole\"", backendQuery.get());
+        }
+    }
+
+    @Test
+    void iamSessionForTheMasterUserKeepsTheMasterSession() throws Exception {
+        AtomicReference<String> backendDatabase = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendStartup(backendServer, backendDatabase, false);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "dbadmin", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("dbadmin"));
+                // The mock backend answers no query, so reaching ReadyForQuery proves no
+                // SET SESSION AUTHORIZATION was issued for the master user.
+                readAuthenticationOk(clientIn);
+                readReadyForQuery(clientIn);
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+    }
+
+    @Test
+    void quotesRoleNamesContainingDoubleQuotes() {
+        assertEquals("\"app\"\"role\"", PostgresProtocolHandler.quoteIdentifier("app\"role"));
+    }
+
+    private Thread startIamAuth(Socket proxyClient, Socket backend) {
+        return Thread.ofVirtual().start(() -> {
+            try {
+                Socket activeClient = PostgresProtocolHandler.authenticate(
+                        proxyClient, backend,
+                        "dbadmin", "adminpass", "postgres",
+                        true, testSigV4Validator(), testTlsCertificates(),
+                        (user, pass) -> true);
+                if (activeClient != null) {
+                    PostgresProtocolHandler.bridge(activeClient, backend);
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    private static String rdsToken(String dbUser) throws Exception {
+        return SigV4TokenTestHelper.createRdsToken("localhost", 7001, dbUser,
+                "AKIATEST", "secret", Instant.now(), 900);
+    }
+
+    /**
+     * Mock backend that completes startup as master and then answers one simple query: either
+     * reporting the handover to {@code role}, or replying with the ErrorResponse PostgreSQL sends
+     * for a role the database does not have.
+     */
+    private static void mockBackendRoleSwitch(ServerSocket server, AtomicReference<String> backendUser,
+                                              AtomicReference<String> backendQuery,
+                                              String role, boolean roleExists) throws IOException {
+        try (Socket socket = server.accept()) {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+            int length = in.readInt();
+            assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
+            byte[] payload = in.readNBytes(length - 8);
+            backendUser.set(parseStartupParams(payload).get("user"));
+
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(3);
+            out.flush();
+
+            assertEquals('p', in.readByte());
+            in.readNBytes(in.readInt() - 4);
+
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(0);
+            writeParameterStatus(out, "session_authorization", "dbadmin");
+            writeParameterStatus(out, "is_superuser", "on");
+            writeBackendKeyData(out);
+            writeReadyForQuery(out);
+
+            assertEquals('Q', in.readByte());
+            byte[] query = in.readNBytes(in.readInt() - 4);
+            backendQuery.set(new String(query, 0, query.length - 1, StandardCharsets.UTF_8));
+
+            if (!roleExists) {
+                writeErrorResponse(out, "ERROR", "42704", "role \"" + role + "\" does not exist");
+                writeReadyForQuery(out);
+                return;
+            }
+
+            writeParameterStatus(out, "session_authorization", role);
+            writeParameterStatus(out, "is_superuser", "off");
+            writeCommandComplete(out, "SET");
+            writeReadyForQuery(out);
+        }
+    }
+
+    private static void writeParameterStatus(DataOutputStream out, String name, String value)
+            throws IOException {
+        byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
+        byte[] valueBytes = value.getBytes(StandardCharsets.UTF_8);
+        out.writeByte('S');
+        out.writeInt(4 + nameBytes.length + 1 + valueBytes.length + 1);
+        out.write(nameBytes);
+        out.writeByte(0);
+        out.write(valueBytes);
+        out.writeByte(0);
+        out.flush();
+    }
+
+    private static void writeBackendKeyData(DataOutputStream out) throws IOException {
+        out.writeByte('K');
+        out.writeInt(12);
+        out.writeInt(4242);
+        out.writeInt(1234);
+        out.flush();
+    }
+
+    private static void writeCommandComplete(DataOutputStream out, String tag) throws IOException {
+        byte[] tagBytes = tag.getBytes(StandardCharsets.UTF_8);
+        out.writeByte('C');
+        out.writeInt(4 + tagBytes.length + 1);
+        out.write(tagBytes);
+        out.writeByte(0);
+        out.flush();
+    }
+
+    private static void writeReadyForQuery(DataOutputStream out) throws IOException {
+        out.writeByte('Z');
+        out.writeInt(5);
+        out.writeByte('I');
+        out.flush();
+    }
+
+    /** Collects ParameterStatus values the client is handed, stopping at ReadyForQuery. */
+    private static Map<String, String> readParametersUntilReadyForQuery(DataInputStream in)
+            throws IOException {
+        Map<String, String> params = new HashMap<>();
+        while (true) {
+            int type = in.readByte();
+            byte[] payload = in.readNBytes(in.readInt() - 4);
+            if (type == 'Z') {
+                return params;
+            }
+            if (type == 'S') {
+                int nameEnd = 0;
+                while (payload[nameEnd] != 0) {
+                    nameEnd++;
+                }
+                int valueEnd = nameEnd + 1;
+                while (payload[valueEnd] != 0) {
+                    valueEnd++;
+                }
+                params.put(new String(payload, 0, nameEnd, StandardCharsets.UTF_8),
+                        new String(payload, nameEnd + 1, valueEnd - nameEnd - 1, StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    private static Map<Character, String> readErrorResponse(DataInputStream in) throws IOException {
+        assertEquals('E', in.readByte());
+        byte[] payload = in.readNBytes(in.readInt() - 4);
+        Map<Character, String> fields = new HashMap<>();
+        int i = 0;
+        while (i < payload.length && payload[i] != 0) {
+            char fieldType = (char) payload[i];
+            i++;
+            int start = i;
+            while (payload[i] != 0) {
+                i++;
+            }
+            fields.put(fieldType, new String(payload, start, i - start, StandardCharsets.UTF_8));
+            i++;
+        }
+        return fields;
     }
 
     private static RdsSigV4Validator testSigV4Validator() {

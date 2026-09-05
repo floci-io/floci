@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>Validate (IAM SigV4 or plain password)
  *   <li>Connect to backend with MD5 or SCRAM-SHA-256 auth
  *   <li>Buffer backend messages until ReadyForQuery
+ *   <li>For IAM logins, hand the session over to the role named in the token
  *   <li>Send AuthOK + buffered messages to client, then bridge
  * </ol>
  */
@@ -124,6 +125,24 @@ public class PostgresProtocolHandler {
 
         // Buffer all backend messages until ReadyForQuery ('Z')
         List<byte[]> bufferedMessages = readUntilReadyForQuery(backendIn);
+
+        // Phase 5b: An IAM token is issued for one specific database role, so the session must run
+        // as that role even though the backend connection was opened as master. Handing it over
+        // gives the session the role's own privileges and object ownership, and refuses a token
+        // naming a role the database does not have instead of silently granting a master session.
+        if (isIam && !isMaster && !endsWithErrorResponse(bufferedMessages)) {
+            List<byte[]> roleSwitch = assumeSessionRole(backendIn, backendOut, clientUsername);
+            if (endsWithErrorResponse(roleSwitch)) {
+                sendErrorResponse(clientOut, "FATAL", "28000",
+                        errorMessage(roleSwitch.get(roleSwitch.size() - 1),
+                                "role \"" + clientUsername + "\" does not exist"));
+                clientOut.flush();
+                closeQuietly(client);
+                closeQuietly(backend);
+                return null;
+            }
+            bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
+        }
 
         // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
         if (endsWithErrorResponse(bufferedMessages)) {
@@ -534,6 +553,100 @@ public class PostgresProtocolHandler {
             }
         }
         return messages;
+    }
+
+    // ── IAM session role ──────────────────────────────────────────────────────
+
+    /**
+     * Hands the backend session over to {@code role} so {@code current_user} and
+     * {@code session_user} both report the role named in the IAM token and the session carries
+     * only that role's privileges.
+     *
+     * @return the backend messages the statement produced, up to ReadyForQuery or ErrorResponse
+     */
+    private static List<byte[]> assumeSessionRole(InputStream in, OutputStream out, String role)
+            throws IOException {
+        String sql = "SET SESSION AUTHORIZATION " + quoteIdentifier(role);
+        sendMessage(out, 'Q', sql.getBytes(StandardCharsets.UTF_8), new byte[]{0});
+        out.flush();
+        return readUntilReadyForQuery(in);
+    }
+
+    static String quoteIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    /**
+     * Folds the ParameterStatus messages a statement produced into the buffered startup messages,
+     * so the client's view of parameters such as {@code session_authorization} and
+     * {@code is_superuser} matches the session it is handed. Same-named entries are replaced;
+     * new ones are inserted ahead of BackendKeyData/ReadyForQuery.
+     */
+    static List<byte[]> applyParameterStatusUpdates(List<byte[]> buffered, List<byte[]> updates) {
+        List<byte[]> merged = new ArrayList<>(buffered);
+        for (byte[] update : updates) {
+            String name = parameterStatusName(update);
+            if (name == null) {
+                continue;
+            }
+            int existing = indexOfParameterStatus(merged, name);
+            if (existing >= 0) {
+                merged.set(existing, update);
+            } else {
+                merged.add(startupTrailerIndex(merged), update);
+            }
+        }
+        return merged;
+    }
+
+    private static int indexOfParameterStatus(List<byte[]> messages, String name) {
+        for (int i = 0; i < messages.size(); i++) {
+            if (name.equals(parameterStatusName(messages.get(i)))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Index of the first BackendKeyData/ReadyForQuery — where ParameterStatus messages end. */
+    private static int startupTrailerIndex(List<byte[]> messages) {
+        for (int i = 0; i < messages.size(); i++) {
+            char type = (char) messages.get(i)[0];
+            if (type == 'K' || type == 'Z') {
+                return i;
+            }
+        }
+        return messages.size();
+    }
+
+    /** Name carried by a ParameterStatus message, or {@code null} for any other message. */
+    private static String parameterStatusName(byte[] message) {
+        if (message.length < 6 || message[0] != 'S') {
+            return null;
+        }
+        int end = 5;
+        while (end < message.length && message[end] != 0) {
+            end++;
+        }
+        return new String(message, 5, end - 5, StandardCharsets.UTF_8);
+    }
+
+    /** Human-readable 'M' field of an ErrorResponse, or {@code fallback} when it carries none. */
+    static String errorMessage(byte[] errorResponse, String fallback) {
+        int i = 5; // skip type byte and Int32 length
+        while (i < errorResponse.length && errorResponse[i] != 0) {
+            char fieldType = (char) errorResponse[i];
+            i++;
+            int start = i;
+            while (i < errorResponse.length && errorResponse[i] != 0) {
+                i++;
+            }
+            if (fieldType == 'M') {
+                return new String(errorResponse, start, i - start, StandardCharsets.UTF_8);
+            }
+            i++; // skip the field's null terminator
+        }
+        return fallback;
     }
 
     public static void bridge(Socket client, Socket backend) {
