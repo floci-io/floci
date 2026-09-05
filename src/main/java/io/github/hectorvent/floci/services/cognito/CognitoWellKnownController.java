@@ -59,8 +59,8 @@ public class CognitoWellKnownController {
         UserPool pool = cognitoService.describeUserPool(poolId);
         String issuer = cognitoService.getIssuer(pool.getId());
         String jwksUri = cognitoService.getJwksUri(pool.getId());
-        String tokenEndpoint = cognitoService.getTokenEndpoint();
-        String userInfoEndpoint = cognitoService.getUserInfoEndpoint();
+        String tokenEndpoint = cognitoService.getTokenEndpoint(pool.getId());
+        String userInfoEndpoint = cognitoService.getUserInfoEndpoint(pool.getId());
 
         String body = """
                 {"issuer":"%s","jwks_uri":"%s","token_endpoint":"%s","userinfo_endpoint":"%s","subject_types_supported":["public"],"response_types_supported":[],"grant_types_supported":["client_credentials"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"],"id_token_signing_alg_values_supported":["RS256"]}

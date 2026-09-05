@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
+import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
@@ -3438,6 +3439,61 @@ class CognitoServiceTest {
         assertEquals("InvalidParameterException", failure.getErrorCode());
         assertEquals(CERTIFICATE_ARN, service.describeUserPoolDomain("auth.example.com").getCertificateArn());
         verify(acmService, never()).removeInUseBy(any(), any(), any());
+    }
+
+    @Test
+    void findCustomDomainMatchesOnlyCustomDomains() {
+        String poolId = createPoolWithCustomDomain("auth.teos.localhost.floci.io").getId();
+        service.createUserPoolDomain("teos-prefix", poolId, null, null);
+
+        assertEquals(poolId, service.findCustomDomain("auth.teos.localhost.floci.io").orElseThrow().getUserPoolId());
+        assertEquals(poolId, service.findCustomDomain("AUTH.teos.localhost.floci.io").orElseThrow().getUserPoolId());
+        assertTrue(service.findCustomDomain("teos-prefix").isEmpty());
+        assertTrue(service.findCustomDomain("nobody.localhost.floci.io").isEmpty());
+        assertTrue(service.findCustomDomain(null).isEmpty());
+        assertEquals("auth.teos.localhost.floci.io",
+                service.findCustomDomainForPool(poolId).orElseThrow().getDomain());
+    }
+
+    @Test
+    void findCustomDomainForPoolIgnoresPrefixDomainsAndOtherPools() {
+        String prefixOnly = service.createUserPool(Map.of("PoolName", "prefix-only"), "us-east-1").getId();
+        service.createUserPoolDomain("prefix-only", prefixOnly, null, null);
+        createPoolWithCustomDomain("auth.other.localhost.floci.io");
+
+        assertTrue(service.findCustomDomainForPool(prefixOnly).isEmpty());
+    }
+
+    @Test
+    void clientCredentialsTokenIsRefusedWhenTheClientBelongsToAnotherPool() {
+        String poolA = service.createUserPool(Map.of("PoolName", "pool-a"), "us-east-1").getId();
+        String poolB = service.createUserPool(Map.of("PoolName", "pool-b"), "us-east-1").getId();
+        ResourceServerScope read = new ResourceServerScope();
+        read.setScopeName("read");
+        service.createResourceServer(poolB, "notes", "Notes", List.of(read));
+        UserPoolClient clientB = service.createUserPoolClient(poolB, "b", true, true,
+                List.of("client_credentials"), List.of("notes/read"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.issueClientCredentialsToken(
+                clientB.getClientId(), clientB.getClientSecret(), null, poolA));
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+
+        assertNotNull(service.issueClientCredentialsToken(clientB.getClientId(), clientB.getClientSecret(), null, poolB)
+                .get("access_token"));
+        assertNotNull(service.issueClientCredentialsToken(clientB.getClientId(), clientB.getClientSecret(), null, null)
+                .get("access_token"));
+    }
+
+    @Test
+    void endpointsUseTheCustomDomainWhenThePoolHasOne() {
+        String withDomain = createPoolWithCustomDomain("auth2.teos.localhost.floci.io").getId();
+        String without = service.createUserPool(Map.of("PoolName", "without-domain"), "us-east-1").getId();
+        service.createUserPoolDomain("prefix-only", without, null, null);
+
+        assertEquals("https://auth2.teos.localhost.floci.io/oauth2/token", service.getTokenEndpoint(withDomain));
+        assertEquals("https://auth2.teos.localhost.floci.io/oauth2/userInfo", service.getUserInfoEndpoint(withDomain));
+        assertEquals("http://localhost:4566/cognito-idp/oauth2/token", service.getTokenEndpoint(without));
+        assertEquals("http://localhost:4566/cognito-idp/oauth2/userInfo", service.getUserInfoEndpoint(without));
     }
 
     @Test

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -1137,6 +1138,31 @@ public class CognitoService implements ResourceProvider {
         }
         return domainStore.get(domain)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
+    }
+
+    /**
+     * Resolves a request {@code Host} to the custom domain it names. An OAuth call carries no
+     * SigV4 account, so the lookup spans every account rather than the request's default one.
+     */
+    public Optional<UserPoolDomain> findCustomDomain(String hostname) {
+        if (hostname == null || hostname.isBlank()) {
+            return Optional.empty();
+        }
+        return allDomains().stream()
+                .filter(d -> d.isCustomDomain() && hostname.equalsIgnoreCase(d.getDomain()))
+                .findFirst();
+    }
+
+    public Optional<UserPoolDomain> findCustomDomainForPool(String poolId) {
+        return allDomains().stream()
+                .filter(d -> d.isCustomDomain() && poolId.equals(d.getUserPoolId()))
+                .findFirst();
+    }
+
+    private List<UserPoolDomain> allDomains() {
+        return domainStore instanceof AccountAwareStorageBackend<UserPoolDomain> aware
+                ? aware.scanAllAccounts()
+                : domainStore.scan(key -> true);
     }
 
     /**
@@ -2543,8 +2569,15 @@ public class CognitoService implements ResourceProvider {
         adminDeleteUserAttributes(poolId, username, attributeNames);
     }
 
-    public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope) {
+    /**
+     * @param requiredPoolId the pool owning the custom domain the request arrived on, or
+     *                       {@code null} on Floci's own host. As on AWS, a client of another pool
+     *                       does not exist on that domain.
+     */
+    public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope,
+                                                           String requiredPoolId) {
         UserPoolClient client = clientStore.get(clientId)
+                .filter(c -> requiredPoolId == null || requiredPoolId.equals(c.getUserPoolId()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         UserPool pool = describeUserPool(client.getUserPoolId());
         validateClientAllowsClientCredentials(client);
@@ -2574,12 +2607,22 @@ public class CognitoService implements ResourceProvider {
         return getIssuer(poolId) + "/.well-known/jwks.json";
     }
 
-    public String getTokenEndpoint() {
-        return baseUrl + "/cognito-idp/oauth2/token";
+    /**
+     * A custom domain is HTTPS-only on AWS, so its endpoints are advertised as {@code https}
+     * regardless of Floci's own base URL.
+     */
+    public String getTokenEndpoint(String poolId) {
+        return oauthEndpoint(poolId, "token");
     }
 
-    public String getUserInfoEndpoint() {
-        return baseUrl + "/cognito-idp/oauth2/userInfo";
+    public String getUserInfoEndpoint(String poolId) {
+        return oauthEndpoint(poolId, "userInfo");
+    }
+
+    private String oauthEndpoint(String poolId, String operation) {
+        return findCustomDomainForPool(poolId)
+                .map(d -> "https://" + d.getDomain() + "/oauth2/" + operation)
+                .orElse(baseUrl + "/cognito-idp/oauth2/" + operation);
     }
 
     // ──────────────────────────── Private helpers ────────────────────────────

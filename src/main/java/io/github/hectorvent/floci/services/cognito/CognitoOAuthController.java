@@ -10,6 +10,8 @@ import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -39,11 +41,14 @@ public class CognitoOAuthController {
     @Path("/cognito-idp/oauth2/token")
     @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
     public Response token(@HeaderParam("Authorization") String authorization,
+                          @Context ContainerRequestContext requestContext,
                           MultivaluedMap<String, String> formParams) {
-        return issueToken(authorization, formParams);
+        String domainPoolId = (String) requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY);
+        return issueToken(authorization, formParams, domainPoolId);
     }
 
-    private Response issueToken(String authorization, MultivaluedMap<String, String> formParams) {
+    private Response issueToken(String authorization, MultivaluedMap<String, String> formParams,
+                                String domainPoolId) {
         String grantType = trimToNull(formParams.getFirst("grant_type"));
         if (grantType == null) {
             return oauthError("invalid_request", "grant_type is required");
@@ -81,7 +86,8 @@ public class CognitoOAuthController {
         String scope = trimToNull(formParams.getFirst("scope"));
 
         try {
-            Map<String, Object> result = cognitoService.issueClientCredentialsToken(clientId, clientSecret, scope);
+            Map<String, Object> result = cognitoService.issueClientCredentialsToken(
+                    clientId, clientSecret, scope, domainPoolId);
             return Response.ok(objectMapper.valueToTree(result))
                     .type(MediaType.APPLICATION_JSON)
                     .header("Cache-Control", "no-store")
