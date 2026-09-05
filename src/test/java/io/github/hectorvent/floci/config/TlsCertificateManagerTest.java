@@ -7,6 +7,7 @@ import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
 import jakarta.enterprise.event.Event;
+import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +19,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Security;
 import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -32,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -138,6 +142,63 @@ class TlsCertificateManagerTest {
         assertEquals(defaultTls, event.getValue().tlsConfiguration());
         assertFalse(Files.exists(tlsDir.resolve("floci-server.crt.tmp")), "temporary file renamed away");
         assertFalse(Files.exists(tlsDir.resolve("floci-server.metadata.json.tmp")), "temporary file renamed away");
+    }
+
+    @Test
+    void reissuedLeafKeepsTheShapeOfTheBootLeaf() throws Exception {
+        X509Certificate before = read("floci-server.crt");
+
+        manager().ensureHost(NEW_HOST);
+
+        X509Certificate after = read("floci-server.crt");
+        assertEquals(before.getSubjectX500Principal(), after.getSubjectX500Principal(), "subject unchanged");
+        assertEquals(ca.certificate().getSubjectX500Principal(), after.getIssuerX500Principal(), "issued by the local CA");
+        assertTrue(ca.isIssuedByUs(after));
+        assertNotEquals(before.getSerialNumber(), after.getSerialNumber(), "a reissue is a new certificate");
+        assertEquals(-1, after.getBasicConstraints(), "a server leaf, not a CA");
+        assertEquals(List.of("1.3.6.1.5.5.7.3.1", "1.3.6.1.5.5.7.3.2"), after.getExtendedKeyUsage(),
+                "serverAuth and clientAuth, as an ACM-issued certificate carries");
+        after.checkValidity();
+        assertTrue(after.getNotAfter().toInstant().isBefore(Instant.now().plus(366, ChronoUnit.DAYS)),
+                "validity is not extended beyond a normal leaf");
+        assertTrue(after.getNotAfter().toInstant().isAfter(Instant.now().plus(364, ChronoUnit.DAYS)));
+
+        List<String> ordered = new ArrayList<>();
+        for (List<?> entry : after.getSubjectAlternativeNames()) {
+            ordered.add(String.valueOf(entry.get(1)));
+        }
+        assertEquals(CONFIGURED, ordered.subList(0, CONFIGURED.size()), "configured names first, in their order");
+        assertEquals(NEW_HOST, ordered.get(ordered.size() - 1), "learned names appended");
+    }
+
+    @Test
+    void aWildcardCoversExactlyOneLabel() throws Exception {
+        TlsCertificateManager m = manager();
+
+        m.ensureHost("one.localhost.floci.io");
+        verify(defaultTls, never()).reload();
+
+        m.ensureHost("two.labels.localhost.floci.io");
+        verify(defaultTls, times(1)).reload();
+
+        m.ensureHost("other.labels.localhost.floci.io");
+        verify(defaultTls, times(2)).reload();
+        assertTrue(sans(read("floci-server.crt")).contains("*.localhost.floci.io"), "the wildcard itself is kept");
+    }
+
+    @Test
+    void anIpAddressAllowedByTheBaseUrlBecomesAnIpSan() throws Exception {
+        when(config.baseUrl()).thenReturn("https://192.168.1.100:4566");
+
+        manager().ensureHost("192.168.1.100");
+
+        boolean ipSan = false;
+        for (List<?> entry : read("floci-server.crt").getSubjectAlternativeNames()) {
+            if (entry.get(0).equals(GeneralName.iPAddress) && "192.168.1.100".equals(entry.get(1))) {
+                ipSan = true;
+            }
+        }
+        assertTrue(ipSan, "an IP is encoded as an iPAddress SAN, not a dNSName");
     }
 
     @Test
