@@ -95,6 +95,17 @@ class CloudWatchLogsCrossAccountServiceTest {
     }
 
     @Test
+    void quotedPrefixStillConflictsWithGlobalFieldIndexPolicy() {
+        service.putAccountPolicy("global-index", DOCUMENT, "FIELD_INDEX_POLICY", null, "ALL", REGION);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putAccountPolicy("prefix-index", DOCUMENT, "FIELD_INDEX_POLICY",
+                        "LogGroupNamePrefix = \"/DataSourceName/DataSourceType/\"", "ALL", REGION));
+
+        assertEquals("LimitExceededException", error.getErrorCode());
+    }
+
+    @Test
     void metricExtractionRejectsMoreThanFiftySelectionValues() {
         StringBuilder criteria = new StringBuilder("LogGroupName IN [");
         for (int i = 0; i < 51; i++) {

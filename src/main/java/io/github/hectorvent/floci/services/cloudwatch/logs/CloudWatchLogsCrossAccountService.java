@@ -192,10 +192,15 @@ public class CloudWatchLogsCrossAccountService {
         if (!hasSelectionCriteria(selectionCriteria)) {
             return FieldIndexScope.GLOBAL;
         }
-        if (selectionCriteria.contains("DataSourceName") && selectionCriteria.contains("DataSourceType")) {
+        String operators = fieldIndexOperators(selectionCriteria);
+        if (operators.contains("DataSourceName") && operators.contains("DataSourceType")) {
             return FieldIndexScope.DATA_SOURCE;
         }
         return FieldIndexScope.PREFIX;
+    }
+
+    private static String fieldIndexOperators(String selectionCriteria) {
+        return QUOTED_SELECTION_VALUE.matcher(selectionCriteria).replaceAll("");
     }
 
     private static AwsException quotaExceeded(String policyType) {
@@ -225,7 +230,7 @@ public class CloudWatchLogsCrossAccountService {
                 }
             }
             case "FIELD_INDEX_POLICY" -> {
-                String operators = QUOTED_SELECTION_VALUE.matcher(selectionCriteria).replaceAll("");
+                String operators = fieldIndexOperators(selectionCriteria);
                 boolean prefix = operators.contains("LogGroupNamePrefix");
                 boolean dataSourceName = operators.contains("DataSourceName");
                 boolean dataSourceType = operators.contains("DataSourceType");

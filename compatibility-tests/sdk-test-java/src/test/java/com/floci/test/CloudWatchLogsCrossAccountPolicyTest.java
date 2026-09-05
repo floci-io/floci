@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.cloudwatchlogs.model.InvalidParameterException;
+import software.amazon.awssdk.services.cloudwatchlogs.model.LimitExceededException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -61,6 +62,14 @@ class CloudWatchLogsCrossAccountPolicyTest {
 
             assertThat(fieldIndex.accountPolicy().selectionCriteria())
                     .isEqualTo("LogGroupNamePrefix = \"/DataSourceName/DataSourceType/\"");
+
+            assertThatThrownBy(() -> logs.putAccountPolicy(request -> request
+                    .policyName("floci-sdk-field-index-global")
+                    .policyType("FIELD_INDEX_POLICY")
+                    .policyDocument("{\"Fields\":[\"requestId\"]}")
+                    .scope("ALL")))
+                    .isInstanceOfSatisfying(LimitExceededException.class, error ->
+                            assertThat(error.awsErrorDetails().errorCode()).isEqualTo("LimitExceededException"));
         }
     }
 
