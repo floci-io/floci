@@ -33,6 +33,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -3453,6 +3458,45 @@ class CognitoServiceTest {
         assertTrue(service.findCustomDomain(null).isEmpty());
         assertEquals("auth.teos.localhost.floci.io",
                 service.findCustomDomainForPool(poolId).orElseThrow().getDomain());
+    }
+
+    /** The uniqueness check and the write are one step, so a burst of creates leaves one owner. */
+    @Test
+    void concurrentCreatesOfTheSameDomainLetExactlyOneWin() throws Exception {
+        int threads = 16;
+        List<String> pools = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            pools.add(service.createUserPool(Map.of("PoolName", "race-" + i), "us-east-1").getId());
+        }
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Boolean>> outcomes = new ArrayList<>();
+            for (String poolId : pools) {
+                outcomes.add(executor.submit(() -> {
+                    start.await();
+                    try {
+                        service.createUserPoolDomain("auth.race.localhost.floci.io", poolId,
+                                Map.of("CertificateArn", CERTIFICATE_ARN), null);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("InvalidParameterException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int winners = 0;
+            for (Future<Boolean> outcome : outcomes) {
+                if (outcome.get(10, TimeUnit.SECONDS)) {
+                    winners++;
+                }
+            }
+            assertEquals(1, winners);
+            verify(acmService, times(1)).addInUseBy(eq(CERTIFICATE_ARN), any(), eq("us-east-1"));
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     /** Two accounts holding the same name can only come from data persisted before names were global. */

@@ -9,6 +9,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.COGNITO;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.FLOCI_URL;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.awsActionAs;
@@ -26,7 +33,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A Cognito custom domain serves {@code https://<domain>/oauth2/token} and
@@ -300,5 +309,51 @@ class CognitoCustomDomainRoutingIntegrationTest {
         .then()
                 .statusCode(200)
                 .body("token_endpoint", equalTo("https://" + DOMAIN + "/oauth2/token"));
+    }
+
+    /** Two accounts racing for one name: exactly one create succeeds, so the name never turns ambiguous. */
+    @Test
+    @Order(17)
+    void concurrentCreatesAcrossAccountsLeaveOneOwner() throws Exception {
+        String contested = "auth-race-" + System.nanoTime() + ".teos.localhost.floci.io";
+        String defaultAccount = "000000000000";
+        String poolInA = createPool("RacePoolA");
+        String poolInB = awsJsonAs(ACCOUNT_B, COGNITO, "CreateUserPool", "{\"PoolName\": \"RacePoolB\"}")
+                .path("UserPool").path("Id").asText();
+        String certificateA = requestCertificate(contested);
+        String certificateB = requestCertificateAs(ACCOUNT_B, contested);
+
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<Integer>> outcomes = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                boolean inA = i % 2 == 0;
+                outcomes.add(executor.submit(() -> awsActionAs(inA ? defaultAccount : ACCOUNT_B, COGNITO,
+                        "CreateUserPoolDomain",
+                        customDomain(contested, inA ? poolInA : poolInB, inA ? certificateA : certificateB))
+                        .statusCode()));
+            }
+            int created = 0;
+            for (Future<Integer> outcome : outcomes) {
+                int status = outcome.get(30, TimeUnit.SECONDS);
+                assertTrue(status == 200 || status == 400, "unexpected status " + status);
+                if (status == 200) {
+                    created++;
+                }
+            }
+            assertEquals(1, created);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertNull(expect(400, contested, clientA, secretA, "/oauth2/token"));
+        given()
+                .header("Host", contested)
+                .header("Authorization", basic(clientA, secretA))
+                .formParam("grant_type", "client_credentials")
+        .when()
+                .post("/oauth2/token")
+        .then()
+                .body("error", equalTo("invalid_client"));
     }
 }

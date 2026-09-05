@@ -1124,10 +1124,19 @@ public class CognitoService implements ResourceProvider {
             userPoolDomain.setCloudFrontDistribution(generateCloudFrontDomain());
         }
 
-        if (userPoolDomain.isCustomDomain()) {
-            registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
+        // Check and write as one step: two accounts racing for one name write to different
+        // account-prefixed keys, so without the lock both would succeed and the name would be
+        // ambiguous for routing.
+        synchronized (domainLock) {
+            if (!findDomains(domain).isEmpty()) {
+                throw new AwsException("InvalidParameterException",
+                        "Domain " + domain + " already associated with another user pool", 400);
+            }
+            if (userPoolDomain.isCustomDomain()) {
+                registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
+            }
+            domainStore.put(domain, userPoolDomain);
         }
-        domainStore.put(domain, userPoolDomain);
         LOG.infov("Created User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
     }
@@ -1757,6 +1766,9 @@ public class CognitoService implements ResourceProvider {
     // updates that touch different optional members both survive there. Guarding
     // every mutating path with one lock reproduces that.
     private final Object identityProviderLock = new Object();
+
+    // Domain creation is check-then-act across every account's keys; see createUserPoolDomain.
+    private final Object domainLock = new Object();
 
     public void adminLinkProviderForUser(String userPoolId, String destinationUsername,
             String sourceProviderName, String sourceUserId) {
