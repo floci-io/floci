@@ -7,9 +7,11 @@ import org.bouncycastle.asn1.pkcs.EncryptedPrivateKeyInfo;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.BasicConstraints;
+import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
 import org.bouncycastle.asn1.x509.Extension;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.asn1.x509.GeneralNames;
+import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.KeyUsage;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
@@ -45,7 +47,9 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -76,6 +80,16 @@ public class CertificateGenerator {
         String issuer,
         String signatureAlgorithm
     ) {}
+
+    /**
+     * What an issued leaf is for. Decides the Extended Key Usage. A CA passes {@code null}.
+     * {@code SERVER} carries both serverAuth and clientAuth, as ACM-issued certificates do (and as
+     * {@code DescribeCertificate} already advertises); {@code CLIENT} is clientAuth only.
+     */
+    public enum LeafUsage { SERVER, CLIENT }
+
+    /** A signer: the issuer's certificate (for its DN) and its private key. */
+    public record Issuer(X509Certificate certificate, PrivateKey key) {}
 
     /**
      * Generates a certificate for local emulation that mimics an ACM-issued certificate:
@@ -115,86 +129,143 @@ public class CertificateGenerator {
         return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true, keyPair);
     }
 
+    /**
+     * A root CA: self-signed, {@code cA=true}, {@code keyCertSign}, ten years. RSA 2048 because
+     * every client in the emulator's reach accepts it and it keeps key generation under a second.
+     */
+    public GeneratedCertificate generateCaCertificate(String commonName) {
+        try {
+            KeyPair keyPair = generateKeyPair(KeyAlgorithm.RSA_2048);
+            X500Name dn = new X500Name("CN=" + commonName);
+            X509Certificate cert = signCertificate(dn, keyPair.getPublic(), dn, keyPair.getPrivate(),
+                    List.of(), true, null, 3650);
+            return toGenerated(cert, keyPair.getPrivate(), dn.toString(), dn.toString());
+        } catch (Exception e) {
+            LOG.error("Failed to generate CA certificate", e);
+            throw new CertificateGenerationException("CA generation failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * A leaf signed by {@code issuer}. {@code subjectKeyPair} may be {@code null} to mint a new
+     * one; pass the previous pair to reissue with an updated SAN list and an unchanged public key.
+     */
+    public GeneratedCertificate generateIssuedCertificate(String domainName, List<String> sans,
+                                                          KeyAlgorithm keyAlgorithm, KeyPair subjectKeyPair,
+                                                          Issuer issuer, LeafUsage usage) {
+        try {
+            KeyPair keyPair = subjectKeyPair != null ? subjectKeyPair : generateKeyPair(keyAlgorithm);
+            X500Name subject = new X500Name("CN=" + domainName);
+            X500Name issuerDn = X500Name.getInstance(issuer.certificate().getSubjectX500Principal().getEncoded());
+            X509Certificate cert = signCertificate(subject, keyPair.getPublic(), issuerDn, issuer.key(),
+                    withDomainFirst(domainName, sans), false, usage, 365);
+            return toGenerated(cert, keyPair.getPrivate(), subject.toString(),
+                    issuer.certificate().getSubjectX500Principal().getName());
+        } catch (Exception e) {
+            LOG.error("Failed to generate issued certificate", e);
+            throw new CertificateGenerationException("Certificate generation failed: " + e.getMessage(), e);
+        }
+    }
+
     private GeneratedCertificate buildCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm,
                                                   String issuerDn, boolean asCa, KeyPair suppliedKeyPair) {
         try {
             KeyPair keyPair = suppliedKeyPair != null ? suppliedKeyPair : generateKeyPair(keyAlgorithm);
-
-            Instant now = Instant.now();
-            Instant notBefore = now;
-            Instant notAfter = now.plus(365, ChronoUnit.DAYS);
-
-            BigInteger serial = new BigInteger(128, SECURE_RANDOM);
             String subjectDn = "CN=" + domainName;
-
-            X500Name issuer = new X500Name(issuerDn);
-            X500Name subject = new X500Name(subjectDn);
-
-            String signatureAlgorithm = keyAlgorithm.getAlgorithm().equals("EC")
-                ? "SHA512withECDSA"
-                : "SHA512WithRSA";
-
-            X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                issuer,
-                serial,
-                Date.from(notBefore),
-                Date.from(notAfter),
-                subject,
-                keyPair.getPublic()
-            );
-
-            // Add Subject Alternative Names
-            List<GeneralName> sanList = new ArrayList<>();
-            sanList.add(toGeneralName(domainName));
-            if (sans != null) {
-                for (String san : sans) {
-                    if (!san.equals(domainName)) {
-                        sanList.add(toGeneralName(san));
-                    }
-                }
-            }
-            GeneralNames generalNames = new GeneralNames(sanList.toArray(new GeneralName[0]));
-            certBuilder.addExtension(Extension.subjectAlternativeName, false, generalNames);
-
-            // Add Key Usage — a trust-anchor self-signed cert also needs keyCertSign so it can
-            // act as its own issuer; an ACM-style leaf only needs digitalSignature/keyEncipherment.
-            int keyUsageBits = KeyUsage.digitalSignature | KeyUsage.keyEncipherment;
-            if (asCa) {
-                keyUsageBits |= KeyUsage.keyCertSign;
-            }
-            certBuilder.addExtension(Extension.keyUsage, true, new KeyUsage(keyUsageBits));
-
-            // Add Basic Constraints — a trust anchor must be a CA so clients accept it as one.
-            certBuilder.addExtension(Extension.basicConstraints, true, new BasicConstraints(asCa));
-
-            // Signed with the subject's own private key. For generateCertificate() the issuer DN is
-            // a cosmetic Amazon DN (mimicking ACM); for generateSelfSignedCertificate() issuer ==
-            // subject, so the cert is a valid self-signed trust anchor.
-            ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm)
-                .build(keyPair.getPrivate());
-
-            X509CertificateHolder certHolder = certBuilder.build(signer);
-            X509Certificate cert = new JcaX509CertificateConverter()
-                .getCertificate(certHolder);
-
-            String certPem = toPem(cert);
-            String keyPem = toPem(keyPair.getPrivate());
-
-            return new GeneratedCertificate(
-                certPem,
-                keyPem,
-                serial.toString(),
-                notBefore,
-                notAfter,
-                subjectDn,
-                issuerDn,
-                signatureAlgorithm
-            );
-
+            // Signed with the subject's own key, as before: generateCertificate keeps its cosmetic
+            // Amazon issuer DN, generateSelfSignedCertificate keeps issuer == subject.
+            X509Certificate cert = signCertificate(new X500Name(subjectDn), keyPair.getPublic(),
+                    new X500Name(issuerDn), keyPair.getPrivate(), withDomainFirst(domainName, sans), asCa, null, 365);
+            return toGenerated(cert, keyPair.getPrivate(), subjectDn, issuerDn);
         } catch (Exception e) {
             LOG.error("Failed to generate certificate", e);
             throw new CertificateGenerationException("Certificate generation failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * The one place a certificate is signed. Everything else in this class, and
+     * {@code CloudHsmV2Service}, goes through here.
+     *
+     * @param sans  DNS names or IP addresses, written once each in order; empty for a CA
+     * @param asCa  sets {@code BasicConstraints(cA)}, {@code keyCertSign} and {@code cRLSign}
+     * @param usage EKU for a leaf, {@code null} for a CA or a leaf without one
+     */
+    public X509Certificate signCertificate(X500Name subject, PublicKey subjectKey, X500Name issuerDn,
+                                           PrivateKey issuerKey, List<String> sans, boolean asCa,
+                                           LeafUsage usage, int validityDays) throws Exception {
+        Instant now = Instant.now();
+        BigInteger serial = new BigInteger(128, SECURE_RANDOM);
+        X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
+                issuerDn, serial, Date.from(now), Date.from(now.plus(validityDays, ChronoUnit.DAYS)),
+                subject, subjectKey);
+
+        if (sans != null && !sans.isEmpty()) {
+            List<GeneralName> sanList = new ArrayList<>();
+            for (String san : new LinkedHashSet<>(sans)) {
+                sanList.add(toGeneralName(san));
+            }
+            certBuilder.addExtension(Extension.subjectAlternativeName, false,
+                    new GeneralNames(sanList.toArray(new GeneralName[0])));
+        }
+
+        // keyEncipherment is an RSA key-transport bit; EC keys sign (and agree), they never encipher.
+        int keyUsageBits = KeyUsage.digitalSignature;
+        if ("RSA".equals(subjectKey.getAlgorithm())) {
+            keyUsageBits |= KeyUsage.keyEncipherment;
+        }
+        if (asCa) {
+            keyUsageBits |= KeyUsage.keyCertSign | KeyUsage.cRLSign;
+        }
+        certBuilder.addExtension(Extension.keyUsage, true, new KeyUsage(keyUsageBits));
+        certBuilder.addExtension(Extension.basicConstraints, true, new BasicConstraints(asCa));
+        if (usage == LeafUsage.SERVER) {
+            certBuilder.addExtension(Extension.extendedKeyUsage, false, new ExtendedKeyUsage(
+                    new KeyPurposeId[] {KeyPurposeId.id_kp_serverAuth, KeyPurposeId.id_kp_clientAuth}));
+        } else if (usage == LeafUsage.CLIENT) {
+            certBuilder.addExtension(Extension.extendedKeyUsage, false,
+                    new ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth));
+        }
+
+        String signatureAlgorithm = "EC".equals(issuerKey.getAlgorithm()) ? "SHA512withECDSA" : "SHA512WithRSA";
+        ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm).build(issuerKey);
+        X509CertificateHolder holder = certBuilder.build(signer);
+        return new JcaX509CertificateConverter().getCertificate(holder);
+    }
+
+    private static List<String> withDomainFirst(String domainName, List<String> sans) {
+        List<String> allSans = new ArrayList<>();
+        allSans.add(domainName);
+        if (sans != null) {
+            allSans.addAll(sans);
+        }
+        return allSans;
+    }
+
+    /**
+     * Metadata comes from the certificate, not from the arguments: the signature algorithm is the
+     * issuer's (an RSA CA signing an EC leaf yields SHA512WITHRSA, spelled in upper case as ACM
+     * does), and ACM shows the serial as colon-separated hex ({@code 07:71:71:f4:...}).
+     */
+    private GeneratedCertificate toGenerated(X509Certificate cert, PrivateKey key, String subjectDn,
+                                             String issuerDn) throws Exception {
+        return new GeneratedCertificate(
+                toPem(cert),
+                toPem(key),
+                colonHex(cert.getSerialNumber()),
+                cert.getNotBefore().toInstant(),
+                cert.getNotAfter().toInstant(),
+                subjectDn,
+                issuerDn,
+                cert.getSigAlgName().toUpperCase(Locale.ROOT));
+    }
+
+    static String colonHex(BigInteger serial) {
+        String hex = serial.toString(16);
+        if (hex.length() % 2 == 1) {
+            hex = "0" + hex;
+        }
+        return String.join(":", hex.split("(?<=\\G..)"));
     }
 
     private KeyPair generateKeyPair(KeyAlgorithm keyAlgorithm) throws Exception {
@@ -244,7 +315,7 @@ public class CertificateGenerator {
         return IP_ADDRESS_PATTERN.matcher(value).matches();
     }
 
-    private String toPem(Object obj) throws Exception {
+    public String toPem(Object obj) throws Exception {
         StringWriter sw = new StringWriter();
         try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
             pemWriter.writeObject(obj);
