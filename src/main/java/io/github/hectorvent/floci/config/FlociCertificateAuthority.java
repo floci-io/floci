@@ -166,8 +166,9 @@ public final class FlociCertificateAuthority {
     }
 
     /**
-     * Writes a private key so that no other user can read it at any point: the file is created
-     * owner-only where the file system supports POSIX permissions, and re-tightened otherwise.
+     * Writes a private key so that, where the file system has POSIX permissions, no other user can
+     * read it at any point: the file is created owner-only before the first byte is written. A
+     * file system without POSIX permissions gets the platform default and a WARN.
      */
     static void writePrivateKey(Path keyFile, String pem) throws IOException {
         Files.deleteIfExists(keyFile);

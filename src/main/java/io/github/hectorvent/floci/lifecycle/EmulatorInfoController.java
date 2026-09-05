@@ -102,21 +102,25 @@ public class EmulatorInfoController {
     }
 
     /**
-     * The trust anchor for Floci's HTTPS endpoint in PEM. With the default configuration that is
-     * the local root CA: trust it once ({@code AWS_CA_BUNDLE}, {@code NODE_EXTRA_CA_CERTS}, a
-     * keychain) and every certificate Floci issues validates. With a user-provided certificate
-     * ({@code floci.tls.cert-path}) it is that certificate file, the same file the Lambda launcher
-     * mounts into containers, so no local CA is created that could not validate the endpoint.
+     * The PEM a client needs to trust Floci. With the default configuration that is the local root
+     * CA alone: it signs the HTTPS certificate and every certificate Floci issues. With a
+     * user-provided certificate ({@code floci.tls.cert-path}) the HTTPS endpoint is signed by that
+     * certificate's issuer instead, so the response is a bundle: the user certificate file first
+     * (the same file the Lambda launcher mounts into containers), then the local CA, which still
+     * signs what Floci itself issues. Trust the file once ({@code AWS_CA_BUNDLE},
+     * {@code NODE_EXTRA_CA_CERTS}, a keychain) and both validate.
      */
     @GET
     @Path("/ca.pem")
     @Produces(MediaType.TEXT_PLAIN)
     public String caPem() throws IOException {
+        String localCa = certificateAuthority.caPem();
         Optional<String> userCertificate = userCertificatePath();
-        if (userCertificate.isPresent()) {
-            return Files.readString(java.nio.file.Path.of(userCertificate.get()));
+        if (userCertificate.isEmpty()) {
+            return localCa;
         }
-        return certificateAuthority.caPem();
+        String userPem = Files.readString(java.nio.file.Path.of(userCertificate.get()));
+        return userPem.endsWith("\n") ? userPem + localCa : userPem + "\n" + localCa;
     }
 
     /** Set when TLS serves a user-provided certificate, the same condition {@code TlsConfigSource} applies. */

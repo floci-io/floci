@@ -377,6 +377,30 @@ class TlsCertificateHostnameTest {
     }
 
     @Test
+    void resolvedTlsDirIsClearedByABootThatDoesNotIssueALeaf() throws Exception {
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", tempDir.toString());
+        new TlsConfigSource();
+        assertEquals(tempDir.resolve("tls"), TlsConfigSource.resolvedTlsDir());
+
+        System.setProperty("floci.tls.enabled", "false");
+        new TlsConfigSource();
+        assertNull(TlsConfigSource.resolvedTlsDir(), "TLS off: nothing was laid down");
+
+        Path userCert = tempDir.resolve("user.crt");
+        Path userKey = tempDir.resolve("user.key");
+        var user = new CertificateGenerator().generateCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+        Files.writeString(userCert, user.certificatePem());
+        Files.writeString(userKey, user.privateKeyPem());
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.cert-path", userCert.toString());
+        System.setProperty("floci.tls.key-path", userKey.toString());
+        new TlsConfigSource();
+        assertNull(TlsConfigSource.resolvedTlsDir(), "user certificate: nothing was laid down");
+    }
+
+    @Test
     void legacySelfSignedLeafIsReplacedByCaIssuedOne() throws Exception {
         System.setProperty("floci.tls.enabled", "true");
         System.setProperty("floci.tls.self-signed", "true");

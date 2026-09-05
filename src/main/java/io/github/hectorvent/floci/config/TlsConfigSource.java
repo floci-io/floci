@@ -58,12 +58,17 @@ public class TlsConfigSource implements ConfigSource {
 
     private final Map<String, String> properties = new HashMap<>();
 
-    /** The directory the bootstrap used for CA and leaf, or null when it did not run the self-signed branch. */
+    /**
+     * The directory the most recent bootstrap used for CA and leaf, or null when that bootstrap did
+     * not run the self-signed branch (TLS off, or a user-provided certificate). Reset on every
+     * construction so a later boot in the same JVM never sees a stale value.
+     */
     static Path resolvedTlsDir() {
         return resolvedTlsDir;
     }
 
     public TlsConfigSource() {
+        resolvedTlsDir = null;
         String enabled = resolveProperty("floci.tls.enabled", "false");
         if (!"true".equalsIgnoreCase(enabled)) {
             LOG.debug("TLS disabled — TlsConfigSource inactive");

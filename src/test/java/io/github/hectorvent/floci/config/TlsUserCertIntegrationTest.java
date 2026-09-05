@@ -59,10 +59,7 @@ class TlsUserCertIntegrationTest {
     }
 
     @Test
-    void caPemReturnsTheUserCertificateAndCreatesNoLocalCa() throws Exception {
-        Path localCa = Path.of("/tmp/floci-tls-usercert-test-data/tls/floci-root-ca.crt");
-        Files.deleteIfExists(localCa);
-
+    void caPemReturnsTheUserCertificateFollowedByTheLocalCa() throws Exception {
         String pem = given()
             .when()
                 .get("/_floci/ca.pem")
@@ -71,9 +68,19 @@ class TlsUserCertIntegrationTest {
                 .contentType(org.hamcrest.Matchers.startsWith("text/plain"))
                 .extract().asString();
 
-        org.junit.jupiter.api.Assertions.assertEquals(Files.readString(UserCertProfile.CERT_FILE), pem,
-                "with a user certificate, ca.pem is that file: the local CA could not validate the endpoint");
-        org.junit.jupiter.api.Assertions.assertFalse(Files.exists(localCa), "no local CA is created in custom-cert mode");
+        String userPem = Files.readString(UserCertProfile.CERT_FILE);
+        org.junit.jupiter.api.Assertions.assertTrue(pem.startsWith(userPem),
+                "the user certificate, which signs the HTTPS endpoint, comes first");
+        var bundle = java.security.cert.CertificateFactory.getInstance("X.509")
+                .generateCertificates(new java.io.ByteArrayInputStream(pem.getBytes(java.nio.charset.StandardCharsets.US_ASCII)))
+                .stream().map(java.security.cert.X509Certificate.class::cast).toList();
+        org.junit.jupiter.api.Assertions.assertEquals(2, bundle.size(), "user certificate plus the local CA");
+        java.security.cert.X509Certificate localCa = bundle.get(1);
+        org.junit.jupiter.api.Assertions.assertTrue(localCa.getBasicConstraints() >= 0, "the local CA is a CA");
+        org.junit.jupiter.api.Assertions.assertEquals("CN=Floci Local CA", localCa.getSubjectX500Principal().getName());
+        org.junit.jupiter.api.Assertions.assertEquals(Files.readString(
+                Path.of("/tmp/floci-tls-usercert-test-data/tls/floci-root-ca.crt")), pem.substring(userPem.length()).stripLeading(),
+                "the local CA served is the one on disk");
     }
 
     @Test
