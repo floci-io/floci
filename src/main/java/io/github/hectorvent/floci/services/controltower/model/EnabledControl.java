@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.controltower.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.Map;
 
+@RegisterForReflection
 public class EnabledControl {
     private String arn;
     private String controlIdentifier;
