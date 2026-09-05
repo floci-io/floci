@@ -978,7 +978,7 @@ class RuntimeApiServerTest {
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, next.statusCode());
 
-        // The extension's first poll arrives after the dispatch already happened — it must find
+        // The extension's first poll arrives after the dispatch already happened, so it must find
         // the event waiting rather than parking forever.
         HttpResponse<String> eventResponse = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
@@ -1033,7 +1033,7 @@ class RuntimeApiServerTest {
      * Case 2 of the #2573 fix, and the maintainer's stated requirement: sendInvocation()'s
      * onFailure requeues the invocation for redelivery to a second /next poller. Since
      * notifyExtensionsOfInvoke() is gated on the write's onSuccess, the failed first attempt must
-     * not have fired it — only the second, successful write should, so the extension sees exactly
+     * not have fired it. Only the second, successful write should, so the extension sees exactly
      * one INVOKE for the requestId, never two. Forces the first write to fail the same way
      * {@link #sendInvocation_writeFails_requeuesAndClearsInFlight} does, then counts
      * beforeSendInvocationWrite calls to prove the redelivery actually happened rather than the
@@ -1173,14 +1173,14 @@ class RuntimeApiServerTest {
         assertTrue(quiesceReachedHook.await(5, TimeUnit.SECONDS),
                 "quiesce should have set stopped=true and queued SHUTDOWN before releasing its lock");
 
-        // Let the runtime write finish now — its onSuccess fires notifyExtensionsOfInvoke() while
+        // Let the runtime write finish now: its onSuccess fires notifyExtensionsOfInvoke() while
         // quiesce is still frozen just past committing stopped=true.
         releaseWrite.countDown();
         Thread.sleep(200);
         releaseQuiesce.countDown();
         quiesceDone.get(5, TimeUnit.SECONDS);
 
-        // Only the SHUTDOWN quiesce queued should be there — no INVOKE snuck in behind it.
+        // Only the SHUTDOWN quiesce queued should be there, no INVOKE snuck in behind it.
         HttpResponse<String> first = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
                         .header("Lambda-Extension-Identifier", extensionId)
