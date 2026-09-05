@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.lifecycle;
 
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import jakarta.inject.Inject;
@@ -27,16 +28,19 @@ public class EmulatorInfoController {
 
     private final StorageFactory storageFactory;
     private final Instance<Resettable> resettables;
+    private final FlociCertificateAuthority certificateAuthority;
 
     @Inject
     public EmulatorInfoController(ServiceRegistry serviceRegistry,
                                   InitLifecycleState initLifecycleState,
                                   StorageFactory storageFactory,
-                                  Instance<Resettable> resettables) {
+                                  Instance<Resettable> resettables,
+                                  FlociCertificateAuthority certificateAuthority) {
         this.serviceRegistry = serviceRegistry;
         this.initLifecycleState = initLifecycleState;
         this.storageFactory = storageFactory;
         this.resettables = resettables;
+        this.certificateAuthority = certificateAuthority;
         this.version = resolveVersion();
     }
 
@@ -88,6 +92,17 @@ public class EmulatorInfoController {
     @Path("/config")
     public Response config() {
         return Response.ok(Map.of()).build();
+    }
+
+    /**
+     * The local root CA in PEM. Trust this once ({@code AWS_CA_BUNDLE}, {@code NODE_EXTRA_CA_CERTS},
+     * a keychain) and every certificate Floci issues validates.
+     */
+    @GET
+    @Path("/ca.pem")
+    @Produces(MediaType.TEXT_PLAIN)
+    public String caPem() {
+        return certificateAuthority.caPem();
     }
 
     @POST
