@@ -222,8 +222,8 @@ Current limitations:
   `isUndefined()`, `encode()`, `get_thing_shadow()`, arithmetic, array indexing, `IN`, `CASE`, and
   `${}` substitution templates in action fields. A rule using any of them takes the unparsed path
   described above.
-- `awsIotSqlVersion` in the rule payload is neither stored nor echoed back. The versions differ in
-  how `SELECT *` treats arrays, which Floci does not model.
+- `awsIotSqlVersion` is stored and echoed back but not acted on. The versions differ in how
+  `SELECT *` treats arrays, which Floci does not model.
 - Less common AWS IoT rule action types are follow-up scope.
 
 Open follow-up scope for phase 7 unless explicitly deferred:
