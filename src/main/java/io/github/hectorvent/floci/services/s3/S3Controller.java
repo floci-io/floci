@@ -2234,7 +2234,7 @@ public class S3Controller {
                 .elem("ETag", copy.getETag());
         appendChecksumElements(xmlBuilder, copy.getChecksum());
         String xml = xmlBuilder.end("CopyObjectResult").build();
-        Response.ResponseBuilder response = Response.ok(xml);
+        Response.ResponseBuilder response = Response.ok(xml).type(MediaType.APPLICATION_XML);
         appendSseCustomerHeaders(response, copy);
         return response.build();
     }

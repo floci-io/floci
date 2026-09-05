@@ -1127,6 +1127,7 @@ class S3MultipartIntegrationTest {
             .put("/" + BUCKET + "/copy-of-multipart.bin")
         .then()
             .statusCode(200)
+            .contentType("application/xml")
             // the copy is a single object: a plain MD5 ETag, not the "-2" of the multipart source
             .body(matchesPattern("(?s).*<ETag>&quot;[0-9a-f]{32}&quot;</ETag>.*"));
 
