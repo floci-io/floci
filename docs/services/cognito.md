@@ -101,6 +101,24 @@ always returns it.
 | UpdateUserPoolDomain | Replaces a custom domain's certificate or changes the managed login version in place. The domain keeps its `CloudFrontDistribution`, and its `InUseBy` entry moves to the new certificate. |
 | DeleteUserPoolDomain | Deletes a domain from its user pool. |
 
+#### Custom domains
+
+A domain created with `CustomDomainConfig` answers the OAuth endpoints on that host, as on AWS:
+
+```
+POST https://auth.example.localhost.floci.io/oauth2/token
+GET  https://auth.example.localhost.floci.io/oauth2/userInfo
+```
+
+Requests are matched on the `Host` header, so the name must resolve to Floci (any
+`*.localhost.floci.io` does) and, for `https`, TLS must be enabled. The domain pins its user pool and
+the account that created it, since these requests carry no AWS credential: a `client_id` from
+another pool is refused with `invalid_client`, and an access token issued by another pool with
+`invalid_token`. Domain names are unique across all accounts, as on AWS. The pool's `openid-configuration` advertises the custom-domain
+URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
+routed, since that hostname never reaches Floci. `/oauth2/authorize`, `/login` and `/logout` are not
+served on any host.
+
 ### Log Delivery
 
 | Action | Description |
@@ -239,7 +257,8 @@ and returned rather than rendered. Two divergences follow from that:
 - It doesn't require a Cognito domain.
 - It returns only `access_token`, `token_type`, and `expires_in`.
 - It validates requested OAuth scopes against the app client's `AllowedOAuthScopes` and the pool's registered resource-server scopes.
-- It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`.
+- It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`, or
+  `https://<domain>/oauth2/token` when the pool has a custom domain (see Custom domains above).
 
 ## Sign-in Identifiers (`UsernameAttributes`)
 

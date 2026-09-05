@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
+import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
@@ -32,6 +33,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -3438,6 +3444,139 @@ class CognitoServiceTest {
         assertEquals("InvalidParameterException", failure.getErrorCode());
         assertEquals(CERTIFICATE_ARN, service.describeUserPoolDomain("auth.example.com").getCertificateArn());
         verify(acmService, never()).removeInUseBy(any(), any(), any());
+    }
+
+    @Test
+    void findCustomDomainMatchesOnlyCustomDomains() {
+        String poolId = createPoolWithCustomDomain("auth.teos.localhost.floci.io").getId();
+        service.createUserPoolDomain("teos-prefix", poolId, null, null);
+
+        assertEquals(poolId, service.findCustomDomain("auth.teos.localhost.floci.io").orElseThrow().getUserPoolId());
+        assertEquals(poolId, service.findCustomDomain("AUTH.teos.localhost.floci.io").orElseThrow().getUserPoolId());
+        assertTrue(service.findCustomDomain("teos-prefix").isEmpty());
+        assertTrue(service.findCustomDomain("nobody.localhost.floci.io").isEmpty());
+        assertTrue(service.findCustomDomain(null).isEmpty());
+        assertEquals("auth.teos.localhost.floci.io",
+                service.findCustomDomainForPool(poolId).orElseThrow().getDomain());
+    }
+
+    /** The uniqueness check and the write are one step, so a burst of creates leaves one owner. */
+    @Test
+    void concurrentCreatesOfTheSameDomainLetExactlyOneWin() throws Exception {
+        int threads = 16;
+        List<String> pools = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            pools.add(service.createUserPool(Map.of("PoolName", "race-" + i), "us-east-1").getId());
+        }
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Boolean>> outcomes = new ArrayList<>();
+            for (String poolId : pools) {
+                outcomes.add(executor.submit(() -> {
+                    start.await();
+                    try {
+                        service.createUserPoolDomain("auth.race.localhost.floci.io", poolId,
+                                Map.of("CertificateArn", CERTIFICATE_ARN), null);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("InvalidParameterException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int winners = 0;
+            for (Future<Boolean> outcome : outcomes) {
+                if (outcome.get(10, TimeUnit.SECONDS)) {
+                    winners++;
+                }
+            }
+            assertEquals(1, winners);
+            verify(acmService, times(1)).addInUseBy(eq(CERTIFICATE_ARN), any(), eq("us-east-1"));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** Two accounts holding the same name can only come from data persisted before names were global. */
+    @Test
+    void ambiguousCustomDomainIsNotRouted() {
+        InMemoryStorage<String, UserPoolDomain> domains = new InMemoryStorage<>();
+        domains.put("111111111111/auth.dup.localhost.floci.io", customDomain("auth.dup.localhost.floci.io", "us-east-1_a"));
+        domains.put("222222222222/auth.dup.localhost.floci.io", customDomain("auth.dup.localhost.floci.io", "us-east-1_b"));
+        CognitoService ambiguous = new CognitoService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), domains, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566", regionResolver, null,
+                acmService, null, null);
+
+        assertTrue(ambiguous.findCustomDomain("auth.dup.localhost.floci.io").isEmpty());
+    }
+
+    private static UserPoolDomain customDomain(String name, String poolId) {
+        UserPoolDomain domain = new UserPoolDomain();
+        domain.setDomain(name);
+        domain.setUserPoolId(poolId);
+        domain.setCertificateArn(CERTIFICATE_ARN);
+        return domain;
+    }
+
+    @Test
+    void findCustomDomainForPoolIgnoresPrefixDomainsAndOtherPools() {
+        String prefixOnly = service.createUserPool(Map.of("PoolName", "prefix-only"), "us-east-1").getId();
+        service.createUserPoolDomain("prefix-only", prefixOnly, null, null);
+        createPoolWithCustomDomain("auth.other.localhost.floci.io");
+
+        assertTrue(service.findCustomDomainForPool(prefixOnly).isEmpty());
+    }
+
+    @Test
+    void clientCredentialsTokenIsRefusedWhenTheClientBelongsToAnotherPool() {
+        String poolA = service.createUserPool(Map.of("PoolName", "pool-a"), "us-east-1").getId();
+        String poolB = service.createUserPool(Map.of("PoolName", "pool-b"), "us-east-1").getId();
+        ResourceServerScope read = new ResourceServerScope();
+        read.setScopeName("read");
+        service.createResourceServer(poolB, "notes", "Notes", List.of(read));
+        UserPoolClient clientB = service.createUserPoolClient(poolB, "b", true, true,
+                List.of("client_credentials"), List.of("notes/read"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.issueClientCredentialsToken(
+                clientB.getClientId(), clientB.getClientSecret(), null, poolA));
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+
+        assertNotNull(service.issueClientCredentialsToken(clientB.getClientId(), clientB.getClientSecret(), null, poolB)
+                .get("access_token"));
+        assertNotNull(service.issueClientCredentialsToken(clientB.getClientId(), clientB.getClientSecret(), null, null)
+                .get("access_token"));
+    }
+
+    /** The pool check precedes the secret check, so a wrong domain never reveals whether a secret is right. */
+    @Test
+    void poolScopeIsCheckedBeforeTheClientSecret() {
+        String poolA = service.createUserPool(Map.of("PoolName", "pool-a"), "us-east-1").getId();
+        String poolB = service.createUserPool(Map.of("PoolName", "pool-b"), "us-east-1").getId();
+        UserPoolClient clientB = service.createUserPoolClient(poolB, "b", true, true,
+                List.of("client_credentials"), List.of("openid"));
+
+        AwsException wrongPool = assertThrows(AwsException.class, () -> service.issueClientCredentialsToken(
+                clientB.getClientId(), "wrong-secret", null, poolA));
+        assertEquals("ResourceNotFoundException", wrongPool.getErrorCode());
+
+        AwsException rightPool = assertThrows(AwsException.class, () -> service.issueClientCredentialsToken(
+                clientB.getClientId(), "wrong-secret", null, poolB));
+        assertNotEquals("ResourceNotFoundException", rightPool.getErrorCode());
+    }
+
+    @Test
+    void endpointsUseTheCustomDomainWhenThePoolHasOne() {
+        String withDomain = createPoolWithCustomDomain("auth2.teos.localhost.floci.io").getId();
+        String without = service.createUserPool(Map.of("PoolName", "without-domain"), "us-east-1").getId();
+        service.createUserPoolDomain("prefix-only", without, null, null);
+
+        assertEquals("https://auth2.teos.localhost.floci.io/oauth2/token", service.getTokenEndpoint(withDomain));
+        assertEquals("https://auth2.teos.localhost.floci.io/oauth2/userInfo", service.getUserInfoEndpoint(withDomain));
+        assertEquals("http://localhost:4566/cognito-idp/oauth2/token", service.getTokenEndpoint(without));
+        assertEquals("http://localhost:4566/cognito-idp/oauth2/userInfo", service.getUserInfoEndpoint(without));
     }
 
     @Test
