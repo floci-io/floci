@@ -91,7 +91,7 @@ public class IotDataController {
                             byte[] payload) {
         // Unsigned or non-SigV4 publishes carry no usable region; both count as unresolved
         String region = regionResolver.resolveRegionFromAuthOrNull(headers.getHeaderString("Authorization"));
-        iotService.publish(topic, payload == null ? new byte[0] : payload, Boolean.TRUE.equals(retain), qos == null ? 0 : qos, region);
+        iotService.publish(topic, payload == null ? new byte[0] : payload, Boolean.TRUE.equals(retain), qos == null ? 0 : qos, region, null);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
