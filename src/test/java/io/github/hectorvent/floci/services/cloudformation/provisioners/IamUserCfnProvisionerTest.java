@@ -210,11 +210,117 @@ class IamUserCfnProvisionerTest {
     }
 
     @Test
-    void deletePropagatesUnexpectedException() {
-        when(iam.getUser("error-user"))
-                .thenThrow(new AwsException("InternalFailure", "Server error", 500));
+    void updateReconcilesRemovedGroupsManagedPoliciesAndInlinePolicies() {
+        IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        existing.getGroupNames().add("keep-group");
+        existing.getGroupNames().add("drop-group");
+        existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Keep");
+        existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
+        existing.getInlinePolicies().put("keep-inline", "{}");
+        existing.getInlinePolicies().put("drop-inline", "{}");
 
-        assertThrows(AwsException.class, () ->
-                provisioner.delete("AWS::IAM::User", "error-user", "us-east-1"));
+        when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getUser("my-user")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("my-user");
+        r.getAttributes().put("UserId", "AIDAuser");
+        r.getAttributes().put("__FlociGroups", "keep-group\ndrop-group");
+        r.getAttributes().put("__FlociManagedPolicyArns", "arn:aws:iam::aws:policy/Keep\narn:aws:iam::aws:policy/Drop");
+        r.getAttributes().put("__FlociInlinePolicyNames", "keep-inline\ndrop-inline");
+
+        provisioner.provision(r, props("""
+                {
+                  "UserName": "my-user",
+                  "Groups": ["keep-group"],
+                  "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Keep"],
+                  "Policies": [
+                    {
+                      "PolicyName": "keep-inline",
+                      "PolicyDocument": {"Version": "2012-10-17", "Statement": []}
+                    }
+                  ]
+                }
+                """), updateCtx("my-user"));
+
+        verify(iam).removeUserFromGroup("drop-group", "my-user");
+        verify(iam).detachUserPolicy("my-user", "arn:aws:iam::aws:policy/Drop");
+        verify(iam).deleteUserPolicy("my-user", "drop-inline");
+        verify(iam, never()).removeUserFromGroup("keep-group", "my-user");
+        verify(iam, never()).detachUserPolicy("my-user", "arn:aws:iam::aws:policy/Keep");
+        verify(iam, never()).deleteUserPolicy("my-user", "keep-inline");
+    }
+
+    @Test
+    void updateReconcilesPathChange() {
+        IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        when(iam.createUser(eq("my-user"), eq("/new-path/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getUser("my-user")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("my-user");
+        r.getAttributes().put("UserId", "AIDAuser");
+
+        provisioner.provision(r, props("""
+                {
+                  "UserName": "my-user",
+                  "Path": "/new-path/"
+                }
+                """), updateCtx("my-user"));
+
+        verify(iam).updateUser("my-user", null, "/new-path/", "AIDAuser");
+    }
+
+    @Test
+    void updateRefusesToAdoptReplacementUserWithDifferentUserId() {
+        IamUser replacement = new IamUser("AIDAnew-user", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getUser("my-user")).thenReturn(replacement);
+
+        StackResource r = resource();
+        r.setPhysicalId("my-user");
+        r.getAttributes().put("UserId", "AIDAold-user");
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                provisioner.provision(r, props("""
+                        {
+                          "UserName": "my-user"
+                        }
+                        """), updateCtx("my-user")));
+
+        assertEquals("EntityAlreadyExists", failure.getErrorCode());
+        verify(iam, never()).addUserToGroup(any(), any());
+        verify(iam, never()).attachUserPolicy(any(), any());
+    }
+
+    @Test
+    void failedUpdateRestoresPriorInlinePolicyAndDetachesNewManagedPolicy() {
+        IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        String priorDocument = "{\"Version\":\"2012-10-17\",\"Statement\":[\"prior\"]}";
+        existing.getInlinePolicies().put("first", priorDocument);
+        when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getUser("my-user")).thenReturn(existing);
+        doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
+                .when(iam).putUserPolicy(eq("my-user"), eq("second"), any());
+
+        StackResource r = resource();
+        r.setPhysicalId("my-user");
+        r.getAttributes().put("UserId", "AIDAuser");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "UserName": "my-user",
+                  "ManagedPolicyArns": ["arn:aws:iam::aws:policy/NewPolicy"],
+                  "Policies": [
+                    {"PolicyName": "first", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}},
+                    {"PolicyName": "second", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), updateCtx("my-user")));
+
+        verify(iam).attachUserPolicy("my-user", "arn:aws:iam::aws:policy/NewPolicy");
+        verify(iam).detachUserPolicy("my-user", "arn:aws:iam::aws:policy/NewPolicy");
+        verify(iam).putUserPolicy("my-user", "first", priorDocument);
+        verify(iam, never()).deleteUser("my-user");
     }
 }

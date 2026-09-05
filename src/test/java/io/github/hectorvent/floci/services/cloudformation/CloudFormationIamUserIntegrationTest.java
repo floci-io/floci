@@ -136,6 +136,157 @@ class CloudFormationIamUserIntegrationTest {
             .body(containsString("NoSuchEntity"));
     }
 
+    @Test
+    void updateStackReconcilesGroupsPoliciesAndPath() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String userName = "update-user-" + suffix;
+        String stackName = "cfn-update-user-stack-" + suffix;
+
+        // Pre-create two groups
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateGroup")
+            .formParam("GroupName", "group-a-" + suffix)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateGroup")
+            .formParam("GroupName", "group-b-" + suffix)
+        .when().post("/").then().statusCode(200);
+
+        String template1 = """
+                {
+                  "Resources": {
+                    "TestUser": {
+                      "Type": "AWS::IAM::User",
+                      "Properties": {
+                        "UserName": "%s",
+                        "Path": "/initial/",
+                        "Groups": ["group-a-%s", "group-b-%s"],
+                        "ManagedPolicyArns": [
+                          "arn:aws:iam::aws:policy/ReadOnlyAccess",
+                          "arn:aws:iam::aws:policy/PowerUserAccess"
+                        ],
+                        "Policies": [
+                          {
+                            "PolicyName": "keep-policy",
+                            "PolicyDocument": {"Version": "2012-10-17", "Statement": []}
+                          },
+                          {
+                            "PolicyName": "drop-policy",
+                            "PolicyDocument": {"Version": "2012-10-17", "Statement": []}
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+                """.formatted(userName, suffix, suffix);
+
+        String stackId = createStack(stackName, template1);
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        // Verify initial state
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetUser")
+            .formParam("UserName", userName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<Path>/initial/</Path>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListAttachedUserPolicies")
+            .formParam("UserName", userName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("ReadOnlyAccess"))
+            .body(containsString("PowerUserAccess"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListUserPolicies")
+            .formParam("UserName", userName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<member>keep-policy</member>"))
+            .body(containsString("<member>drop-policy</member>"));
+
+        // Update stack: change path to /updated/, drop group-b, drop PowerUserAccess, drop drop-policy
+        String template2 = """
+                {
+                  "Resources": {
+                    "TestUser": {
+                      "Type": "AWS::IAM::User",
+                      "Properties": {
+                        "UserName": "%s",
+                        "Path": "/updated/",
+                        "Groups": ["group-a-%s"],
+                        "ManagedPolicyArns": [
+                          "arn:aws:iam::aws:policy/ReadOnlyAccess"
+                        ],
+                        "Policies": [
+                          {
+                            "PolicyName": "keep-policy",
+                            "PolicyDocument": {"Version": "2012-10-17", "Statement": []}
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+                """.formatted(userName, suffix);
+
+        updateStack(stackName, template2);
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+        // Verify updated path
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetUser")
+            .formParam("UserName", userName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<Path>/updated/</Path>"));
+
+        // Verify managed policy PowerUserAccess was detached
+        String attachedPolicies = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListAttachedUserPolicies")
+            .formParam("UserName", userName)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertThat(attachedPolicies, containsString("ReadOnlyAccess"));
+        assertThat(attachedPolicies, org.hamcrest.Matchers.not(containsString("PowerUserAccess")));
+
+        // Verify drop-policy was deleted
+        String inlinePolicies = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListUserPolicies")
+            .formParam("UserName", userName)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertThat(inlinePolicies, containsString("<member>keep-policy</member>"));
+        assertThat(inlinePolicies, org.hamcrest.Matchers.not(containsString("<member>drop-policy</member>")));
+
+        // Verify group-b was removed
+        String userGroups = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "ListGroupsForUser")
+            .formParam("UserName", userName)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertThat(userGroups, containsString("group-a-" + suffix));
+        assertThat(userGroups, org.hamcrest.Matchers.not(containsString("group-b-" + suffix)));
+
+        deleteStack(stackName);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+    }
+
     private static String createStack(String stackName, String template) {
         return cfnQuery("CreateStack", stackName, template)
                 .then()
@@ -143,6 +294,12 @@ class CloudFormationIamUserIntegrationTest {
                 .extract()
                 .xmlPath()
                 .getString("CreateStackResponse.CreateStackResult.StackId");
+    }
+
+    private static void updateStack(String stackName, String template) {
+        cfnQuery("UpdateStack", stackName, template)
+                .then()
+                .statusCode(200);
     }
 
     private static void deleteStack(String stackName) {
