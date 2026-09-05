@@ -1,0 +1,5210 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Fast, free, open-source local AWS emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci/services/step-functions/">
+      
+      
+        <link rel="prev" href="../cloudcontrol/">
+      
+      
+        <link rel="next" href="../swf/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Step Functions - Floci</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#step-functions" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Floci" class="md-header__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Floci
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Step Functions
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testcontainers/" class="md-tabs__link">
+          
+  
+  
+  Testcontainers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../contributing/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Contributing
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Floci" class="md-nav__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    Floci
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/aws-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/terraform/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terraform
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/migrate-from-localstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrate from LocalStack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Images
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ports Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/multi-account/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Account Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/initialization-hooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Initialization Hooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_10" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_10" id="__nav_3_10_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ssm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSM Parameter Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SES
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3 Tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3vectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3 Vectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../efs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EFS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dynamodb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DynamoDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lambda-microvms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda MicroVMs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cognito/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cognito
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cognitoidentity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cognito Identity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudhsmv2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudHSM v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kinesis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kinesis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kinesisanalytics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Service for Apache Flink
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secrets-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudformation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFormation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudcontrol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Control API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Step Functions
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Step Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Actions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#execution-history-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution history events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#map-concurrency" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Map concurrency
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retry-policies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retry policies
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#timeouts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timeouts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#intrinsic-arguments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Intrinsic arguments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jsonata-nulls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSONata nulls
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#an-expression-that-returns-nothing-fails-the-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An expression that returns nothing fails the state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jsonata-functions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSONata functions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#execution-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nested-workflows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nested workflows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#aws-sdk-task-integrations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AWS SDK task integrations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publishing-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publishing events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jsonata-expressions-are-validated-when-the-state-machine-is-created" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSONata expressions are validated when the state machine is created
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mocked-service-integrations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mocked service integrations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SWF
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    STS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../organizations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Organizations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../controltower/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Tower
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Service Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elasticache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ElastiCache
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memorydb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MemoryDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rds/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rds-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS Data API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../msk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MSK (Kafka)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../amazonmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon MQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lakeformation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lake Formation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../neptune/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Neptune
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docdb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DocumentDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../athena/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Athena
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redshift/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redshift
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firehose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Firehose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eventbridge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pipes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Pipes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudwatch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rum/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch RUM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../managed-prometheus/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Prometheus (AMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardduty/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GuardDuty
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../connect/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../acm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ACM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ecs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ecr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-groups-tagging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Groups Tagging API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-explorer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Explorer 2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EKS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mwaa/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MWAA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../opensearch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenSearch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ec2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EC2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lightsail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lightsail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../appconfig/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppConfig
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bedrock-runtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bedrock Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bedrock-agentcore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bedrock AgentCore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ELB v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elb-classic/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ELB Classic (v1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../autoscaling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auto Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../applicationautoscaling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Application Auto Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elastic-beanstalk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Elastic Beanstalk
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codebuild/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeBuild
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../batch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Batch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codedeploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeDeploy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codegurureviewer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeGuru Reviewer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codepipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodePipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../servicequotas/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Quotas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ram/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS RAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Backup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS FIS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudtrail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudTrail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudfront/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFront
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../route53/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Route53
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../route53resolver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Route 53 Resolver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Cloud Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS IoT Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../appsync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppSync
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transfer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transfer Family
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Config
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../emr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EMR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../emr-serverless/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EMR Serverless
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wafv2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WAF v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-firewall/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Network Firewall
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../textract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Textract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transcribe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transcribe
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../comprehend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comprehend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rekognition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rekognition
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../translate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Translate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pricing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pricing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ce/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Explorer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cur/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost and Usage Reports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bcm-data-exports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BCM Data Exports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testcontainers
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testcontainers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/java/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Java
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/nodejs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Node.js / TypeScript
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/python/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/go/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Go
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Actions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#execution-history-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution history events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#map-concurrency" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Map concurrency
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retry-policies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retry policies
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#timeouts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timeouts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#intrinsic-arguments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Intrinsic arguments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jsonata-nulls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSONata nulls
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#an-expression-that-returns-nothing-fails-the-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An expression that returns nothing fails the state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jsonata-functions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSONata functions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#execution-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nested-workflows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nested workflows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#aws-sdk-task-integrations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AWS SDK task integrations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publishing-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publishing events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jsonata-expressions-are-validated-when-the-state-machine-is-created" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSONata expressions are validated when the state machine is created
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mocked-service-integrations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mocked service integrations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="step-functions">Step Functions</h1>
+<p><strong>Protocol:</strong> AWS JSON 1.0 (<code>X-Amz-Target: AWSStepFunctions.*</code>)
+<strong>Endpoint:</strong> <code>POST http://localhost:4566/</code></p>
+<h2 id="supported-actions">Supported Actions</h2>
+<!-- floci:actions:start -->
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CreateStateMachine</code></td>
+<td>Create a state machine (Standard or Express)</td>
+</tr>
+<tr>
+<td><code>UpdateStateMachine</code></td>
+<td>Update definition, role, logging, tracing, or encryption settings and optionally publish a version</td>
+</tr>
+<tr>
+<td><code>DescribeStateMachine</code></td>
+<td>Get state machine definition and metadata</td>
+</tr>
+<tr>
+<td><code>ListStateMachines</code></td>
+<td>List all state machines</td>
+</tr>
+<tr>
+<td><code>DeleteStateMachine</code></td>
+<td>Delete a state machine</td>
+</tr>
+<tr>
+<td><code>PublishStateMachineVersion</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>ListStateMachineVersions</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>DeleteStateMachineVersion</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>ValidateStateMachineDefinition</code></td>
+<td>Validate an ASL definition without creating a state machine</td>
+</tr>
+<tr>
+<td><code>StartExecution</code></td>
+<td>Start a new execution</td>
+</tr>
+<tr>
+<td><code>StartSyncExecution</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>DescribeExecution</code></td>
+<td>Get execution status and output</td>
+</tr>
+<tr>
+<td><code>ListExecutions</code></td>
+<td>List executions for a state machine</td>
+</tr>
+<tr>
+<td><code>StopExecution</code></td>
+<td>Stop a running execution</td>
+</tr>
+<tr>
+<td><code>GetExecutionHistory</code></td>
+<td>Get the full event history of an execution</td>
+</tr>
+<tr>
+<td><code>DescribeMapRun</code></td>
+<td>Get the item and execution counters of a distributed Map run</td>
+</tr>
+<tr>
+<td><code>SendTaskSuccess</code></td>
+<td>Report task success (for <code>.waitForTaskToken</code> tasks)</td>
+</tr>
+<tr>
+<td><code>SendTaskFailure</code></td>
+<td>Report task failure</td>
+</tr>
+<tr>
+<td><code>SendTaskHeartbeat</code></td>
+<td>Send a heartbeat for long-running tasks</td>
+</tr>
+<tr>
+<td><code>CreateActivity</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>DeleteActivity</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>DescribeActivity</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>ListActivities</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>GetActivityTask</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>ListTagsForResource</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>TagResource</code></td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>UntagResource</code></td>
+<td>-</td>
+</tr>
+</tbody>
+</table>
+<!-- floci:actions:end -->
+
+<p><code>UpdateStateMachine</code> returns the new revision ID and update timestamp. CloudFormation updates
+definition, role, logging, tracing, encryption, and tags without replacing the state machine;
+changes to <code>StateMachineName</code> or <code>StateMachineType</code> use replacement semantics.</p>
+<h2 id="execution-history-events">Execution history events</h2>
+<p><code>GetExecutionHistory</code> emits an event family around a Task state's <code>TaskStateEntered</code> and
+<code>TaskStateExited</code> pair. Which family depends on the resource type.</p>
+<ul>
+<li>A service integration ARN (<code>arn:aws:states:::...</code>) emits <code>TaskScheduled</code>, <code>TaskStarted</code>,
+  and then <code>TaskSucceeded</code> or <code>TaskFailed</code>. <code>taskScheduledEventDetails</code> carries
+  <code>resourceType</code>, <code>resource</code>, <code>region</code>, and <code>parameters</code>. <code>parameters</code> is the resolved
+  <code>Parameters</code> or <code>Arguments</code> payload, serialized as a JSON string. <code>timeoutInSeconds</code> and
+  <code>heartbeatInSeconds</code> appear only when the state sets <code>TimeoutSeconds</code> or
+  <code>HeartbeatSeconds</code> as a literal number.</li>
+<li>A direct Lambda function ARN emits <code>LambdaFunctionScheduled</code>, <code>LambdaFunctionStarted</code>,
+  and then <code>LambdaFunctionSucceeded</code> or <code>LambdaFunctionFailed</code>. <code>LambdaFunctionScheduled</code>
+  carries <code>resource</code> and <code>input</code>. <code>resource</code> holds the full function ARN. <code>LambdaFunctionStarted</code>
+  carries no details at all. This matches AWS.</li>
+<li>An activity ARN emits the equivalent <code>Activity*</code> family.</li>
+</ul>
+<p>A <code>Retry</code> re-entry emits its own Scheduled, Started, and Failed triple for each attempt. A
+mocked Task (<code>SFN_MOCK_CONFIG</code>) emits the same events as a real one, because Step Functions
+Local does the same.</p>
+<p>Every event's <code>previousEventId</code> points to the id of the event right before it. The one
+exception is the first state's <code>*StateEntered</code> event. Its <code>previousEventId</code> is <code>0</code>. That
+matches <code>ExecutionStarted</code>, which is always <code>id: 1, previousEventId: 0</code>.</p>
+<p><code>inputDetails</code> appears on <code>ExecutionStarted</code>, on <code>stateEnteredEventDetails</code>, and on
+<code>LambdaFunctionScheduled</code>/<code>ActivityScheduled</code>. <code>outputDetails</code> appears on
+<code>stateExitedEventDetails</code>, on <code>executionSucceededEventDetails</code>, and on
+<code>taskSucceededEventDetails</code>/<code>lambdaFunctionSucceededEventDetails</code>. Both are always
+<code>{"truncated": false}</code>. Floci never truncates a payload, so the value never changes.
+When the request sets <code>includeExecutionData</code> to false, the details objects stay but lose
+<code>input</code>, <code>inputDetails</code>, <code>output</code>, and <code>outputDetails</code>. Every other field stays, including
+<code>taskScheduledEventDetails.parameters</code>. This matches AWS.</p>
+<p>A few gaps remain. <code>TaskStarted</code>, <code>LambdaFunctionStarted</code>, and <code>ActivityStarted</code> fire at
+scheduling time, not when a worker actually picks up the task. Events inside a <code>Parallel</code> or
+<code>Map</code> branch are not recorded in the parent execution's history. <code>TaskSubmitted</code>, which real
+AWS emits for <code>.sync</code> and <code>.waitForTaskToken</code> integrations, is not emitted yet.</p>
+<h2 id="map-concurrency">Map concurrency</h2>
+<p>Map states honor <code>MaxConcurrency</code> and, for JSONPath state machines, <code>MaxConcurrencyPath</code>.
+JSONata state machines may supply <code>MaxConcurrency</code> as an expression. A value of <code>0</code>, or an
+omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline Map states and
+10,000 for Distributed Map states. <code>MaxConcurrency: 1</code> runs iterations sequentially.</p>
+<p>Results remain in input order even when iterations finish out of order. If an iteration fails,
+the Map state fails promptly, cancels its active sibling iterations, and does not start queued
+iterations.</p>
+<h2 id="retry-policies">Retry policies</h2>
+<p><code>Task</code>, <code>Parallel</code>, and <code>Map</code> states honor their <code>Retry</code> field. <code>ErrorEquals</code> matching
+follows AWS semantics, including the <code>States.ALL</code> and <code>States.TaskFailed</code> wildcards.
+<code>States.Runtime</code> is never retried. AWS defaults apply when fields are omitted
+(<code>MaxAttempts</code> 3, <code>IntervalSeconds</code> 1, <code>BackoffRate</code> 2.0), <code>MaxDelaySeconds</code> is honored,
+and each retrier keeps its own attempt counter. <code>Retry</code> is evaluated before <code>Catch</code>, and
+<code>$$.State.RetryCount</code> increments per attempt. Attempt counts, defaults, and backoff
+timing were verified against real AWS Step Functions.</p>
+<p>A state with no <code>Retry</code> array runs exactly once. This is what makes CDK-generated provider-framework
+workflows converge: the <code>framework-isComplete-task</code> throws on every not-yet-complete poll and relies on
+<code>Retry</code> to poll again until the custom resource reports done — see
+<a href="../cloudformation/#custom-resources-and-the-cdk-provider-framework">CloudFormation custom resources</a>.</p>
+<p><code>JitterStrategy</code> supports <code>NONE</code> (the default) and <code>FULL</code>. <code>FULL</code> draws the delay
+uniformly between zero and the computed delay, as on AWS. One deviation. The delay
+between attempts is capped at 30 seconds, the same cap Floci applies to <code>Wait</code> states,
+so emulated runs stay fast.</p>
+<h2 id="timeouts">Timeouts</h2>
+<p>ASL carries two <code>TimeoutSeconds</code> fields and Floci enforces both, in the two terminal shapes
+AWS uses. The state machine's own field bounds every state; a <code>Task</code>'s own field only bounds
+one that waits for a task token — an activity, or a <code>.waitForTaskToken</code> integration. A Lambda
+or other SDK task that returns directly is not bound by it.</p>
+<p>The state machine's own <code>TimeoutSeconds</code> is the whole execution's budget. It is checked before
+every state and inside a <code>Wait</code>, so a <code>Wait</code> longer than what is left is cut rather than slept
+out. The execution ends <code>TIMED_OUT</code> with <code>stopDate</code> set and no <code>error</code> and no <code>cause</code> at all;
+<code>States.Timeout</code> is named only in the single <code>ExecutionTimedOut</code> event, whose <code>previousEventId</code>
+is <code>0</code>. The state that was cut gets no <code>*StateExited</code> event. A <code>Parallel</code> or <code>Map</code> branch runs
+on its own thread and is not cut mid-state: the budget is enforced again as soon as the branch
+returns.</p>
+<p>A <code>Task</code> that waits for a task token — an activity, or a <code>.waitForTaskToken</code> integration — has
+two independent bounds. <code>TimeoutSeconds</code> is the whole wait; <code>HeartbeatSeconds</code> is the longest gap
+allowed between two <code>SendTaskHeartbeat</code> calls, and every heartbeat pushes that gap forward, so a
+worker that reports as often as the definition asks runs until <code>TimeoutSeconds</code> runs out. Either
+clock ends the state the same way: an <code>ActivityTimedOut</code> event — <code>TaskTimedOut</code> for a
+<code>.waitForTaskToken</code> integration — carrying <code>States.Timeout</code> and no cause, then an execution that
+reads <code>FAILED</code> with that same error. A <code>Catch</code> on a heartbeat expiry matches under
+<code>States.HeartbeatTimeout</code> and under <code>States.Timeout</code> alike. Neither timeout carries a cause:
+<code>DescribeExecution</code> and the <code>ExecutionFailed</code> event both leave the key out, where every other
+failure reports one. A <code>Task</code> that declares no <code>TimeoutSeconds</code> waits 300 seconds, where AWS
+waits a year.</p>
+<p>One deviation. AWS starts the <code>TimeoutSeconds</code> clock when a worker picks the task up, the instant
+it emits <code>ActivityStarted</code>. Floci emits <code>ActivityStarted</code> at schedule time, so both clocks start
+when the task is scheduled.</p>
+<h2 id="intrinsic-arguments">Intrinsic arguments</h2>
+<p>A <code>$.</code> reference passed to a <code>States.*</code> intrinsic must find something. An argument that matches
+nothing fails the execution with <code>States.Runtime</code>, as on AWS.</p>
+<p>One deviation. Indexing something that is not an array makes AWS leak its JSONPath library and
+write <code>Filter: [0] can only be applied to arrays. Current context is: 1</code>. Floci writes its own
+<code>The JsonPath argument for the field '$.other[0]' could not be found in the input ...</code> there.</p>
+<h2 id="jsonata-nulls">JSONata nulls</h2>
+<p>An expression that evaluates to JSON <code>null</code> produces a value, not a missing one. It keeps its key
+in <code>Output</code>, in <code>Assign</code> and in a Task's <code>Arguments</code>, at any nesting depth, and it stays in place as
+an array element:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>"Output": {"v": "{% $states.input.bar %}"}   on input {"bar": null}   -&gt;   {"v": null}
+</code></pre></div>
+<p>The same <code>null</code> is a value inside the expression too: <code>$exists()</code> on it is true and <code>$type()</code> on it
+is <code>"null"</code>.</p>
+<p>One deviation. <code>$count()</code> on a JSON null answers <code>0</code>; AWS answers <code>1</code>.</p>
+<h2 id="an-expression-that-returns-nothing-fails-the-state">An expression that returns nothing fails the state</h2>
+<p>An expression that returns nothing, which is what <code>$states.input.absent</code> and the functions listed
+below that evaluate to undefined do, is not a missing value the state carries on without. It fails
+the state with <code>States.QueryEvaluationError</code>, naming the field it was written in, and a <code>Catch</code> on
+that error fires:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>"Output": {"v": "{% $states.input.absent %}"}
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>  -&gt;  States.QueryEvaluationError
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>      The JSONata expression '$states.input.absent' specified for the field 'Output/v'
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>      returned nothing (undefined).
+</code></pre></div>
+<p>The field is named relative to the state, with <code>/</code> before each object key and <code>[i]</code> for each array
+index: <code>Output</code>, <code>Output/a/b[0]</code>, <code>Assign/x</code>, <code>Arguments/MessageGroupId</code>, <code>Choices[1]/Condition</code>,
+<code>Seconds</code>, <code>Error</code>, <code>Cause</code>, <code>Items</code>, <code>MaxConcurrency</code>. A matched <code>Choice</code> rule and a matching
+<code>Catch</code> clause carry their own <code>Assign</code> and <code>Output</code>, which are named under the rule or clause:
+<code>Choices[1]/Output/v</code>, <code>Choices[0]/Assign/x</code>, <code>Catch[1]/Output/v</code>. A <code>Choice</code> stops at the first rule
+that matches, so an undefined condition in a later rule is never evaluated.</p>
+<p>One deviation. AWS prefixes the cause of a real execution with
+<code>An error occurred while executing the state '&lt;name&gt;' (entered at the event id #&lt;n&gt;).</code>; Floci
+returns the cause without it, which is the form AWS's own <code>TestState</code> returns.</p>
+<h2 id="jsonata-functions">JSONata functions</h2>
+<p>State machines with <code>"QueryLanguage": "JSONata"</code> reach the six functions Step Functions adds on
+top of the JSONata language, alongside every function JSONata itself provides.</p>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Returns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>$parse(jsonString)</code></td>
+<td>the deserialized value; the replacement for <code>$eval</code>, which AWS disables and so does Floci, answering <code>T1006</code> to a call</td>
+</tr>
+<tr>
+<td><code>$partition(array, chunkSize)</code></td>
+<td><code>array</code> split into chunks of <code>chunkSize</code>, the last one holding the remainder</td>
+</tr>
+<tr>
+<td><code>$range(start, end, step)</code></td>
+<td>the values from <code>start</code> to <code>end</code>, inclusive when <code>step</code> lands on <code>end</code></td>
+</tr>
+<tr>
+<td><code>$hash(str, algorithm)</code></td>
+<td>the hex digest of <code>str</code>; <code>algorithm</code> is <code>MD5</code>, <code>SHA-1</code>, <code>SHA-256</code>, <code>SHA-384</code> or <code>SHA-512</code>, case-sensitive</td>
+</tr>
+<tr>
+<td><code>$random(seed)</code></td>
+<td>a number in <code>[0, 1)</code>, reproducible under the optional integer <code>seed</code></td>
+</tr>
+<tr>
+<td><code>$uuid()</code></td>
+<td>a v4 UUID</td>
+</tr>
+</tbody>
+</table>
+<p>Three behaviours are worth knowing before reading an unexpected result, and all three are AWS's:</p>
+<ul>
+<li>A non-integer argument is rounded <strong>towards zero</strong>, so <code>$range(-1.7, 2, 1)</code> starts at <code>-1</code> and
+  <code>$partition(items, 2.9)</code> chunks by 2.</li>
+<li>Several arguments evaluate to undefined rather than failing: a chunk size of zero, an empty
+  array, a <code>$range</code> with no <code>step</code> or with a step whose sign disagrees with the direction, and a
+  <code>$hash</code> with no algorithm. The argument itself does not fail; the field the expression was
+  written in does, under <code>States.QueryEvaluationError</code>, as the section above records.</li>
+<li><code>$range</code> collapses a single-element range to the bare number, not a one-element array.</li>
+</ul>
+<p>JSONata's own <code>$string</code> follows AWS's number notation: a whole number is written out in full below
+<code>1e21</code> and in exponent notation from there, on both signs, so <code>$string(1e20)</code> is
+<code>100000000000000000000</code> and <code>$string(1e21)</code> is <code>1e+21</code>.</p>
+<p>The execution input reaching <code>$states.input</code> follows the same number model as <code>$parse</code>: an integer
+stays exact while it fits in a <code>long</code> and switches to a <code>double</code> past that boundary, matching AWS.</p>
+<p>JSONata's own <code>$formatNumber</code> checks its picture string against the fourteen rules of XPath F&amp;O
+4.7.3, as AWS does, so <code>$formatNumber(1, "x")</code> fails with <code>D3086</code> rather than answering <code>x1</code>: a
+picture with no digit in it describes no number.</p>
+<p>Evaluation is bounded on three axes, as it is on AWS, and past any of them the state fails with
+<code>States.QueryEvaluationError</code>.</p>
+<ul>
+<li><strong>Depth</strong>: one expression may nest 100 levels, which is AWS's own ceiling: AWS accepts <code>1+1+…+1</code>
+  at 100 terms, 99 parentheses, 99 brackets, 99 <code>~&gt;</code> stages, and a non-tail-recursive <code>$f(31)</code>,
+  which nests <code>3n+5</code>, and refuses one level more of each. The refusal names the depth reached, as
+  in <code>Stack overflow error: … Depth=101 max=100</code>.</li>
+<li><strong>Memory</strong>: one value an expression builds may hold 6,990,256 bytes, counting a number as eight
+  bytes and a character as one. That is AWS's own bound: AWS accepts <code>[1..873782]</code> and refuses one
+  element more, and it accepts a string doubled 22 times, 2^22 characters, refusing the 23rd. The
+  refusal is AWS's own
+  <code>Expression evaluation memory limit exceeded</code>, which is what <code>[1..900000] ~&gt; $count()</code> and
+  <code>$sum([1..900000])</code> now answer. <code>$range</code> holds a tighter bound of its own, checked before it
+  allocates rather than on the array it would have built: AWS accepts <code>$range(1, 360145, 1)</code>, all
+  360,145 elements, and refuses one element more with the same refusal. A lazy literal range such
+  as <code>[1..873782]</code> is exempt from both bounds on AWS, and stays exempt here.</li>
+<li><strong>Time</strong>: five seconds, which is the library's own default and roughly fifty times the slowest
+  evaluation of a payload AWS itself accepts. A recursive expression with no base case is a tail
+  call, so it loops rather than nesting and only the clock ends it.</li>
+</ul>
+<p>JSON has no literal for a non-finite number, so AWS writes each one as the string JavaScript names
+it by, wherever it lands: <code>1/0</code> is <code>"Infinity"</code>, <code>1e308 * 10</code> is <code>"Infinity"</code>, <code>0/0</code> is <code>"NaN"</code> and
+<code>$parseInteger("abc", "0")</code> is <code>"NaN"</code>, and nested, <code>[1/0]</code> is <code>["Infinity"]</code> and <code>{"k": 1/0}</code> is
+<code>{"k": "Infinity"}</code>.</p>
+<p>One deviation, on the arithmetic half of that. A non-finite number a <strong>function</strong> answers is a value
+like any other here, so <code>$parseInteger("abc", "0")</code> is <code>"NaN"</code> on its own, inside an array and
+inside an object, as on AWS. One the <strong>arithmetic</strong> produces is not: the JSONata library refuses to
+carry it and raises instead, so Floci sees the value only in that refusal, after it has unwound
+whatever was being built around it. <code>1/0</code>, <code>-1/0</code> and <code>1e308 * 10</code> are answered because the
+expression's own result is what was refused; <code>[1/0]</code>, <code>{"k": 1/0}</code> and <code>$string(1/0)</code> fail the state
+with <code>States.QueryEvaluationError</code> where AWS answers a string, and <code>0/0</code> fails the field that holds
+it, because NaN is dropped as not-a-number without even a refusal to read it from. A state that
+fails is one a <code>Catch</code> fires on, which is the half of the divergence worth keeping.</p>
+<h2 id="execution-names">Execution names</h2>
+<p>A Standard execution name is unique per account, Region and state machine. Starting a Standard
+execution with a name and input that match one still running returns that original execution, so a
+retried call is idempotent; any other reuse of the name, whether a different input or a name whose
+execution has already closed, fails with <code>ExecutionAlreadyExists</code>.</p>
+<p>One deviation. AWS frees a Standard name 90 days after the execution closes; Floci keeps it taken for
+the life of the emulator, so a closed name never becomes reusable on its own.</p>
+<p>An Express execution name is not unique. Every <code>StartExecution</code> on an Express state machine is its
+own execution that runs alongside any others of the same name, and its ARN carries a per-start id
+after the name (<code>express:&lt;stateMachine&gt;:&lt;name&gt;:&lt;id&gt;</code>). Reusing an Express name never returns an
+earlier execution and never fails with <code>ExecutionAlreadyExists</code>.</p>
+<p>One more. AWS keeps no record of an Express execution once it ends, only its logs, and does not serve
+<code>DescribeExecution</code>, <code>GetExecutionHistory</code> or <code>ListExecutions</code> for one. Floci keeps every Express
+execution, running or finished, in its execution store (and, in persistent mode, in
+<code>sfn-executions.json</code>), and nothing evicts them while the emulator runs. A workload that
+starts the same Express name in a tight loop therefore grows that store without bound.</p>
+<h2 id="nested-workflows">Nested workflows</h2>
+<p>A parent workflow calls a child workflow through one of several integrations, and they differ in
+more than syntax:</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Child type</th>
+<th>A child that fails</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>arn:aws:states:::states:startExecution</code></td>
+<td>Standard</td>
+<td>not awaited</td>
+<td><code>{executionArn, startDate}</code></td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::states:startExecution.sync</code></td>
+<td>Standard</td>
+<td>fails the calling task</td>
+<td>execution envelope, <code>output</code> as a JSON string</td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::states:startExecution.sync:2</code></td>
+<td>Standard</td>
+<td>fails the calling task</td>
+<td>the child output, parsed</td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:sfn:startExecution</code></td>
+<td>Standard</td>
+<td>not awaited</td>
+<td><code>{ExecutionArn, StartDate}</code></td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:sfn:startSyncExecution</code></td>
+<td>Express</td>
+<td>reported through <code>Status</code></td>
+<td>PascalCase envelope, <code>Output</code> as a JSON string</td>
+</tr>
+</tbody>
+</table>
+<p><code>states:startExecution</code> and <code>aws-sdk:sfn:startExecution</code> are the same API through two different
+integrations, and only the casing of the result tells them apart.</p>
+<p><code>startSyncExecution</code> is the only one that does not fail the calling task when the child fails: the
+SDK call itself succeeded, so the task result carries <code>Status</code>, <code>Error</code> and <code>Cause</code> and the parent
+decides what to do next.</p>
+<p>A <code>Name</code> a Standard child already used fails the calling task with the child's collision error, named
+for the integration that raised it: <code>StepFunctions.ExecutionAlreadyExistsException</code> through
+<code>states:startExecution</code> in any of its modes, and <code>Sfn.ExecutionAlreadyExistsException</code> through
+<code>aws-sdk:sfn:startExecution</code>. An Express child starts a new execution instead, so the same <code>Name</code>
+never fails it.</p>
+<h2 id="aws-sdk-task-integrations">AWS SDK task integrations</h2>
+<p>A resource of the form <code>arn:aws:states:::aws-sdk:&lt;service&gt;:&lt;action&gt;</code> calls the service's API and
+returns its response. Two conventions separate that result from the same API's wire response, and
+both are AWS's:</p>
+<ul>
+<li><strong>Field names are the SDK's</strong>, so a <code>startDate</code> on the wire is a <code>StartDate</code> in the task result.</li>
+<li><strong>A timestamp is an ISO-8601 string</strong> such as <code>2026-08-28T20:34:59.712Z</code>, where the wire response
+  carries epoch seconds.</li>
+</ul>
+<p>A failure names the SDK exception class, which always ends in <code>Exception</code>:
+<code>StartExecution</code> answers a missing state machine with the error code <code>StateMachineDoesNotExist</code> on
+the wire and the task fails with <code>Sfn.StateMachineDoesNotExistException</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Result</th>
+<th>Notable failure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:sfn:startExecution</code></td>
+<td><code>{ExecutionArn, StartDate}</code></td>
+<td><code>Sfn.ExecutionAlreadyExistsException</code> when <code>Name</code> is reused on a Standard child</td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:sfn:startSyncExecution</code></td>
+<td>execution envelope</td>
+<td><code>Sfn.StateMachineTypeNotSupportedException</code> for a Standard child</td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:sfn:sendTaskSuccess</code></td>
+<td><code>{}</code></td>
+<td><code>Sfn.InvalidTokenException</code> when no task is waiting on the token</td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:sfn:sendTaskFailure</code></td>
+<td><code>{}</code></td>
+<td><code>Sfn.InvalidTokenException</code></td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:scheduler:createSchedule</code></td>
+<td><code>{ScheduleArn}</code></td>
+<td><code>Scheduler.ConflictException</code> when the name is taken</td>
+</tr>
+<tr>
+<td><code>arn:aws:states:::aws-sdk:scheduler:updateSchedule</code></td>
+<td><code>{ScheduleArn}</code></td>
+<td><code>Scheduler.ResourceNotFoundException</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>sendTaskSuccess</code> and <code>sendTaskFailure</code> resolve a token a <code>.waitForTaskToken</code> task is parked on. A
+token nobody is waiting for fails the calling task rather than reporting a delivery that never
+happened.</p>
+<h2 id="publishing-events">Publishing events</h2>
+<p><code>arn:aws:states:::events:putEvents</code> returns the PutEvents response itself, <code>Entries</code> and
+<code>FailedEntryCount</code>, and one rejected entry fails the whole task with <code>EventBridge.FailedEntry</code>. The
+cause is the response serialized as a string, so a <code>Catch</code> can read which entry was rejected:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="p">{</span><span class="nt">"FailedEntryCount"</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">"Entries"</span><span class="p">:[{</span><span class="nt">"EventId"</span><span class="p">:</span><span class="s2">"08cbdc46-…"</span><span class="p">},{</span><span class="nt">"ErrorCode"</span><span class="p">:</span><span class="s2">"InvalidArgument"</span><span class="p">,</span><span class="nt">"ErrorMessage"</span><span class="p">:</span><span class="s2">"EventBus not found: no-such-bus"</span><span class="p">}]}</span>
+</code></pre></div>
+<p>One deviation, and it belongs to EventBridge rather than to the integration: Floci rejects an entry
+addressed to an event bus that does not exist, while AWS accepts it and returns an <code>EventId</code>.</p>
+<h2 id="jsonata-expressions-are-validated-when-the-state-machine-is-created">JSONata expressions are validated when the state machine is created</h2>
+<p>A JSONata expression runs with no context item: the execution input arrives as <code>$states.input</code>
+and a variable written by <code>Assign</code> as <code>$name</code>. A path that starts from neither reads a context
+item that does not exist, and AWS refuses the whole definition:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>An error occurred (InvalidDefinition) when calling the CreateStateMachine operation:
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>Invalid State Machine Definition: 'UNSUPPORTED_JSONATA_EXPRESSION: Reference to 'phone' at the
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>top level is not supported. at /States/E/Output/v'
+</code></pre></div>
+<p>Floci refuses it too, from <code>CreateStateMachine</code>, <code>UpdateStateMachine</code> and
+<code>ValidateStateMachineDefinition</code>, with that message and that location. Write
+<code>$states.input.phone</code> to read the input and <code>$phone</code> to read a variable: an earlier <code>Assign</code> of
+<code>phone</code> does not put a bare <code>phone</code> in scope on AWS either.</p>
+<p>Only the first step of a path is read against the top-level context, so a name in a later step,
+in a predicate, in a sort term or in an object grouping stays legal and
+<code>$states.input.items[value &gt; 3]</code> is accepted. A lambda body keeps the context of the expression
+that defines it, so <code>$map($states.input.a, function($x){ b })</code> does name <code>b</code> at the top level.</p>
+<p>A JSONata expression that fails to parse, such as <code>{% a[1,2) %}</code>, is refused the same way, with
+<code>INVALID_JSONATA_EXPRESSION</code> and the parser's own message at the field's location. <code>$$</code>, the
+reference to the top-level context, is refused under <code>UNSUPPORTED_JSONATA_EXPRESSION</code> with the
+message <code>Reference to '$$' is not supported.</code>; so is <code>$states.errorOutput</code> outside the one place it
+resolves, a catcher's own <code>Output</code> or <code>Assign</code>.</p>
+<p>A definition is refused outright, with no state machine created, for a graph that never reaches a
+terminal state (<code>MISSING_END_STATE</code>), for a <code>StartAt</code>, <code>Next</code>, <code>Default</code> or <code>Catch[].Next</code> naming a
+state absent from its container or a state nothing transitions to (<code>MISSING_TRANSITION_TARGET</code>),
+and for a field the state type does not carry: <code>TimeoutSeconds</code> only on <code>Task</code>, and <code>Catch</code>/<code>Retry</code>
+only on <code>Task</code>, <code>Parallel</code> and <code>Map</code>.</p>
+<h2 id="mocked-service-integrations">Mocked service integrations</h2>
+<p>Floci supports the Step Functions Local mock configuration format
+(<code>MockConfigFile.json</code>). This lets a Task state return a predefined result or error
+instead of calling the integrated service. It is the standard way to unit test <code>Catch</code>
+and <code>Retry</code> branches, and it also lets you execute state machines whose integrations
+Floci does not implement yet.</p>
+<p>Point <code>SFN_MOCK_CONFIG</code> at the mock configuration file and start an execution against
+<code>&lt;stateMachineArn&gt;#&lt;testCaseName&gt;</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># docker run -e SFN_MOCK_CONFIG=/tmp/mock.json -v ./MockConfigFile.json:/tmp/mock.json ...</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>aws<span class="w"> </span>stepfunctions<span class="w"> </span>start-execution<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>--state-machine-arn<span class="w"> </span><span class="s2">"</span><span class="nv">$SM_ARN</span><span class="s2">#Throw422"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span>--input<span class="w"> </span><span class="s1">'{}'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p">{</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">"StateMachines"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">    </span><span class="nt">"Test"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"TestCases"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"Throw422"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"Call API"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ApiFailure"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span><span class="p">},</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">  </span><span class="nt">"MockedResponses"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">    </span><span class="nt">"ApiFailure"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">      </span><span class="nt">"0"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"Throw"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"Error"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ApiGateway.422"</span><span class="p">,</span><span class="w"> </span><span class="nt">"Cause"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Unprocessable"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">    </span><span class="p">},</span>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">    </span><span class="nt">"ApiSuccess"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">      </span><span class="nt">"0-1"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"Return"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"StatusCode"</span><span class="p">:</span><span class="w"> </span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="nt">"ResponseBody"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a><span class="p">}</span>
+</code></pre></div>
+<p>Each test case maps a state name to a <code>MockedResponses</code> entry. Each mocked response is
+keyed by retry attempt (<code>"0"</code>, <code>"1"</code>, or a range like <code>"1-2"</code>), so a state can fail on
+the first attempt and succeed on a retry. <code>Return</code> supplies the task result. <code>Throw</code>
+fails the task with the given <code>Error</code> and <code>Cause</code>, which flow through <code>Retry</code> and
+<code>Catch</code> unchanged. States not named in the test case run their real integration, so
+mocked and real service calls can be combined in one execution. The file is re-read
+when it changes, so it can be edited without restarting Floci.</p>
+<p>Behavior was verified against Step Functions Local 2.0.0. As there, <code>StartSyncExecution</code>
+rejects a test case suffix with <code>UnsupportedOperation</code> and does not strip a bare trailing
+<code>#</code>, a bare trailing <code>#</code> on <code>StartExecution</code> runs the execution unmocked, and a retry
+attempt with no mocked entry fails the execution with <code>States.Runtime</code>. One intentional deviation: Floci reports an unknown test case and any
+invalid mock configuration (unparseable file, bad attempt key, missing <code>MockedResponses</code>
+entry, <code>Return</code> and <code>Throw</code> together, <code>Throw</code> without <code>Error</code>) as a structured 400 error
+at <code>StartExecution</code>. Step Functions Local instead returns a plain HTTP 500 for most of
+these and starts the execution only to fail it with <code>States.Runtime</code> for the last two.</p>
+<p>A mocked response with no attempt entries (<code>{}</code>) is not rejected. As in Step Functions
+Local, the execution starts and fails with <code>States.Runtime</code> only if the state that names
+it is entered. This keeps a generated mock file usable when the collection it was built
+from is empty and the state is never reached.</p>
+<h2 id="configuration">Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_STEPFUNCTIONS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable or disable the service</td>
+</tr>
+<tr>
+<td><code>SFN_MOCK_CONFIG</code></td>
+<td>unset</td>
+<td>Path to a Step Functions Local compatible mock configuration file (alias: <code>FLOCI_SERVICES_STEPFUNCTIONS_MOCK_CONFIG_FILE</code>)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="examples">Examples</h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">AWS_ENDPOINT_URL</span><span class="o">=</span>http://localhost:4566
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1"># Create a state machine</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="nv">SM_ARN</span><span class="o">=</span><span class="k">$(</span>aws<span class="w"> </span>stepfunctions<span class="w"> </span>create-state-machine<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">  </span>--name<span class="w"> </span>my-workflow<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">  </span>--definition<span class="w"> </span><span class="s1">'{</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="s1">    "Comment": "Simple workflow",</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="s1">    "StartAt": "HelloWorld",</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="s1">    "States": {</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="s1">      "HelloWorld": {</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="s1">        "Type": "Pass",</span>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="s1">        "Result": {"message": "Hello, World!"},</span>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="s1">        "End": true</span>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="s1">      }</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="s1">    }</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a><span class="s1">  }'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="w">  </span>--role-arn<span class="w"> </span>arn:aws:iam::000000000000:role/step-functions-role<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a><span class="w">  </span>--query<span class="w"> </span>stateMachineArn<span class="w"> </span>--output<span class="w"> </span>text<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span><span class="k">)</span>
+<a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a>
+<a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="c1"># Start an execution</span>
+<a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a><span class="nv">EXEC_ARN</span><span class="o">=</span><span class="k">$(</span>aws<span class="w"> </span>stepfunctions<span class="w"> </span>start-execution<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-23" name="__codelineno-6-23" href="#__codelineno-6-23"></a><span class="w">  </span>--state-machine-arn<span class="w"> </span><span class="nv">$SM_ARN</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-24" name="__codelineno-6-24" href="#__codelineno-6-24"></a><span class="w">  </span>--input<span class="w"> </span><span class="s1">'{"key":"value"}'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-25" name="__codelineno-6-25" href="#__codelineno-6-25"></a><span class="w">  </span>--query<span class="w"> </span>executionArn<span class="w"> </span>--output<span class="w"> </span>text<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-26" name="__codelineno-6-26" href="#__codelineno-6-26"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span><span class="k">)</span>
+<a id="__codelineno-6-27" name="__codelineno-6-27" href="#__codelineno-6-27"></a>
+<a id="__codelineno-6-28" name="__codelineno-6-28" href="#__codelineno-6-28"></a><span class="c1"># Check status</span>
+<a id="__codelineno-6-29" name="__codelineno-6-29" href="#__codelineno-6-29"></a>aws<span class="w"> </span>stepfunctions<span class="w"> </span>describe-execution<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-30" name="__codelineno-6-30" href="#__codelineno-6-30"></a><span class="w">  </span>--execution-arn<span class="w"> </span><span class="nv">$EXEC_ARN</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-31" name="__codelineno-6-31" href="#__codelineno-6-31"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-6-32" name="__codelineno-6-32" href="#__codelineno-6-32"></a>
+<a id="__codelineno-6-33" name="__codelineno-6-33" href="#__codelineno-6-33"></a><span class="c1"># Get event history</span>
+<a id="__codelineno-6-34" name="__codelineno-6-34" href="#__codelineno-6-34"></a>aws<span class="w"> </span>stepfunctions<span class="w"> </span>get-execution-history<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-35" name="__codelineno-6-35" href="#__codelineno-6-35"></a><span class="w">  </span>--execution-arn<span class="w"> </span><span class="nv">$EXEC_ARN</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-36" name="__codelineno-6-36" href="#__codelineno-6-36"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+</code></pre></div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
