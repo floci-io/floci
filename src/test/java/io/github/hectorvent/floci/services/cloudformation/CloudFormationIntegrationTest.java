@@ -4628,6 +4628,17 @@ class CloudFormationIntegrationTest {
                     ]
                   }
                 }
+              },
+              "Outputs": {
+                "EsmId": {
+                  "Value": { "Fn::GetAtt": ["MyKafkaESM", "Id"] }
+                },
+                "EsmArn": {
+                  "Value": { "Fn::GetAtt": ["MyKafkaESM", "EventSourceMappingArn"] }
+                },
+                "EsmRef": {
+                  "Value": { "Ref": "MyKafkaESM" }
+                }
               }
             }
             """.formatted(funcName);
@@ -4645,7 +4656,7 @@ class CloudFormationIntegrationTest {
             .body(containsString("<StackId>"));
 
         // 2. Stack must reach CREATE_COMPLETE
-        given()
+        String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
             .formParam("StackName", stackName)
@@ -4653,7 +4664,12 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().body().asString();
+
+        String getAttId = outputValue(describeXml, "EsmId");
+        String getAttArn = outputValue(describeXml, "EsmArn");
+        String getAttRef = outputValue(describeXml, "EsmRef");
 
         // 3. Lambda list-event-source-mappings must return our ESM with Kafka properties populated
         String esmJson = given()
@@ -4668,6 +4684,11 @@ class CloudFormationIntegrationTest {
         assertEquals(1, esmList.path("EventSourceMappings").size());
         JsonNode esmNode = esmList.path("EventSourceMappings").get(0);
         String esmUuid = esmNode.path("UUID").asText();
+
+        // Verify Fn::GetAtt attributes and Ref
+        assertEquals(esmUuid, getAttId);
+        assertEquals(esmUuid, getAttRef);
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:event-source-mapping:" + esmUuid, getAttArn);
 
         // Verify Topics
         JsonNode topics = esmNode.path("Topics");
