@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
@@ -396,7 +397,7 @@ class S3ServiceTest {
         assertEquals("team-a", head.getMetadata().get("owner"));
         assertNotNull(head.getChecksum());
         assertNotNull(head.getChecksum().getChecksumCRC64NVME());
-        assertEquals("FULL_OBJECT", head.getChecksum().getChecksumType());
+        assertEquals(ChecksumType.FULL_OBJECT, head.getChecksum().getChecksumType());
         assertEquals(stored.getETag(), head.getETag());
     }
 

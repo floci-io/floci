@@ -1,7 +1,15 @@
 """S3 bucket and object integration tests."""
 
+import base64
+import hashlib
+import random
+import zlib
+
 import pytest
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
+
+MIB = 1024 * 1024
 
 
 class TestS3Bucket:
@@ -330,3 +338,111 @@ class TestS3LargeObject:
 
         response = s3_client.head_object(Bucket=test_bucket, Key=key)
         assert response["ContentLength"] == 25 * 1024 * 1024
+
+
+class TestS3MultipartChecksums:
+    """Multipart uploads carry composite checksums, computed as on AWS.
+
+    AWS combines the part-level checksums of a multipart upload into a single object-level value:
+    the algorithm applied to the concatenated binary part checksums, Base64 encoded, followed by
+    ``-<part count>``. HeadObject/GetObject return that suffixed value, GetObjectAttributes returns
+    it without the suffix. SHA1/SHA256 uploads are always COMPOSITE, and so are CRC32 uploads
+    unless FULL_OBJECT is requested on CreateMultipartUpload.
+    """
+
+    PART_SIZE = 5 * MIB
+    TRANSFER_CONFIG = TransferConfig(multipart_threshold=5 * MIB, multipart_chunksize=5 * MIB)
+
+    @staticmethod
+    def _payload(size=12 * MIB):
+        return random.Random(20260903).randbytes(size)
+
+    @staticmethod
+    def _parts(payload, part_size):
+        return [payload[i:i + part_size] for i in range(0, len(payload), part_size)]
+
+    @staticmethod
+    def _sha256(data):
+        return hashlib.sha256(data).digest()
+
+    @staticmethod
+    def _crc32(data):
+        return (zlib.crc32(data) & 0xFFFFFFFF).to_bytes(4, "big")
+
+    @classmethod
+    def _composite(cls, digest, parts):
+        combined = digest(b"".join(digest(part) for part in parts))
+        return base64.b64encode(combined).decode() + f"-{len(parts)}"
+
+    def _upload(self, s3_client, bucket, key, payload, tmp_path, **extra_args):
+        source = tmp_path / key
+        source.write_bytes(payload)
+        s3_client.upload_file(
+            str(source), bucket, key,
+            ExtraArgs=extra_args or None,
+            Config=self.TRANSFER_CONFIG,
+        )
+
+    def test_multipart_upload_sha256_reports_composite_checksum(self, s3_client, test_bucket, tmp_path):
+        """Multipart upload with SHA256 returns the composite checksum, stable across reads."""
+        key = "multipart-sha256.bin"
+        payload = self._payload()
+        parts = self._parts(payload, self.PART_SIZE)
+        composite = self._composite(self._sha256, parts)
+        assert composite.endswith("-3")
+
+        self._upload(s3_client, test_bucket, key, payload, tmp_path, ChecksumAlgorithm="SHA256")
+
+        head = s3_client.head_object(Bucket=test_bucket, Key=key, ChecksumMode="ENABLED")
+        assert head["ChecksumSHA256"] == composite
+        assert head["ChecksumType"] == "COMPOSITE"
+        assert head["ETag"].endswith('-3"')
+
+        # The same value on every read: a client comparing checksums must not see drift
+        again = s3_client.head_object(Bucket=test_bucket, Key=key, ChecksumMode="ENABLED")
+        assert again["ChecksumSHA256"] == composite
+
+        attributes = s3_client.get_object_attributes(
+            Bucket=test_bucket, Key=key, ObjectAttributes=["Checksum", "ObjectParts"]
+        )
+        assert attributes["Checksum"]["ChecksumSHA256"] == composite.rsplit("-", 1)[0]
+        assert attributes["Checksum"]["ChecksumType"] == "COMPOSITE"
+        assert attributes["ObjectParts"]["TotalPartsCount"] == 3
+        assert [p["ChecksumSHA256"] for p in attributes["ObjectParts"]["Parts"]] == [
+            base64.b64encode(self._sha256(part)).decode() for part in parts
+        ]
+
+        body = s3_client.get_object(Bucket=test_bucket, Key=key)["Body"].read()
+        assert body == payload
+
+    def test_multipart_upload_default_checksum_is_composite_crc32(self, s3_client, test_bucket, tmp_path):
+        """Without an explicit algorithm the SDK declares CRC32, which AWS stores as COMPOSITE."""
+        key = "multipart-default.bin"
+        payload = self._payload()
+        parts = self._parts(payload, self.PART_SIZE)
+
+        self._upload(s3_client, test_bucket, key, payload, tmp_path)
+
+        head = s3_client.head_object(Bucket=test_bucket, Key=key, ChecksumMode="ENABLED")
+        assert head["ChecksumType"] == "COMPOSITE"
+        assert head["ChecksumCRC32"] == self._composite(self._crc32, parts)
+
+        attributes = s3_client.get_object_attributes(
+            Bucket=test_bucket, Key=key, ObjectAttributes=["Checksum", "ObjectParts"]
+        )
+        assert attributes["Checksum"]["ChecksumCRC32"] == head["ChecksumCRC32"].rsplit("-", 1)[0]
+        assert [p["ChecksumCRC32"] for p in attributes["ObjectParts"]["Parts"]] == [
+            base64.b64encode(self._crc32(part)).decode() for part in parts
+        ]
+
+    def test_single_part_upload_keeps_full_object_checksum(self, s3_client, test_bucket, tmp_path):
+        """A file below the multipart threshold is a plain PutObject: FULL_OBJECT, no suffix."""
+        key = "single-part-sha256.bin"
+        payload = self._payload(1 * MIB)
+
+        self._upload(s3_client, test_bucket, key, payload, tmp_path, ChecksumAlgorithm="SHA256")
+
+        head = s3_client.head_object(Bucket=test_bucket, Key=key, ChecksumMode="ENABLED")
+        assert head["ChecksumSHA256"] == base64.b64encode(self._sha256(payload)).decode()
+        assert head["ChecksumType"] == "FULL_OBJECT"
+        assert "-" not in head["ETag"]

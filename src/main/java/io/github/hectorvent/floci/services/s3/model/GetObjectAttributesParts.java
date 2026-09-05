@@ -13,6 +13,7 @@ public class GetObjectAttributesParts {
     private int nextPartNumberMarker;
     private int partNumberMarker;
     private int partsCount;
+    private boolean partChecksumsAvailable;
     private List<Part> parts = new ArrayList<>();
 
     public boolean isTruncated() { return isTruncated; }
@@ -29,6 +30,9 @@ public class GetObjectAttributesParts {
 
     public int getPartsCount() { return partsCount; }
     public void setPartsCount(int partsCount) { this.partsCount = partsCount; }
+
+    public boolean isPartChecksumsAvailable() { return partChecksumsAvailable; }
+    public void setPartChecksumsAvailable(boolean partChecksumsAvailable) { this.partChecksumsAvailable = partChecksumsAvailable; }
 
     public List<Part> getParts() { return parts; }
     public void setParts(List<Part> parts) { this.parts = parts; }

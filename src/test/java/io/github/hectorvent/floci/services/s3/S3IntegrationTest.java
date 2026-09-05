@@ -217,6 +217,7 @@ class S3IntegrationTest {
             .header("x-amz-meta-owner", equalTo("team-b"))
             .header("x-amz-storage-class", equalTo("GLACIER"))
             .header("x-amz-checksum-sha256", notNullValue())
+            .header("x-amz-checksum-type", equalTo("FULL_OBJECT"))
             .body(equalTo("Hello World from S3!"));
 
         // Verify GetObjectAttributes returns the overridden checksum algorithm
