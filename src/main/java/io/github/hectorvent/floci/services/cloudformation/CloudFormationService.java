@@ -167,6 +167,38 @@ public class CloudFormationService implements ResourceProvider {
         return stack != null ? stack.getParameters() : Map.of();
     }
 
+    /**
+     * The status of a stack, or {@code null} when no stack of that name exists in the region.
+     * Unlike {@link #describeStacks}, asking about a stack that is not there is not an error:
+     * StackSet deployment uses this to decide what to do with an instance before it acts on it.
+     */
+    String stackStatus(String stackName, String region) {
+        Stack stack = resolveStack(stackName, region);
+        return stack != null ? stack.getStatus() : null;
+    }
+
+    /**
+     * Whether a stack in this status refuses an update, on the two grounds AWS refuses one.
+     *
+     * <p>A status ending in {@code _IN_PROGRESS} says an operation owns the stack: a create, an
+     * update, a rollback or the cleanup phase of a committed update. AWS refuses to start a second
+     * one over it, and offers nothing that finishes a phase whose process is gone - DeleteStack is
+     * the only way out of one. Refusing keeps every abandoned phase out of the next update's
+     * transaction.
+     *
+     * <p>{@code ROLLBACK_COMPLETE} is terminal for a different reason: a create that failed rolled
+     * its resources back, so the stack holds the name and nothing else, and only DeleteStack frees
+     * it. The CDK CLI keys on this state and tells the user to delete the stack; a client that is
+     * accepted here instead proceeds against a stack AWS would have rejected. It is matched exactly
+     * rather than by suffix, because {@code UPDATE_ROLLBACK_COMPLETE} ends the same way and is a
+     * perfectly updatable stack: it is where an update that failed and rolled back settles, and
+     * retrying the update is how it is repaired.
+     */
+    static boolean refusesUpdate(String status) {
+        return status != null
+                && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status));
+    }
+
     // ── CreateChangeSet ───────────────────────────────────────────────────────
 
     public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
@@ -293,17 +325,10 @@ public class CloudFormationService implements ResourceProvider {
                     throw new AwsException("AlreadyExistsException",
                             "Stack [" + stackName + "] already exists", 400);
                 }
-                // A status ending in _IN_PROGRESS says an operation owns the stack: a create, an
-                // update, a rollback or the cleanup phase of a committed update. AWS refuses to
-                // start a second one over it, and offers nothing that finishes a phase whose
-                // process is gone - DeleteStack is the only way out of one. Refusing here keeps
-                // every abandoned phase out of the next update's transaction.
-                //
                 // The message is the one real CloudFormation emits, down to its own "can not"
                 // spelling and the stack id carried as "Stack:<arn>" with no space: clients match
                 // on this string.
-                if (!isCreateType && existing.getStatus() != null
-                        && existing.getStatus().endsWith("_IN_PROGRESS")) {
+                if (!isCreateType && refusesUpdate(existing.getStatus())) {
                     throw new AwsException("ValidationError",
                             "Stack:" + existing.getStackId() + " is in " + existing.getStatus()
                                     + " state and can not be updated.", 400);
