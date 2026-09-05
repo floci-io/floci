@@ -55,7 +55,8 @@ class CloudFormationIamUserTest {
         if (iam != null) {
             try {
                 iam.deleteUser(DeleteUserRequest.builder().userName(userName).build());
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                System.err.println("IAM user direct cleanup skipped: " + e.getMessage());
             }
             iam.close();
         }
