@@ -30,6 +30,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -270,6 +271,27 @@ class IotServiceTest {
     }
 
     @Test
+    void firehoseActionAcceptsEverySeparatorTheApiAllows() throws Exception {
+        List<String> separators = List.of("\\n", "\\t", "\\r\\n", ",");
+        for (int i = 0; i < separators.size(); i++) {
+            createRule("rule" + i, firehoseRule(separators.get(i), false));
+        }
+    }
+
+    @Test
+    void firehoseActionRejectsAnySeparatorTheApiDoesNotAllow() {
+        for (String separator : List.of("|", ";", "", " ", "\\n\\n")) {
+            AwsException e = assertThrows(AwsException.class, () -> createRule("metricsRule", firehoseRule(separator, false)));
+            assertEquals("InvalidRequestException", e.getErrorCode(), separator);
+            assertEquals(400, e.getHttpStatus());
+        }
+        assertThrows(AwsException.class, () -> createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'", "actions": [],
+             "errorAction": {"firehose": {"deliveryStreamName": "errors", "roleArn": "arn:aws:iam::000000000000:role/rule", "separator": "|"}}}
+            """));
+    }
+
+    @Test
     void firehoseActionFailureIsReportedWithTheDeliveryStreamName() throws Exception {
         createRule("metricsRule", """
             {"sql": "SELECT * FROM 'devices/+/metrics'",
@@ -327,13 +349,35 @@ class IotServiceTest {
     }
 
     @Test
-    void cloudwatchLogsActionInBatchModeWritesOneEventPerArrayElement() throws Exception {
+    void cloudwatchLogsActionInBatchModeTakesTimestampAndMessageFromEachArrayElement() throws Exception {
         createRule("metricsRule", cloudwatchLogsRule(true));
 
-        publish("[{\"v\":1},{\"v\":2}]");
+        publish("""
+            [
+              {"timestamp": 1673520691093, "message": "Test message 1"},
+              {"timestamp": 1673520692879, "message": "Test message 2"},
+              {"timestamp": 1673520693442, "message": "Test message 3"}
+            ]
+            """);
 
-        assertEquals(List.of("{\"v\":1}", "{\"v\":2}"),
-                capturedLogEvents().stream().map(event -> event.get("message")).toList());
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(List.of("Test message 1", "Test message 2", "Test message 3"),
+                events.stream().map(event -> event.get("message")).toList());
+        assertEquals(List.of(1673520691093L, 1673520692879L, 1673520693442L),
+                events.stream().map(event -> event.get("timestamp")).toList());
+    }
+
+    @Test
+    void cloudwatchLogsActionInBatchModeFallsBackToThePublishTimeAndTheElementText() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(true));
+        long before = System.currentTimeMillis();
+
+        publish("[{\"v\":1}, {\"timestamp\": \"1673520691093\", \"message\": {\"nested\": true}}, \"plain\"]");
+
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(List.of("{\"v\":1}", "{\"nested\":true}", "\"plain\""),
+                events.stream().map(event -> event.get("message")).toList());
+        events.forEach(event -> assertTrue((Long) event.get("timestamp") >= before));
     }
 
     @Test

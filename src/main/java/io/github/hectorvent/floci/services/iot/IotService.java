@@ -63,6 +63,8 @@ public class IotService {
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
+    /** The {@code FirehoseSeparator} shape of the IoT API model. */
+    private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
 
     private final StorageBackend<String, Thing> thingStore;
     private final StorageBackend<String, IotCertificate> certificateStore;
@@ -880,13 +882,27 @@ public class IotService {
         rule.setDescription(payload.path("description").asText(null));
         rule.setRuleDisabled(payload.path("ruleDisabled").asBoolean(false));
         JsonNode actions = payload.path("actions");
+        actions.forEach(IotService::validateAction);
         rule.setActionsJson(actions.isArray() ? actions.toString() : "[]");
         rule.setAwsIotSqlVersion(payload.path("awsIotSqlVersion").asText(null));
         JsonNode errorAction = payload.path("errorAction");
+        validateAction(errorAction);
         rule.setErrorActionJson(errorAction.isObject() ? errorAction.toString() : null);
         rule.setCreatedAt(createdAt == null ? Instant.now() : createdAt);
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
         return rule;
+    }
+
+    /** The API model restricts the firehose {@code separator} to a newline, tab, Windows newline or comma. */
+    private static void validateAction(JsonNode action) {
+        JsonNode separator = action.path("firehose").path("separator");
+        if (separator.isMissingNode() || separator.isNull()) {
+            return;
+        }
+        if (!FIREHOSE_SEPARATOR.matcher(separator.asText()).matches()) {
+            throw new AwsException("InvalidRequestException",
+                    "Invalid firehose separator. Valid values are: '\\n' (newline), '\\t' (tab), '\\r\\n' (Windows newline), ',' (comma)", 400);
+        }
     }
 
     public IotTopicRule getTopicRule(String ruleName, String region) {
@@ -1208,17 +1224,20 @@ public class IotService {
     /**
      * The cloudwatchLogs action writes the payload as one log event to a stream named after the
      * rule, creating the stream in the given group on first use. The group itself must exist, as
-     * on AWS. With {@code batchMode} a JSON array payload becomes one event per element.
+     * on AWS. With {@code batchMode} a JSON array payload becomes one event per element, each
+     * element carrying its own {@code timestamp} and {@code message} as the AWS message format
+     * for batched device logs requires.
      */
     private void putLogEvents(String logGroupName, String logStreamName, JsonNode action, byte[] payload, String region) {
         JsonNode batch = action.path("batchMode").asBoolean(false) ? jsonArrayOrNull(payload) : null;
-        List<String> messages = new ArrayList<>();
+        long now = Instant.now().toEpochMilli();
+        List<Map<String, Object>> events = new ArrayList<>();
         if (batch == null) {
-            messages.add(new String(payload, StandardCharsets.UTF_8));
+            events.add(Map.of("timestamp", now, "message", new String(payload, StandardCharsets.UTF_8)));
         } else {
-            batch.forEach(element -> messages.add(element.toString()));
+            batch.forEach(element -> events.add(batchedLogEvent(element, now)));
         }
-        if (messages.isEmpty()) {
+        if (events.isEmpty()) {
             return;
         }
         try {
@@ -1229,12 +1248,21 @@ public class IotService {
             }
             LOG.debugv("Log stream {0}/{1} already exists", logGroupName, logStreamName);
         }
-        long timestamp = Instant.now().toEpochMilli();
-        List<Map<String, Object>> events = new ArrayList<>();
-        for (String message : messages) {
-            events.add(Map.of("timestamp", timestamp, "message", message));
-        }
         cloudWatchLogsService.putLogEvents(logGroupName, logStreamName, events, region);
+    }
+
+    /**
+     * One batched element is {@code {"timestamp": <epoch milliseconds>, "message": "<text>"}}. An
+     * element without a numeric timestamp is stamped with the publish time and one without a
+     * message is logged as its own JSON text, so a batch that ignores the format still reaches
+     * the log group instead of failing the action.
+     */
+    private static Map<String, Object> batchedLogEvent(JsonNode element, long now) {
+        JsonNode timestamp = element.path("timestamp");
+        JsonNode message = element.path("message");
+        String text = message.isMissingNode() ? element.toString()
+                : message.isValueNode() ? message.asText() : message.toString();
+        return Map.of("timestamp", timestamp.isNumber() ? timestamp.asLong() : now, "message", text);
     }
 
     private JsonNode jsonArrayOrNull(byte[] payload) {
