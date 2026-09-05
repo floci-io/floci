@@ -44,6 +44,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudWatch Metrics](cloudwatch.md#metrics) | `POST /` with `Action=` or JSON 1.1 | Query / JSON | 11 |
 | [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
 | [GuardDuty](guardduty.md) | `/detector`, `/detector/{detectorId}`, `/detector/{detectorId}/admin`, `/admin/*`, `/tags/*` | REST JSON | 13 |
+| [IAM Identity Center (SSO Admin)](ssoadmin.md) | `POST /` + `X-Amz-Target: SWBExternalService.*` | JSON 1.1 | 13 |
 | [Amazon Connect](connect.md) | `/instance`, `/instance/{instanceId}/*`, `/tags/*` | REST JSON | 15 |
 | [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 8 |
 | [MemoryDB](memorydb.md) | `POST /` + `X-Amz-Target: AmazonMemoryDB.*` + TCP proxy | JSON 1.1 + RESP | 7 |

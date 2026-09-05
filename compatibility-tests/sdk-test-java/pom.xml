@@ -234,6 +234,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>organizations</artifactId>
         </dependency>
+        <!-- IAM Identity Center (SSO Admin) client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssoadmin</artifactId>
+        </dependency>
         <!-- Cloud Map (servicediscovery) client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
