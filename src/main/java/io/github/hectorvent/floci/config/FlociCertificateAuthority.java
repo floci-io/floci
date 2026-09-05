@@ -27,6 +27,7 @@ import java.security.PrivateKey;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.cert.X509Certificate;
+import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
@@ -47,6 +48,8 @@ public final class FlociCertificateAuthority {
     public static final String CA_CERT_NAME = "floci-root-ca.crt";
     public static final String CA_KEY_NAME = "floci-root-ca.key";
     static final String COMMON_NAME = "Floci Local CA";
+    /** AWS IoT-issued client certificates all expire at this instant, whenever they were created. */
+    public static final Instant DEVICE_CERTIFICATE_NOT_AFTER = Instant.parse("2049-12-31T23:59:59Z");
 
     private final Path certificatePath;
     private final X509Certificate certificate;
@@ -159,10 +162,13 @@ public final class FlociCertificateAuthority {
                 CertificateGenerator.LeafUsage.SERVER);
     }
 
-    /** A {@code clientAuth} leaf, for IoT device certificates. Always a fresh RSA 2048 key pair. */
+    /**
+     * A {@code clientAuth} leaf for an IoT device: a fresh RSA 2048 key pair and, as on AWS, validity
+     * until the end of 2049.
+     */
     public CertificateGenerator.GeneratedCertificate issueClientCertificate(String commonName) {
         return generator.generateIssuedCertificate(commonName, List.of(), KeyAlgorithm.RSA_2048, null, issuer(),
-                CertificateGenerator.LeafUsage.CLIENT);
+                CertificateGenerator.LeafUsage.CLIENT, DEVICE_CERTIFICATE_NOT_AFTER);
     }
 
     /**
@@ -183,7 +189,7 @@ public final class FlociCertificateAuthority {
             }
             X500Name issuerDn = X500Name.getInstance(certificate.getSubjectX500Principal().getEncoded());
             return generator.signCertificate(csr.getSubject(), subjectKey, issuerDn, key, List.of(), false,
-                    CertificateGenerator.LeafUsage.CLIENT, 365);
+                    CertificateGenerator.LeafUsage.CLIENT, Instant.now(), DEVICE_CERTIFICATE_NOT_AFTER);
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {

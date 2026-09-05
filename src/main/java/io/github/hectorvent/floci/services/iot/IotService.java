@@ -328,6 +328,8 @@ public class IotService {
         stored.setPublicKey(certificate.getPublicKey());
         stored.setStatus(certificate.getStatus());
         stored.setCreationDate(certificate.getCreationDate());
+        stored.setNotBefore(certificate.getNotBefore());
+        stored.setNotAfter(certificate.getNotAfter());
         stored.setTags(certificate.getTags());
         return stored;
     }
@@ -364,6 +366,8 @@ public class IotService {
         certificate.setCertificateId(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(x509.getEncoded())));
         certificate.setCertificatePem(pem.toPem(x509));
         certificate.setPublicKey(pem.toPem(x509.getPublicKey()));
+        certificate.setNotBefore(x509.getNotBefore().toInstant());
+        certificate.setNotAfter(x509.getNotAfter().toInstant());
     }
 
     public IotCertificate describeCertificate(String certificateId, String region) {

@@ -73,6 +73,9 @@ class IotDeviceCertificateIntegrationTest {
         assertEquals(-1, cert.getBasicConstraints());
         assertEquals("RSA", cert.getPublicKey().getAlgorithm());
         assertEquals(2048, ((java.security.interfaces.RSAPublicKey) cert.getPublicKey()).getModulus().bitLength());
+        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant(),
+                "AWS IoT-issued certificates all expire at the end of 2049");
+        assertTrue(!cert.getNotBefore().toInstant().isAfter(java.time.Instant.now()), "valid from issue time");
 
         String expectedId = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(cert.getEncoded()));
         assertEquals(expectedId, body.getString("certificateId"), "AWS certificateId is sha256(DER), lowercase hex");
@@ -142,6 +145,7 @@ class IotDeviceCertificateIntegrationTest {
                 cert.getSubjectX500Principal(), "the CSR's subject is the certificate's subject");
         assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage(), "clientAuth");
         assertEquals(-1, cert.getBasicConstraints());
+        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant());
         String expectedId = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(cert.getEncoded()));
         assertEquals(expectedId, body.getString("certificateId"));
         assertNull(body.get("keyPair"), "AWS never returns a private key for a CSR: the device holds it");
@@ -256,7 +260,7 @@ class IotDeviceCertificateIntegrationTest {
     }
 
     @Test
-    void describeCertificateReturnsTheSamePem() {
+    void describeCertificateReturnsTheSamePem() throws Exception {
         JsonPath created = given()
             .contentType("application/json")
             .queryParam("setAsActive", false)
@@ -267,14 +271,25 @@ class IotDeviceCertificateIntegrationTest {
             .statusCode(200)
             .extract().jsonPath();
 
-        given()
+        String body = given()
         .when()
             .get("/certificates/" + created.getString("certificateId"))
         .then()
             .statusCode(200)
             .body("certificateDescription.certificatePem", equalTo(created.getString("certificatePem")))
             .body("certificateDescription.certificateId", equalTo(created.getString("certificateId")))
-            .body("certificateDescription.status", equalTo("INACTIVE"));
+            .body("certificateDescription.status", equalTo("INACTIVE"))
+            .body("certificateDescription.certificateMode", equalTo("DEFAULT"))
+            .extract().asString();
+
+        // Read with Jackson: RestAssured's JsonPath narrows large epoch doubles to float precision.
+        com.fasterxml.jackson.databind.JsonNode described = new com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
+                .path("certificateDescription");
+        assertEquals(2524607999L, described.path("validity").path("notAfter").asLong(),
+                "validity.notAfter is 2049-12-31T23:59:59Z as epoch seconds");
+        long notBefore = described.path("validity").path("notBefore").asLong();
+        long creation = described.path("creationDate").asLong();
+        assertTrue(Math.abs(notBefore - creation) <= 2, "the certificate is valid from its creation");
     }
 
     private static JsonPath create() {

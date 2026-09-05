@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.iot.model.AttributePayload;
 import software.amazon.awssdk.services.iot.model.AttachPolicyRequest;
 import software.amazon.awssdk.services.iot.model.AttachThingPrincipalRequest;
 import software.amazon.awssdk.services.iot.model.AuthorizerConfig;
+import software.amazon.awssdk.services.iot.model.CertificateMode;
 import software.amazon.awssdk.services.iot.model.CertificateStatus;
 import software.amazon.awssdk.services.iot.model.Action;
 import software.amazon.awssdk.services.iot.model.AddThingToThingGroupRequest;
@@ -363,6 +364,11 @@ class IotTest {
                 .certificateId(cert.certificateId())
                 .build());
         assertThat(described.certificateDescription().status()).isEqualTo(CertificateStatus.ACTIVE);
+        assertThat(described.certificateDescription().certificateMode()).isEqualTo(CertificateMode.DEFAULT);
+        assertThat(described.certificateDescription().validity().notAfter())
+                .isEqualTo(java.time.Instant.parse("2049-12-31T23:59:59Z"));
+        assertThat(cert.certificateId()).matches("[0-9a-f]{64}");
+        assertThat(cert.keyPair().privateKey()).startsWith("-----BEGIN RSA PRIVATE KEY-----");
 
         var certs = iot.listCertificates(ListCertificatesRequest.builder().build());
         assertThat(certs.certificates()).anyMatch(item -> cert.certificateArn().equals(item.certificateArn()));
