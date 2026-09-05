@@ -548,6 +548,73 @@ class CloudFormationStackSetsIntegrationTest {
             .body(containsString("<Status>FAILED</Status>"));
     }
 
+    /**
+     * An instance whose stack rolled back is terminal, and the single-stack engine refuses to
+     * update it. That is one instance failing, not a malformed request: UpdateStackSet still
+     * answers, leaves the instance INOPERABLE, and reports the operation FAILED. Letting the
+     * refusal out would fail the whole call with a 400 and update no instance at all.
+     */
+    @Test
+    void updateStackSetReportsFailedRatherThanRefusingOverARolledBackInstance() {
+        String setName = "failset-update-" + UUID.randomUUID().toString().substring(0, 8);
+        String queueName = "failset-update-q-" + UUID.randomUUID().toString().substring(0, 8);
+        String badTemplate =
+            "{\"Resources\":{\"Nested\":{\"Type\":\"AWS::CloudFormation::Stack\",\"Properties\":{}}}}";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", badTemplate)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        String operationId = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(queueName))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("UpdateStackSetResponse.UpdateStackSetResult.OperationId");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackSetOperation")
+            .formParam("StackSetName", setName)
+            .formParam("OperationId", operationId)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Status>FAILED</Status>"));
+
+        // The instance is kept and still INOPERABLE, carrying the refusal as its reason.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackInstance")
+            .formParam("StackSetName", setName)
+            .formParam("StackInstanceAccount", ACCOUNT_B)
+            .formParam("StackInstanceRegion", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<DetailedStatus>FAILED</DetailedStatus>"))
+            .body(containsString(
+                    "Stack instance is in ROLLBACK_COMPLETE state and can not be updated"));
+    }
+
     @Test
     void stackSetConditionPreflightUsesTargetAccountOnCreateInstances() {
         // Regression: condition-dependency preflight for a StackSet instance must run in the target
