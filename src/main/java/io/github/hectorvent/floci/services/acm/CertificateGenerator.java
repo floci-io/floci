@@ -28,6 +28,7 @@ import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfo;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.util.io.pem.PemObject;
 import org.jboss.logging.Logger;
 
 import javax.crypto.Cipher;
@@ -47,6 +48,7 @@ import java.security.SecureRandom;
 import java.security.Security;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.ECKey;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -61,7 +63,6 @@ import java.util.regex.Pattern;
 public class CertificateGenerator {
 
     private static final Logger LOG = Logger.getLogger(CertificateGenerator.class);
-    private static final String ISSUER_DN = "CN=Amazon,OU=Server CA 1B,O=Amazon,C=US";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final String PBE_ALGORITHM = "PBEWithHmacSHA256AndAES_256";
     private static final int PBE_SALT_BYTES = 16;
@@ -97,21 +98,6 @@ public class CertificateGenerator {
     public record Issuer(X509Certificate certificate, PrivateKey key) {}
 
     /**
-     * Generates a certificate for local emulation that mimics an ACM-issued certificate:
-     * the subject is {@code CN=<domainName>} but the issuer is a cosmetic Amazon CA DN, matching
-     * what real ACM returns. It is signed by its own key, so it is <em>not</em> verifiable as a
-     * trust anchor (the issuer DN does not match any certificate a client could hold). Use this
-     * for ACM responses; use {@link #generateSelfSignedCertificate} for a cert clients must trust.
-     *
-     * <p>Note: RSA key generation (especially 4096-bit) can take 100-500ms.
-     * In production emulator usage, consider moving this to a worker thread
-     * or using virtual threads for concurrent certificate generation.</p>
-     */
-    public GeneratedCertificate generateCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
-        return buildCertificate(domainName, sans, keyAlgorithm, ISSUER_DN, false, null);
-    }
-
-    /**
      * Generates a genuinely self-signed certificate (issuer == subject, marked as a CA) suitable
      * for use as a <em>trust anchor</em>: a client that adds this certificate to its CA store can
      * verify a TLS connection that presents it. Used for Floci's own HTTPS server certificate so
@@ -119,7 +105,7 @@ public class CertificateGenerator {
      * Floci once the certificate is installed in their CA bundle.
      */
     public GeneratedCertificate generateSelfSignedCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
-        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true, null);
+        return buildSelfSignedCertificate(domainName, sans, keyAlgorithm, null);
     }
 
     /**
@@ -131,7 +117,7 @@ public class CertificateGenerator {
      */
     public GeneratedCertificate generateSelfSignedCertificate(String domainName, List<String> sans,
                                                               KeyAlgorithm keyAlgorithm, KeyPair keyPair) {
-        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true, keyPair);
+        return buildSelfSignedCertificate(domainName, sans, keyAlgorithm, keyPair);
     }
 
     /**
@@ -191,7 +177,7 @@ public class CertificateGenerator {
      */
     boolean isOfAlgorithm(PublicKey key, KeyAlgorithm keyAlgorithm) {
         if ("EC".equals(keyAlgorithm.getAlgorithm())) {
-            if (!"EC".equals(key.getAlgorithm())) {
+            if (!(key instanceof ECKey)) {
                 return false;
             }
             X962Parameters parameters = X962Parameters.getInstance(
@@ -199,12 +185,12 @@ public class CertificateGenerator {
             return parameters.isNamedCurve()
                     && ECNamedCurveTable.getOID(keyAlgorithm.getCurveName()).equals(parameters.getParameters());
         }
-        return "RSA".equals(key.getAlgorithm()) && detectKeyAlgorithm(key) == keyAlgorithm;
+        return !(key instanceof ECKey) && detectKeyAlgorithm(key) == keyAlgorithm;
     }
 
     /** True when {@code privateKey} signs what {@code publicKey} verifies. */
     public static boolean isPair(PrivateKey privateKey, PublicKey publicKey) throws Exception {
-        String algorithm = "EC".equals(privateKey.getAlgorithm()) ? "SHA256withECDSA" : "SHA256withRSA";
+        String algorithm = privateKey instanceof ECKey ? "SHA256withECDSA" : "SHA256withRSA";
         byte[] probe = "floci".getBytes(StandardCharsets.US_ASCII);
         Signature signer = Signature.getInstance(algorithm);
         signer.initSign(privateKey);
@@ -216,16 +202,15 @@ public class CertificateGenerator {
         return verifier.verify(signature);
     }
 
-    private GeneratedCertificate buildCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm,
-                                                  String issuerDn, boolean asCa, KeyPair suppliedKeyPair) {
+    private GeneratedCertificate buildSelfSignedCertificate(String domainName, List<String> sans,
+                                                            KeyAlgorithm keyAlgorithm, KeyPair suppliedKeyPair) {
         try {
             KeyPair keyPair = suppliedKeyPair != null ? suppliedKeyPair : generateKeyPair(keyAlgorithm);
-            String subjectDn = "CN=" + domainName;
-            // Signed with the subject's own key, as before: generateCertificate keeps its cosmetic
-            // Amazon issuer DN, generateSelfSignedCertificate keeps issuer == subject.
-            X509Certificate cert = signCertificate(new X500Name(subjectDn), keyPair.getPublic(),
-                    new X500Name(issuerDn), keyPair.getPrivate(), withDomainFirst(domainName, sans), asCa, null, 365);
-            return toGenerated(cert, keyPair.getPrivate(), subjectDn, issuerDn);
+            String dn = "CN=" + domainName;
+            // Signed with the subject's own key: issuer == subject, and a CA so it can be a trust anchor.
+            X509Certificate cert = signCertificate(new X500Name(dn), keyPair.getPublic(),
+                    new X500Name(dn), keyPair.getPrivate(), withDomainFirst(domainName, sans), true, null, 365);
+            return toGenerated(cert, keyPair.getPrivate(), dn, dn);
         } catch (Exception e) {
             LOG.error("Failed to generate certificate", e);
             throw new CertificateGenerationException("Certificate generation failed: " + e.getMessage(), e);
@@ -276,7 +261,7 @@ public class CertificateGenerator {
                     new ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth));
         }
 
-        String signatureAlgorithm = "EC".equals(issuerKey.getAlgorithm()) ? "SHA512withECDSA" : "SHA512WithRSA";
+        String signatureAlgorithm = issuerKey instanceof ECKey ? "SHA512withECDSA" : "SHA512WithRSA";
         ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm).build(issuerKey);
         X509CertificateHolder holder = certBuilder.build(signer);
         return new JcaX509CertificateConverter().getCertificate(holder);
@@ -364,10 +349,20 @@ public class CertificateGenerator {
         return IP_ADDRESS_PATTERN.matcher(value).matches();
     }
 
+    /**
+     * PEM for a certificate or key. A JDK EC private key goes out as PKCS#8 ({@code PRIVATE KEY}):
+     * {@link JcaPEMWriter} would write it as a bare SEC1 structure without the curve, which neither
+     * OpenSSL nor {@link #parsePrivateKey} can read. RSA keys stay PKCS#1 ({@code RSA PRIVATE KEY}),
+     * the form AWS IoT hands out.
+     */
     public String toPem(Object obj) throws Exception {
         StringWriter sw = new StringWriter();
         try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
-            pemWriter.writeObject(obj);
+            if (obj instanceof PrivateKey key && key instanceof ECKey) {
+                pemWriter.writeObject(new PemObject("PRIVATE KEY", key.getEncoded()));
+            } else {
+                pemWriter.writeObject(obj);
+            }
         }
         return sw.toString();
     }
@@ -434,7 +429,8 @@ public class CertificateGenerator {
             JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
 
             if (obj instanceof org.bouncycastle.openssl.PEMKeyPair pemKeyPair) {
-                return converter.getKeyPair(pemKeyPair).getPrivate();
+                // Only the private half is needed, and a SEC1 key may carry no public half at all.
+                return converter.getPrivateKey(pemKeyPair.getPrivateKeyInfo());
             } else if (obj instanceof org.bouncycastle.asn1.pkcs.PrivateKeyInfo pkInfo) {
                 return converter.getPrivateKey(pkInfo);
             }

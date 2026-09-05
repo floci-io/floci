@@ -60,6 +60,7 @@ Status: control plane only.
 - `ListDomainConfigurations` filters by `serviceType` and pages with `marker` and `pageSize`.
 - Tags work through `TagResource`, `UntagResource` and `ListTagsForResource` on the configuration ARN.
 - CloudFormation provisions `AWS::IoT::DomainConfiguration` through the same operations; see the CloudFormation service page for the attribute list.
+- With TLS enabled, a customer-managed configuration (`domainName` set) adds its domain to Floci's server certificate as soon as it is created, so `https://<domain>` verifies without a restart; see [TLS](../configuration/tls.md) for the accepted suffixes. A configuration without a domain name registers nothing.
 - The four AWS-managed configurations every account has (`iot:Data-ATS`, `iot:Data`, `iot:CredentialProvider`, `iot:Jobs`) exist in every region without being created: `AWS_MANAGED`, `ENABLED`, no server certificate, and the address `DescribeEndpoint` returns as their domain name. They can be updated and tagged but not deleted, as on AWS.
 
 Current limitations:

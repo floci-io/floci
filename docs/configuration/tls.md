@@ -8,7 +8,7 @@ Floci supports optional TLS, enabling `https://` for all REST/JSON/Query endpoin
 docker run -e FLOCI_TLS_ENABLED=true -p 4566:4566 floci/floci:latest
 ```
 
-Then point your SDK at `https://localhost:4566` and trust Floci's local CA in the processes that talk to it. Every certificate Floci issues (its HTTPS endpoint, and in later releases ACM and IoT device certificates) chains to that one CA:
+Then point your SDK at `https://localhost:4566` and trust Floci's local CA in the processes that talk to it. Every certificate Floci issues (its HTTPS endpoint, every ACM certificate and, in a later release, IoT device certificates) chains to that one CA:
 
 ```bash
 curl -s http://localhost:4566/_floci/ca.pem -o floci-root-ca.pem
@@ -84,6 +84,14 @@ services:
 ```
 
 The generated certificate will include `floci` in its SANs, so TLS validation succeeds when `app` connects to `https://floci:4566`. Fetch `ca.pem` from Floci into `app` (an entrypoint `curl`, or a shared volume mounted from `{persistent-path}/tls/`) so the bundle path above exists.
+
+### Custom Domains Learned at Runtime
+
+A wildcard SAN matches one label only, so `*.localhost.floci.io` covers `api.localhost.floci.io` but not `api.dev.localhost.floci.io`. For names like that, Floci can add an exact hostname to the server certificate while it runs: the certificate is reissued by the local CA with the same key and the new name, and the HTTPS listener switches to it at once. No restart, no new CA, nothing new for clients to trust. Learned names are recorded in `{persistent-path}/tls/floci-server.metadata.json`, so they survive restarts and a regeneration after a `FLOCI_HOSTNAME` change; `POST /_floci/state/reset` drops them.
+
+Only a name under a local suffix is accepted: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME`, the `FLOCI_BASE_URL` host, and every `FLOCI_DNS_EXTRA_SUFFIXES` entry. Any other name is refused with a warning, so a Floci certificate can never cover a public name. This only applies to the generated certificate; a user-provided one is never changed.
+
+Names are added by the custom domain operations: API Gateway `CreateDomainName`, IoT Core `CreateDomainConfiguration` with a `domainName`, and Cognito `CreateUserPoolDomain` with a `CustomDomainConfig`. The AWS operation succeeds either way; a name outside the local suffixes, or a reissue that fails, is logged as a warning.
 
 ## User-Provided Certificates
 

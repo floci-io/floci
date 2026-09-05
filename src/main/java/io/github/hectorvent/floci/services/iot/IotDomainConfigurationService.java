@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -56,6 +57,7 @@ public class IotDomainConfigurationService {
     private final StorageBackend<String, IotDomainConfiguration> store;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
+    private final TlsCertificateManager certificateManager;
     /**
      * Guards every read-modify-write on the store: the duplicate check and store of a create, the
      * seeding of the AWS-managed configurations, and the update, delete and tag paths, which all
@@ -65,16 +67,17 @@ public class IotDomainConfigurationService {
 
     @Inject
     public IotDomainConfigurationService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                         EmulatorConfig config) {
+                                         EmulatorConfig config, TlsCertificateManager certificateManager) {
         this(storageFactory.create("iot", "iot-domain-configurations.json",
-                new TypeReference<Map<String, IotDomainConfiguration>>() {}), regionResolver, config);
+                new TypeReference<Map<String, IotDomainConfiguration>>() {}), regionResolver, config, certificateManager);
     }
 
     IotDomainConfigurationService(StorageBackend<String, IotDomainConfiguration> store, RegionResolver regionResolver,
-                                  EmulatorConfig config) {
+                                  EmulatorConfig config, TlsCertificateManager certificateManager) {
         this.store = store;
         this.regionResolver = regionResolver;
         this.config = config;
+        this.certificateManager = certificateManager;
     }
 
     public IotDomainConfiguration createDomainConfiguration(String name, JsonNode request, String region) {
@@ -118,6 +121,10 @@ public class IotDomainConfigurationService {
                         "Domain configuration already exists: " + name, 409);
             }
             store.put(key, configuration);
+        }
+        // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
+        if (domainName != null) {
+            certificateManager.ensureHost(domainName);
         }
         return configuration;
     }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -15,8 +16,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -49,6 +48,7 @@ public class AcmService implements ResourceProvider {
     private static final int MAX_DOMAIN_LENGTH = 253;
     private final StorageBackend<String, Certificate> store;
     private final CertificateGenerator certificateGenerator;
+    private final FlociCertificateAuthority certificateAuthority;
     private final RegionResolver regionResolver;
     private final int validationWaitSeconds;
     private final AtomicInteger accountDaysBeforeExpiry = new AtomicInteger(45);
@@ -68,23 +68,24 @@ public class AcmService implements ResourceProvider {
 
     @Inject
     public AcmService(StorageFactory factory, CertificateGenerator certificateGenerator,
-                      EmulatorConfig config, RegionResolver regionResolver) {
+                      FlociCertificateAuthority certificateAuthority, EmulatorConfig config,
+                      RegionResolver regionResolver) {
         this(factory.create("acm", "acm-certificates.json",
                 new TypeReference<Map<String, Certificate>>() {}),
             certificateGenerator,
+            certificateAuthority,
             regionResolver,
             config.services().acm().validationWaitSeconds());
     }
 
     AcmService(StorageBackend<String, Certificate> store, CertificateGenerator certificateGenerator,
-               RegionResolver regionResolver, int validationWaitSeconds) {
+               FlociCertificateAuthority certificateAuthority, RegionResolver regionResolver,
+               int validationWaitSeconds) {
         this.store = store;
         this.certificateGenerator = certificateGenerator;
+        this.certificateAuthority = certificateAuthority;
         this.regionResolver = regionResolver;
         this.validationWaitSeconds = validationWaitSeconds;
-
-        // Validate Root CA resource availability
-        validateRootCaResource();
     }
 
     /**
@@ -95,19 +96,6 @@ public class AcmService implements ResourceProvider {
         if (securityWarningLogged.compareAndSet(false, true)) {
             LOG.warn("SECURITY WARNING: ACM emulator stores private keys in plaintext. " +
                      "This is acceptable for local development but NOT for production use.");
-        }
-    }
-
-    private void validateRootCaResource() {
-        try (InputStream is = getClass().getResourceAsStream("/certs/amazon-root-ca.pem")) {
-            if (is == null) {
-                LOG.warn("Amazon Root CA certificate not found at /certs/amazon-root-ca.pem - " +
-                         "certificate chains will be empty");
-            } else {
-                LOG.info("Amazon Root CA certificate loaded successfully");
-            }
-        } catch (IOException e) {
-            LOG.warnv("Failed to validate Root CA resource: {0}", e.getMessage());
         }
     }
 
@@ -149,10 +137,10 @@ public class AcmService implements ResourceProvider {
             status = validationWaitSeconds > 0 ? CertificateStatus.PENDING_VALIDATION : CertificateStatus.ISSUED;
         }
 
-        // Generate real X.509 certificate
-        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateCertificate(
-            domainName, sans, alg
-        );
+        // A server leaf signed by the local CA, so Certificate plus CertificateChain from
+        // GetCertificate validate the way an ACM certificate and its chain do on AWS.
+        CertificateGenerator.GeneratedCertificate generated = certificateAuthority.issueServerCertificate(
+            domainName, sans, alg, null);
 
         Instant now = Instant.now();
 
@@ -182,7 +170,7 @@ public class AcmService implements ResourceProvider {
         cert.setSignatureAlgorithm(generated.signatureAlgorithm());
         cert.setCertificateBody(generated.certificatePem());
         cert.setPrivateKey(generated.privateKeyPem());
-        cert.setCertificateChain(getAwsRootCa());
+        cert.setCertificateChain(certificateAuthority.caPem());
         cert.setCertOptions(options != null ? options : CertificateOptions.defaultOptions());
         cert.setCertAuthorityArn(certAuthorityArn);
         cert.setIdempotencyToken(idempotencyToken);
@@ -749,18 +737,5 @@ public class AcmService implements ResourceProvider {
             .findFirst()
             .map(s -> s.substring(3))
             .orElse(dn);
-    }
-
-    private String getAwsRootCa() {
-        try (InputStream is = getClass().getResourceAsStream("/certs/amazon-root-ca.pem")) {
-            if (is == null) {
-                LOG.warn("Could not load Amazon Root CA from resources, using empty chain");
-                return "";
-            }
-            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            LOG.warn("Failed to load Amazon Root CA: " + e.getMessage());
-            return "";
-        }
     }
 }

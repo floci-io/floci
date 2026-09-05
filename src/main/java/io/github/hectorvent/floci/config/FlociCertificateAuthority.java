@@ -19,7 +19,7 @@ import java.util.List;
 
 /**
  * Floci's one local root CA. Every certificate the emulator hands out that a client is expected
- * to validate (the HTTPS server leaf, and later ACM and IoT device certificates) chains to it, so
+ * to validate (the HTTPS server leaf, ACM certificates and, later, IoT device certificates) chains to it, so
  * a developer trusts one file once: {@code {persistent-path}/tls/floci-root-ca.crt}, also served
  * at {@code GET /_floci/ca.pem}.
  *
