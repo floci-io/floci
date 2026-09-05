@@ -230,6 +230,15 @@ class LambdaEventSourceMappingCfnProvisionerTest {
     }
 
     @Test
+    void deletePropagatesNonResourceNotFoundExceptions() {
+        doThrow(new AwsException("InternalError", "boom", 500))
+                .when(lambdaService).deleteEventSourceMapping("broken-uuid");
+
+        assertThrows(AwsException.class,
+                () -> provisioner.delete("AWS::Lambda::EventSourceMapping", "broken-uuid", "us-east-1"));
+    }
+
+    @Test
     void provisionRejectsWrongResourceType() {
         StackResource r = new StackResource();
         r.setResourceType("AWS::Lambda::Function");

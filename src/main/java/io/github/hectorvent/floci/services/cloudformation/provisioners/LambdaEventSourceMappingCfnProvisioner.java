@@ -129,13 +129,7 @@ public class LambdaEventSourceMappingCfnProvisioner implements CfnResourceProvis
         if (!"AWS::Lambda::EventSourceMapping".equals(resourceType) || physicalId == null) {
             return;
         }
-        try {
-            lambdaService.deleteEventSourceMapping(physicalId);
-        } catch (AwsException e) {
-            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
-                return;
-            }
-            throw e;
-        }
+        CfnDeletes.safeDelete("event source mapping", physicalId,
+                () -> lambdaService.deleteEventSourceMapping(physicalId), "ResourceNotFoundException");
     }
 }
