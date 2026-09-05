@@ -36,6 +36,16 @@ class CloudWatchLogsCrossAccountIntegrationTest {
     }
 
     @Test
+    void transformerPolicyAcceptsProcessorArrayDocument() {
+        json("Logs_20140328.PutAccountPolicy",
+                "{\"policyName\":\"account-transformer\",\"policyDocument\":\"[{\\\"parseJSON\\\":{}}]\","
+                        + "\"policyType\":\"TRANSFORMER_POLICY\",\"scope\":\"ALL\"}")
+                .then().statusCode(200)
+                .body("accountPolicy.policyType", equalTo("TRANSFORMER_POLICY"))
+                .body("accountPolicy.policyDocument", equalTo("[{\"parseJSON\":{}}]"));
+    }
+
+    @Test
     void destinationPolicyRequiresExistingDestination() {
         json("Logs_20140328.PutDestinationPolicy",
                 "{\"destinationName\":\"missing\",\"accessPolicy\":\"{}\"}")

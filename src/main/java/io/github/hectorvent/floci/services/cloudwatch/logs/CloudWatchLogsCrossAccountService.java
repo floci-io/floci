@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.AccountPolicy;
@@ -45,11 +45,6 @@ public class CloudWatchLogsCrossAccountService {
                 regionResolver, objectMapper);
     }
 
-    CloudWatchLogsCrossAccountService() {
-        this(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), new ObjectMapper());
-    }
-
     CloudWatchLogsCrossAccountService(StorageBackend<String, LogDestination> destinations,
                                       StorageBackend<String, AccountPolicy> accountPolicies,
                                       RegionResolver regionResolver, ObjectMapper objectMapper) {
@@ -70,14 +65,16 @@ public class CloudWatchLogsCrossAccountService {
         destination.setTargetArn(targetArn);
         destination.setRoleArn(roleArn);
         destination.setArn("arn:aws:logs:" + region + ":" + regionResolver.getAccountId() + ":destination:" + destinationName);
-        if (destination.getCreationTime() == 0) destination.setCreationTime(System.currentTimeMillis());
+        if (destination.getCreationTime() == 0) {
+            destination.setCreationTime(System.currentTimeMillis());
+        }
         destinations.put(key, destination);
         return destination;
     }
 
     public synchronized void putDestinationPolicy(String destinationName, String accessPolicy, String region) {
         validateDestinationName(destinationName);
-        requireJson(accessPolicy, "accessPolicy", DESTINATION_POLICY_MAX_BYTES);
+        requireJsonObject(accessPolicy, "accessPolicy", DESTINATION_POLICY_MAX_BYTES);
         String key = destinationKey(region, destinationName);
         LogDestination destination = destinations.get(key)
                 .orElseThrow(() -> invalid("The specified destination does not exist."));
@@ -89,9 +86,13 @@ public class CloudWatchLogsCrossAccountService {
                                                         String policyType, String selectionCriteria, String scope,
                                                         String region) {
         validatePolicyName(policyName);
-        requireJson(policyDocument, "policyDocument", ACCOUNT_POLICY_MAX_CHARS);
-        if (policyType == null || !POLICY_TYPES.contains(policyType)) throw invalid("policyType is invalid.");
-        if (scope != null && !"ALL".equals(scope)) throw invalid("scope must be ALL.");
+        if (policyType == null || !POLICY_TYPES.contains(policyType)) {
+            throw invalid("policyType is invalid.");
+        }
+        requirePolicyDocument(policyDocument, policyType);
+        if (scope != null && !"ALL".equals(scope)) {
+            throw invalid("scope must be ALL.");
+        }
         validateSelectionCriteria(policyType, selectionCriteria);
 
         String key = policyKey(region, policyType, policyName);
@@ -114,7 +115,9 @@ public class CloudWatchLogsCrossAccountService {
     }
 
     public List<AccountPolicy> describeAccountPolicies(String policyType, String policyName, String region) {
-        if (policyType == null || !POLICY_TYPES.contains(policyType)) throw invalid("policyType is required and must be valid.");
+        if (policyType == null || !POLICY_TYPES.contains(policyType)) {
+            throw invalid("policyType is required and must be valid.");
+        }
         List<AccountPolicy> result = accountPolicies.scan(key -> key.startsWith(region + "::" + policyType + "::")).stream()
                 .filter(policy -> policyName == null || policyName.equals(policy.getPolicyName()))
                 .sorted(Comparator.comparing(AccountPolicy::getPolicyName))
@@ -137,13 +140,17 @@ public class CloudWatchLogsCrossAccountService {
     }
 
     private static void validateSelectionCriteria(String policyType, String selectionCriteria) {
-        if (selectionCriteria == null || selectionCriteria.isBlank()) return;
+        if (selectionCriteria == null || selectionCriteria.isBlank()) {
+            return;
+        }
         if (selectionCriteria.getBytes(StandardCharsets.UTF_8).length > SELECTION_CRITERIA_MAX_BYTES) {
             throw invalid("selectionCriteria exceeds 25 KB.");
         }
         switch (policyType) {
             case "DATA_PROTECTION_POLICY", "METRIC_EXTRACTION_POLICY" -> {
-                if ("DATA_PROTECTION_POLICY".equals(policyType)) throw invalid("selectionCriteria is not supported for data protection policies.");
+                if ("DATA_PROTECTION_POLICY".equals(policyType)) {
+                    throw invalid("selectionCriteria is not supported for data protection policies.");
+                }
             }
             case "SUBSCRIPTION_FILTER_POLICY" -> {
                 if (!selectionCriteria.matches("\\s*LogGroupName\\s+NOT\\s+IN\\s*\\[.*]\\s*")) {
@@ -151,38 +158,70 @@ public class CloudWatchLogsCrossAccountService {
                 }
             }
             case "TRANSFORMER_POLICY" -> {
-                if (!selectionCriteria.contains("LogGroupNamePrefix")) throw invalid("Transformer selectionCriteria must use LogGroupNamePrefix.");
+                if (!selectionCriteria.contains("LogGroupNamePrefix")) {
+                    throw invalid("Transformer selectionCriteria must use LogGroupNamePrefix.");
+                }
             }
             case "FIELD_INDEX_POLICY" -> {
                 boolean prefix = selectionCriteria.contains("LogGroupNamePrefix");
                 boolean source = selectionCriteria.contains("DataSourceName") && selectionCriteria.contains("DataSourceType");
-                if (!prefix && !source) throw invalid("Field index selectionCriteria is invalid.");
+                if (!prefix && !source) {
+                    throw invalid("Field index selectionCriteria is invalid.");
+                }
             }
             default -> throw invalid("policyType is invalid.");
         }
     }
 
-    private void requireJson(String value, String field, int max) {
-        if (value == null || value.isBlank()) throw invalid(field + " is required.");
-        int size = field.equals("accessPolicy") ? value.getBytes(StandardCharsets.UTF_8).length : value.length();
-        if (size > max) throw invalid(field + " exceeds the maximum size.");
+    private void requireJsonObject(String value, String field, int maxBytes) {
+        JsonNode document = parseJson(value, field, maxBytes, true);
+        if (!document.isObject()) {
+            throw invalid(field + " must contain a JSON object.");
+        }
+    }
+
+    private void requirePolicyDocument(String value, String policyType) {
+        JsonNode document = parseJson(value, "policyDocument", ACCOUNT_POLICY_MAX_CHARS, false);
+        if ("TRANSFORMER_POLICY".equals(policyType)) {
+            if (!document.isArray() && !document.isObject()) {
+                throw invalid("policyDocument must contain a JSON object or processor array.");
+            }
+            return;
+        }
+        if (!document.isObject()) {
+            throw invalid("policyDocument must contain a JSON object.");
+        }
+    }
+
+    private JsonNode parseJson(String value, String field, int max, boolean countUtf8Bytes) {
+        if (value == null || value.isBlank()) {
+            throw invalid(field + " is required.");
+        }
+        int size = countUtf8Bytes ? value.getBytes(StandardCharsets.UTF_8).length : value.length();
+        if (size > max) {
+            throw invalid(field + " exceeds the maximum size.");
+        }
         try {
-            if (!objectMapper.readTree(value).isObject()) throw invalid(field + " must contain a JSON object.");
-        } catch (AwsException e) {
-            throw e;
+            return objectMapper.readTree(value);
         } catch (Exception e) {
             throw invalid(field + " must contain valid JSON.");
         }
     }
 
     private static void validateDestinationName(String value) {
-        if (value == null || !DESTINATION_NAME.matcher(value).matches()) throw invalid("destinationName is invalid.");
+        if (value == null || !DESTINATION_NAME.matcher(value).matches()) {
+            throw invalid("destinationName is invalid.");
+        }
     }
     private static void validatePolicyName(String value) {
-        if (value == null || value.isBlank() || value.startsWith("aws/") || value.length() > 256) throw invalid("policyName is invalid.");
+        if (value == null || value.isBlank() || value.startsWith("aws/") || value.length() > 256) {
+            throw invalid("policyName is invalid.");
+        }
     }
     private static void requireArn(String value, String field) {
-        if (value == null || !value.startsWith("arn:") || value.length() < 10) throw invalid(field + " must be a valid ARN.");
+        if (value == null || !value.startsWith("arn:") || value.length() < 10) {
+            throw invalid(field + " must be a valid ARN.");
+        }
     }
     private static String destinationKey(String region, String name) { return region + "::" + name; }
     private static String policyKey(String region, String type, String name) { return region + "::" + type + "::" + name; }

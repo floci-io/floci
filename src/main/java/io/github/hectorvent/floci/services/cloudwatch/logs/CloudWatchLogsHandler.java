@@ -39,10 +39,6 @@ public class CloudWatchLogsHandler {
         this.objectMapper = objectMapper;
     }
 
-    CloudWatchLogsHandler(CloudWatchLogsService logsService, ObjectMapper objectMapper) {
-        this(logsService, new CloudWatchLogsCrossAccountService(), objectMapper);
-    }
-
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "CreateLogGroup" -> handleCreateLogGroup(request, region);
