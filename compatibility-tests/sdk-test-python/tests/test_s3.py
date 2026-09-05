@@ -446,3 +446,54 @@ class TestS3MultipartChecksums:
         assert head["ChecksumSHA256"] == base64.b64encode(self._sha256(payload)).decode()
         assert head["ChecksumType"] == "FULL_OBJECT"
         assert "-" not in head["ETag"]
+
+    def test_copy_of_multipart_object_is_a_single_full_object(self, s3_client, test_bucket, tmp_path):
+        """CopyObject writes one object: FULL_OBJECT checksum, an MD5 ETag without part count, no ObjectParts."""
+        key, copy_key = "multipart-copy-source.bin", "multipart-copy.bin"
+        payload = self._payload()
+        self._upload(s3_client, test_bucket, key, payload, tmp_path, ChecksumAlgorithm="SHA256")
+        source = s3_client.head_object(Bucket=test_bucket, Key=key, ChecksumMode="ENABLED")
+        assert source["ChecksumType"] == "COMPOSITE"
+
+        result = s3_client.copy_object(
+            Bucket=test_bucket, Key=copy_key, CopySource={"Bucket": test_bucket, "Key": key}
+        )["CopyObjectResult"]
+        full = base64.b64encode(self._sha256(payload)).decode()
+        assert result["ChecksumSHA256"] == full
+        assert result["ChecksumType"] == "FULL_OBJECT"
+        assert result["ETag"] == f'"{hashlib.md5(payload).hexdigest()}"'
+        assert result["ETag"] != source["ETag"]
+
+        head = s3_client.head_object(Bucket=test_bucket, Key=copy_key, ChecksumMode="ENABLED")
+        assert (head["ChecksumSHA256"], head["ChecksumType"], head["ETag"]) == (full, "FULL_OBJECT", result["ETag"])
+        attributes = s3_client.get_object_attributes(
+            Bucket=test_bucket, Key=copy_key, ObjectAttributes=["Checksum", "ObjectParts"]
+        )
+        assert attributes["Checksum"]["ChecksumType"] == "FULL_OBJECT"
+        assert "ObjectParts" not in attributes
+
+    def test_get_object_attributes_etag_has_no_quotes(self, s3_client, test_bucket, tmp_path):
+        """S3 quotes the ETag everywhere except in GetObjectAttributes."""
+        key = "etag-quotes.bin"
+        self._upload(s3_client, test_bucket, key, self._payload(), tmp_path, ChecksumAlgorithm="SHA256")
+
+        head_etag = s3_client.head_object(Bucket=test_bucket, Key=key)["ETag"]
+        attributes = s3_client.get_object_attributes(Bucket=test_bucket, Key=key, ObjectAttributes=["ETag"])
+
+        assert head_etag.startswith('"') and head_etag.endswith('-3"')
+        assert attributes["ETag"] == head_etag.strip('"')
+
+    def test_download_with_checksum_mode_works_for_composite_and_full_object(self, s3_client, test_bucket, tmp_path):
+        """botocore validates a full-object checksum on GetObject and skips a composite one (the -N suffix)."""
+        payload, small = self._payload(), self._payload(1 * MIB)
+        self._upload(s3_client, test_bucket, "download-composite.bin", payload, tmp_path, ChecksumAlgorithm="SHA256")
+        self._upload(s3_client, test_bucket, "download-full.bin", small, tmp_path, ChecksumAlgorithm="SHA256")
+
+        composite = s3_client.get_object(Bucket=test_bucket, Key="download-composite.bin", ChecksumMode="ENABLED")
+        assert composite["ChecksumSHA256"].endswith("-3")
+        assert composite["ChecksumType"] == "COMPOSITE"
+        assert composite["Body"].read() == payload
+
+        full = s3_client.get_object(Bucket=test_bucket, Key="download-full.bin", ChecksumMode="ENABLED")
+        assert full["ChecksumType"] == "FULL_OBJECT"
+        assert full["Body"].read() == small

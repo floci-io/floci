@@ -32,6 +32,7 @@ import software.amazon.awssdk.services.fis.FisClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.rum.RumClient;
 import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.endpoints.Endpoint;
 import software.amazon.awssdk.services.s3control.S3ControlClient;
@@ -311,6 +312,19 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .forcePathStyle(true)
+                .build();
+    }
+
+    /** Async client with the Java-based multipart support enabled (5 MiB threshold and parts), for the transfer manager. */
+    public static S3AsyncClient s3MultipartAsyncClient() {
+        long fiveMiB = 5L * 1024 * 1024;
+        return S3AsyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .forcePathStyle(true)
+                .multipartEnabled(true)
+                .multipartConfiguration(b -> b.thresholdInBytes(fiveMiB).minimumPartSizeInBytes(fiveMiB))
                 .build();
     }
 
