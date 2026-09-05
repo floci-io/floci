@@ -2318,9 +2318,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         reservation.setOwnerId(accountId);
 
         String effectiveInstanceType = instanceType != null ? instanceType : "t2.micro";
-        validateArchitectureCompatibility(imageId, effectiveInstanceType);
+        validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
-        String architecture = architectureFor(imageId, effectiveInstanceType);
+        String architecture = architectureFor(region, imageId, effectiveInstanceType);
+        ResolvedAmiImage dockerImage = null;
+        if (!config.services().ec2().mock()) {
+            // A CreateImage AMI is not in the catalog, so resolve through its source.
+            dockerImage = amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
+        }
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
             String privateIp = suppliedEni != null
@@ -2420,9 +2425,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                // A CreateImage AMI is not in the catalog, so resolve through its source.
-                ResolvedAmiImage dockerImage =
-                        amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -2531,9 +2533,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
-    private void validateArchitectureCompatibility(String imageId, String instanceType) {
-        Optional<String> imageArchitecture = imageCatalog.findByIdOrAlias(imageId)
-                .map(image -> image.architecture)
+    private void validateArchitectureCompatibility(String region, String imageId, String instanceType) {
+        Optional<String> imageArchitecture = registeredImages.get(key(region, imageId))
+                .map(Image::getArchitecture)
+                .or(() -> imageCatalog.findByIdOrAlias(imageId).map(image -> image.architecture))
                 .filter(value -> !value.isBlank());
         if (imageArchitecture.isEmpty()) {
             return;
@@ -2550,9 +2553,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 });
     }
 
-    private String architectureFor(String imageId, String instanceType) {
-        Optional<Ec2ImageCatalog.CatalogImage> image = imageCatalog.findByIdOrAlias(imageId);
-        return image.map(catalogImage -> catalogImage.architecture)
+    private String architectureFor(String region, String imageId, String instanceType) {
+        Optional<String> registeredArchitecture = registeredImages.get(key(region, imageId))
+                .map(Image::getArchitecture);
+        return registeredArchitecture
+                .filter(value -> !value.isBlank())
+                .or(() -> imageCatalog.findByIdOrAlias(imageId).map(image -> image.architecture))
                 .filter(value -> !value.isBlank())
                 .or(() -> instanceTypeCatalog.find(instanceType)
                         .flatMap(type -> type.supportedArchitectures.stream()
