@@ -20,6 +20,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -64,6 +65,8 @@ class AcmServicePersistenceTest {
         assertEquals("example.com", loaded.getDomainName());
         assertEquals(List.of("example.com", "www.example.com"), loaded.getSubjectAlternativeNames());
         assertEquals("test", loaded.getTags().get("Env"));
+        assertTrue(loaded.getCertificateChain().startsWith("-----BEGIN CERTIFICATE-----"), "the CA chain is persisted");
+        assertEquals(cert.getCertificateChain(), loaded.getCertificateChain());
     }
 
     private AcmService newService(Path dir) {
