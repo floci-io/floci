@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -169,11 +170,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             var codeDownloadUrl = imagePackage ? null : codeDownloadUrl(fn, region);
             var layerUrls = imagePackage ? List.<String>of() : layerDownloadUrls(fn, region);
 
-            var caCert = config.tls().enabled()
-                    ? ContainerLauncher.resolveFlociCaCertPath(true, config.tls().certPath(),
-                            config.storage().persistentPath())
-                    : Optional.<Path>empty();
-            var caConfigMap = caCert.map(cert -> ensureCaConfigMap(namespace, cert));
+            var caConfigMap = ContainerCaBundle.hostPath(config).map(bundle -> ensureCaConfigMap(namespace, bundle));
 
             var env = new ArrayList<String>();
             env.add("AWS_LAMBDA_RUNTIME_API=" + addressResolver.resolve() + ":" + runtimeApiServer.getPort());
@@ -188,7 +185,6 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             }
             env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), addressResolver.flociBaseUrl(),
                     Optional.empty(), AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId())));
-            env.addAll(ContainerLauncher.flociCaEnv(caCert));
             if (fn.getEnvironment() != null) {
                 // Same all-or-nothing rule as ContainerLauncher: this launcher never has
                 // execution-role credentials, so the function's own Environment may only supply
@@ -208,7 +204,9 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                             fn.getImageConfigCommand(), fn.getImageConfigWorkingDirectory())
                     : null;
 
-            var pod = podSpecFactory.buildPod(podName, fn.getFunctionName(), image, env,
+            // After the function's own variables, so a value it sets wins, as in the docker launcher.
+            var podEnv = caConfigMap.isPresent() ? ContainerCaBundle.appendEnv(env) : env;
+            var pod = podSpecFactory.buildPod(podName, fn.getFunctionName(), image, podEnv,
                     codeDownloadUrl, layerUrls, isProvidedRuntime(fn.getRuntime()),
                     imagePackage ? null : fn.getHandler(), imageConfig, fn.getMemorySize(), caConfigMap);
 
@@ -514,15 +512,16 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     /**
-     * Publishes Floci's CA cert as a ConfigMap so pods can trust Floci's HTTPS endpoint.
-     * Applied once per process; the cert cannot rotate within a Floci lifetime.
+     * Publishes the CA bundle as a ConfigMap so pods can trust Floci's HTTPS endpoint and still
+     * reach public HTTPS. Applied once per process; the bundle is written at boot and does not
+     * change within a Floci lifetime.
      */
-    private String ensureCaConfigMap(String namespace, Path caCertPath) {
+    private String ensureCaConfigMap(String namespace, Path bundle) {
         if (caConfigMapApplied.get()) {
             return CA_CONFIG_MAP_NAME;
         }
         try {
-            var pem = Files.readString(caCertPath);
+            var pem = Files.readString(bundle);
             var nodes = JsonNodeFactory.instance;
             var labels = nodes.objectNode();
             LambdaPodSpecFactory.managedPodSelector().forEach(labels::put);
@@ -535,7 +534,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             caConfigMapApplied.set(true);
             return CA_CONFIG_MAP_NAME;
         } catch (Exception e) {
-            throw new RuntimeException("Could not publish Floci CA cert ConfigMap '" + CA_CONFIG_MAP_NAME
+            throw new RuntimeException("Could not publish the Floci CA bundle ConfigMap '" + CA_CONFIG_MAP_NAME
                     + "' in namespace " + namespace + ": " + e.getMessage(), e);
         }
     }

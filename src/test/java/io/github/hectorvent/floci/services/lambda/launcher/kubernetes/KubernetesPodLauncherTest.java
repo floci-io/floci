@@ -6,6 +6,7 @@ import io.fabric8.kubernetes.api.model.PodStatusBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -19,12 +20,15 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
@@ -61,6 +65,9 @@ import static org.mockito.Mockito.when;
 @EnableKubernetesMockClient(crud = true)
 class KubernetesPodLauncherTest {
     KubernetesClient client;
+
+    @TempDir
+    Path tempDir;
 
     private KubernetesApiClient apiClient;
     private EmulatorConfig config;
@@ -445,5 +452,43 @@ class KubernetesPodLauncherTest {
 
     private ContainerHandle handleFor(String podName) {
         return new ContainerHandle(podName, "my-fn", runtimeApiServer, ContainerState.WARM);
+    }
+
+    @Test
+    void tlsOnPublishesTheCaBundleAsAConfigMapAndTheFunctionEnvWins() throws Exception {
+        String bundlePem = enableTlsWithBundle();
+        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        var fn = function();
+        fn.setEnvironment(Map.of("SSL_CERT_FILE", "/my/own.pem"));
+
+        var handle = launcher.launch(fn);
+
+        var configMap = client.configMaps().inNamespace("default").withName(KubernetesPodLauncher.CA_CONFIG_MAP_NAME).get();
+        assertThat(configMap.getData()).containsEntry(KubernetesPodLauncher.CA_CONFIG_MAP_KEY, bundlePem);
+        var env = client.pods().inNamespace("default").withName(handle.getContainerId()).get()
+                .getSpec().getContainers().getFirst().getEnv();
+        assertThat(env).extracting(EnvVar::getName, EnvVar::getValue).contains(
+                tuple("SSL_CERT_FILE", "/my/own.pem"),
+                tuple("CURL_CA_BUNDLE", "/etc/floci-ca-bundle.pem"),
+                tuple("REQUESTS_CA_BUNDLE", "/etc/floci-ca-bundle.pem"),
+                tuple("NODE_EXTRA_CA_CERTS", "/etc/floci-ca-bundle.pem"),
+                tuple("AWS_CA_BUNDLE", "/etc/floci-ca-bundle.pem"));
+        assertThat(env).extracting(EnvVar::getName).containsOnlyOnce("SSL_CERT_FILE");
+    }
+
+    /** TLS on with a bundle under {@link #tempDir}, the file the boot would have written; returns its PEM. */
+    private String enableTlsWithBundle() throws Exception {
+        System.setProperty("floci.tls.enabled", "false");
+        new TlsConfigSource(); // forgets the static directory a TLS-on bootstrap in another test class left behind
+        System.clearProperty("floci.tls.enabled");
+        var tls = mock(EmulatorConfig.TlsConfig.class);
+        var storage = mock(EmulatorConfig.StorageConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(true);
+        when(config.storage()).thenReturn(storage);
+        when(storage.persistentPath()).thenReturn(tempDir.toString());
+        String bundlePem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        Files.writeString(Files.createDirectories(tempDir.resolve("tls")).resolve("floci-ca-bundle.pem"), bundlePem);
+        return bundlePem;
     }
 }
