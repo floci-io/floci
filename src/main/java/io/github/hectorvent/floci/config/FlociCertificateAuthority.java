@@ -137,7 +137,7 @@ public final class FlociCertificateAuthority {
     /**
      * A {@code serverAuth} leaf for {@code commonName} plus {@code sans}. {@code keyPair} null
      * mints a new key of {@code keyAlgorithm}; passing the current pair keeps the public key
-     * across a SAN change (the algorithm is then ignored).
+     * across a SAN change, and it must be of {@code keyAlgorithm}.
      */
     public CertificateGenerator.GeneratedCertificate issueServerCertificate(String commonName, List<String> sans,
                                                                             KeyAlgorithm keyAlgorithm, KeyPair keyPair) {
