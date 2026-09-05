@@ -807,13 +807,15 @@ public class CloudFormationQueryHandler {
                     .elem("Status", ss.getStatus())
                     .elem("Description", ss.getDescription())
                     .elem("TemplateBody", ss.getTemplateBody())
-                    .elem("PermissionModel", ss.getPermissionModel())
-                    .start("AutoDeployment")
-                      .elem("Enabled", Boolean.toString(ss.isAutoDeploymentEnabled()))
-                      .elem("RetainStacksOnAccountRemoval", Boolean.toString(ss.isRetainStacksOnAccountRemoval()))
-                    .end("AutoDeployment")
-                    .start("ManagedExecution")
-                      .elem("Active", Boolean.toString(ss.isManagedExecutionActive()))
+                    .elem("PermissionModel", ss.getPermissionModel());
+            if ("SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+                xml.start("AutoDeployment")
+                        .elem("Enabled", Boolean.toString(ss.isAutoDeploymentEnabled()))
+                        .elem("RetainStacksOnAccountRemoval", Boolean.toString(ss.isRetainStacksOnAccountRemoval()))
+                        .end("AutoDeployment");
+            }
+            xml.start("ManagedExecution")
+                    .elem("Active", Boolean.toString(ss.isManagedExecutionActive()))
                     .end("ManagedExecution");
             appendCapabilities(xml, ss.getCapabilities());
             appendParameters(xml, ss.getParameters());
@@ -961,6 +963,7 @@ public class CloudFormationQueryHandler {
                     params.getFirst("StackSetName"),
                     extractList(params, "Accounts.member."),
                     extractList(params, "Regions.member."),
+                    extractList(params, "DeploymentTargets.OrganizationalUnitIds.member."),
                     Boolean.parseBoolean(params.getFirst("RetainStacks")));
             return operationResponse("DeleteStackInstances", op.getOperationId());
         } catch (AwsException e) {

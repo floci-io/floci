@@ -120,7 +120,7 @@ public class StackSetService {
             throw new AwsException("ValidationError", "PermissionModel must be SELF_MANAGED or SERVICE_MANAGED.", 400);
         }
         if ("SERVICE_MANAGED".equals(resolvedPermissionModel) && !isOrganizationsAccessEnabled()) {
-            throw new AwsException("InvalidOperationException",
+            throw new AwsException("ValidationError",
                     "Activate trusted access with AWS Organizations before creating a service-managed StackSet.", 400);
         }
         if ("SELF_MANAGED".equals(resolvedPermissionModel) && (autoDeploymentEnabled || retainStacksOnAccountRemoval)) {
@@ -343,13 +343,45 @@ public class StackSetService {
 
     public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions,
                                                   boolean retainStacks) {
-        getStackSetOrThrow(name);
-        if (accounts == null || accounts.isEmpty() || regions == null || regions.isEmpty()) {
-            throw new AwsException("ValidationError",
-                    "Accounts and Regions must each contain at least one value", 400);
+        return deleteStackInstances(name, accounts, regions, List.of(), retainStacks);
+    }
+
+    public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions,
+                                                  List<String> organizationalUnits, boolean retainStacks) {
+        StackSet stackSet = getStackSetOrThrow(name);
+        validateRegions(regions);
+        List<String> directAccounts = accounts == null ? List.of() : accounts;
+        List<String> targetOus = organizationalUnits == null ? List.of() : organizationalUnits;
+        if (!directAccounts.isEmpty() && !targetOus.isEmpty()) {
+            throw new AwsException("InvalidOperationException",
+                    "Specify Accounts or DeploymentTargets, but not both.", 400);
         }
+        if (directAccounts.isEmpty() && targetOus.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Accounts or DeploymentTargets must contain at least one value.", 400);
+        }
+        if (!targetOus.isEmpty() && !"SERVICE_MANAGED".equals(stackSet.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "DeploymentTargets can be used only with SERVICE_MANAGED StackSets.", 400);
+        }
+        if (!directAccounts.isEmpty() && "SERVICE_MANAGED".equals(stackSet.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "Accounts can be used only with SELF_MANAGED StackSets. Use DeploymentTargets for SERVICE_MANAGED StackSets.", 400);
+        }
+        for (String account : directAccounts) {
+            validateAccountId(account);
+        }
+        for (String ou : targetOus) {
+            validateOuOrRoot(ou);
+        }
+
+        List<String> targetAccounts = !directAccounts.isEmpty()
+                ? directAccounts
+                : resolveOrganizationTargets(targetOus, regions, name, false).stream()
+                        .map(TargetAccount::accountId)
+                        .toList();
         List<StackInstance> results = new ArrayList<>();
-        for (String account : accounts) {
+        for (String account : targetAccounts) {
             for (String region : regions) {
                 String key = instanceKey(name, account, region);
                 StackInstance inst = instances.get(key).orElse(null);
@@ -399,6 +431,12 @@ public class StackSetService {
 
     private List<TargetAccount> resolveOrganizationTargets(List<String> organizationalUnits,
                                                            List<String> regions, String stackSetName) {
+        return resolveOrganizationTargets(organizationalUnits, regions, stackSetName, true);
+    }
+
+    private List<TargetAccount> resolveOrganizationTargets(List<String> organizationalUnits,
+                                                           List<String> regions, String stackSetName,
+                                                           boolean persistTargets) {
         String caller = regionResolver.getAccountId();
         Organization organization;
         try {
@@ -410,8 +448,10 @@ public class StackSetService {
         java.util.LinkedHashMap<String, TargetAccount> targets = new java.util.LinkedHashMap<>();
         for (String ou : organizationalUnits) {
             collectOrganizationTargets(caller, organization, ou, ou, targets);
-            autoDeploymentTargets.put(stackSetName + "::" + ou,
-                    new StackSetAutoDeploymentTarget(stackSetName, ou, regions));
+            if (persistTargets) {
+                autoDeploymentTargets.put(stackSetName + "::" + ou,
+                        new StackSetAutoDeploymentTarget(stackSetName, ou, regions));
+            }
         }
         return new ArrayList<>(targets.values());
     }
