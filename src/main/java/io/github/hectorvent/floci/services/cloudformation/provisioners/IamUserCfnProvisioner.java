@@ -47,15 +47,10 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String existingUserName = ctx.priorPhysicalId() != null ? ctx.priorPhysicalId() : r.getPhysicalId();
-        String userName = ctx.resolveOptional(props, "UserName");
-        if (userName == null || userName.isBlank()) {
-            userName = existingUserName != null && !existingUserName.isBlank()
-                    ? existingUserName
-                    : ctx.generatePhysicalName(r.getLogicalId(), 64, false);
-        }
+        String userName = ctx.stablePhysicalName(ctx.resolveOptional(props, "UserName"),
+                r.getLogicalId(), 64, false);
         final String resolvedUserName = userName;
-        if (existingUserName != null && !existingUserName.equals(resolvedUserName)) {
+        if (ctx.isUpdate() && !ctx.priorPhysicalId().equals(resolvedUserName)) {
             throw new AwsException("ValidationError",
                     "Updating UserName requires resource replacement, which is not supported.", 400);
         }
@@ -78,8 +73,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
             createdUser = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
-            boolean stackAlreadyOwnsUser = existingUserName != null && existingUserName.equals(resolvedUserName);
-            if (!stackAlreadyOwnsUser || !"EntityAlreadyExists".equals(e.getErrorCode())) {
+            if (!ctx.reusesPriorEntity(resolvedUserName) || !"EntityAlreadyExists".equals(e.getErrorCode())) {
                 throw e;
             }
             user = iamService.getUser(resolvedUserName);
