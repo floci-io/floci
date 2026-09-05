@@ -73,8 +73,8 @@ class IotDeviceCertificateIntegrationTest {
         assertEquals(-1, cert.getBasicConstraints());
         assertEquals("RSA", cert.getPublicKey().getAlgorithm());
         assertEquals(2048, ((java.security.interfaces.RSAPublicKey) cert.getPublicKey()).getModulus().bitLength());
-        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant(),
-                "AWS IoT-issued certificates all expire at the end of 2049");
+        assertEquals(expectedNotAfter(ca), cert.getNotAfter().toInstant(),
+                "AWS IoT-issued certificates all expire at the end of 2049, never past the CA");
         assertTrue(!cert.getNotBefore().toInstant().isAfter(java.time.Instant.now()), "valid from issue time");
 
         String expectedId = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(cert.getEncoded()));
@@ -145,7 +145,7 @@ class IotDeviceCertificateIntegrationTest {
                 cert.getSubjectX500Principal(), "the CSR's subject is the certificate's subject");
         assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage(), "clientAuth");
         assertEquals(-1, cert.getBasicConstraints());
-        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant());
+        assertEquals(expectedNotAfter(ca), cert.getNotAfter().toInstant());
         String expectedId = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(cert.getEncoded()));
         assertEquals(expectedId, body.getString("certificateId"));
         assertNull(body.get("keyPair"), "AWS never returns a private key for a CSR: the device holds it");
@@ -285,8 +285,9 @@ class IotDeviceCertificateIntegrationTest {
         // Read with Jackson: RestAssured's JsonPath narrows large epoch doubles to float precision.
         com.fasterxml.jackson.databind.JsonNode described = new com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
                 .path("certificateDescription");
-        assertEquals(2524607999L, described.path("validity").path("notAfter").asLong(),
-                "validity.notAfter is 2049-12-31T23:59:59Z as epoch seconds");
+        X509Certificate ca = parse(given().when().get("/_floci/ca.pem").then().statusCode(200).extract().asString());
+        assertEquals(expectedNotAfter(ca).getEpochSecond(), described.path("validity").path("notAfter").asLong(),
+                "validity.notAfter is 2049-12-31T23:59:59Z as epoch seconds (or the CA's expiry, if earlier)");
         long notBefore = described.path("validity").path("notBefore").asLong();
         long creation = described.path("creationDate").asLong();
         assertTrue(Math.abs(notBefore - creation) <= 2, "the certificate is valid from its creation");
@@ -346,6 +347,13 @@ class IotDeviceCertificateIntegrationTest {
             writer.writeObject(object);
         }
         return out.toString();
+    }
+
+    /** AWS's fixed 2049 expiry, capped at the CA's own: a CA created before this change lives ten years. */
+    private static java.time.Instant expectedNotAfter(X509Certificate ca) {
+        java.time.Instant aws = java.time.Instant.parse("2049-12-31T23:59:59Z");
+        java.time.Instant caNotAfter = ca.getNotAfter().toInstant();
+        return caNotAfter.isBefore(aws) ? caNotAfter : aws;
     }
 
     private static X509Certificate parse(String pem) throws Exception {

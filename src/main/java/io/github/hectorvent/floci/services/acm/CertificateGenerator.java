@@ -139,11 +139,16 @@ public class CertificateGenerator {
      * every client in the emulator's reach accepts it and it keeps key generation under a second.
      */
     public GeneratedCertificate generateCaCertificate(String commonName) {
+        return generateCaCertificate(commonName, Instant.now().plus(3650, ChronoUnit.DAYS));
+    }
+
+    /** Same as {@link #generateCaCertificate(String)} with an explicit end of validity. */
+    public GeneratedCertificate generateCaCertificate(String commonName, Instant notAfter) {
         try {
             KeyPair keyPair = generateKeyPair(KeyAlgorithm.RSA_2048);
             X500Name dn = new X500Name("CN=" + commonName);
             X509Certificate cert = signCertificate(dn, keyPair.getPublic(), dn, keyPair.getPrivate(),
-                    List.of(), true, null, 3650);
+                    List.of(), true, null, Instant.now(), notAfter);
             return toGenerated(cert, keyPair.getPrivate(), dn.toString(), dn.toString());
         } catch (Exception e) {
             LOG.error("Failed to generate CA certificate", e);
