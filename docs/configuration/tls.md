@@ -85,6 +85,14 @@ services:
 
 The generated certificate will include `floci` in its SANs, so TLS validation succeeds when `app` connects to `https://floci:4566`. Fetch `ca.pem` from Floci into `app` (an entrypoint `curl`, or a shared volume mounted from `{persistent-path}/tls/`) so the bundle path above exists.
 
+### Custom Domains Learned at Runtime
+
+A wildcard SAN matches one label only, so `*.localhost.floci.io` covers `api.localhost.floci.io` but not `api.dev.localhost.floci.io`. For names like that, Floci can add an exact hostname to the server certificate while it runs: the certificate is reissued by the local CA with the same key and the new name, and the HTTPS listener switches to it at once. No restart, no new CA, nothing new for clients to trust. Learned names are recorded in `{persistent-path}/tls/floci-server.metadata.json`, so they survive restarts and a regeneration after a `FLOCI_HOSTNAME` change; `POST /_floci/state/reset` drops them.
+
+Only a name under a local suffix is accepted: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME`, the `FLOCI_BASE_URL` host, and every `FLOCI_DNS_EXTRA_SUFFIXES` entry. Any other name is refused with a warning, so a Floci certificate can never cover a public name. This only applies to the generated certificate; a user-provided one is never changed.
+
+Nothing adds names yet. The API Gateway, IoT Core and Cognito custom domain operations will, in a follow-up.
+
 ## User-Provided Certificates
 
 To use your own certificate (e.g., from a corporate CA or mkcert):
