@@ -95,7 +95,9 @@ class AcmImportExportTest {
             .body("Certificate.DomainName", equalTo("test-import.example.com"))
             .body("Certificate.Status", equalTo("ISSUED"))
             .body("Certificate.Type", equalTo("IMPORTED"))
-            .body("Certificate.KeyAlgorithm", equalTo("RSA-2048"));
+            .body("Certificate.KeyAlgorithm", equalTo("RSA-2048"))
+            .body("Certificate.Serial", matchesPattern("([0-9a-f]{2}:)+[0-9a-f]{2}"))
+            .body("Certificate.SignatureAlgorithm", matchesPattern("SHA[0-9]+WITH[A-Z]+"));
     }
 
     @Test

@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Unit tests for {@link ContainerLauncher}'s Floci CA-trust injection helpers. These are pure
  * (no Docker / Quarkus): they cover where the CA cert is resolved from and which environment
- * variables get injected so a Lambda container trusts Floci's self-signed HTTPS endpoint.
+ * variables get injected so a Lambda container trusts Floci's HTTPS endpoint through the local CA.
  */
 class ContainerLauncherCaTrustTest {
 
@@ -41,9 +41,9 @@ class ContainerLauncherCaTrustTest {
     }
 
     @Test
-    void resolveCaCertPath_selfSignedUnderPersistentPath() throws Exception {
+    void resolveCaCertPath_localCaUnderPersistentPath() throws Exception {
         Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
-        Path cert = Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "PEM");
+        Path cert = Files.writeString(tlsDir.resolve("floci-root-ca.crt"), "PEM");
 
         Optional<Path> resolved =
                 ContainerLauncher.resolveFlociCaCertPath(true, Optional.empty(), tempDir.toString());
@@ -64,9 +64,9 @@ class ContainerLauncherCaTrustTest {
     }
 
     @Test
-    void resolveCaCertPath_blankUserCertFallsBackToSelfSigned() throws Exception {
+    void resolveCaCertPath_blankUserCertFallsBackToLocalCa() throws Exception {
         Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
-        Path cert = Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "PEM");
+        Path cert = Files.writeString(tlsDir.resolve("floci-root-ca.crt"), "PEM");
 
         Optional<Path> resolved =
                 ContainerLauncher.resolveFlociCaCertPath(true, Optional.of("   "), tempDir.toString());
