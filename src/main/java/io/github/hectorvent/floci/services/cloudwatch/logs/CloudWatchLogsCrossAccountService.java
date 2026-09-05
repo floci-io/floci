@@ -17,11 +17,15 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CloudWatchLogsCrossAccountService {
     private static final Pattern DESTINATION_NAME = Pattern.compile("[^:*]{1,512}");
+    private static final Pattern METRIC_SELECTION_CRITERIA = Pattern.compile(
+            "\\s*(LogGroupName|LogGroupNamePrefix)\\s+(IN|NOT\\s+IN)\\s*(\\[.*])\\s*",
+            Pattern.DOTALL);
     private static final Set<String> POLICY_TYPES = Set.of(
             "DATA_PROTECTION_POLICY", "SUBSCRIPTION_FILTER_POLICY", "FIELD_INDEX_POLICY",
             "TRANSFORMER_POLICY", "METRIC_EXTRACTION_POLICY");
@@ -96,11 +100,7 @@ public class CloudWatchLogsCrossAccountService {
         validateSelectionCriteria(policyType, selectionCriteria);
 
         String key = policyKey(region, policyType, policyName);
-        boolean updating = accountPolicies.get(key).isPresent();
-        if (!updating && exceedsPolicyLimit(region, policyType, selectionCriteria)) {
-            throw new AwsException("LimitExceededException",
-                    "The account policy quota for this policy type has been exceeded.", 400);
-        }
+        validatePolicyQuota(region, policyType, policyName, selectionCriteria);
 
         AccountPolicy policy = accountPolicies.get(key).orElseGet(AccountPolicy::new);
         policy.setAccountId(regionResolver.getAccountId());
@@ -128,18 +128,80 @@ public class CloudWatchLogsCrossAccountService {
         return result;
     }
 
-    private boolean exceedsPolicyLimit(String region, String type, String selectionCriteria) {
-        long count = accountPolicies.scan(key -> key.startsWith(region + "::" + type + "::")).size();
-        boolean scoped = selectionCriteria != null && !selectionCriteria.isBlank();
-        return switch (type) {
-            case "SUBSCRIPTION_FILTER_POLICY", "DATA_PROTECTION_POLICY" -> count >= 1;
-            case "TRANSFORMER_POLICY", "FIELD_INDEX_POLICY" -> scoped ? count >= 20 : count >= 1;
-            case "METRIC_EXTRACTION_POLICY" -> scoped ? count >= 5 : count >= 1;
-            default -> false;
-        };
+    private void validatePolicyQuota(String region, String type, String policyName, String selectionCriteria) {
+        List<AccountPolicy> others = accountPolicies.scan(key -> key.startsWith(region + "::" + type + "::")).stream()
+                .filter(policy -> !policyName.equals(policy.getPolicyName()))
+                .toList();
+        boolean scoped = hasSelectionCriteria(selectionCriteria);
+
+        switch (type) {
+            case "DATA_PROTECTION_POLICY", "SUBSCRIPTION_FILTER_POLICY" -> {
+                if (!others.isEmpty()) {
+                    throw quotaExceeded(type);
+                }
+            }
+            case "TRANSFORMER_POLICY" -> validateExclusiveScopedQuota(type, scoped, 20, others);
+            case "METRIC_EXTRACTION_POLICY" -> validateExclusiveScopedQuota(type, scoped, 5, others);
+            case "FIELD_INDEX_POLICY" -> validateFieldIndexQuota(selectionCriteria, others);
+            default -> {
+                // policyType is validated before this method is called.
+            }
+        }
     }
 
-    private static void validateSelectionCriteria(String policyType, String selectionCriteria) {
+    private static void validateExclusiveScopedQuota(String type, boolean scoped, int scopedLimit,
+                                                     List<AccountPolicy> others) {
+        long scopedCount = others.stream()
+                .filter(policy -> hasSelectionCriteria(policy.getSelectionCriteria()))
+                .count();
+        boolean hasUnscoped = others.stream()
+                .anyMatch(policy -> !hasSelectionCriteria(policy.getSelectionCriteria()));
+        if (scoped ? hasUnscoped || scopedCount >= scopedLimit : !others.isEmpty()) {
+            throw quotaExceeded(type);
+        }
+    }
+
+    private static void validateFieldIndexQuota(String selectionCriteria, List<AccountPolicy> others) {
+        FieldIndexScope requestedScope = fieldIndexScope(selectionCriteria);
+        long prefixCount = others.stream()
+                .filter(policy -> fieldIndexScope(policy.getSelectionCriteria()) == FieldIndexScope.PREFIX)
+                .count();
+        long dataSourceCount = others.stream()
+                .filter(policy -> fieldIndexScope(policy.getSelectionCriteria()) == FieldIndexScope.DATA_SOURCE)
+                .count();
+        boolean hasGlobal = others.stream()
+                .anyMatch(policy -> fieldIndexScope(policy.getSelectionCriteria()) == FieldIndexScope.GLOBAL);
+
+        boolean exceeded = switch (requestedScope) {
+            case GLOBAL -> hasGlobal || prefixCount > 0;
+            case PREFIX -> hasGlobal || prefixCount >= 20;
+            case DATA_SOURCE -> dataSourceCount >= 20;
+        };
+        if (exceeded) {
+            throw quotaExceeded("FIELD_INDEX_POLICY");
+        }
+    }
+
+    private static boolean hasSelectionCriteria(String selectionCriteria) {
+        return selectionCriteria != null && !selectionCriteria.isBlank();
+    }
+
+    private static FieldIndexScope fieldIndexScope(String selectionCriteria) {
+        if (!hasSelectionCriteria(selectionCriteria)) {
+            return FieldIndexScope.GLOBAL;
+        }
+        if (selectionCriteria.contains("DataSourceName") && selectionCriteria.contains("DataSourceType")) {
+            return FieldIndexScope.DATA_SOURCE;
+        }
+        return FieldIndexScope.PREFIX;
+    }
+
+    private static AwsException quotaExceeded(String policyType) {
+        return new AwsException("LimitExceededException",
+                "The account policy quota for " + policyType + " has been exceeded.", 400);
+    }
+
+    private void validateSelectionCriteria(String policyType, String selectionCriteria) {
         if (selectionCriteria == null || selectionCriteria.isBlank()) {
             return;
         }
@@ -147,11 +209,9 @@ public class CloudWatchLogsCrossAccountService {
             throw invalid("selectionCriteria exceeds 25 KB.");
         }
         switch (policyType) {
-            case "DATA_PROTECTION_POLICY", "METRIC_EXTRACTION_POLICY" -> {
-                if ("DATA_PROTECTION_POLICY".equals(policyType)) {
+            case "DATA_PROTECTION_POLICY" ->
                     throw invalid("selectionCriteria is not supported for data protection policies.");
-                }
-            }
+            case "METRIC_EXTRACTION_POLICY" -> validateMetricSelectionCriteria(selectionCriteria);
             case "SUBSCRIPTION_FILTER_POLICY" -> {
                 if (!selectionCriteria.matches("\\s*LogGroupName\\s+NOT\\s+IN\\s*\\[.*]\\s*")) {
                     throw invalid("Subscription filter selectionCriteria must use LogGroupName NOT IN [...].");
@@ -171,6 +231,34 @@ public class CloudWatchLogsCrossAccountService {
             }
             default -> throw invalid("policyType is invalid.");
         }
+    }
+
+    private void validateMetricSelectionCriteria(String selectionCriteria) {
+        Matcher matcher = METRIC_SELECTION_CRITERIA.matcher(selectionCriteria);
+        if (!matcher.matches()) {
+            throw invalid("Metric extraction selectionCriteria must use LogGroupName or LogGroupNamePrefix with IN or NOT IN.");
+        }
+        try {
+            JsonNode values = objectMapper.readTree(matcher.group(3));
+            if (!values.isArray() || values.isEmpty() || values.size() > 50) {
+                throw invalid("Metric extraction selectionCriteria must contain between 1 and 50 values.");
+            }
+            for (JsonNode value : values) {
+                if (!value.isTextual() || value.textValue().isBlank()) {
+                    throw invalid("Metric extraction selectionCriteria values must be non-empty strings.");
+                }
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw invalid("Metric extraction selectionCriteria must contain a valid JSON string array.");
+        }
+    }
+
+    private enum FieldIndexScope {
+        GLOBAL,
+        PREFIX,
+        DATA_SOURCE
     }
 
     private void requireJsonObject(String value, String field, int maxBytes) {
