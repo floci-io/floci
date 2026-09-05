@@ -190,16 +190,45 @@ public class EcrService implements ResourceProvider {
         String key = key(region, account, repositoryName);
         Repository repo = repoStore.get(key).orElseThrow(() -> notFound(repositoryName, account));
 
-        List<String> tags = listTagsBestEffort(account, region, repositoryName);
-        if (!force && !tags.isEmpty()) {
+        // Check whether the registry has any tagged images for this repo.
+        // A test double with no HTTP client means no backing registry exists,
+        // so there is nothing to clean up. Any failure against a real client
+        // aborts the delete: an unreachable registry cannot prove the repo
+        // empty (non-force must not bypass RepositoryNotEmptyException) and
+        // force must not orphan pullable images behind deleted metadata.
+        List<String> tags;
+        boolean registryAvailable = true;
+        if (registryManager.httpClient() == null) {
+            // Test double without an HTTP layer (Mockito default): no backing
+            // registry exists, so there is nothing to clean up.
+            tags = List.of();
+            registryAvailable = false;
+        } else try {
+            tags = listTagsOrThrow(account, region, repositoryName);
+        } catch (Exception e) {
+            if (isRegistryUnreachable(e)) {
+                throw new AwsException("ServerException",
+                        "Backing registry unreachable for repository '" + repositoryName
+                                + "': retry after the registry recovers (" + e.getMessage() + ")",
+                        500);
+            }
+            throw new AwsException("ServerException",
+                    "Failed to clean up the backing registry for repository '" + repositoryName + "': "
+                            + e.getMessage(),
+                    500);
+        }
+        if (!tags.isEmpty() && !force) {
             throw new AwsException("RepositoryNotEmptyException",
                     "The repository with name '" + repositoryName
                             + "' in registry with id '" + account + "' cannot be deleted because it still contains images",
                     400);
         }
-
-        if (force) {
-            deleteRepositoryStorage(account, region, repositoryName);
+        if (force && registryAvailable) {
+            // Single cleanup mechanism (#2982): remove the repository storage
+            // directories inside the registry container. Routed through
+            // resolveRegistryRepoName so content pushed under the bare name
+            // via hostname-style URIs is removed too (issue #2444).
+            deleteRepositoryStorageResolved(account, region, repositoryName);
         }
 
         repoStore.delete(key);
@@ -235,7 +264,7 @@ public class EcrService implements ResourceProvider {
     public List<ImageIdentifier> listImages(String repositoryName, String registryId, String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
         try {
             RegistryHttpClient http = registryManager.httpClient();
             List<String> tags = http.listTags(internal);
@@ -257,7 +286,7 @@ public class EcrService implements ResourceProvider {
                                                 String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
         List<String> refs = new ArrayList<>();
@@ -332,7 +361,7 @@ public class EcrService implements ResourceProvider {
                                               String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
         List<Image> images = new ArrayList<>();
@@ -372,7 +401,7 @@ public class EcrService implements ResourceProvider {
                                                     String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         registryManager.ensureStarted();
-        String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
+        String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
         List<ImageIdentifier> deleted = new ArrayList<>();
@@ -536,7 +565,7 @@ public class EcrService implements ResourceProvider {
     private List<String> listTagsBestEffort(String account, String region, String repoName) {
         try {
             return registryManager.httpClient()
-                    .listTags(registryManager.internalRepoName(account, region, repoName));
+                    .listTags(resolveRegistryRepoName(account, region, repoName));
         } catch (Exception e) {
             LOG.debugv("Could not list tags for {0} (registry not available): {1}", repoName, e.getMessage());
             return List.of();
@@ -546,6 +575,20 @@ public class EcrService implements ResourceProvider {
     private void deleteRepositoryStorage(String account, String region, String repositoryName) {
         try {
             registryManager.deleteRepositoryStorage(account, region, repositoryName);
+        } catch (Exception e) {
+            throw registryFailure(repositoryName, e);
+        }
+    }
+
+    /**
+     * Deletes registry storage for the repository under the name it was
+     * actually pushed as. Hostname-style pushes land under the bare name,
+     * which {@code internalRepoName} alone never addresses (issue #2444).
+     */
+    private void deleteRepositoryStorageResolved(String account, String region, String repositoryName) {
+        String internal = resolveRegistryRepoName(account, region, repositoryName);
+        try {
+            registryManager.deleteRepositoryStorageByInternalName(internal);
         } catch (Exception e) {
             throw registryFailure(repositoryName, e);
         }
@@ -563,6 +606,90 @@ public class EcrService implements ResourceProvider {
                 repositoryName, cause.getMessage());
         return new AwsException("ServerException",
                 "Could not delete images from repository '" + repositoryName + "'", 500);
+    }
+
+    /**
+     * Lists tags and propagates registry failures. Used by force-delete to
+     * distinguish "registry unreachable" (skip cleanup) from "registry
+     * available but listing failed" (abort deletion).
+     */
+    private List<String> listTagsOrThrow(String account, String region, String repoName) throws Exception {
+        return registryManager.httpClient()
+                .listTagsStrict(resolveRegistryRepoNameStrict(account, region, repoName));
+    }
+
+    /**
+     * Resolves the repository name as stored in the backing registry.
+     * Hostname-style URIs ({@code <account>.dkr.ecr.<region>.localhost:<port>/<repo>})
+     * reach the raw registry, so docker pushes land under the bare repo name,
+     * while path-style URIs land under {@code <account>/<region>/<repo>}.
+     * Resolution uses catalog membership (not tag listing) so untagged,
+     * digest-only repositories resolve correctly. The namespaced form wins
+     * when both exist.
+     *
+     * <p>Ambiguity guard: a bare-name entry can only be claimed when no
+     * <em>other</em> account/region has metadata for the same repository name.
+     * Otherwise the bare entry's owning scope is unknown and resolving to it
+     * would let one scope read or delete another scope's images, so the call
+     * falls back to the (empty) namespaced form.
+     */
+    private String resolveRegistryRepoName(String account, String region, String repoName) {
+        try {
+            return resolveRegistryRepoNameStrict(account, region, repoName);
+        } catch (Exception e) {
+            LOG.debugv("Registry lookup failed while resolving {0}: {1}", repoName, e.getMessage());
+            return registryManager.internalRepoName(account, region, repoName);
+        }
+    }
+
+    private String resolveRegistryRepoNameStrict(String account, String region, String repoName) throws Exception {
+        String internal = registryManager.internalRepoName(account, region, repoName);
+        List<String> catalog = registryManager.httpClient().catalogStrict();
+        if (catalog.contains(internal)) {
+            return internal;
+        }
+        if (catalog.contains(repoName)) {
+            String currentKey = region + "::" + account + "::" + repoName;
+            boolean otherScopeClaimsIt = hasOtherScopeClaim(repoName, currentKey);
+            if (!otherScopeClaimsIt) {
+                return repoName;
+            }
+            LOG.warnv("Bare registry entry {0} claimed by another account/region; "
+                    + "resolving {0} to its namespaced form", repoName, internal);
+        }
+        return internal;
+    }
+
+    private boolean hasOtherScopeClaim(String repoName, String currentKey) {
+        String suffix = "::" + repoName;
+        if (repoStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            var typed = (AccountAwareStorageBackend<Repository>) aware;
+            return typed.scanAllAccountEntries(k -> k.endsWith(suffix) && !k.equals(currentKey))
+                    .stream().findAny().isPresent();
+        }
+        return repoStore.keys().stream()
+                .anyMatch(k -> k.endsWith(suffix) && !k.equals(currentKey));
+    }
+
+    private static boolean isRegistryUnreachable(Throwable e) {
+        // Only genuine connectivity failures qualify. An NPE or an "is null"
+        // message means a bug or an answered error body — those must abort
+        // the delete, never masquerade as an outage.
+        Throwable t = e;
+        while (t != null) {
+            if (t instanceof java.net.ConnectException || t instanceof java.net.UnknownHostException
+                    || t instanceof java.net.SocketTimeoutException) {
+                return true;
+            }
+            String msg = t.getMessage();
+            if (msg != null && (msg.contains("Connection refused") || msg.contains("Connection reset")
+                    || msg.contains("Failed to connect") || msg.contains("Connection timed out"))) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
     }
 
     private static String key(String region, String account, String repoName) {

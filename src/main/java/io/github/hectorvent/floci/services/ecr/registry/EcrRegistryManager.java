@@ -392,12 +392,20 @@ public class EcrRegistryManager {
 
     /** Removes repository manifest storage without removing descendant repository directories. */
     public synchronized void deleteRepositoryStorage(String accountId, String region, String repositoryName) {
+        deleteRepositoryStorageByInternalName(internalRepoName(accountId, region, repositoryName));
+    }
+
+    /**
+     * Removes repository manifest storage for an already-resolved internal
+     * repository name. Used when the caller resolved a bare name (hostname-style
+     * pushes) that {@code internalRepoName} alone never addresses (issue #2444).
+     */
+    public synchronized void deleteRepositoryStorageByInternalName(String internalRepoName) {
         ensureStarted();
         if (!started || containerId == null) {
             throw new IllegalStateException("ECR registry is not started");
         }
-        String repository = internalRepoName(accountId, region, repositoryName);
-        String path = repositoryStoragePath(repository);
+        String path = repositoryStoragePath(internalRepoName);
         StringBuilder output = new StringBuilder();
         DockerClient dockerClient = lifecycleManager.getDockerClient();
         ExecCreateCmdResponse exec = dockerClient
