@@ -2178,8 +2178,13 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         upload.setAcl(acl);
         ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(checksumAlgorithm);
+        ChecksumType requestedChecksumType = ChecksumType.fromWireValue(checksumType);
+        if (requestedChecksumType != null && algorithm == null) {
+            throw new AwsException("InvalidRequest",
+                    "The x-amz-checksum-type header can only be used with the x-amz-checksum-algorithm header.", 400);
+        }
         upload.setChecksumAlgorithm(algorithm);
-        upload.setChecksumType(algorithm == null ? null : algorithm.multipartType(ChecksumType.fromWireValue(checksumType)));
+        upload.setChecksumType(algorithm == null ? null : algorithm.multipartType(requestedChecksumType));
         if (tagging != null && !tagging.isEmpty()) {
             upload.setTagging(new HashMap<>(tagging));
         }

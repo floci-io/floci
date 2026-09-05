@@ -783,6 +783,23 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("InvalidRequest"));
+
+        // S3 validates the type header on its own, and only accepts it next to an algorithm
+        given()
+            .header("x-amz-checksum-type", "PARTIAL")
+        .when()
+            .post("/" + BUCKET + "/checksum-type-invalid.bin?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("Value for x-amz-checksum-type header is invalid."));
+
+        given()
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+        .when()
+            .post("/" + BUCKET + "/checksum-type-invalid.bin?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("The x-amz-checksum-type header can only be used with the x-amz-checksum-algorithm header."));
     }
 
     @Test

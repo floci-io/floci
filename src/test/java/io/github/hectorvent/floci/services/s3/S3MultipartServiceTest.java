@@ -337,6 +337,14 @@ class S3MultipartServiceTest {
         assertEquals("InvalidRequest", crc64.getErrorCode());
         assertEquals(ChecksumType.COMPOSITE, initiate("crc32c.bin", "CRC32C", null).getChecksumType());
         assertNull(initiate("no-algorithm.bin", null, null).getChecksumType());
+
+        AwsException typeAlone = assertThrows(AwsException.class, () -> initiate("type-alone.bin", null, "FULL_OBJECT"));
+        assertEquals("InvalidRequest", typeAlone.getErrorCode());
+        assertEquals("The x-amz-checksum-type header can only be used with the x-amz-checksum-algorithm header.",
+                typeAlone.getMessage());
+        AwsException unknownType = assertThrows(AwsException.class, () -> initiate("unknown-type.bin", null, "PARTIAL"));
+        assertEquals("InvalidRequest", unknownType.getErrorCode());
+        assertEquals("Value for x-amz-checksum-type header is invalid.", unknownType.getMessage());
     }
 
     @Test
