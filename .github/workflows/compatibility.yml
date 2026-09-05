@@ -9,6 +9,7 @@ on:
       - 'docker/Dockerfile.compat'
       - 'docker/entrypoint.sh'
       - 'docker/localstack-parity.sh'
+      - 'docker/healthcheck.sh'
       - 'compatibility-tests/**'
       - '.github/ci/compat-timing-report.py'
       - '.github/ci/compat-opentofu-drift-check.py'
@@ -41,11 +42,15 @@ jobs:
           build-args: VERSION=latest
           load: true
           tags: floci-compat-shim-test
+          # The tools stage has the aws CLI and the shim. The final stage only adds
+          # the Floci binary copied out of a published floci/floci tag, which these
+          # tests never start.
+          target: tools
           # Read-only; warm-compat-caches.yml produces this scope on main. Unlike
-          # floci-native above, these layers are worth caching: the image builds
-          # FROM a published floci/floci tag and its cost is a microdnf install
-          # that changes only when the Dockerfile does. Writing from here would
-          # put a per-PR copy no other PR can read back into the budget.
+          # floci-native above, these layers are worth caching: the tools stage
+          # depends only on ubi9-minimal and the Dockerfile, so it changes only
+          # when the Dockerfile does. Writing from here would put a per-PR copy
+          # no other PR can read back into the budget.
           cache-from: type=gha,scope=compat-shim
 
       - name: Unflagged aws sqs call routes to AWS_ENDPOINT_URL

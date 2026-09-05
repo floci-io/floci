@@ -13,6 +13,8 @@ Every image tag combines two independent choices: **what's inside** (variant) an
 
 The compat image runs the same native binary as the standard image, so startup time and memory footprint are identical. Only the image size increases.
 
+The standard image is built on Red Hat UBI 9 micro. Besides Floci it contains only bash and coreutils. There is no package manager, curl, grep or sed inside. Pick the compat image when you need tools inside the container.
+
 ## Axis 2: Channel (how stable)
 
 | Channel | Source | Published |

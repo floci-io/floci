@@ -1,29 +1,26 @@
 FROM registry.access.redhat.com/ubi9-micro:9.7
 
-ARG VERSION=latest
 # Automatically set by Docker BuildKit to "amd64" or "arm64"
 ARG TARGETARCH
 
-ENV FLOCI_VERSION=${VERSION}
-ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
-
-# ubi9-micro has no package manager and no shadow-utils, so the runtime user is one
-# /etc/passwd line. The entrypoint drops privileges with coreutils `chroot --userspec`
-# and adds the Docker socket's group with `chroot --groups`; both ship in the base image.
-RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd
-
 WORKDIR /app
 
-RUN mkdir -p /app/data \
+# ubi9-micro has no shadow-utils, so the runtime user is one /etc/passwd line.
+RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \
+    && mkdir -p /app/data \
     && chown -R 1001:root /app \
     && chmod -R g+rwX /app
 
 VOLUME /app/data
 
-COPY --chmod=755 --chown=1001:root native/${TARGETARCH}/ /app/
-
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
+COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bin/
+
+ARG VERSION=latest
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+
+COPY --chmod=755 --chown=1001:root native/${TARGETARCH}/ /app/
 
 LABEL org.opencontainers.image.title="Floci" \
       org.opencontainers.image.description="Local AWS emulator — open-source alternative to LocalStack Community" \
@@ -44,9 +41,7 @@ LABEL org.opencontainers.image.title="Floci" \
 
 EXPOSE 4566
 
-# No curl in ubi9-micro, so bash does the HTTP probe.
-HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/4566 && printf "GET /_floci/health HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && read -r proto status rest <&3 && [ "$status" = 200 ]'
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthcheck.sh"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]

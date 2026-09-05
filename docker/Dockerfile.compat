@@ -3,18 +3,13 @@ ARG VERSION=latest
 # tags use VERSION; reusable builds override BASE_IMAGE with the digest-qualified
 # native image they just published.
 #
-# That image is ubi9-micro and has no package manager, so this image cannot extend
-# it. It starts from ubi9-minimal, copies /app and the entrypoint scripts out of the
-# native image, and repeats what the native image declares (user, env, volume,
-# healthcheck, entrypoint, labels).
+# That image is ubi9-micro and has no package manager, so this image cannot extend it.
 ARG BASE_IMAGE=floci/floci:${VERSION}
 FROM ${BASE_IMAGE} AS native
 
-FROM registry.access.redhat.com/ubi9-minimal:9.7
-
-ARG VERSION
-ENV FLOCI_VERSION=${VERSION}
-ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+# Everything that does not depend on the Floci version. CI builds this stage alone
+# (target: tools) to test the aws CLI shim and to warm the layer cache.
+FROM registry.access.redhat.com/ubi9-minimal:9.7 AS tools
 
 LABEL org.opencontainers.image.title="Floci (compat)" \
       org.opencontainers.image.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
@@ -86,20 +81,23 @@ RUN mkdir -p /etc/localstack/init/boot.d /etc/localstack/init/start.d /etc/local
     && chown -R 1001:root /etc/localstack /etc/floci
 
 WORKDIR /app
-# Ownership and group bits go on the empty directory first. A chmod after the copy
-# would rewrite the 200 MB binary into a second layer.
-RUN mkdir -p /app/data \
-    && chown -R 1001:root /app \
-    && chmod -R g+rwX /app
+# A chmod after the copy below would rewrite the 200 MB binary into a second layer.
+RUN chown 1001:root /app && chmod g+rwX /app
+
+FROM tools
+
+ARG VERSION
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+
 COPY --from=native --chown=1001:root /app/ /app/
 VOLUME /app/data
 
-COPY --from=native /usr/local/bin/docker-entrypoint.sh /usr/local/bin/localstack-parity.sh /usr/local/bin/
+COPY --from=native /usr/local/bin/docker-entrypoint.sh /usr/local/bin/localstack-parity.sh /usr/local/bin/healthcheck.sh /usr/local/bin/
 
 EXPOSE 4566
 
-HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD curl -f http://localhost:4566/_floci/health || exit 1
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthcheck.sh"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]

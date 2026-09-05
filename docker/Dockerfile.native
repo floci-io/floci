@@ -17,17 +17,15 @@ RUN mvn clean package -Dnative -DskipTests -B
 FROM registry.access.redhat.com/ubi9-micro:9.7
 
 WORKDIR /app
-RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd
-
-RUN mkdir -p /app/data \
+RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \
+    && mkdir -p /app/data \
     && chown -R 1001:root /app \
     && chmod -R g+rwX /app
 VOLUME /app/data
 
 EXPOSE 4566
 
-HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/4566 && printf "GET /_floci/health HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && read -r proto status rest <&3 && [ "$status" = 200 ]'
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthcheck.sh"]
 
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
@@ -35,7 +33,7 @@ ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
 COPY --chmod=755 --from=build /app/target/*-runner /app/application
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
+COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/app/application"]
