@@ -114,4 +114,22 @@ class SesTemplateServiceTest {
         assertEquals("team", reloaded.getTags().get(0).key());
         assertEquals("ses", reloaded.getTags().get(0).value());
     }
+
+    @Test
+    void tagOps_lifecycle_notFoundMessage() {
+        service.createTemplate(template("welcome"), REGION);
+        service.tag("welcome", REGION, List.of(new Tag("team", "floci"), new Tag("env", "dev")));
+        assertEquals(2, service.listTags("welcome", REGION).size());
+
+        // Re-tagging an existing key replaces its value; untagging a missing key is a silent success.
+        service.tag("welcome", REGION, List.of(new Tag("env", "prod")));
+        service.untag("welcome", REGION, List.of("team", "ghost-key"));
+        List<Tag> tags = service.listTags("welcome", REGION);
+        assertEquals(1, tags.size());
+        assertEquals("env", tags.get(0).key());
+        assertEquals("prod", tags.get(0).value());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listTags("ghost", REGION));
+        assertEquals("No Template present with name: ghost", e.getMessage());
+    }
 }
