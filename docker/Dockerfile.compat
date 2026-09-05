@@ -1,9 +1,36 @@
 ARG VERSION=latest
-# This must be the UBI-based image produced by Dockerfile.native-package.
-# Release and nightly tags use VERSION; reusable builds override BASE_IMAGE
-# with the digest-qualified native image they just published.
+# The native image is built on the Quarkus micro image, which has no package manager, so the
+# compat image starts from ubi9-minimal (microdnf, curl) and copies the emulator, its entrypoint
+# and the parity script from the published native image. Release and nightly tags use VERSION;
+# reusable builds override BASE_IMAGE with the digest-qualified native image they just published.
 ARG BASE_IMAGE=floci/floci:${VERSION}
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS floci
+
+FROM registry.access.redhat.com/ubi9-minimal:9.7
+ARG VERSION=latest
+
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+
+RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
+    && mkdir -p /app/data \
+    && chown -R 1001:root /app \
+    && chmod -R g+rwX /app
+
+WORKDIR /app
+VOLUME /app/data
+
+COPY --from=floci --chown=1001:root /app/ /app/
+COPY --from=floci /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --from=floci /usr/local/bin/localstack-parity.sh /usr/local/bin/localstack-parity.sh
+
+EXPOSE 4566
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+    CMD curl -f http://localhost:4566/_floci/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]
 
 LABEL org.opencontainers.image.title="Floci (compat)" \
       org.opencontainers.image.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
