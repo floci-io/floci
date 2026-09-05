@@ -163,6 +163,14 @@ public class CertificateGenerator {
     public GeneratedCertificate generateIssuedCertificate(String domainName, List<String> sans,
                                                           KeyAlgorithm keyAlgorithm, KeyPair subjectKeyPair,
                                                           Issuer issuer, LeafUsage usage) {
+        return generateIssuedCertificate(domainName, sans, keyAlgorithm, subjectKeyPair, issuer, usage,
+                Instant.now().plus(365, ChronoUnit.DAYS));
+    }
+
+    /** Same as {@link #generateIssuedCertificate(String, List, KeyAlgorithm, KeyPair, Issuer, LeafUsage)} with an explicit end of validity. */
+    public GeneratedCertificate generateIssuedCertificate(String domainName, List<String> sans,
+                                                          KeyAlgorithm keyAlgorithm, KeyPair subjectKeyPair,
+                                                          Issuer issuer, LeafUsage usage, Instant notAfter) {
         try {
             if (subjectKeyPair != null && !isOfAlgorithm(subjectKeyPair.getPublic(), keyAlgorithm)) {
                 throw new IllegalArgumentException("supplied key pair is not the requested " + keyAlgorithm);
@@ -174,7 +182,7 @@ public class CertificateGenerator {
             X500Name subject = new X500Name("CN=" + domainName);
             X500Name issuerDn = X500Name.getInstance(issuer.certificate().getSubjectX500Principal().getEncoded());
             X509Certificate cert = signCertificate(subject, keyPair.getPublic(), issuerDn, issuer.key(),
-                    withDomainFirst(domainName, sans), false, usage, 365);
+                    withDomainFirst(domainName, sans), false, usage, Instant.now(), notAfter);
             cert.verify(issuer.certificate().getPublicKey());
             return toGenerated(cert, keyPair.getPrivate(), subject.toString(),
                     issuer.certificate().getSubjectX500Principal().getName());
@@ -244,10 +252,17 @@ public class CertificateGenerator {
                                            PrivateKey issuerKey, List<String> sans, boolean asCa,
                                            LeafUsage usage, int validityDays) throws Exception {
         Instant now = Instant.now();
+        return signCertificate(subject, subjectKey, issuerDn, issuerKey, sans, asCa, usage, now,
+                now.plus(validityDays, ChronoUnit.DAYS));
+    }
+
+    /** Same as {@link #signCertificate(X500Name, PublicKey, X500Name, PrivateKey, List, boolean, LeafUsage, int)} with an explicit validity window. */
+    public X509Certificate signCertificate(X500Name subject, PublicKey subjectKey, X500Name issuerDn,
+                                           PrivateKey issuerKey, List<String> sans, boolean asCa,
+                                           LeafUsage usage, Instant notBefore, Instant notAfter) throws Exception {
         BigInteger serial = new BigInteger(128, SECURE_RANDOM);
         X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                issuerDn, serial, Date.from(now), Date.from(now.plus(validityDays, ChronoUnit.DAYS)),
-                subject, subjectKey);
+                issuerDn, serial, Date.from(notBefore), Date.from(notAfter), subject, subjectKey);
 
         if (sans != null && !sans.isEmpty()) {
             List<GeneralName> sanList = new ArrayList<>();
