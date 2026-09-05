@@ -55,10 +55,10 @@ AWS::EC2::VPCEndpoint	Ec2VpcEndpointCfnProvisioner
 AWS::EC2::VPCGatewayAttachment	Ec2VpcGatewayAttachmentCfnProvisioner
 AWS::ECR::Repository	EcrCfnProvisioner
 AWS::ECS::CapacityProvider	EcsCapacityCfnProvisioner
-AWS::ECS::Cluster	LEGACY_SWITCH
+AWS::ECS::Cluster	EcsCfnProvisioner
 AWS::ECS::ClusterCapacityProviderAssociations	EcsCapacityCfnProvisioner
-AWS::ECS::Service	LEGACY_SWITCH
-AWS::ECS::TaskDefinition	LEGACY_SWITCH
+AWS::ECS::Service	EcsCfnProvisioner
+AWS::ECS::TaskDefinition	EcsCfnProvisioner
 AWS::EKS::Cluster	LEGACY_SWITCH
 AWS::EKS::Nodegroup	LEGACY_SWITCH
 AWS::ElasticLoadBalancingV2::Listener	LEGACY_SWITCH
