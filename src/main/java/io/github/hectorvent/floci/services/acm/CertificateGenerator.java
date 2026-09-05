@@ -28,6 +28,7 @@ import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfo;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.util.io.pem.PemObject;
 import org.jboss.logging.Logger;
 
 import javax.crypto.Cipher;
@@ -47,6 +48,7 @@ import java.security.SecureRandom;
 import java.security.Security;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.ECKey;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -175,7 +177,7 @@ public class CertificateGenerator {
      */
     boolean isOfAlgorithm(PublicKey key, KeyAlgorithm keyAlgorithm) {
         if ("EC".equals(keyAlgorithm.getAlgorithm())) {
-            if (!"EC".equals(key.getAlgorithm())) {
+            if (!(key instanceof ECKey)) {
                 return false;
             }
             X962Parameters parameters = X962Parameters.getInstance(
@@ -183,12 +185,12 @@ public class CertificateGenerator {
             return parameters.isNamedCurve()
                     && ECNamedCurveTable.getOID(keyAlgorithm.getCurveName()).equals(parameters.getParameters());
         }
-        return "RSA".equals(key.getAlgorithm()) && detectKeyAlgorithm(key) == keyAlgorithm;
+        return !(key instanceof ECKey) && detectKeyAlgorithm(key) == keyAlgorithm;
     }
 
     /** True when {@code privateKey} signs what {@code publicKey} verifies. */
     public static boolean isPair(PrivateKey privateKey, PublicKey publicKey) throws Exception {
-        String algorithm = "EC".equals(privateKey.getAlgorithm()) ? "SHA256withECDSA" : "SHA256withRSA";
+        String algorithm = privateKey instanceof ECKey ? "SHA256withECDSA" : "SHA256withRSA";
         byte[] probe = "floci".getBytes(StandardCharsets.US_ASCII);
         Signature signer = Signature.getInstance(algorithm);
         signer.initSign(privateKey);
@@ -259,7 +261,7 @@ public class CertificateGenerator {
                     new ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth));
         }
 
-        String signatureAlgorithm = "EC".equals(issuerKey.getAlgorithm()) ? "SHA512withECDSA" : "SHA512WithRSA";
+        String signatureAlgorithm = issuerKey instanceof ECKey ? "SHA512withECDSA" : "SHA512WithRSA";
         ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm).build(issuerKey);
         X509CertificateHolder holder = certBuilder.build(signer);
         return new JcaX509CertificateConverter().getCertificate(holder);
@@ -347,10 +349,20 @@ public class CertificateGenerator {
         return IP_ADDRESS_PATTERN.matcher(value).matches();
     }
 
+    /**
+     * PEM for a certificate or key. A JDK EC private key goes out as PKCS#8 ({@code PRIVATE KEY}):
+     * {@link JcaPEMWriter} would write it as a bare SEC1 structure without the curve, which neither
+     * OpenSSL nor {@link #parsePrivateKey} can read. RSA keys stay PKCS#1 ({@code RSA PRIVATE KEY}),
+     * the form AWS IoT hands out.
+     */
     public String toPem(Object obj) throws Exception {
         StringWriter sw = new StringWriter();
         try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
-            pemWriter.writeObject(obj);
+            if (obj instanceof PrivateKey key && key instanceof ECKey) {
+                pemWriter.writeObject(new PemObject("PRIVATE KEY", key.getEncoded()));
+            } else {
+                pemWriter.writeObject(obj);
+            }
         }
         return sw.toString();
     }
@@ -417,7 +429,8 @@ public class CertificateGenerator {
             JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
 
             if (obj instanceof org.bouncycastle.openssl.PEMKeyPair pemKeyPair) {
-                return converter.getKeyPair(pemKeyPair).getPrivate();
+                // Only the private half is needed, and a SEC1 key may carry no public half at all.
+                return converter.getPrivateKey(pemKeyPair.getPrivateKeyInfo());
             } else if (obj instanceof org.bouncycastle.asn1.pkcs.PrivateKeyInfo pkInfo) {
                 return converter.getPrivateKey(pkInfo);
             }
