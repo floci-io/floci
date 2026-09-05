@@ -54,7 +54,14 @@ public class TlsConfigSource implements ConfigSource {
             "*.execute-api.localhost.floci.io",
             "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
 
+    private static volatile Path resolvedTlsDir;
+
     private final Map<String, String> properties = new HashMap<>();
+
+    /** The directory the bootstrap used for CA and leaf, or null when it did not run the self-signed branch. */
+    static Path resolvedTlsDir() {
+        return resolvedTlsDir;
+    }
 
     public TlsConfigSource() {
         String enabled = resolveProperty("floci.tls.enabled", "false");
