@@ -439,6 +439,23 @@ Local, the execution starts and fails with `States.Runtime` only if the state th
 it is entered. This keeps a generated mock file usable when the collection it was built
 from is empty and the state is never reached.
 
+## Executions abandoned by a restart
+
+An execution runs in the Floci process. When Floci restarts while an execution is `RUNNING`,
+no worker survives it, so at startup every execution still stored as `RUNNING` is aborted with no
+error and no cause, the shape AWS returns for `StopExecution` called without them:
+`DescribeExecution` reports `status` `ABORTED` and a `stopDate`, and leaves the `error` and `cause`
+keys out. How many executions the sweep retired is reported once, as a `WARN` log line. Executions
+of every account are swept, each written back under its own account. Executions that already
+reached a terminal status are left untouched, and so is the status and `stopDate` of one this sweep
+aborted on an earlier boot.
+
+Execution histories are held in memory, not in storage. The events recorded before the restart are
+gone, so the execution cannot be resumed, and `GetExecutionHistory` reports a single
+`ExecutionAborted` event, with an empty `executionAbortedEventDetails`, only for the boot that
+aborted it: after a further restart the execution is already terminal, no event is written, and the
+history is empty while `DescribeExecution` still reports the status and `stopDate`.
+
 ## Configuration
 
 | Variable | Default | Description |

@@ -15,6 +15,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * Guards that {@code StopExecution} stops the execution instead of relabelling it: the status,
@@ -92,6 +93,40 @@ class StepFunctionsStopExecutionIntegrationTest {
         assertEquals("Manual", described.jsonPath().getString("error"));
         assertEquals("probe", described.jsonPath().getString("cause"));
         assertEquals(stopDate, described.jsonPath().getDouble("stopDate"));
+    }
+
+    /**
+     * Measured against us-east-1: an abort with no error and no cause leaves both keys out of
+     * {@code DescribeExecution} and carries an empty {@code executionAbortedEventDetails}. This is
+     * the terminal write the startup sweep of abandoned executions makes as well.
+     */
+    @Test
+    void abortWithNoReasonOmitsErrorAndCause() throws Exception {
+        String executionArn = startWaitingExecution("stop-without-reason");
+        Thread.sleep(300);
+
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.StopExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("""
+                        {"executionArn": "%s"}
+                        """.formatted(executionArn))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        Map<String, Object> described = describeExecution(executionArn).jsonPath().getMap("$");
+        assertEquals("ABORTED", described.get("status"));
+        // Absent, not null: a null value would leave the key in place and here it is gone.
+        assertFalse(described.containsKey("error"), "DescribeExecution kept error: " + described);
+        assertFalse(described.containsKey("cause"), "DescribeExecution kept cause: " + described);
+
+        List<Map<String, Object>> events =
+                getExecutionHistory(executionArn).jsonPath().getList("events");
+        Map<String, Object> aborted = events.get(events.size() - 1);
+        assertEquals("ExecutionAborted", aborted.get("type"));
+        assertEquals(Map.of(), aborted.get("executionAbortedEventDetails"));
     }
 
     @Test
