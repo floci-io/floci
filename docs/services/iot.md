@@ -15,7 +15,7 @@ Supported MVP 1 behavior:
 - Tags for things, certificates, policies, and topic rules.
 - IoT Data retained messages: retained `Publish`, `GetRetainedMessage`, and paginated `ListRetainedMessages`.
 - Shadow null-delete and version-conflict behavior for HTTP and shared service paths.
-- Topic rule duplicate/delete/replace semantics, plus `republish`, `sqs`, `sns`, `s3`, `dynamoDBv2`, `kinesis`, and `lambda` action dispatch.
+- Topic rule duplicate/delete/replace semantics, plus `republish`, `sqs`, `sns`, `s3`, `dynamoDBv2`, `kinesis`, `lambda`, `firehose`, and `cloudwatchLogs` action dispatch.
 
 Current MVP 1 limitations:
 
@@ -37,7 +37,7 @@ Supported MVP 2 behavior:
 - MQTT clients can use QoS 1 subscribe/publish paths with broker PUBACK and delivery behavior.
 - IoT Data connection APIs for live MQTT sessions: `GetConnection`, `DeleteConnection`, `ListSubscriptions`, and `SendDirectMessage`.
 - `DeleteConnection` closes active MQTT client sessions through the embedded broker and optionally purges broker session state for `cleanSession=true`.
-- IoT rules can dispatch matching payloads to SQS, SNS, S3, DynamoDB v2, Kinesis, Lambda, and MQTT republish targets.
+- IoT rules can dispatch matching payloads to SQS, SNS, S3, DynamoDB v2, Kinesis, Lambda, Kinesis Data Firehose, CloudWatch Logs, and MQTT republish targets.
 
 Current MVP 2 limitations:
 
@@ -151,6 +151,8 @@ Supported rule behavior:
 - `dynamoDBv2` action writes JSON object payload fields as DynamoDB attribute values through Floci's DynamoDB service boundary; nested objects and arrays become maps and lists.
 - `kinesis` action puts the original payload into a Kinesis stream through Floci's Kinesis service boundary.
 - `lambda` action invokes the configured function ARN through Floci's Lambda service boundary.
+- `firehose` action puts the original payload into a Kinesis Data Firehose delivery stream through Floci's Firehose service boundary, with `separator` appended to each record; the separator must be `\n`, `\t`, `\r\n` or `,`, as the API model requires, or the rule is rejected with `InvalidRequestException`. With `batchMode`, a JSON array payload becomes one record per element.
+- `cloudwatchLogs` action writes the original payload as a log event through Floci's CloudWatch Logs service boundary, into a log stream named after the rule that is created in `logGroupName` on first use. The log group must exist. With `batchMode`, a JSON array payload becomes one event per element, and each element supplies its own `timestamp` (epoch milliseconds) and `message`, as the AWS message format for batched device logs requires; an element without them is logged as its JSON text at publish time.
 - One failing action never fails the publish or the other actions of the rule. The failure is logged, and once every action ran the rule's `errorAction` receives the AWS failure document: `ruleName`, `topic`, `base64OriginalPayload` and `failures` with `failedAction`, `failedResource` and `errorMessage` per failed action.
 - `GetTopicRule` returns `awsIotSqlVersion` and `errorAction` as they were given to `CreateTopicRule` or `ReplaceTopicRule`.
 

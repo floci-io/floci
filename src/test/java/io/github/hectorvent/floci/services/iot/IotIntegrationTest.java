@@ -748,6 +748,52 @@ class IotIntegrationTest {
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    @Test
+    @Order(20)
+    void aSixthPolicyVersionIsRefusedUntilOneIsDeleted() {
+        String document = "{\"policyDocument\":\"{\\\"Version\\\":\\\"2012-10-17\\\",\\\"Statement\\\":[]}\"}";
+        given()
+            .contentType("application/json")
+            .body(document)
+        .when()
+            .post("/policies/five-versions")
+        .then()
+            .statusCode(200);
+        for (int version = 2; version <= 5; version++) {
+            given()
+                .contentType("application/json")
+                .body(document)
+            .when()
+                .post("/policies/five-versions/version")
+            .then()
+                .statusCode(200)
+                .body("policyVersionId", equalTo(Integer.toString(version)));
+        }
+
+        given()
+            .contentType("application/json")
+            .body(document)
+        .when()
+            .post("/policies/five-versions/version")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("VersionsLimitExceededException"));
+
+        given()
+        .when()
+            .delete("/policies/five-versions/version/3")
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/json")
+            .body(document)
+        .when()
+            .post("/policies/five-versions/version")
+        .then()
+            .statusCode(200)
+            .body("policyVersionId", equalTo("6"));
+    }
+
     private String createThingAndReturnArn(String thingName) {
         return given()
             .contentType("application/json")
