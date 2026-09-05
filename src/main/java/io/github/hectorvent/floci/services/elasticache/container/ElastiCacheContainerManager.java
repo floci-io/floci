@@ -77,7 +77,8 @@ public class ElastiCacheContainerManager {
      * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
      * so nothing changes for a Floci that can start Valkey containers.
      *
-     * @return the container handle, or {@code null} when no Docker daemon is reachable
+     * @return the container handle, or {@code null} when no Docker daemon is reachable and no
+     *         container was created
      */
     public ElastiCacheContainerHandle tryStart(String groupId, String image) {
         try {
@@ -88,7 +89,11 @@ public class ElastiCacheContainerManager {
             if (isDockerReachable()) {
                 throw e;
             }
+            boolean partial = activeContainers.containsKey(groupId);
             stopByGroupId(groupId);
+            if (partial) {
+                throw e;
+            }
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "

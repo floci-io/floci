@@ -73,7 +73,8 @@ public class ElastiCacheMemcachedContainerManager {
      * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
      * so nothing changes for a Floci that can start Memcached containers.
      *
-     * @return the container handle, or {@code null} when no Docker daemon is reachable
+     * @return the container handle, or {@code null} when no Docker daemon is reachable and no
+     *         container was created
      */
     public ElastiCacheContainerHandle tryStart(String clusterId, String image) {
         try {
@@ -87,6 +88,7 @@ public class ElastiCacheMemcachedContainerManager {
             ElastiCacheContainerHandle partial = activeContainers.get(clusterId);
             if (partial != null) {
                 stop(partial);
+                throw e;
             }
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
