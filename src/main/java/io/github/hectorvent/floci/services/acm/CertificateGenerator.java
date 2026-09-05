@@ -13,6 +13,9 @@ import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.KeyUsage;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.asn1.x9.ECNamedCurveTable;
+import org.bouncycastle.asn1.x9.X962Parameters;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
@@ -161,12 +164,11 @@ public class CertificateGenerator {
                                                           KeyAlgorithm keyAlgorithm, KeyPair subjectKeyPair,
                                                           Issuer issuer, LeafUsage usage) {
         try {
+            if (subjectKeyPair != null && !isOfAlgorithm(subjectKeyPair.getPublic(), keyAlgorithm)) {
+                throw new IllegalArgumentException("supplied key pair is not the requested " + keyAlgorithm);
+            }
             if (subjectKeyPair != null && !isPair(subjectKeyPair.getPrivate(), subjectKeyPair.getPublic())) {
                 throw new IllegalArgumentException("supplied private key does not match its public key");
-            }
-            if (subjectKeyPair != null && detectKeyAlgorithm(subjectKeyPair.getPublic()) != keyAlgorithm) {
-                throw new IllegalArgumentException("supplied key pair is " + detectKeyAlgorithm(subjectKeyPair.getPublic())
-                        + ", not the requested " + keyAlgorithm);
             }
             KeyPair keyPair = subjectKeyPair != null ? subjectKeyPair : generateKeyPair(keyAlgorithm);
             X500Name subject = new X500Name("CN=" + domainName);
@@ -180,6 +182,24 @@ public class CertificateGenerator {
             LOG.error("Failed to generate issued certificate", e);
             throw new CertificateGenerationException("Certificate generation failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * True when {@code key} is exactly what {@code keyAlgorithm} names: the RSA size, or for EC the
+     * named curve read from the key's encoding, so a curve that only shares a field size
+     * (secp256k1 for {@code EC_prime256v1}) does not pass.
+     */
+    boolean isOfAlgorithm(PublicKey key, KeyAlgorithm keyAlgorithm) {
+        if ("EC".equals(keyAlgorithm.getAlgorithm())) {
+            if (!"EC".equals(key.getAlgorithm())) {
+                return false;
+            }
+            X962Parameters parameters = X962Parameters.getInstance(
+                    SubjectPublicKeyInfo.getInstance(key.getEncoded()).getAlgorithm().getParameters());
+            return parameters.isNamedCurve()
+                    && ECNamedCurveTable.getOID(keyAlgorithm.getCurveName()).equals(parameters.getParameters());
+        }
+        return "RSA".equals(key.getAlgorithm()) && detectKeyAlgorithm(key) == keyAlgorithm;
     }
 
     /** True when {@code privateKey} signs what {@code publicKey} verifies. */

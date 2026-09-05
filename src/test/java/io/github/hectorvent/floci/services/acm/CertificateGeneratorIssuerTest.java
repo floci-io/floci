@@ -161,8 +161,25 @@ class CertificateGeneratorIssuerTest {
         var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, rsaPair, issuer,
                         CertificateGenerator.LeafUsage.CLIENT));
-        assertTrue(refused.getMessage().contains("RSA_2048") && refused.getMessage().contains("EC_prime256v1"),
-                refused.getMessage());
+        assertTrue(refused.getMessage().contains("not the requested EC_prime256v1"), refused.getMessage());
+    }
+
+    @Test
+    void aSuppliedEcKeyPairOnACurveOfTheSameSizeIsRefused() throws Exception {
+        var issuer = newIssuer();
+        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("EC", "BC");
+        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256k1"));
+        KeyPair k1 = kpg.generateKeyPair();
+        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        KeyPair p256 = kpg.generateKeyPair();
+
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+                () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, k1, issuer,
+                        CertificateGenerator.LeafUsage.CLIENT));
+        assertTrue(refused.getMessage().contains("not the requested EC_prime256v1"), refused.getMessage());
+        var accepted = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, p256, issuer,
+                CertificateGenerator.LeafUsage.CLIENT);
+        assertEquals(p256.getPublic(), generator.parseCertificate(accepted.certificatePem()).getPublicKey());
     }
 
     @Test
