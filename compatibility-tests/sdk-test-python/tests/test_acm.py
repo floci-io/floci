@@ -7,7 +7,7 @@ import pytest
 from botocore.exceptions import ClientError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
 FAKE_ARN = "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
@@ -42,20 +42,14 @@ class TestACMCertificateLifecycle:
         arn = response["CertificateArn"]
 
         try:
-            pem = acm_client.get_certificate(CertificateArn=arn)["Certificate"]
-            certificate = x509.load_pem_x509_certificate(pem.encode())
+            response = acm_client.get_certificate(CertificateArn=arn)
+            certificate = x509.load_pem_x509_certificate(response["Certificate"].encode())
             assert isinstance(certificate.public_key(), key_type)
-            # A certificate whose signature does not match its own contents would
-            # still parse, so check the self-signature rather than trusting the PEM.
-            certificate.public_key().verify(
-                certificate.signature,
-                certificate.tbs_certificate_bytes,
-                *(
-                    (ec.ECDSA(certificate.signature_hash_algorithm),)
-                    if isinstance(certificate.public_key(), ec.EllipticCurvePublicKey)
-                    else (padding.PKCS1v15(), certificate.signature_hash_algorithm)
-                ),
-            )
+            # As on AWS, the certificate is signed by the issuing CA, returned first in
+            # CertificateChain, not by its own key: check that signature, not just the PEM.
+            issuer = x509.load_pem_x509_certificate(response["CertificateChain"].encode())
+            assert certificate.issuer == issuer.subject
+            certificate.verify_directly_issued_by(issuer)
         finally:
             acm_client.delete_certificate(CertificateArn=arn)
 
