@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ses.model.ReceiptAction;
+import io.github.hectorvent.floci.services.ses.model.ReceiptFilter;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -24,15 +25,15 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
- * Owns the SES receipt-rule domain (the {@code receiptRuleSetStore}: rule sets and the rules they
- * hold). Extracted from {@link SesService} in the store-based domain split and reached only through
+ * Owns the SES inbound-mail management domain: receipt rule sets and their rules (the
+ * {@code receiptRuleSetStore}) and receipt IP filters (the {@code receiptFilterStore}). Extracted from {@link SesService} in the store-based domain split and reached only through
  * that facade. Action-target validation couples this domain to {@link S3Service},
  * {@link SnsService}, and {@link LambdaService}, reproducing the checks real SES runs against the
  * account; the bounce-sender check arrives as a predicate the facade binds to
  * {@code SesIdentityService}, keeping identity resolution out of this class's dependencies.
  *
- * <p>Floci has no inbound-mail endpoint, so rule sets and rules are stored inertly: stored rules
- * route no mail and their actions never execute. The management API round-trips (enough to unblock
+ * <p>Floci has no inbound-mail endpoint, so everything here is stored inertly: stored rules
+ * route no mail, their actions never execute, and a filter never blocks or allows any connection. The management API round-trips (enough to unblock
  * tools such as Terraform that declare inbound configuration during bootstrap).
  */
 @ApplicationScoped
@@ -58,8 +59,12 @@ public class SesReceiptRuleService {
     // RFC 5322 ftext: printable US-ASCII excluding the colon. Real SES rejects anything else with
     // "Invalid header name: <name>" (probed 2026-09).
     private static final Pattern HEADER_NAME_CHARS = Pattern.compile("^[\\x21-\\x39\\x3B-\\x7E]+$");
+    private static final Pattern IPV4_OCTETS = Pattern.compile(
+            "^((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)$");
+    private static final int MAX_FILTERS = 100;
 
     private final StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore;
+    private final StorageBackend<String, ReceiptFilter> receiptFilterStore;
     // Serializes receipt-rule-set create (check-then-put) and set-active (clear-then-set) so the
     // one-active-per-region invariant and duplicate-name rejection hold under concurrency. Rule
     // mutations (create/update/delete/set-position, all read-modify-write on the set record) take
@@ -68,6 +73,8 @@ public class SesReceiptRuleService {
     private final S3Service s3Service;
     private final SnsService snsService;
     private final LambdaService lambdaService;
+    // Serializes filter create (duplicate check, then the 100-filter cap, then put).
+    private final Object receiptFilterLock = new Object();
     private final Clock clock;
 
     @Inject
@@ -75,6 +82,8 @@ public class SesReceiptRuleService {
                                  SnsService snsService, LambdaService lambdaService, Clock clock) {
         this.receiptRuleSetStore = storageFactory.create("ses", "ses-receipt-rule-sets.json",
                 new TypeReference<Map<String, ReceiptRuleSet>>() {});
+        this.receiptFilterStore = storageFactory.create("ses", "ses-receipt-filters.json",
+                new TypeReference<Map<String, ReceiptFilter>>() {});
         this.s3Service = s3Service;
         this.snsService = snsService;
         this.lambdaService = lambdaService;
@@ -82,9 +91,11 @@ public class SesReceiptRuleService {
     }
 
     SesReceiptRuleService(StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore,
+                          StorageBackend<String, ReceiptFilter> receiptFilterStore,
                           S3Service s3Service, SnsService snsService, LambdaService lambdaService,
                           Clock clock) {
         this.receiptRuleSetStore = receiptRuleSetStore;
+        this.receiptFilterStore = receiptFilterStore;
         this.s3Service = s3Service;
         this.snsService = snsService;
         this.lambdaService = lambdaService;
@@ -548,6 +559,194 @@ public class SesReceiptRuleService {
                 || !Character.isLetterOrDigit(name.charAt(name.length() - 1))) {
             throw new AwsException("InvalidParameterValue", "Not a valid ruleName: " + name, 400);
         }
+    }
+
+    public void createReceiptFilter(ReceiptFilter filter, String region) {
+        validateFilterShape(filter);
+        requireValidFilterName(filter.getName());
+        requireValidCidr(filter.getCidr());
+        String key = receiptFilterKey(region, filter.getName());
+        synchronized (receiptFilterLock) {
+            if (receiptFilterStore.get(key).isPresent()) {
+                throw new AwsException("AlreadyExists",
+                        "Filter already exists: " + filter.getName(), 400);
+            }
+            // Probed: the account/region holds at most 100 filters; the next create is rejected.
+            if (receiptFilterStore.scan(k -> k.startsWith(receiptFilterPrefix(region))).size()
+                    >= MAX_FILTERS) {
+                throw new AwsException("LimitExceeded", "Too many filters", 400);
+            }
+            receiptFilterStore.put(key, filter);
+        }
+        LOG.infov("Created SES receipt filter: {0} in region {1}", filter.getName(), region);
+    }
+
+    public List<ReceiptFilter> listReceiptFilters(String region) {
+        List<ReceiptFilter> all = new ArrayList<>(
+                receiptFilterStore.scan(k -> k.startsWith(receiptFilterPrefix(region))));
+        // The wire ordering is not pinned by the probe (creation order and name order coincided);
+        // sorting by name keeps the response deterministic across storage backends.
+        all.sort(Comparator.comparing(ReceiptFilter::getName, Comparator.nullsLast(Comparator.naturalOrder())));
+        return all;
+    }
+
+    public void deleteReceiptFilter(String filterName, String region) {
+        if (filterName == null) {
+            // Probed: an absent FilterName is the one case the wire rejects; deleting a missing
+            // or malformed name succeeds without error.
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'filterName' failed to satisfy "
+                            + "constraint: Member must not be null", 400);
+        }
+        receiptFilterStore.delete(receiptFilterKey(region, filterName));
+        LOG.infov("Deleted SES receipt filter: {0} in region {1}", filterName, region);
+    }
+
+    /**
+     * The Smithy-model layer of filter validation, probed: an absent IpFilter, Policy, or Cidr
+     * is a not-null violation under the 'filter.ipFilter' paths, and a present Policy outside
+     * [Allow, Block] (the empty string included) is an enum violation. Unlike rule and
+     * rule-set names, a PRESENT filter name has no Smithy layer: every malformed non-null
+     * shape lands on the service-level messages in {@link #requireValidFilterName}. Only an
+     * absent name takes the not-null violation above (extrapolated; the SDKs cannot put an
+     * absent name on the wire to probe it).
+     */
+    private static void validateFilterShape(ReceiptFilter filter) {
+        if (filter == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: " + notNullViolation("filter"), 400);
+        }
+        List<String> violations = new ArrayList<>();
+        if (filter.getName() == null) {
+            violations.add(notNullViolation("filter.name"));
+        }
+        boolean hasIpFilter = filter.getPolicy() != null || filter.getCidr() != null;
+        if (!hasIpFilter) {
+            violations.add(notNullViolation("filter.ipFilter"));
+        } else {
+            if (filter.getPolicy() == null) {
+                violations.add(notNullViolation("filter.ipFilter.policy"));
+            } else if (!"Allow".equals(filter.getPolicy()) && !"Block".equals(filter.getPolicy())) {
+                violations.add("Value at 'filter.ipFilter.policy' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [Allow, Block]");
+            }
+            if (filter.getCidr() == null) {
+                violations.add(notNullViolation("filter.ipFilter.cidr"));
+            }
+        }
+        if (!violations.isEmpty()) {
+            String label = violations.size() == 1 ? "1 validation error detected: "
+                    : violations.size() + " validation errors detected: ";
+            throw new AwsException("ValidationError", label + String.join("; ", violations), 400);
+        }
+    }
+
+    private static String notNullViolation(String path) {
+        return "Value at '" + path + "' failed to satisfy constraint: Member must not be null";
+    }
+
+    /**
+     * Service-level filter name checks, probed: empty gets its own message, and every other
+     * malformed shape (bad character, longer than 64, non-alphanumeric start or end) shares
+     * the "Not a valid filterName" message.
+     */
+    private static void requireValidFilterName(String name) {
+        if (name.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "filterName must not be empty", 400);
+        }
+        if (!RULE_SET_NAME_CHARS.matcher(name).matches()
+                || name.length() > 64
+                || !Character.isLetterOrDigit(name.charAt(0))
+                || !Character.isLetterOrDigit(name.charAt(name.length() - 1))) {
+            throw new AwsException("InvalidParameterValue", "Not a valid filterName: " + name, 400);
+        }
+    }
+
+    /**
+     * Probed CIDR acceptance: a single IPv4 or IPv6 address, or a CIDR block with an in-range
+     * mask (0-32 for IPv4, 0-128 for IPv6). Everything else is the probed
+     * "Invalid CIDR block" message, the empty string included.
+     */
+    private static void requireValidCidr(String cidr) {
+        if (!isValidCidr(cidr)) {
+            throw new AwsException("InvalidParameterValue", "Invalid CIDR block: " + cidr, 400);
+        }
+    }
+
+    private static boolean isValidCidr(String cidr) {
+        String address = cidr;
+        int slash = cidr.indexOf('/');
+        Integer mask = null;
+        if (slash >= 0) {
+            address = cidr.substring(0, slash);
+            String maskPart = cidr.substring(slash + 1);
+            if (maskPart.isEmpty() || maskPart.length() > 3
+                    || !maskPart.chars().allMatch(c -> c >= '0' && c <= '9')) {
+                return false;
+            }
+            mask = Integer.parseInt(maskPart);
+        }
+        if (IPV4_OCTETS.matcher(address).matches()) {
+            return mask == null || mask <= 32;
+        }
+        if (isValidIpv6(address)) {
+            return mask == null || mask <= 128;
+        }
+        return false;
+    }
+
+    /**
+     * Strict IPv6 literal check, probed: bracketed ({@code [2001:db8::1]}), zone-scoped
+     * ({@code fe80::1%eth0}), and IPv4-mapped ({@code ::ffff:192.0.2.1}) spellings are all
+     * rejected by real SES, so the lenient {@code InetAddress} parser cannot be used here.
+     * Accepted: colon-separated 1-4 digit hex groups, eight of them, or fewer with a single
+     * {@code ::} compression.
+     */
+    private static boolean isValidIpv6(String address) {
+        if (address.isEmpty() || address.indexOf('%') >= 0 || address.indexOf('.') >= 0
+                || address.indexOf('[') >= 0 || address.indexOf(']') >= 0) {
+            return false;
+        }
+        int compression = address.indexOf("::");
+        if (compression != address.lastIndexOf("::")) {
+            return false;
+        }
+        if (compression < 0) {
+            return hexGroupCount(address) == 8;
+        }
+        int headGroups = hexGroupCount(address.substring(0, compression));
+        int tailGroups = hexGroupCount(address.substring(compression + 2));
+        return headGroups >= 0 && tailGroups >= 0 && headGroups + tailGroups <= 7;
+    }
+
+    /** Returns the number of valid 1-4 digit hex groups, or -1 when any group is malformed. */
+    private static int hexGroupCount(String colonSeparated) {
+        if (colonSeparated.isEmpty()) {
+            return 0;
+        }
+        String[] groups = colonSeparated.split(":", -1);
+        for (String group : groups) {
+            if (group.isEmpty() || group.length() > 4) {
+                return -1;
+            }
+            for (int i = 0; i < group.length(); i++) {
+                // Explicit ASCII grammar: Character.digit also recognizes non-ASCII Unicode
+                // digits, which real SES rejects (probed with fullwidth digits).
+                char c = group.charAt(i);
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                    return -1;
+                }
+            }
+        }
+        return groups.length;
+    }
+
+    private static String receiptFilterPrefix(String region) {
+        return "receiptFilter::" + region + "::";
+    }
+
+    private static String receiptFilterKey(String region, String name) {
+        return receiptFilterPrefix(region) + name;
     }
 
     private void clearActiveReceiptRuleSet(String region) {

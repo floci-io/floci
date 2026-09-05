@@ -16,9 +16,12 @@ import software.amazon.awssdk.services.ses.model.DescribeReceiptRuleResponse;
 import software.amazon.awssdk.services.ses.model.DescribeReceiptRuleSetResponse;
 import software.amazon.awssdk.services.ses.model.InvalidSnsTopicException;
 import software.amazon.awssdk.services.ses.model.ListReceiptRuleSetsResponse;
+import software.amazon.awssdk.services.ses.model.ReceiptFilter;
 import software.amazon.awssdk.services.ses.model.ReceiptRule;
 import software.amazon.awssdk.services.ses.model.RuleDoesNotExistException;
+import software.amazon.awssdk.services.ses.model.ReceiptFilterPolicy;
 import software.amazon.awssdk.services.ses.model.RuleSetDoesNotExistException;
+import software.amazon.awssdk.services.ses.model.SesException;
 import software.amazon.awssdk.services.ses.model.TlsPolicy;
 import software.amazon.awssdk.services.sns.SnsClient;
 
@@ -26,14 +29,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * SDK compatibility test for the SES V1 receipt-rule-set and receipt-rule actions, the surface
+ * SDK compatibility test for the SES V1 receipt-rule-set, receipt-rule, and receipt-filter
+ * actions. Floci stores all of them inertly (no mail routing, no connection filtering), but the
+ * management API must still round-trip through the real AWS SDK client (the same surface
  * Terraform's {@code aws_ses_receipt_rule_set} / {@code aws_ses_active_receipt_rule_set} /
- * {@code aws_ses_receipt_rule} drive. Rule sets and rules are stored without routing any mail,
- * but AWS error mapping, ordering semantics (front insert, After placement,
- * SetReceiptRulePosition), full-replace update, idempotent deletes, and local validation of
- * action targets all follow behavior probed against real AWS.
+ * {@code aws_ses_receipt_rule} / {@code aws_ses_receipt_filter} drive), including AWS error
+ * mapping, ordering semantics, and idempotent deletes.
  */
-@DisplayName("SES V1 ReceiptRuleSet and ReceiptRule")
+@DisplayName("SES V1 ReceiptRuleSet, ReceiptRule, and ReceiptFilter")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesReceiptRuleSetTest {
 
@@ -41,12 +44,17 @@ class SesReceiptRuleSetTest {
     private static SnsClient sns;
     private static String ruleSet;
     private static String topicArn;
+    private static String blockFilter;
+    private static String allowFilter;
 
     @BeforeAll
     static void setup() {
         ses = TestFixtures.sesClient();
         sns = TestFixtures.snsClient();
-        ruleSet = "sdk-v1-rule-set-" + TestFixtures.uniqueName();
+        String unique = TestFixtures.uniqueName();
+        ruleSet = "sdk-v1-rule-set-" + unique;
+        blockFilter = "sdk-v1-filter-block-" + unique;
+        allowFilter = "sdk-v1-filter-allow-" + unique;
         topicArn = sns.createTopic(b -> b.name("sdk-v1-receipt-rule-topic")).topicArn();
     }
 
@@ -63,6 +71,13 @@ class SesReceiptRuleSetTest {
             } catch (RuntimeException e) {
                 System.err.println("Best-effort cleanup of rule set " + ruleSet
                         + " failed (its rules cascade with it): " + e.getMessage());
+            }
+            for (String name : new String[] {blockFilter, allowFilter}) {
+                try {
+                    ses.deleteReceiptFilter(b -> b.filterName(name));
+                } catch (RuntimeException e) {
+                    System.err.println("Best-effort cleanup of filter " + name + " failed: " + e.getMessage());
+                }
             }
             ses.close();
         }
@@ -209,7 +224,7 @@ class SesReceiptRuleSetTest {
         // The active describe renders the set's remaining rules too.
         assertThat(a.rules()).extracting(ReceiptRule::name).containsExactly("rich", "first");
 
-        // The active rule set can't be deleted (matches AWS) — a caller must unset it first.
+        // The active rule set can't be deleted (matches AWS): a caller must unset it first.
         assertThatThrownBy(() -> ses.deleteReceiptRuleSet(b -> b.ruleSetName(ruleSet)))
                 .isInstanceOf(CannotDeleteException.class);
     }
@@ -238,4 +253,47 @@ class SesReceiptRuleSetTest {
         assertThatThrownBy(() -> ses.describeReceiptRuleSet(b -> b.ruleSetName(ruleSet)))
                 .isInstanceOf(RuleSetDoesNotExistException.class);
     }
+
+    @Test
+    @Order(14)
+    void createFilterAndList_roundTrip() {
+        ses.createReceiptFilter(b -> b.filter(f -> f.name(blockFilter)
+                .ipFilter(ip -> ip.policy(ReceiptFilterPolicy.BLOCK).cidr("10.0.0.0/24"))));
+        ses.createReceiptFilter(b -> b.filter(f -> f.name(allowFilter)
+                .ipFilter(ip -> ip.policy(ReceiptFilterPolicy.ALLOW).cidr("192.0.2.10"))));
+
+        var filters = ses.listReceiptFilters().filters();
+        ReceiptFilter block = filters.stream()
+                .filter(f -> blockFilter.equals(f.name())).findFirst().orElseThrow();
+        assertThat(block.ipFilter().policy()).isEqualTo(ReceiptFilterPolicy.BLOCK);
+        assertThat(block.ipFilter().cidr()).isEqualTo("10.0.0.0/24");
+        assertThat(filters).anyMatch(f -> allowFilter.equals(f.name()));
+    }
+
+    @Test
+    @Order(15)
+    void duplicateFilterCreate_andInvalidCidr_mapToTypedExceptions() {
+        assertThatThrownBy(() -> ses.createReceiptFilter(b -> b.filter(f -> f.name(blockFilter)
+                .ipFilter(ip -> ip.policy(ReceiptFilterPolicy.ALLOW).cidr("10.9.9.9")))))
+                .isInstanceOf(AlreadyExistsException.class)
+                .hasMessageContaining("Filter already exists: " + blockFilter);
+
+        // InvalidParameterValue is not a modeled SES v1 exception; the SDK surfaces the
+        // generic SesException carrying the wire error code.
+        assertThatThrownBy(() -> ses.createReceiptFilter(b -> b.filter(f -> f.name("sdk-v1-bad-cidr")
+                .ipFilter(ip -> ip.policy(ReceiptFilterPolicy.BLOCK).cidr("not-a-cidr")))))
+                .isInstanceOfSatisfying(SesException.class, e -> assertThat(
+                        e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue"))
+                .hasMessageContaining("Invalid CIDR block: not-a-cidr");
+    }
+
+    @Test
+    @Order(16)
+    void deleteFilter_isIdempotent() {
+        ses.deleteReceiptFilter(b -> b.filterName(allowFilter));
+        ses.deleteReceiptFilter(b -> b.filterName(allowFilter));
+        assertThat(ses.listReceiptFilters().filters())
+                .noneMatch(f -> allowFilter.equals(f.name()));
+    }
+
 }

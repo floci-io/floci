@@ -128,7 +128,7 @@ final class SesServiceTestBuilder {
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 new SesContactService(contactListStore, contactStore, clock),
                 new SesPolicyService(policyStore, objectMapper),
-                new SesReceiptRuleService(receiptRuleStore, mock(S3Service.class),
+                new SesReceiptRuleService(receiptRuleStore, new InMemoryStorage<>(), mock(S3Service.class),
                         mock(SnsService.class), mock(LambdaService.class), clock),
                 new SesCvetService(cvetStore),
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),

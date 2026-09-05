@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
+import io.github.hectorvent.floci.services.ses.model.ReceiptFilter;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.Topic;
@@ -1306,6 +1307,18 @@ public class SesService {
 
     public void setReceiptRulePosition(String ruleSetName, String ruleName, String after, String region) {
         receiptRuleService.setReceiptRulePosition(ruleSetName, ruleName, after, region);
+    }
+
+    public void createReceiptFilter(ReceiptFilter filter, String region) {
+        receiptRuleService.createReceiptFilter(filter, region);
+    }
+
+    public List<ReceiptFilter> listReceiptFilters(String region) {
+        return receiptRuleService.listReceiptFilters(region);
+    }
+
+    public void deleteReceiptFilter(String filterName, String region) {
+        receiptRuleService.deleteReceiptFilter(filterName, region);
     }
 
     // ──────────────────────── Dedicated IP Pools ────────────────────────

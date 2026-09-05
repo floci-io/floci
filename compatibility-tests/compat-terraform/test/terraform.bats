@@ -148,6 +148,13 @@ sha256_composite_by_sizes() {
     assert_output --partial "floci-compat-events"
 }
 
+@test "Terraform: SES receipt filter created" {
+    run aws_cmd ses list-receipt-filters
+    assert_success
+    assert_output --partial "floci-compat-filter"
+    assert_output --partial "10.10.10.0/24"
+}
+
 @test "Terraform: SES receipt rule set created and active" {
     run aws_cmd ses describe-receipt-rule-set --rule-set-name floci-compat-rule-set
     assert_success

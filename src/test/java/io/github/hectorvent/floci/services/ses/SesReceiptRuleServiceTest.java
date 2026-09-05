@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ses.model.ReceiptAction;
+import io.github.hectorvent.floci.services.ses.model.ReceiptFilter;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -48,8 +49,12 @@ class SesReceiptRuleServiceTest {
         when(s3Service.bucketExists(anyString())).thenReturn(true);
         when(snsService.topicExists(anyString(), anyString())).thenReturn(true);
         when(lambdaService.functionExists(anyString(), anyString())).thenReturn(true);
-        service = new SesReceiptRuleService(new InMemoryStorage<>(), s3Service, snsService,
-                lambdaService, Clock.systemUTC());
+        service = new SesReceiptRuleService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                s3Service, snsService, lambdaService, Clock.systemUTC());
+    }
+
+    private static ReceiptFilter filter(String name, String policy, String cidr) {
+        return new ReceiptFilter(name, policy, cidr);
     }
 
     private static ReceiptRule rule(String name, ReceiptAction... actions) {
@@ -578,5 +583,101 @@ class SesReceiptRuleServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeReceiptRuleSet("rules-a", REGION));
         assertEquals("RuleSetDoesNotExist", e.getErrorCode());
+    }
+
+    // ---- receipt filters ----
+
+    @Test
+    void createFilter_thenList_roundTripsSortedByName() {
+        service.createReceiptFilter(filter("zulu", "Block", "10.0.0.0/24"), REGION);
+        service.createReceiptFilter(filter("alpha", "Allow", "192.0.2.10"), REGION);
+
+        List<ReceiptFilter> listed = service.listReceiptFilters(REGION);
+        assertEquals(List.of("alpha", "zulu"), listed.stream().map(ReceiptFilter::getName).toList());
+        assertEquals("Allow", listed.get(0).getPolicy());
+        assertEquals("192.0.2.10", listed.get(0).getCidr());
+    }
+
+    @Test
+    void createFilter_duplicate_throwsAlreadyExists() {
+        service.createReceiptFilter(filter("f1", "Block", "10.0.0.0/24"), REGION);
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createReceiptFilter(filter("f1", "Allow", "10.9.9.9"), REGION));
+        assertEquals("AlreadyExists", e.getErrorCode());
+        assertEquals("Filter already exists: f1", e.getMessage());
+        assertEquals("Block", service.listReceiptFilters(REGION).get(0).getPolicy());
+    }
+
+    @Test
+    void filterName_isSingleLayerServiceValidation() {
+        // Unlike rule and rule-set names there is no Smithy pattern layer (probed): bad chars,
+        // overlength, and bad boundaries all share one message, and empty has its own.
+        for (String bad : new String[] {"bad name", "a".repeat(65), "-abc"}) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.createReceiptFilter(filter(bad, "Block", "10.0.0.0/24"), REGION));
+            assertEquals("InvalidParameterValue", e.getErrorCode());
+            assertEquals("Not a valid filterName: " + bad, e.getMessage());
+        }
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.createReceiptFilter(filter("", "Block", "10.0.0.0/24"), REGION));
+        assertEquals("filterName must not be empty", empty.getMessage());
+    }
+
+    @Test
+    void filterShape_missingMembers_areSmithyViolations() {
+        AwsException noIpFilter = assertThrows(AwsException.class,
+                () -> service.createReceiptFilter(filter("f1", null, null), REGION));
+        assertEquals("ValidationError", noIpFilter.getErrorCode());
+        assertTrue(noIpFilter.getMessage().contains("'filter.ipFilter'"));
+
+        AwsException noCidr = assertThrows(AwsException.class,
+                () -> service.createReceiptFilter(filter("f1", "Block", null), REGION));
+        assertTrue(noCidr.getMessage().contains("'filter.ipFilter.cidr'"));
+
+        AwsException badPolicy = assertThrows(AwsException.class,
+                () -> service.createReceiptFilter(filter("f1", "Bogus", "10.0.0.0/24"), REGION));
+        assertTrue(badPolicy.getMessage().contains("'filter.ipFilter.policy'"));
+        assertTrue(badPolicy.getMessage().contains("[Allow, Block]"));
+    }
+
+    @Test
+    void cidr_validation_matchesProbedAcceptance() {
+        service.createReceiptFilter(filter("single-ip", "Allow", "192.0.2.10"), REGION);
+        service.createReceiptFilter(filter("ipv6", "Block", "2001:db8::/32"), REGION);
+
+        // Probed: bracketed, zone-scoped, and IPv4-mapped IPv6 spellings are rejected too,
+        // so the lenient InetAddress parser must not be used for validation.
+        for (String bad : new String[] {"not-a-cidr", "", "10.0.0.0/33", "10.0.0/24", "10.0.0.0/",
+                "[2001:db8::1]", "fe80::1%eth0", "::ffff:192.0.2.1", "2001:db8::/129",
+                "1:2:3:4:5:6:7:8:9", "2001:db8:::1", "10.0.0.0/２４", "０:0:0:0:0:0:0:1"}) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.createReceiptFilter(filter("f-bad", "Block", bad), REGION));
+            assertEquals("InvalidParameterValue", e.getErrorCode());
+            assertEquals("Invalid CIDR block: " + bad, e.getMessage());
+        }
+    }
+
+    @Test
+    void deleteFilter_isIdempotent_butRequiresName() {
+        service.createReceiptFilter(filter("f1", "Block", "10.0.0.0/24"), REGION);
+        service.deleteReceiptFilter("f1", REGION);
+        service.deleteReceiptFilter("f1", REGION);
+        assertTrue(service.listReceiptFilters(REGION).isEmpty());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.deleteReceiptFilter(null, REGION));
+        assertEquals("ValidationError", e.getErrorCode());
+        assertTrue(e.getMessage().contains("'filterName'"));
+    }
+
+    @Test
+    void createFilter_beyond100_throwsLimitExceeded() {
+        for (int i = 1; i <= 100; i++) {
+            service.createReceiptFilter(filter("f" + i, "Block", "10.0.0.0/24"), REGION);
+        }
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createReceiptFilter(filter("f101", "Block", "10.0.0.0/24"), REGION));
+        assertEquals("LimitExceeded", e.getErrorCode());
+        assertEquals("Too many filters", e.getMessage());
     }
 }

@@ -665,6 +665,12 @@ resource "aws_ses_active_receipt_rule_set" "compat" {
   rule_set_name = aws_ses_receipt_rule_set.compat.rule_set_name
 }
 
+resource "aws_ses_receipt_filter" "compat" {
+  name   = "floci-compat-filter"
+  cidr   = "10.10.10.0/24"
+  policy = "Block"
+}
+
 resource "aws_ses_receipt_rule" "compat" {
   rule_set_name = aws_ses_receipt_rule_set.compat.rule_set_name
   name          = "floci-compat-rule"

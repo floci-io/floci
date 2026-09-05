@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.KinesisFirehoseDestination;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.ReceiptAction;
+import io.github.hectorvent.floci.services.ses.model.ReceiptFilter;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.SnsDestination;
@@ -137,6 +138,9 @@ public class SesQueryHandler {
                 case "UpdateReceiptRule" -> handleUpdateReceiptRule(params, region);
                 case "DeleteReceiptRule" -> handleDeleteReceiptRule(params, region);
                 case "SetReceiptRulePosition" -> handleSetReceiptRulePosition(params, region);
+                case "CreateReceiptFilter" -> handleCreateReceiptFilter(params, region);
+                case "ListReceiptFilters" -> handleListReceiptFilters(region);
+                case "DeleteReceiptFilter" -> handleDeleteReceiptFilter(params, region);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
             };
@@ -1202,6 +1206,41 @@ public class SesQueryHandler {
         xml.end("Actions");
         xml.elem("ScanEnabled", String.valueOf(rule.isScanEnabled()));
         xml.end(tag);
+    }
+
+    private Response handleCreateReceiptFilter(MultivaluedMap<String, String> params, String region) {
+        String name = getParam(params, "Filter.Name");
+        String policy = getParam(params, "Filter.IpFilter.Policy");
+        String cidr = getParam(params, "Filter.IpFilter.Cidr");
+        // A request with no Filter member at all is a single 'filter' violation (probed), not the
+        // nested per-member ones, so the absent structure must stay distinguishable as null.
+        ReceiptFilter filter = name == null && policy == null && cidr == null
+                ? null : new ReceiptFilter(name, policy, cidr);
+        sesService.createReceiptFilter(filter, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "CreateReceiptFilter", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleListReceiptFilters(String region) {
+        XmlBuilder xml = new XmlBuilder().start("Filters");
+        for (ReceiptFilter filter : sesService.listReceiptFilters(region)) {
+            xml.start("member");
+            xml.elem("Name", filter.getName());
+            xml.start("IpFilter");
+            xml.elem("Policy", filter.getPolicy());
+            xml.elem("Cidr", filter.getCidr());
+            xml.end("IpFilter");
+            xml.end("member");
+        }
+        xml.end("Filters");
+        return Response.ok(AwsQueryResponse.envelope(
+                "ListReceiptFilters", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private Response handleDeleteReceiptFilter(MultivaluedMap<String, String> params, String region) {
+        sesService.deleteReceiptFilter(getParam(params, "FilterName"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "DeleteReceiptFilter", AwsNamespaces.SES)).build();
     }
 
     private void writeReceiptRuleSetMetadata(XmlBuilder xml, ReceiptRuleSet ruleSet) {
