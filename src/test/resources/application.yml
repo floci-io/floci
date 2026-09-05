@@ -371,6 +371,7 @@ floci:
       enabled: true
     controltower:
       enabled: true
+      seed-landing-zone: true
     route53resolver:
       enabled: true
     connect:
