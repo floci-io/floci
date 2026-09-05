@@ -224,9 +224,12 @@ public class CloudWatchLogsCrossAccountService {
             }
             case "FIELD_INDEX_POLICY" -> {
                 boolean prefix = selectionCriteria.contains("LogGroupNamePrefix");
-                boolean source = selectionCriteria.contains("DataSourceName") && selectionCriteria.contains("DataSourceType");
-                if (!prefix && !source) {
-                    throw invalid("Field index selectionCriteria is invalid.");
+                boolean dataSourceName = selectionCriteria.contains("DataSourceName");
+                boolean dataSourceType = selectionCriteria.contains("DataSourceType");
+                boolean prefixOnly = prefix && !dataSourceName && !dataSourceType;
+                boolean dataSourcePairOnly = !prefix && dataSourceName && dataSourceType;
+                if (!prefixOnly && !dataSourcePairOnly) {
+                    throw invalid("Field index selectionCriteria must use either LogGroupNamePrefix or DataSourceName and DataSourceType.");
                 }
             }
             default -> throw invalid("policyType is invalid.");

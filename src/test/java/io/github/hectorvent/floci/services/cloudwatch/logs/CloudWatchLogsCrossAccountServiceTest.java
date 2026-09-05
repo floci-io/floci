@@ -60,6 +60,25 @@ class CloudWatchLogsCrossAccountServiceTest {
     }
 
     @Test
+    void fieldIndexRejectsMixedScopeForms() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putAccountPolicy("mixed-index", DOCUMENT, "FIELD_INDEX_POLICY",
+                        "LogGroupNamePrefix = 'aws/' AND DataSourceName = 'amazon_vpc' AND DataSourceType = 'flow'",
+                        "ALL", REGION));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+    }
+
+    @Test
+    void fieldIndexRequiresCompleteDataSourcePair() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putAccountPolicy("partial-index", DOCUMENT, "FIELD_INDEX_POLICY",
+                        "DataSourceName = 'amazon_vpc'", "ALL", REGION));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+    }
+
+    @Test
     void metricExtractionRejectsMoreThanFiftySelectionValues() {
         StringBuilder criteria = new StringBuilder("LogGroupName IN [");
         for (int i = 0; i < 51; i++) {
