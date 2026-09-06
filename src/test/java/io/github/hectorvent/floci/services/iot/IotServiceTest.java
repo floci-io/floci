@@ -95,7 +95,8 @@ class IotServiceTest {
                 dynamoDb,
                 lambda,
                 firehose,
-                logs);
+                logs,
+                mock(io.github.hectorvent.floci.config.FlociCertificateAuthority.class));
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {
