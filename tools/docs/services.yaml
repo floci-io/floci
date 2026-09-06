@@ -202,6 +202,19 @@ services:
     doc: docs/services/route53resolver.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/route53resolver/Route53ResolverJsonHandler.java, mode: switch }
+  - service: securityhub
+    doc: docs/services/securityhub.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/securityhub/SecurityHubController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: secretsmanager
     doc: docs/services/secrets-manager.md
     sources:

@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.securityhub;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.securityhub.model.SecurityHubAssociation;
 import io.github.hectorvent.floci.services.securityhub.model.SecurityHubState;
@@ -15,6 +18,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -41,13 +45,27 @@ public class SecurityHubController {
 
     @GET
     @Path("/organization/admin")
-    public Response listOrganizationAdminAccounts(@Context HttpHeaders headers) {
+    public Response listOrganizationAdminAccounts(@Context HttpHeaders headers,
+                                                  @QueryParam("Feature") String feature,
+                                                  @QueryParam("MaxResults") String maxResultsValue,
+                                                  @QueryParam("NextToken") String nextToken) {
+        Integer maxResults = Pagination.parseMaxResults(maxResultsValue, "InvalidInputException");
+        if (maxResults != null && maxResults > 10) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 10.", 400);
+        }
+        if (nextToken != null && !nextToken.isBlank()) {
+            throw new AwsException("InvalidInputException", "NextToken is invalid.", 400);
+        }
         SecurityHubState state = securityHubService.state(region(headers));
         ObjectNode response = objectMapper.createObjectNode();
         var accounts = response.putArray("AdminAccounts");
-        if (state.getAdminAccountId() != null) {
-            accounts.addObject().put("AccountId", state.getAdminAccountId()).put("Status", "ENABLED");
+        String requestedFeature = securityHubService.normalizeFeature(feature);
+        if (state.getAdminAccountId() != null && requestedFeature.equals(state.getAdminFeature())) {
+            accounts.addObject()
+                    .put("AccountId", state.getAdminAccountId())
+                    .put("Status", "ENABLED");
         }
+        response.put("Feature", requestedFeature);
         return Response.ok(response).build();
     }
 
@@ -55,8 +73,12 @@ public class SecurityHubController {
     @Path("/organization/admin/enable")
     public Response enableOrganizationAdminAccount(@Context HttpHeaders headers, String body) {
         JsonNode request = readTree(body);
-        securityHubService.enableOrganizationAdminAccount(region(headers), request.path("AdminAccountId").asText(null));
-        return empty();
+        SecurityHubState state = securityHubService.enableOrganizationAdminAccount(
+                region(headers), request.path("AdminAccountId").asText(null), request.path("Feature").asText(null));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("AdminAccountId", state.getAdminAccountId());
+        response.put("Feature", state.getAdminFeature());
+        return Response.ok(response).build();
     }
 
     @GET
@@ -66,21 +88,38 @@ public class SecurityHubController {
         securityHubService.requireEnabled(region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("HubArn", securityHubService.hubArn(region));
-        response.put("AutoEnableControls", true);
-        response.put("ControlFindingGenerator", "SECURITY_CONTROL");
+        SecurityHubState state = securityHubService.state(region);
+        response.put("AutoEnableControls", state.isAutoEnableControls());
+        response.put("ControlFindingGenerator", state.getControlFindingGenerator());
         return Response.ok(response).build();
     }
 
     @POST
     @Path("/accounts")
     public Response enableSecurityHub(@Context HttpHeaders headers, String body) {
-        securityHubService.enableSecurityHub(region(headers));
-        return Response.ok(objectMapper.createObjectNode()).build();
+        securityHubService.enableSecurityHub(region(headers), readTree(body));
+        return empty();
+    }
+
+    @PATCH
+    @Path("/accounts")
+    public Response updateSecurityHubConfiguration(@Context HttpHeaders headers, String body) {
+        securityHubService.updateSecurityHubConfiguration(region(headers), readTree(body));
+        return empty();
     }
 
     @GET
     @Path("/findingAggregator/list")
-    public Response listFindingAggregators(@Context HttpHeaders headers) {
+    public Response listFindingAggregators(@Context HttpHeaders headers,
+                                           @QueryParam("MaxResults") String maxResultsValue,
+                                           @QueryParam("NextToken") String nextToken) {
+        Integer maxResults = Pagination.parseMaxResults(maxResultsValue, "InvalidInputException");
+        if (maxResults != null && maxResults > 100) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 100.", 400);
+        }
+        if (nextToken != null && !nextToken.isBlank()) {
+            throw new AwsException("InvalidInputException", "NextToken is invalid.", 400);
+        }
         SecurityHubState state = securityHubService.state(region(headers));
         ObjectNode response = objectMapper.createObjectNode();
         var items = response.putArray("FindingAggregators");
@@ -120,8 +159,8 @@ public class SecurityHubController {
     public Response describeOrganizationConfiguration(@Context HttpHeaders headers) {
         SecurityHubState state = securityHubService.organizationConfiguration(region(headers));
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("AutoEnable", false);
-        response.put("AutoEnableStandards", "NONE");
+        response.put("AutoEnable", state.isAutoEnable());
+        response.put("AutoEnableStandards", state.getAutoEnableStandards());
         response.put("MemberAccountLimitReached", false);
         ObjectNode configuration = response.putObject("OrganizationConfiguration");
         configuration.put("ConfigurationType", state.getOrganizationConfigurationType());
@@ -138,11 +177,19 @@ public class SecurityHubController {
 
     @GET
     @Path("/configurationPolicy/list")
-    public Response listConfigurationPolicies(@Context HttpHeaders headers) {
+    public Response listConfigurationPolicies(@Context HttpHeaders headers,
+                                              @QueryParam("MaxResults") String maxResultsValue,
+                                              @QueryParam("NextToken") String nextToken) {
         String region = region(headers);
+        Integer maxResults = Pagination.parseMaxResults(maxResultsValue, "InvalidInputException");
+        PaginatedResult<java.util.Map.Entry<String, JsonNode>> page =
+                securityHubService.policyPage(region, maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         var items = response.putArray("ConfigurationPolicySummaries");
-        securityHubService.policies(region).forEach(entry -> items.add(policySummary(region, entry.getKey(), entry.getValue())));
+        page.items().forEach(entry -> items.add(policySummary(region, entry.getKey(), entry.getValue())));
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -197,18 +244,13 @@ public class SecurityHubController {
     @Path("/configurationPolicyAssociation/list")
     public Response listConfigurationPolicyAssociations(@Context HttpHeaders headers, String body) {
         String region = region(headers);
+        PaginatedResult<SecurityHubAssociation> page = securityHubService.associationPage(region, readTree(body));
         ObjectNode response = objectMapper.createObjectNode();
         var items = response.putArray("ConfigurationPolicyAssociationSummaries");
-        securityHubService.associations(region).forEach(entry -> items.add(association(entry)));
-        return Response.ok(response).build();
-    }
-
-    @GET
-    @Path("/tags/{resource: .+}")
-    public Response listTagsForResource(@Context HttpHeaders headers, @PathParam("resource") String resource) {
-        ObjectNode response = objectMapper.createObjectNode();
-        ObjectNode tags = response.putObject("Tags");
-        securityHubService.tagsForResource(region(headers), resource).forEach(tags::put);
+        page.items().forEach(entry -> items.add(association(entry)));
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -217,7 +259,9 @@ public class SecurityHubController {
         response.put("FindingAggregatorArn", state.getAggregatorArn());
         response.put("FindingAggregationRegion", region);
         response.put("RegionLinkingMode", state.getRegionLinkingMode());
-        if (state.getRegions() != null) response.set("Regions", state.getRegions());
+        if (state.getRegions() != null) {
+            response.set("Regions", state.getRegions());
+        }
         return Response.ok(response).build();
     }
 
@@ -228,15 +272,23 @@ public class SecurityHubController {
         response.put("Arn", securityHubService.policyArn(region, policyId));
         response.put("Id", policyId);
         response.put("Name", policy.path("Name").asText());
-        if (policy.hasNonNull("Description")) response.put("Description", policy.path("Description").asText());
-        response.put("UpdatedAt", Instant.now().toString());
+        if (policy.hasNonNull("Description")) {
+            response.put("Description", policy.path("Description").asText());
+        }
+        JsonNode securityHub = policy.path("ConfigurationPolicy").path("SecurityHub");
+        if (securityHub.path("ServiceEnabled").isBoolean()) {
+            response.put("ServiceEnabled", securityHub.path("ServiceEnabled").asBoolean());
+        }
+        response.put("UpdatedAt", policy.path("UpdatedAt").asText(Instant.now().toString()));
         return response;
     }
 
     private ObjectNode policyDocument(String region, String id, JsonNode policy) {
         ObjectNode response = policySummary(region, id, policy);
-        if (policy.has("ConfigurationPolicy")) response.set("ConfigurationPolicy", policy.get("ConfigurationPolicy"));
-        response.put("CreatedAt", Instant.now().toString());
+        if (policy.has("ConfigurationPolicy")) {
+            response.set("ConfigurationPolicy", policy.get("ConfigurationPolicy"));
+        }
+        response.put("CreatedAt", policy.path("CreatedAt").asText(Instant.now().toString()));
         return response;
     }
 
@@ -250,14 +302,23 @@ public class SecurityHubController {
         response.put("ConfigurationPolicyId", association.getPolicyId());
         response.put("TargetId", association.getTargetId());
         response.put("TargetType", association.getTargetType());
-        response.put("UpdatedAt", Instant.now().toString());
+        response.put("UpdatedAt", association.getUpdatedAt());
         return response;
     }
 
-    private String region(HttpHeaders headers) { return regionResolver.resolveRegion(headers); }
-    private Response empty() { return Response.ok(objectMapper.createObjectNode()).build(); }
+    private String region(HttpHeaders headers) {
+        return regionResolver.resolveRegion(headers);
+    }
+
+    private Response empty() {
+        return Response.ok().build();
+    }
+
     private JsonNode readTree(String body) {
-        try { return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body); }
-        catch (Exception e) { throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse()); }
+        try {
+            return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+        } catch (Exception e) {
+            throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse());
+        }
     }
 }

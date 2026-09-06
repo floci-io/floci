@@ -11,7 +11,13 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class SecurityHubState {
     private String adminAccountId;
+    private String adminFeature = "SecurityHub";
     private boolean enabled;
+    private boolean autoEnable;
+    private String autoEnableStandards = "DEFAULT";
+    private boolean autoEnableControls = true;
+    private String controlFindingGenerator = "SECURITY_CONTROL";
+    private Map<String, String> hubTags = new LinkedHashMap<>();
     private String aggregatorArn;
     private String regionLinkingMode;
     private JsonNode regions;
@@ -23,8 +29,20 @@ public class SecurityHubState {
 
     public String getAdminAccountId() { return adminAccountId; }
     public void setAdminAccountId(String adminAccountId) { this.adminAccountId = adminAccountId; }
+    public String getAdminFeature() { return adminFeature; }
+    public void setAdminFeature(String adminFeature) { this.adminFeature = adminFeature; }
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    public boolean isAutoEnable() { return autoEnable; }
+    public void setAutoEnable(boolean autoEnable) { this.autoEnable = autoEnable; }
+    public String getAutoEnableStandards() { return autoEnableStandards; }
+    public void setAutoEnableStandards(String autoEnableStandards) { this.autoEnableStandards = autoEnableStandards; }
+    public boolean isAutoEnableControls() { return autoEnableControls; }
+    public void setAutoEnableControls(boolean autoEnableControls) { this.autoEnableControls = autoEnableControls; }
+    public String getControlFindingGenerator() { return controlFindingGenerator; }
+    public void setControlFindingGenerator(String controlFindingGenerator) { this.controlFindingGenerator = controlFindingGenerator; }
+    public Map<String, String> getHubTags() { return hubTags; }
+    public void setHubTags(Map<String, String> hubTags) { this.hubTags = hubTags; }
     public String getAggregatorArn() { return aggregatorArn; }
     public void setAggregatorArn(String aggregatorArn) { this.aggregatorArn = aggregatorArn; }
     public String getRegionLinkingMode() { return regionLinkingMode; }

@@ -39,17 +39,6 @@ class UnknownServiceScopeGuardIntegrationTest {
     }
 
     @Test
-    void securityhubScopedRestRequestGetsUnknownOperation() {
-        given()
-            .header("Authorization", authorization("securityhub"))
-        .when()
-            .get("/accounts")
-        .then()
-            .statusCode(404)
-            .body("__type", equalTo("UnknownOperationException"));
-    }
-
-    @Test
     void s3ScopedRequestKeepsS3Behavior() {
         given()
             .header("Authorization", authorization("s3"))

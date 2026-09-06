@@ -11,6 +11,7 @@ public class SecurityHubAssociation {
     private String policyId;
     private String status;
     private String statusMessage;
+    private String updatedAt;
     private int pendingPollsRemaining;
     private boolean disassociating;
 
@@ -23,6 +24,7 @@ public class SecurityHubAssociation {
         this.targetType = targetType;
         this.policyId = policyId;
         this.status = status;
+        this.updatedAt = java.time.Instant.now().toString();
         this.pendingPollsRemaining = pendingPollsRemaining;
     }
 
@@ -36,6 +38,8 @@ public class SecurityHubAssociation {
     public void setStatus(String status) { this.status = status; }
     public String getStatusMessage() { return statusMessage; }
     public void setStatusMessage(String statusMessage) { this.statusMessage = statusMessage; }
+    public String getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
     public int getPendingPollsRemaining() { return pendingPollsRemaining; }
     public void setPendingPollsRemaining(int pendingPollsRemaining) { this.pendingPollsRemaining = pendingPollsRemaining; }
     public boolean isDisassociating() { return disassociating; }
@@ -45,6 +49,7 @@ public class SecurityHubAssociation {
         SecurityHubAssociation copy = new SecurityHubAssociation(targetId, targetType, policyId, status,
                 pendingPollsRemaining);
         copy.setStatusMessage(statusMessage);
+        copy.setUpdatedAt(updatedAt);
         copy.setDisassociating(disassociating);
         return copy;
     }
