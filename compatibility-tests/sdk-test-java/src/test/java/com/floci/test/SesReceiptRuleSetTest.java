@@ -55,21 +55,23 @@ class SesReceiptRuleSetTest {
         if (ses != null) {
             try {
                 ses.setActiveReceiptRuleSet(b -> { });
-            } catch (RuntimeException ignored) {
-                // best-effort: clearing the active rule set
+            } catch (RuntimeException e) {
+                System.err.println("Best-effort clearing of the active rule set failed: " + e.getMessage());
             }
             try {
                 ses.deleteReceiptRuleSet(b -> b.ruleSetName(ruleSet));
-            } catch (RuntimeException ignored) {
-                // best-effort: removing the throwaway rule set (rules cascade with it)
+            } catch (RuntimeException e) {
+                System.err.println("Best-effort cleanup of rule set " + ruleSet
+                        + " failed (its rules cascade with it): " + e.getMessage());
             }
             ses.close();
         }
         if (sns != null) {
             try {
                 sns.deleteTopic(b -> b.topicArn(topicArn));
-            } catch (RuntimeException ignored) {
-                // best-effort: removing the throwaway topic
+            } catch (RuntimeException e) {
+                System.err.println("Best-effort cleanup of topic " + topicArn
+                        + " failed: " + e.getMessage());
             }
             sns.close();
         }
