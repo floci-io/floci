@@ -773,6 +773,13 @@ public interface EmulatorConfig {
 
         @WithDefault("1883")
         int port();
+
+        /**
+         * MQTT over TLS listener, the port AWS IoT serves for X.509 device connections. Opened only
+         * while {@code floci.tls.enabled} is true; {@code 0} disables it. Env: FLOCI_SERVICES_IOT_MQTT_TLS_PORT
+         */
+        @WithDefault("8883")
+        int tlsPort();
     }
 
     interface IotDataServiceConfig {
