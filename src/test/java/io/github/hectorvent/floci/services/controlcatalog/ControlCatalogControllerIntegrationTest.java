@@ -128,6 +128,31 @@ class ControlCatalogControllerIntegrationTest {
     }
 
     @Test
+    void listControlsSupportsIdentifierAndProviderFilters() {
+        given()
+                .contentType("application/json")
+                .header("Authorization", auth("us-east-1"))
+                .body("{\"Filter\":{\"Implementations\":{\"Identifiers\":[\"CT.S3.PV.5\"]},\"GovernedProviders\":[\"AWS\"]}}")
+                .when()
+                .post("/list-controls")
+                .then()
+                .statusCode(200)
+                .body("Controls.size()", equalTo(1))
+                .body("Controls[0].Implementation.Identifier", equalTo("CT.S3.PV.5"))
+                .body("Controls[0].GovernedProviders[0]", equalTo("AWS"));
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", auth("us-east-1"))
+                .body("{\"Filter\":{\"GovernedProviders\":[\"invalid\"]}}")
+                .when()
+                .post("/list-controls")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
     void healthReportsControlCatalogService() {
         given()
                 .when()

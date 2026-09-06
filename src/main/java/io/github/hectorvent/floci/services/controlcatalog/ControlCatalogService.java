@@ -64,7 +64,11 @@ public class ControlCatalogService {
             regionConfiguration.set("DeployableRegions", stringArray(List.of(region)));
         }
 
-        response.putObject("Implementation").put("Type", definition.implementationType());
+        ObjectNode implementation = response.putObject("Implementation");
+        implementation.put("Type", definition.implementationType());
+        if (!definition.aliases().isEmpty()) {
+            implementation.put("Identifier", definition.aliases().getFirst());
+        }
         response.put("ParameterRequirementSummary", definition.parameters().isEmpty() ? "NONE" : "OPTIONAL");
         ArrayNode parameters = response.putArray("Parameters");
         for (String parameter : definition.parameters()) {
@@ -81,26 +85,35 @@ public class ControlCatalogService {
         int maxResults = parseMaxResults(maxResultsRaw);
         int offset = parseNextToken(nextToken);
         String implementationType = null;
+        String implementationIdentifier = null;
+        String governedProvider = null;
         JsonNode filter = request == null ? null : request.get("Filter");
         if (filter != null && !filter.isNull()) {
-            if (!filter.isObject()) throw validation("Filter must be a JSON object.");
+            if (!filter.isObject()) {
+                throw validation("Filter must be a JSON object.");
+            }
             JsonNode implementations = filter.get("Implementations");
             if (implementations != null && !implementations.isNull()) {
-                if (!implementations.isObject()) throw validation("Filter.Implementations must be an object.");
-                JsonNode types = implementations.get("Types");
-                if (types != null && !types.isNull()) {
-                    if (!types.isArray() || types.size() != 1 || !types.get(0).isTextual()) {
-                        throw validation("Filter.Implementations.Types must contain exactly one implementation type.");
-                    }
-                    implementationType = types.get(0).asText();
+                if (!implementations.isObject()) {
+                    throw validation("Filter.Implementations must be an object.");
                 }
+                implementationType = singleFilterValue(implementations.get("Types"),
+                        "Filter.Implementations.Types", Pattern.compile("[A-Za-z0-9]+(::[A-Za-z0-9_]+){2,3}"));
+                implementationIdentifier = singleFilterValue(implementations.get("Identifiers"),
+                        "Filter.Implementations.Identifiers", Pattern.compile("[a-zA-Z0-9_.-]+"));
             }
+            governedProvider = singleFilterValue(filter.get("GovernedProviders"),
+                    "Filter.GovernedProviders", Pattern.compile("[A-Z]{2,64}"));
         }
 
         final String typeFilter = implementationType;
+        final String identifierFilter = implementationIdentifier;
+        final String providerFilter = governedProvider;
         List<ControlDefinition> definitions = CONTROLS.values().stream()
                 .filter(definition -> definition.globalIdentifier() != null)
                 .filter(definition -> typeFilter == null || typeFilter.equals(definition.implementationType()))
+                .filter(definition -> identifierFilter == null || definition.aliases().contains(identifierFilter))
+                .filter(definition -> providerFilter == null || "AWS".equals(providerFilter))
                 .distinct()
                 .sorted(java.util.Comparator.comparing(ControlDefinition::globalIdentifier))
                 .toList();
@@ -116,18 +129,44 @@ public class ControlCatalogService {
             item.put("Description", definition.description());
             item.put("Behavior", definition.behavior());
             item.put("Severity", definition.severity());
-            item.putObject("Implementation").put("Type", definition.implementationType());
+            ObjectNode implementation = item.putObject("Implementation");
+            implementation.put("Type", definition.implementationType());
+            if (!definition.aliases().isEmpty()) {
+                implementation.put("Identifier", definition.aliases().getFirst());
+            }
+            item.put("ParameterRequirementSummary", definition.parameters().isEmpty() ? "NONE" : "OPTIONAL");
             item.set("GovernedResources", objectMapper.createArrayNode());
+            item.set("GovernedProviders", stringArray(List.of("AWS")));
         }
-        if (end < definitions.size()) response.put("NextToken", Integer.toString(end));
+        if (end < definitions.size()) {
+            response.put("NextToken", Integer.toString(end));
+        }
         return response;
     }
 
+    private static String singleFilterValue(JsonNode node, String field, Pattern pattern) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isArray() || node.size() != 1 || !node.get(0).isTextual()) {
+            throw validation(field + " must contain exactly one string value.");
+        }
+        String value = node.get(0).textValue();
+        if (!pattern.matcher(value).matches()) {
+            throw validation(field + " contains an invalid value.");
+        }
+        return value;
+    }
+
     private static int parseMaxResults(String raw) {
-        if (raw == null || raw.isBlank()) return 100;
+        if (raw == null || raw.isBlank()) {
+            return 100;
+        }
         try {
             int value = Integer.parseInt(raw);
-            if (value < 1 || value > 100) throw new NumberFormatException();
+            if (value < 1 || value > 100) {
+                throw new NumberFormatException();
+            }
             return value;
         } catch (NumberFormatException e) {
             throw validation("maxResults must be between 1 and 100.");
@@ -135,10 +174,14 @@ public class ControlCatalogService {
     }
 
     private static int parseNextToken(String raw) {
-        if (raw == null || raw.isBlank()) return 0;
+        if (raw == null || raw.isBlank()) {
+            return 0;
+        }
         try {
             int value = Integer.parseInt(raw);
-            if (value < 0) throw new NumberFormatException();
+            if (value < 0) {
+                throw new NumberFormatException();
+            }
             return value;
         } catch (NumberFormatException e) {
             throw validation("nextToken is invalid.");

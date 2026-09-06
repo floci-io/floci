@@ -379,6 +379,8 @@ floci:
       enabled: true
     account:
       enabled: true
+    controlcatalog:
+      enabled: true
     accessanalyzer:
       enabled: true
     identitystore:

@@ -59,6 +59,13 @@ services:
     doc: docs/services/comprehend.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/comprehend/ComprehendJsonHandler.java, mode: switch }
+  - service: controlcatalog
+    doc: docs/services/controlcatalog.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/controlcatalog/ControlCatalogController.java, mode: rest }
+    rename_actions:
+      GetControl: GetControl
+      ListControls: ListControls
   - service: connect
     doc: docs/services/connect.md
     sources:
