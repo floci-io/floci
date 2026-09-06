@@ -269,6 +269,7 @@ floci:
       runtime-api-base-port: 12000
       runtime-api-max-port: 12499
       code-path: ./data/lambda-code
+      zip-max-entries: 100000
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300
       region-concurrency-limit: 1000

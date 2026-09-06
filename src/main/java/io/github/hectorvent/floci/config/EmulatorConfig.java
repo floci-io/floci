@@ -1885,6 +1885,14 @@ public interface EmulatorConfig {
         @WithDefault("./data/lambda-code")
         String codePath();
 
+        /**
+         * Maximum number of entries accepted in a Lambda ZIP archive.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_ZIP_MAX_ENTRIES
+         */
+        @WithDefault("100000")
+        int zipMaxEntries();
+
         @WithDefault("1000")
         long pollIntervalMs();
 

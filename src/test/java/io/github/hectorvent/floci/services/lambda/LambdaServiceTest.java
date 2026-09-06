@@ -871,6 +871,11 @@ class LambdaServiceTest {
     // ──────────────────────────── Hot-reload ────────────────────────────
 
     private LambdaService serviceWithHotReload(boolean enabled, List<String> allowedPaths) {
+        return serviceWithHotReload(enabled, allowedPaths, ZipExtractor.DEFAULT_MAX_ENTRIES);
+    }
+
+    private LambdaService serviceWithHotReload(boolean enabled, List<String> allowedPaths,
+                                               int zipMaxEntries) {
         EmulatorConfig cfg = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig svc = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambdaCfg = mock(EmulatorConfig.LambdaServiceConfig.class);
@@ -881,6 +886,7 @@ class LambdaServiceTest {
         when(lambdaCfg.hotReload()).thenReturn(hr);
         when(lambdaCfg.defaultTimeoutSeconds()).thenReturn(3);
         when(lambdaCfg.defaultMemoryMb()).thenReturn(128);
+        when(lambdaCfg.zipMaxEntries()).thenReturn(zipMaxEntries);
         when(hr.enabled()).thenReturn(enabled);
         when(hr.allowedPaths()).thenReturn(allowedPaths == null ? Optional.empty() : Optional.of(allowedPaths));
 
@@ -890,6 +896,32 @@ class LambdaServiceTest {
         ZipExtractor zipExtractor = new ZipExtractor();
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         return new LambdaService(store, warmPool, codeStore, zipExtractor, cfg, regionResolver);
+    }
+
+    @Test
+    void createFunctionRejectsConfiguredZipEntryLimit() throws Exception {
+        LambdaService limited = serviceWithHotReload(true, null, 2);
+        Map<String, Object> request = baseRequest("zip-entry-limit");
+        request.put("Code", Map.of("ZipFile", createZipBase64("index.js", "one.js", "two.js")));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> limited.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("more than the configured 2 entries"));
+    }
+
+    @Test
+    void createFunctionRejectsOversizedDirectZipUploadWithAwsError() {
+        Map<String, Object> request = baseRequest("oversized-zip");
+        byte[] oversized = new byte[(int) ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES + 1];
+        request.put("Code", Map.of("ZipFile", Base64.getEncoder().encodeToString(oversized)));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("RequestEntityTooLargeException", error.getErrorCode());
+        assertEquals(413, error.getHttpStatus());
     }
 
     @Test

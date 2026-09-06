@@ -131,6 +131,7 @@ floci:
     lambda:
       enabled: true
       honour-architectures: false
+      zip-max-entries: 100000
       # aws-config-path:
       hot-reload:
         enabled: true

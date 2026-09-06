@@ -27,8 +27,25 @@ public class ZipExtractor {
     private static final Logger LOG = Logger.getLogger(ZipExtractor.class);
 
     private static final char BACKSLASH = '\\';
+    public static final long DIRECT_UPLOAD_MAX_COMPRESSED_BYTES = 50L * 1024 * 1024;
+    private static final long S3_MAX_COMPRESSED_BYTES = 250L * 1024 * 1024;
+    static final long MAX_EXPANDED_BYTES = 250L * 1024 * 1024;
+    static final long MAX_ENTRY_BYTES = 250L * 1024 * 1024;
+    public static final int DEFAULT_MAX_ENTRIES = 100_000;
 
     public void extractTo(byte[] zipBytes, Path targetDir) throws IOException {
+        extractTo(zipBytes, targetDir, DEFAULT_MAX_ENTRIES);
+    }
+
+    public void extractTo(byte[] zipBytes, Path targetDir, int maxEntries) throws IOException {
+        if (maxEntries < 1) {
+            throw new IOException("ZIP archive entry limit must be at least 1: " + maxEntries);
+        }
+        if (zipBytes.length > S3_MAX_COMPRESSED_BYTES) {
+            throw new IOException("ZIP archive exceeds the " + S3_MAX_COMPRESSED_BYTES
+                    + " byte compressed limit: " + zipBytes.length);
+        }
+
         // Resolve to absolute path so that normalize() on entry paths stays comparable
         Path absTarget = targetDir.toAbsolutePath().normalize();
         Files.createDirectories(absTarget.getParent());
@@ -65,7 +82,13 @@ public class ZipExtractor {
             Files.write(staged, zipBytes);
             try (ZipFile zip = new ZipFile(staged.toFile())) {
                 var entries = zip.entries();
+                int entryCount = 0;
+                long expandedBytes = 0;
                 while (entries.hasMoreElements()) {
+                    if (++entryCount > maxEntries) {
+                        throw new IOException("ZIP archive contains more than the configured "
+                                + maxEntries + " entries");
+                    }
                     ZipEntry entry = entries.nextElement();
                     String entryName = entry.getName();
 
@@ -91,12 +114,29 @@ public class ZipExtractor {
                         continue;
                     }
 
+                    long declaredSize = entry.getSize();
+                    if (declaredSize > MAX_ENTRY_BYTES) {
+                        throw new IOException("ZIP entry exceeds the " + MAX_ENTRY_BYTES
+                                + " byte limit: " + entryName);
+                    }
+                    long accountedSize = declaredSize >= 0 ? declaredSize : 0;
+                    if (accountedSize > MAX_EXPANDED_BYTES - expandedBytes) {
+                        throw new IOException("ZIP archive exceeds the " + MAX_EXPANDED_BYTES
+                                + " byte expanded limit");
+                    }
+
                     if (entry.isDirectory()) {
                         Files.createDirectories(targetPath);
                     } else {
                         Files.createDirectories(targetPath.getParent());
-                        copyVerified(zip, entry, targetPath);
+                        long copyLimit = declaredSize >= 0
+                                ? Math.min(declaredSize, MAX_EXPANDED_BYTES - expandedBytes)
+                                : MAX_EXPANDED_BYTES - expandedBytes;
+                        long copiedBytes = copyVerified(zip, entry, targetPath,
+                                MAX_ENTRY_BYTES, copyLimit);
+                        accountedSize = declaredSize >= 0 ? declaredSize : copiedBytes;
                     }
+                    expandedBytes += accountedSize;
                 }
             }
             // Extraction succeeded in full: install the new tree.
@@ -197,15 +237,21 @@ public class ZipExtractor {
      * a package corrupted in transit would be deployed silently as garbage code rather than
      * rejected. The message mirrors the JDK's own so existing reports stay recognisable.
      */
-    private static void copyVerified(ZipFile zip, ZipEntry entry, Path targetPath) throws IOException {
+    private static long copyVerified(ZipFile zip, ZipEntry entry, Path targetPath,
+                                     long maxEntryBytes, long remainingExpandedBytes) throws IOException {
         CRC32 checksum = new CRC32();
+        long bytesWritten = 0;
         try (InputStream in = zip.getInputStream(entry);
              OutputStream out = Files.newOutputStream(targetPath)) {
             byte[] buffer = new byte[8192];
             int read;
             while ((read = in.read(buffer)) >= 0) {
+                if (read > maxEntryBytes - bytesWritten || read > remainingExpandedBytes - bytesWritten) {
+                    throw new IOException("ZIP archive exceeds its extraction size limit");
+                }
                 checksum.update(buffer, 0, read);
                 out.write(buffer, 0, read);
+                bytesWritten += read;
             }
         }
         long expected = entry.getCrc();
@@ -214,5 +260,6 @@ public class ZipExtractor {
                     "invalid entry CRC for \"%s\" (expected 0x%08x but got 0x%08x)",
                     entry.getName(), expected, checksum.getValue()));
         }
+        return bytesWritten;
     }
 }

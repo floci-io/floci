@@ -34,6 +34,79 @@ class ZipExtractorTest {
         return baos.toByteArray();
     }
 
+    private static byte[] zipWithEntries(String... names) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            for (String name : names) {
+                zos.putNextEntry(new ZipEntry(name));
+                zos.write(name.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+            }
+        }
+        return baos.toByteArray();
+    }
+
+    private static byte[] zipWithDeclaredSizes(long... sizes) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        List<Integer> offsets = new ArrayList<>();
+        List<byte[]> names = new ArrayList<>();
+        byte[] content = new byte[]{'x'};
+        CRC32 crc = new CRC32();
+        crc.update(content);
+
+        for (int i = 0; i < sizes.length; i++) {
+            byte[] name = ("entry" + i).getBytes(StandardCharsets.UTF_8);
+            offsets.add(out.size());
+            names.add(name);
+            le32(out, 0x04034b50L);
+            le16(out, 20);
+            le16(out, 0);
+            le16(out, 0);
+            le16(out, 0);
+            le16(out, 0);
+            le32(out, crc.getValue());
+            le32(out, content.length);
+            le32(out, sizes[i]);
+            le16(out, name.length);
+            le16(out, 0);
+            out.write(name);
+            out.write(content);
+        }
+
+        int centralOffset = out.size();
+        for (int i = 0; i < sizes.length; i++) {
+            byte[] name = names.get(i);
+            le32(out, 0x02014b50L);
+            le16(out, 20);
+            le16(out, 20);
+            le16(out, 0);
+            le16(out, 0);
+            le16(out, 0);
+            le16(out, 0);
+            le32(out, crc.getValue());
+            le32(out, content.length);
+            le32(out, sizes[i]);
+            le16(out, name.length);
+            le16(out, 0);
+            le16(out, 0);
+            le16(out, 0);
+            le16(out, 0);
+            le32(out, 0);
+            le32(out, offsets.get(i));
+            out.write(name);
+        }
+        int centralSize = out.size() - centralOffset;
+        le32(out, 0x06054b50L);
+        le16(out, 0);
+        le16(out, 0);
+        le16(out, sizes.length);
+        le16(out, sizes.length);
+        le32(out, centralSize);
+        le32(out, centralOffset);
+        le16(out, 0);
+        return out.toByteArray();
+    }
+
     @Test
     void extractsBackslashEntriesAsLiteralFilename(@TempDir Path target) throws IOException {
         // PowerShell 5 Compress-Archive writes '\' separators (issue #1198).
@@ -75,6 +148,67 @@ class ZipExtractorTest {
 
         assertFalse(Files.exists(target.getParent().getParent().resolve("evil.sh")),
                 "traversal entry must not escape the target dir");
+    }
+
+    @Test
+    void rejectsArchivesAboveTheConfiguredEntryCount(@TempDir Path target) throws IOException {
+        byte[] zip = zipWithEntries("one.txt", "two.txt", "three.txt");
+
+        IOException thrown = assertThrows(IOException.class,
+                () -> extractor.extractTo(zip, target, 2));
+
+        assertEquals("ZIP archive contains more than the configured 2 entries", thrown.getMessage());
+        assertFalse(Files.exists(target.resolve("one.txt")));
+    }
+
+    @Test
+    void acceptsArchivesAtTheConfiguredEntryCount(@TempDir Path target) throws IOException {
+        byte[] zip = zipWithEntries("one.txt", "two.txt");
+
+        extractor.extractTo(zip, target, 2);
+
+        assertEquals("one.txt", Files.readString(target.resolve("one.txt")));
+        assertEquals("two.txt", Files.readString(target.resolve("two.txt")));
+    }
+
+    @Test
+    void rejectsAnInvalidEntryCountLimit(@TempDir Path target) throws IOException {
+        IOException thrown = assertThrows(IOException.class,
+                () -> extractor.extractTo(zipWith("one.txt", "one"), target, 0));
+
+        assertEquals("ZIP archive entry limit must be at least 1: 0", thrown.getMessage());
+    }
+
+    @Test
+    void rejectsAnEntryAboveTheExpandedEntryLimit(@TempDir Path target) throws IOException {
+        byte[] zip = zipWithDeclaredSizes(ZipExtractor.MAX_ENTRY_BYTES + 1);
+
+        IOException thrown = assertThrows(IOException.class, () -> extractor.extractTo(zip, target));
+
+        assertEquals("ZIP entry exceeds the 262144000 byte limit: entry0", thrown.getMessage());
+        assertFalse(Files.exists(target.resolve("entry0")));
+    }
+
+    @Test
+    void rejectsExpandedContentAboveTheArchiveLimit(@TempDir Path target) throws IOException {
+        byte[] zip = zipWithDeclaredSizes(200L * 1024 * 1024, 200L * 1024 * 1024);
+
+        IOException thrown = assertThrows(IOException.class, () -> extractor.extractTo(zip, target));
+
+        assertEquals("ZIP archive exceeds the 262144000 byte expanded limit", thrown.getMessage());
+        assertFalse(Files.exists(target.resolve("entry0")));
+    }
+
+    @Test
+    void leavesThePreviousExtractionIntactAfterAResourceLimitFailure(@TempDir Path target)
+            throws IOException {
+        extractor.extractTo(zipWith("entry0", "previous"), target);
+
+        assertThrows(IOException.class,
+                () -> extractor.extractTo(
+                        zipWithDeclaredSizes(200L * 1024 * 1024, 200L * 1024 * 1024), target));
+
+        assertEquals("previous", Files.readString(target.resolve("entry0")));
     }
 
     /**
