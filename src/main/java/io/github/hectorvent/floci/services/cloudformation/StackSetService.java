@@ -22,6 +22,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -243,7 +244,7 @@ public class StackSetService {
                 }
                 StackInstance updated =
                         deployInstance(ss, inst.getAccount(), inst.getRegion(), UPDATE_CHANGE_SET, "UPDATE");
-                updated.setOrganizationalUnitId(inst.getOrganizationalUnitId());
+                applyDeploymentTargets(updated, deploymentTargetsFor(inst));
                 instances.put(instanceKey(name, updated.getAccount(), updated.getRegion()), updated);
                 deployed.add(updated);
             }
@@ -309,7 +310,7 @@ public class StackSetService {
 
         String operationId = reserveOperation(name, "CREATE", requestedOperationId).getOperationId();
         List<TargetAccount> targets = !directAccounts.isEmpty()
-                ? directAccounts.stream().map(account -> new TargetAccount(account, null)).toList()
+                ? directAccounts.stream().map(account -> new TargetAccount(account, Set.of())).toList()
                 : resolveOrganizationTargets(targetOus, regions, name);
 
         List<StackInstance> deployed = new ArrayList<>();
@@ -318,10 +319,20 @@ public class StackSetService {
                 String instanceKey = instanceKey(name, target.accountId(), region);
                 StackInstance existing = instances.get(instanceKey).orElse(null);
                 if (existing != null && !"OUTDATED".equals(existing.getStatus())) {
+                    if (!target.organizationalUnitIds().isEmpty()) {
+                        Set<String> associations = deploymentTargetsFor(existing);
+                        if (associations.addAll(target.organizationalUnitIds())) {
+                            applyDeploymentTargets(existing, associations);
+                            instances.put(instanceKey, existing);
+                        }
+                    }
                     continue;
                 }
                 StackInstance inst = deployInstance(ss, target.accountId(), region, INSTANCE_CHANGE_SET, "CREATE");
-                inst.setOrganizationalUnitId(target.organizationalUnitId());
+                Set<String> associations = existing == null
+                        ? new LinkedHashSet<>() : deploymentTargetsFor(existing);
+                associations.addAll(target.organizationalUnitIds());
+                applyDeploymentTargets(inst, associations);
                 instances.put(instanceKey, inst);
                 deployed.add(inst);
             }
@@ -399,7 +410,7 @@ public class StackSetService {
                 .filter(inst -> requestedRegions.contains(inst.getRegion()))
                 .filter(inst -> !requestedAccounts.isEmpty()
                         ? requestedAccounts.contains(inst.getAccount())
-                        : requestedDeploymentTargets.contains(inst.getOrganizationalUnitId()))
+                        : deploymentTargetsFor(inst).stream().anyMatch(requestedDeploymentTargets::contains))
                 .toList();
 
         List<StackInstance> results = new ArrayList<>();
@@ -407,11 +418,20 @@ public class StackSetService {
             String account = inst.getAccount();
             String region = inst.getRegion();
             String key = instanceKey(name, account, region);
-            // For service-managed StackSets the persisted OrganizationalUnitId is the
-            // DeploymentTargets association that created this instance. Do not resolve the OU's
-            // current membership here: accounts can move after deployment while the instance
-            // remains associated with its original target until an auto-deployment or explicit
-            // StackSets operation changes it.
+            // Service-managed instances can be covered by multiple DeploymentTargets when a
+            // parent OU and one of its descendants are both targeted. Removing one target must not
+            // tear down the backing stack while another recorded target still covers the instance.
+            if (!requestedDeploymentTargets.isEmpty()) {
+                Set<String> remainingTargets = deploymentTargetsFor(inst);
+                remainingTargets.removeAll(requestedDeploymentTargets);
+                if (!remainingTargets.isEmpty()) {
+                    applyDeploymentTargets(inst, remainingTargets);
+                    instances.put(key, inst);
+                    inst.setDetailedStatus("SUCCEEDED");
+                    results.add(inst);
+                    continue;
+                }
+            }
             if (!retainStacks && !await(cfnService.deleteStack(inst.getStackName(), region, account))) {
                 // The underlying stack delete failed. Match AWS: retain the instance record
                 // (now INOPERABLE) and report the operation as FAILED, rather than silently
@@ -466,7 +486,7 @@ public class StackSetService {
             throw new AwsException("InvalidOperationException",
                     "SERVICE_MANAGED StackSets require an AWS Organization.", 400);
         }
-        java.util.LinkedHashMap<String, TargetAccount> targets = new java.util.LinkedHashMap<>();
+        LinkedHashMap<String, TargetAccount> targets = new LinkedHashMap<>();
         for (String ou : organizationalUnits) {
             collectOrganizationTargets(caller, organization, ou, ou, targets);
             if (persistTargets) {
@@ -479,10 +499,15 @@ public class StackSetService {
 
     private void collectOrganizationTargets(String caller, Organization organization, String parentId,
                                             String requestedTargetId,
-                                            java.util.LinkedHashMap<String, TargetAccount> targets) {
+                                            LinkedHashMap<String, TargetAccount> targets) {
         for (OrganizationAccount account : organizationsService.listAccountsForParent(caller, parentId)) {
             if (!organization.getMasterAccountId().equals(account.getId()) && "ACTIVE".equals(account.getStatus())) {
-                targets.putIfAbsent(account.getId(), new TargetAccount(account.getId(), requestedTargetId));
+                targets.compute(account.getId(), (ignored, existing) -> {
+                    Set<String> associations = existing == null
+                            ? new LinkedHashSet<>() : new LinkedHashSet<>(existing.organizationalUnitIds());
+                    associations.add(requestedTargetId);
+                    return new TargetAccount(account.getId(), associations);
+                });
             }
         }
         for (OrganizationalUnit child : organizationsService.listOrganizationalUnitsForParent(caller, parentId)) {
@@ -550,7 +575,24 @@ public class StackSetService {
         }
     }
 
-    private record TargetAccount(String accountId, String organizationalUnitId) {}
+    private static Set<String> deploymentTargetsFor(StackInstance instance) {
+        LinkedHashSet<String> targets = new LinkedHashSet<>();
+        if (instance.getDeploymentTargetIds() != null) {
+            targets.addAll(instance.getDeploymentTargetIds());
+        }
+        if (targets.isEmpty() && instance.getOrganizationalUnitId() != null) {
+            targets.add(instance.getOrganizationalUnitId());
+        }
+        return targets;
+    }
+
+    private static void applyDeploymentTargets(StackInstance instance, Set<String> targets) {
+        List<String> orderedTargets = new ArrayList<>(targets);
+        instance.setDeploymentTargetIds(orderedTargets);
+        instance.setOrganizationalUnitId(orderedTargets.isEmpty() ? null : orderedTargets.getFirst());
+    }
+
+    private record TargetAccount(String accountId, Set<String> organizationalUnitIds) {}
 
     /**
      * Drives the single-stack engine to materialize one instance's resources into the target

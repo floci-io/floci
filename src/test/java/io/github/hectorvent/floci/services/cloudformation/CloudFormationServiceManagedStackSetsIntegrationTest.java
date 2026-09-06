@@ -294,6 +294,70 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     @Test
+    void overlappingOuTargetsKeepInstanceUntilLastAssociationIsDeleted() {
+        String management = "929292929292";
+        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .post("/").then().statusCode(200);
+        String rootId = organizations(management, "ListRoots", "{}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("Roots[0].Id");
+        String parentOu = organizations(management, "CreateOrganizationalUnit",
+                "{\"ParentId\":\"" + rootId + "\",\"Name\":\"OverlapParent\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("OrganizationalUnit.Id");
+        String childOu = organizations(management, "CreateOrganizationalUnit",
+                "{\"ParentId\":\"" + parentOu + "\",\"Name\":\"OverlapChild\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("OrganizationalUnit.Id");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String account = organizations(management, "CreateAccount",
+                "{\"Email\":\"overlap-" + suffix + "@example.com\",\"AccountName\":\"Overlap\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("CreateAccountStatus.AccountId");
+        organizations(management, "MoveAccount",
+                "{\"AccountId\":\"" + account + "\",\"SourceParentId\":\"" + rootId
+                        + "\",\"DestinationParentId\":\"" + childOu + "\"}")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "ActivateOrganizationsAccess")
+                .post("/").then().statusCode(200);
+
+        String stackSet = "overlap-ou-" + suffix;
+        String queue = "overlap-ou-q-" + suffix;
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate(queue))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", parentOu)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", childOu)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(200);
+        assertQueueVisible(account, queue);
+
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", parentOu)
+                .formParam("Regions.member.1", REGION)
+                .formParam("RetainStacks", "false")
+                .post("/").then().statusCode(200);
+        assertQueueVisible(account, queue);
+
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", childOu)
+                .formParam("Regions.member.1", REGION)
+                .formParam("RetainStacks", "false")
+                .post("/").then().statusCode(200);
+        assertQueueAbsent(account, queue);
+    }
+
+    @Test
     void activateOrganizationsAccessRequiresAllFeatures() {
         String management = "666666666666";
         organizations(management, "CreateOrganization", "{\"FeatureSet\":\"CONSOLIDATED_BILLING\"}")
