@@ -1686,7 +1686,150 @@ class DynamoDbServiceTest {
         assertTrue(stored.get("isActive").get("BOOL").asBoolean(),
                 "isActive should still be true after get");
     }
+    
+    @Test
+    void updateItemSetListIndexPastEndAppendsWithoutNullPadding() {
+        String region = "eu-west-1";
+        createUsersTable(region);
 
+        ObjectNode initialItem = item("userId", "list-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "list-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[10] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("a", updatedList.get(0).get("S").asText());
+        assertEquals("b", updatedList.get(1).get("S").asText());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetHugeListIndexAppendsWithoutAllocatingPadding() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "huge-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "huge-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[2000000000] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetMaximumValidListIndexAppends() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "max-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "max-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[4294967294] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetListIndexAboveMaximumThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "invalid-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "invalid-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.updateItem(
+                        "Users",
+                        key,
+                        null,
+                        "SET l[4294967295] = :v",
+                        null,
+                        exprValues,
+                        "ALL_NEW",
+                        region));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertTrue(exception.getMessage().contains("List index is not within the allowable range"));
+        assertTrue(exception.getMessage().contains("4294967295"));
+    }
     /**
      * Test REMOVE with nested map paths (e.g. "ratings.foo").
      * Reproduces GitHub issue #402: REMOVE on a map key succeeds but data is unchanged.
