@@ -15,6 +15,7 @@ import org.eclipse.paho.mqttv5.client.MqttCallback;
 import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
 import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 
 import java.io.BufferedReader;
@@ -54,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestProfile(IotMqttWebSocketIntegrationTest.Profile.class)
 class IotMqttWebSocketContractIntegrationTest {
 
+    private static final Logger LOG = Logger.getLogger(IotMqttWebSocketContractIntegrationTest.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final int PLAIN_PORT = IotMqttWebSocketIntegrationTest.PLAIN_PORT;
     @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
@@ -243,8 +245,8 @@ class IotMqttWebSocketContractIntegrationTest {
             message.setQos(2);
             try {
                 client.client.publish("contract/qos2/" + System.nanoTime(), message);
-            } catch (MqttException expected) {
-                // Paho may report the drop while waiting for PUBREC; the assertion below is the contract.
+            } catch (MqttException dropWhileWaitingForPubrec) {
+                LOG.debugv("QoS 2 publish reported the disconnect: {0}", dropWhileWaitingForPubrec.getMessage());
             }
             assertTrue(client.lost.await(10, TimeUnit.SECONDS), "AWS IoT disconnects a client that publishes QoS 2");
         }

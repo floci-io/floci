@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iot;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -30,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestProfile(IotMqttWebSocketIntegrationTest.Profile.class)
 class IotMqttWebSocketFramingIntegrationTest {
 
+    private static final Logger LOG = Logger.getLogger(IotMqttWebSocketFramingIntegrationTest.class);
     private static final byte[] CONNACK_ACCEPTED = {0x20, 0x02, 0x00, 0x00};
 
     @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "0")
@@ -83,6 +85,7 @@ class IotMqttWebSocketFramingIntegrationTest {
             } catch (ExecutionException serverClosedMidWrite) {
                 // The frame header already says 300 KB, so the server may drop the connection before
                 // the client has finished writing it; the latch below is the assertion either way.
+                LOG.debugv("oversized frame write ended early: {0}", serverClosedMidWrite.getCause());
             }
 
             assertTrue(raw.closed.await(10, TimeUnit.SECONDS), "a 300 KB frame is over the 256 KB limit");
