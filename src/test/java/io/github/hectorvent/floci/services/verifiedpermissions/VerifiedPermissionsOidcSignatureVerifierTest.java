@@ -42,7 +42,7 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
     }
 
     @Test
-    void freshJwksCacheDoesNotRefetchForUnknownKids() throws Exception {
+    void unknownKidsTriggerAtMostOneRateLimitedRefresh() throws Exception {
         RSAPublicKey key = org.mockito.Mockito.mock(RSAPublicKey.class);
         class CountingVerifier extends VerifiedPermissionsOidcSignatureVerifier {
             int fetches;
@@ -62,7 +62,35 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
             assertSame(key, verifier.resolveKey("https://issuer.example.com", "known"));
             assertNull(verifier.resolveKey("https://issuer.example.com", "missing-one"));
             assertNull(verifier.resolveKey("https://issuer.example.com", "missing-two"));
-            assertEquals(1, verifier.fetches);
+            assertEquals(2, verifier.fetches);
+        }
+    }
+
+    @Test
+    void unknownKidRefreshAllowsRoutineKeyRotation() throws Exception {
+        RSAPublicKey oldKey = org.mockito.Mockito.mock(RSAPublicKey.class);
+        RSAPublicKey newKey = org.mockito.Mockito.mock(RSAPublicKey.class);
+        class RotatingVerifier extends VerifiedPermissionsOidcSignatureVerifier {
+            int fetches;
+
+            RotatingVerifier() {
+                super(new ObjectMapper(), SystemDefaultDnsResolver.INSTANCE);
+            }
+
+            @Override
+            Map<String, RSAPublicKey> fetchJwks(String issuer) {
+                fetches++;
+                if (fetches == 1) {
+                    return Map.of("old", oldKey);
+                }
+                return Map.of("old", oldKey, "new", newKey);
+            }
+        }
+
+        try (RotatingVerifier verifier = new RotatingVerifier()) {
+            assertSame(oldKey, verifier.resolveKey("https://issuer.example.com", "old"));
+            assertSame(newKey, verifier.resolveKey("https://issuer.example.com", "new"));
+            assertEquals(2, verifier.fetches);
         }
     }
 }

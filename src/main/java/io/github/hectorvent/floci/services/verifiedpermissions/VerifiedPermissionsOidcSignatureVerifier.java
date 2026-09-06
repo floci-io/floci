@@ -40,11 +40,14 @@ import java.util.concurrent.ConcurrentHashMap;
 public class VerifiedPermissionsOidcSignatureVerifier implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(VerifiedPermissionsOidcSignatureVerifier.class);
     private static final Duration CACHE_TTL = Duration.ofMinutes(10);
+    private static final Duration UNKNOWN_KID_REFRESH_COOLDOWN = Duration.ofMinutes(1);
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
 
     private final ObjectMapper objectMapper;
     private final CloseableHttpClient httpClient;
     private final Map<String, CachedJwks> jwksCache = new ConcurrentHashMap<>();
+    private final Map<String, Instant> unknownKidRefreshes = new ConcurrentHashMap<>();
+    private final Map<String, Object> issuerLocks = new ConcurrentHashMap<>();
 
     @Inject
     public VerifiedPermissionsOidcSignatureVerifier(ObjectMapper objectMapper) {
@@ -100,13 +103,34 @@ public class VerifiedPermissionsOidcSignatureVerifier implements AutoCloseable {
         }
     }
     RSAPublicKey resolveKey(String issuer, String kid) throws VerificationException {
-        CachedJwks cached = jwksCache.get(issuer);
-        if (cached != null && !cached.expired()) {
-            return cached.keysByKid().get(kid);
+        Object lock = issuerLocks.computeIfAbsent(issuer, ignored -> new Object());
+        synchronized (lock) {
+            Instant now = Instant.now();
+            CachedJwks cached = jwksCache.get(issuer);
+            if (cached == null || cached.expired()) {
+                Map<String, RSAPublicKey> fetched = fetchJwks(issuer);
+                jwksCache.put(issuer, new CachedJwks(fetched, now));
+                if (!fetched.containsKey(kid)) {
+                    unknownKidRefreshes.put(issuer, now);
+                }
+                return fetched.get(kid);
+            }
+
+            RSAPublicKey cachedKey = cached.keysByKid().get(kid);
+            if (cachedKey != null) {
+                return cachedKey;
+            }
+
+            Instant lastRefresh = unknownKidRefreshes.get(issuer);
+            if (lastRefresh != null && now.isBefore(lastRefresh.plus(UNKNOWN_KID_REFRESH_COOLDOWN))) {
+                return null;
+            }
+
+            unknownKidRefreshes.put(issuer, now);
+            Map<String, RSAPublicKey> refreshed = fetchJwks(issuer);
+            jwksCache.put(issuer, new CachedJwks(refreshed, now));
+            return refreshed.get(kid);
         }
-        Map<String, RSAPublicKey> fetched = fetchJwks(issuer);
-        jwksCache.put(issuer, new CachedJwks(fetched, Instant.now()));
-        return fetched.get(kid);
     }
 
     Map<String, RSAPublicKey> fetchJwks(String issuer) throws VerificationException {
