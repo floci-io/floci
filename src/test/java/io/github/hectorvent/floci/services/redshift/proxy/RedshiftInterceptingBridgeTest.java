@@ -12,6 +12,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -218,7 +219,7 @@ class RedshiftInterceptingBridgeTest {
         startBridge();
         Mockito.when(s3Stub.listObjectsWithPrefixes(Mockito.eq("b"), Mockito.eq("out/"),
                         Mockito.isNull(), Mockito.anyInt(), Mockito.any(), Mockito.any()))
-                .thenReturn(new S3Service.ListObjectsResult(java.util.List.of(), java.util.List.of(), false, null));
+                .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         AtomicReference<byte[]> put = new AtomicReference<>();
         Mockito.when(s3Stub.putObject(Mockito.eq("b"), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any()))
                 .thenAnswer(inv -> {

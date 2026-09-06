@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -15,7 +16,10 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -139,7 +143,7 @@ class S3CopySimulatorTest {
 
     @Test
     void unloadWritesSingleObjectAndForwardsCommandComplete() throws Exception {
-        java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+        Map<String, byte[]> written = new ConcurrentHashMap<>();
         when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
             written.put(inv.getArgument(1), inv.getArgument(2));
             return null;
@@ -168,7 +172,7 @@ class S3CopySimulatorTest {
         long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
         S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 8; // force a split after the first row
         try {
-            java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+            Map<String, byte[]> written = new ConcurrentHashMap<>();
             when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
                 written.put(inv.getArgument(1), inv.getArgument(2));
                 return null;
@@ -185,7 +189,7 @@ class S3CopySimulatorTest {
             assertTrue(written.containsKey("out/0000_part_00"));
             assertTrue(written.containsKey("out/0001_part_00"));
             StringBuilder all = new StringBuilder();
-            written.entrySet().stream().sorted(java.util.Map.Entry.comparingByKey())
+            written.entrySet().stream().sorted(Map.Entry.comparingByKey())
                     .forEach(e -> all.append(new String(e.getValue(), StandardCharsets.US_ASCII)));
             assertEquals("1|alice\n2|bob\n3|carol\n", all.toString());
         } finally {
@@ -195,7 +199,7 @@ class S3CopySimulatorTest {
 
     @Test
     void unloadParallelOffUsesThreeDigitKeyNames() throws Exception {
-        java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+        Map<String, byte[]> written = new ConcurrentHashMap<>();
         when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
             written.put(inv.getArgument(1), inv.getArgument(2));
             return null;
@@ -213,7 +217,7 @@ class S3CopySimulatorTest {
 
     @Test
     void unloadGzipAppendsGzSuffixAndWritesDecompressibleBytes() throws Exception {
-        java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+        Map<String, byte[]> written = new ConcurrentHashMap<>();
         when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
             written.put(inv.getArgument(1), inv.getArgument(2));
             return null;
@@ -228,8 +232,8 @@ class S3CopySimulatorTest {
 
         assertTrue(written.containsKey("out/0000_part_00.gz"), written.keySet().toString());
         byte[] gz = written.get("out/0000_part_00.gz");
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-        try (java.util.zip.GZIPInputStream in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(gz))) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gz))) {
             in.transferTo(out);
         }
         assertEquals("1|a\n2|b\n", out.toString(StandardCharsets.US_ASCII));
@@ -240,7 +244,7 @@ class S3CopySimulatorTest {
         long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
         S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 8;
         try {
-            java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+            Map<String, byte[]> written = new ConcurrentHashMap<>();
             when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
                 written.put(inv.getArgument(1), inv.getArgument(2));
                 return null;

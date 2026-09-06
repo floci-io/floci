@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
+import java.util.function.IntConsumer;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -68,7 +69,7 @@ public final class S3CopySimulator {
 
     public static boolean runCopyFrom(Socket client, Socket backend,
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3,
-                                      char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+                                      char txStatus, IntConsumer onStatusChange) throws IOException {
         try {
             s3.authorizeAnonymousListBucket(spec.bucket());
         } catch (AwsException e) {
@@ -149,7 +150,7 @@ public final class S3CopySimulator {
 
     private static void abortOpenCopyIn(Socket client, Socket backend, OutputStream backendOut,
                                         PostgresWireDecoder backendDecoder, Exception cause,
-                                        char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+                                        char txStatus, IntConsumer onStatusChange) throws IOException {
         try {
             writeCopyFail(backendOut, cause.getMessage());
             drainToReadyForQuery(backendDecoder, client, onStatusChange);
@@ -290,7 +291,7 @@ public final class S3CopySimulator {
     }
 
     private static void drainToReadyForQuery(PostgresWireDecoder decoder, Socket client,
-                                            java.util.function.IntConsumer onStatusChange) throws IOException {
+                                            IntConsumer onStatusChange) throws IOException {
         OutputStream clientOut = client.getOutputStream();
         while (true) {
             PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
@@ -314,13 +315,13 @@ public final class S3CopySimulator {
     }
 
     private static void sendAccessDenied(Socket client, Socket backend, CopyStatementParser.S3CopyFrom spec,
-                                         char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+                                         char txStatus, IntConsumer onStatusChange) throws IOException {
         sendError(client, backend, SQLSTATE_INSUFFICIENT_PRIVILEGE,
                 "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus, onStatusChange);
     }
 
     private static void sendError(Socket client, Socket backend, String sqlState, String message,
-                                  char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+                                  char txStatus, IntConsumer onStatusChange) throws IOException {
         if (txStatus == 'T' && backend != null && !backend.isClosed()) {
             if (!failBackendTransaction(backend, onStatusChange)) {
                 closeQuietly(backend);
@@ -354,7 +355,7 @@ public final class S3CopySimulator {
         }
     }
 
-    private static boolean failBackendTransaction(Socket backend, java.util.function.IntConsumer onStatusChange) {
+    private static boolean failBackendTransaction(Socket backend, IntConsumer onStatusChange) {
         try {
             OutputStream out = backend.getOutputStream();
             out.write(PostgresWireDecoder.encodeQuery("(FLOCI_ABORT_TX)"));
@@ -423,7 +424,7 @@ public final class S3CopySimulator {
 
     public static boolean runUnload(Socket client, Socket backend,
             CopyStatementParser.S3Unload spec, S3Service s3, char txStatus,
-            java.util.function.IntConsumer onStatusChange) throws IOException {
+            IntConsumer onStatusChange) throws IOException {
 
         String manifestKey = spec.prefix() + "manifest";
         try {
@@ -460,7 +461,7 @@ public final class S3CopySimulator {
 
     private static boolean runUnloadStreaming(Socket client, Socket backend,
             CopyStatementParser.S3Unload spec, S3Service s3, char txStatus,
-            java.util.function.IntConsumer onStatusChange, int[] heldMib) throws IOException {
+            IntConsumer onStatusChange, int[] heldMib) throws IOException {
 
         PostgresWireDecoder.FrontendMessage cmdComplete = null;
         PostgresWireDecoder.FrontendMessage readyForQuery = null;
@@ -703,7 +704,7 @@ public final class S3CopySimulator {
 
     private static boolean abortUnload(Socket client, Socket backend, PostgresWireDecoder backendDecoder,
             OutputStream acc, ByteArrayOutputStream sink, String sqlState, String message,
-            char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+            char txStatus, IntConsumer onStatusChange) throws IOException {
         closeAcc(acc, sink);
         drainBackendDiscarding(backendDecoder);
         sendError(client, backend, sqlState, message, txStatus, onStatusChange);
