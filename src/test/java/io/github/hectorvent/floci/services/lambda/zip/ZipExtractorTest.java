@@ -228,6 +228,7 @@ class ZipExtractorTest {
     private static void writeLocalHeader(ByteArrayOutputStream out, RawZipEntry entry) {
         boolean hasDescriptor = (entry.flags() & DATA_DESCRIPTOR_FLAG) != 0;
         byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        // Local header: version, flags, method, timestamps, CRC, sizes, and file name.
         le32(out, LOCAL_FILE_HEADER_SIGNATURE);
         le16(out, 20);
         le16(out, entry.flags());
@@ -243,6 +244,7 @@ class ZipExtractorTest {
     }
 
     private static void writeDataDescriptor(ByteArrayOutputStream out, RawZipEntry entry) {
+        // Data descriptor: streamed entries write CRC and sizes after their payload.
         le32(out, DATA_DESCRIPTOR_SIGNATURE);
         le32(out, entry.crc());
         le32(out, entry.payload().length);
@@ -252,6 +254,7 @@ class ZipExtractorTest {
     private static void writeCentralDirectoryHeader(ByteArrayOutputStream out,
                                                     RawZipEntry entry, int localOffset) {
         byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        // Central directory entry: metadata plus the offset of the matching local header.
         le32(out, CENTRAL_DIRECTORY_HEADER_SIGNATURE);
         le16(out, 20);
         le16(out, 20);
@@ -275,6 +278,7 @@ class ZipExtractorTest {
     private static void writeEndOfCentralDirectory(ByteArrayOutputStream out,
                                                    int entryCount, int centralSize,
                                                    int centralOffset) {
+        // End record: entry count and the central directory's size and location.
         le32(out, END_OF_CENTRAL_DIRECTORY_SIGNATURE);
         le16(out, 0);
         le16(out, 0);
