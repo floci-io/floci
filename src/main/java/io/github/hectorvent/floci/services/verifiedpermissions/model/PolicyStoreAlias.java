@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.verifiedpermissions.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 
+@RegisterForReflection
 public record PolicyStoreAlias(
         String aliasName,
         String aliasArn,

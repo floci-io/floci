@@ -38,6 +38,8 @@ quarkus:
         - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
+        # cedar-java's uber JAR loads the platform FFI through JNE at runtime.
+        - jne/**
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
       # for the running platform loads, so 23 are dropped. Linux x86_64 and
       # aarch64 cover the published images, Mac covers a local native build.
@@ -78,6 +80,16 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
       - --initialize-at-run-time=graphql.util.IdGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
+      # cedar-java binds to CedarJavaFFI through JNI. These classes load the bundled
+      # library from their static initializers and therefore must initialize at runtime.
+      - --initialize-at-run-time=com.cedarpolicy.value.EntityTypeName
+      - --initialize-at-run-time=com.cedarpolicy.value.EntityUID
+      - --initialize-at-run-time=com.cedarpolicy.value.EntityIdentifier
+      - --initialize-at-run-time=com.cedarpolicy.BasicAuthorizationEngine
+      - --initialize-at-run-time=com.cedarpolicy.formatter.PolicyFormatter
+      - --initialize-at-run-time=com.cedarpolicy.model.schema.Schema
+      - --initialize-at-run-time=com.cedarpolicy.model.policy.Policy
+      - --initialize-at-run-time=com.cedarpolicy.model.policy.PolicySet
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
       # bundled JNI library from the static initializers of these two classes.
       - --initialize-at-run-time=org.xerial.snappy.Snappy

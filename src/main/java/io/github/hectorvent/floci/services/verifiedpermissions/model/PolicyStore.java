@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.verifiedpermissions.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+@RegisterForReflection
 public record PolicyStore(
         String policyStoreId,
         String arn,
