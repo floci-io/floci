@@ -1,4 +1,5 @@
 AWS::ApiGateway::Account	ApiGatewayAccountCfnProvisioner
+AWS::ApiGateway::ApiKey	ApiGatewayApiKeyCfnProvisioner
 AWS::ApiGateway::Authorizer	LEGACY_SWITCH
 AWS::ApiGateway::BasePathMapping	ApiGatewayDomainCfnProvisioner
 AWS::ApiGateway::Deployment	LEGACY_SWITCH

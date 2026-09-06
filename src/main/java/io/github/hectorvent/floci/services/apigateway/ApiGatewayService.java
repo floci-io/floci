@@ -995,6 +995,20 @@ public class ApiGatewayService {
         return key;
     }
 
+    /**
+     * Replaces an API key's tags wholesale. CloudFormation drives a resource's tags to the
+     * template's desired state on update, so a dropped key has to disappear, which the additive
+     * TagResource shape cannot express.
+     */
+    public ApiKey replaceApiKeyTags(String region, String apiKeyId, Map<String, String> tags) {
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
+        ApiKey key = getApiKey(region, apiKeyId);
+        key.setTags(new HashMap<>(tags));
+        key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
+        return key;
+    }
+
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
