@@ -102,15 +102,17 @@ public class IotMqttWebSocketBridge {
 
     private static void wire(ServerWebSocket ws, NetSocket socket) {
         ws.frameHandler(frame -> {
-            if (frame.isText()) {
-                ws.close(CLOSE_UNSUPPORTED_DATA, "MQTT over WebSocket is binary");
-            }
-        });
-        ws.handler(bytes -> {
             if (ws.isClosed()) {
                 return;
             }
-            socket.write(bytes);
+            if (frame.isText()) {
+                ws.close(CLOSE_UNSUPPORTED_DATA, "MQTT over WebSocket is binary");
+                return;
+            }
+            if (!frame.isBinary() && !frame.isContinuation()) {
+                return;
+            }
+            socket.write(frame.binaryData());
             if (socket.writeQueueFull()) {
                 ws.pause();
                 socket.drainHandler(ignored -> ws.resume());
