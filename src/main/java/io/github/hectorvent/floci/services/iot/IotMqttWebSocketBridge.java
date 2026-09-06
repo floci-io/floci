@@ -53,10 +53,13 @@ public class IotMqttWebSocketBridge {
             ctx.next();
             return;
         }
+        // startIfEnabled blocks on the listen, and ordered blocking tasks queue behind every other
+        // blocking task of this event loop (a Lambda invocation, say); the start is idempotent and
+        // synchronized, so the handshake need not wait its turn.
         vertx.executeBlocking(() -> {
             broker.startIfEnabled();
             return broker.isRunning();
-        }).onSuccess(running -> {
+        }, false).onSuccess(running -> {
             if (!running) {
                 ctx.response().setStatusCode(503).end();
                 return;
