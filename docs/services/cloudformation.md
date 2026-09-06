@@ -57,7 +57,7 @@ cross-resource references.
 |---|---|
 | S3 | `Bucket`, `BucketPolicy` (accepted; policy not enforced) |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
-| SNS | `Topic`, `Subscription` |
+| SNS | `Topic`, `Subscription`, `TopicPolicy` |
 | DynamoDB | `Table`, `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `MicrovmImage`, `NetworkConnector`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |

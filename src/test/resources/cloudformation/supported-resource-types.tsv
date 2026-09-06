@@ -107,6 +107,7 @@ AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner
 AWS::SNS::Topic	SnsCfnProvisioner
+AWS::SNS::TopicPolicy	SnsCfnProvisioner
 AWS::SQS::Queue	SqsCfnProvisioner
 AWS::SQS::QueuePolicy	SqsCfnProvisioner
 AWS::SSM::Parameter	SsmCfnProvisioner
