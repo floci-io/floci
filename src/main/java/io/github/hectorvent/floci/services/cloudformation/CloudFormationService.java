@@ -1336,7 +1336,12 @@ public class CloudFormationService implements ResourceProvider {
 
     private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack) {
         List<UpdateCleanupFailure> failures = new ArrayList<>();
-        for (StackResource resource : stack.getResources().values()) {
+        // Dependents go before what they depend on, as in every other teardown walk here: a
+        // displaced listener has to go before the displaced target group it still forwards to,
+        // or that delete fails ResourceInUse three times and leaves the group behind.
+        List<StackResource> resources = new ArrayList<>(stack.getResources().values());
+        Collections.reverse(resources);
+        for (StackResource resource : resources) {
             String cleanupPhysicalId = provisioner.updateCleanupPhysicalId(resource);
             if (cleanupPhysicalId != null) {
                 addEvent(

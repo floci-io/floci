@@ -361,6 +361,77 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
+    void aFailedStackUpdateRollsAReplacementBackToThePriorServiceAndDeletesTheReplacement() {
+        EcsServiceModel moved = service("front");
+        moved.setServiceArn("arn:aws:ecs:us-east-1:000000000000:service/batch/front");
+        when(ecs.createService(eq("batch"), eq("front"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(), isNull(),
+                eq(REGION))).thenReturn(moved);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+        r.getAttributes().put("ServiceArn", SERVICE_ARN);
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "batch").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN), ctx(SERVICE_ARN));
+        assertEquals(moved.getServiceArn(), r.getAttributes().get("ServiceArn"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        // The resource names the prior service again, with the attributes it had, the replacement
+        // is deleted in its cluster, the prior is never touched, and the cleanup record is spent.
+        assertEquals(SERVICE_ARN, r.getPhysicalId());
+        assertEquals(SERVICE_ARN, r.getAttributes().get("ServiceArn"));
+        assertEquals("front", r.getAttributes().get("Name"));
+        verify(ecs).deleteService("batch", "front", true, REGION);
+        verify(ecs, never()).deleteService("web", "front", true, REGION);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        assertEquals(UpdateCleanupResult.notApplicable(), provisioner.completeUpdate(r));
+    }
+
+    @Test
+    void anUnchangedClusterHasNothingToRollBack() {
+        when(ecs.createCluster("web", REGION)).thenReturn(cluster("web"));
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+        provisioner.provision(r, mapper.createObjectNode().put("ClusterName", "web"), ctx("web"));
+
+        // The idempotent create changed nothing, so the rollback is complete with nothing to do.
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals("web", r.getPhysicalId());
+        verify(ecs, never()).deleteCluster(anyString(), anyString());
+    }
+
+    @Test
+    void anInPlaceUpdateIsNotRolledBackHere() {
+        when(ecs.updateService(eq("web"), eq("front"), eq(TASK_DEF_ARN), eq(3), isNull(), eq(REGION)))
+                .thenReturn(service("front"));
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN)
+                .put("DesiredCount", "3"), ctx(SERVICE_ARN));
+
+        assertFalse(provisioner.rollbackUpdate(r), "no replacement means nothing this helper can undo");
+        assertEquals(SERVICE_ARN, r.getPhysicalId());
+        verify(ecs, never()).deleteService(anyString(), anyString(), eq(true), anyString());
+    }
+
+    @Test
+    void aRollbackWhoseDeleteFailsStillPointsTheResourceAtThePriorAndPropagates() {
+        TaskDefinition next = new TaskDefinition();
+        next.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":4"));
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(next);
+        doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(next.getTaskDefinitionArn(), REGION);
+        StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
+        r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);
+        provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertEquals("busy", e.getMessage());
+        assertEquals(TASK_DEF_ARN, r.getPhysicalId());
+        assertEquals(TASK_DEF_ARN, r.getAttributes().get("TaskDefinitionArn"));
+        assertFalse(provisioner.hasReplacementUpdate(r), "the record is spent so the prior is never put on a cleanup list");
+    }
+
+    @Test
     void aNonIntegerDesiredCountIsAValidationError() {
         StackResource r = resource("AWS::ECS::Service", "Service");
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,

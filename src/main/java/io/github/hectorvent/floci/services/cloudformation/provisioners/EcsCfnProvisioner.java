@@ -23,6 +23,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -54,12 +55,16 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case CLUSTER -> provisionCluster(r, props, ctx);
             case TASK_DEFINITION -> provisionTaskDefinition(r, props, ctx);
             case SERVICE -> provisionService(r, props, ctx);
             default -> throw new IllegalStateException("EcsCfnProvisioner cannot handle " + r.getResourceType());
         }
+        // A provision that left the resource with a new physical id replaced the entity: the
+        // displaced one is deleted once the update commits, or restored if the update rolls back.
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     @Override
@@ -102,6 +107,21 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * A replacement is undone through the cleanup record. Without one, a cluster has nothing to put
+     * back: its only property is the create-only name, so an update that kept it re-issued the
+     * idempotent create and changed nothing. A service without a record was updated in place, and
+     * putting that back needs a snapshot this provisioner does not keep, so the engine reports it as
+     * not rolled back, as it did for the switch.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        return CLUSTER.equals(resource.getResourceType());
+    }
+
+    /**
      * The cluster name is create-only and the physical id, so an unnamed cluster keeps the name its
      * first execution generated. createCluster is idempotent, which is what makes an unchanged
      * update a no-op here.
@@ -112,7 +132,6 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         EcsCluster cluster = ecsService.createCluster(clusterName, ctx.region());
         r.setPhysicalId(cluster.getClusterName());
         r.getAttributes().put("Arn", cluster.getClusterArn());
-        ReplacementCleanup.record(r, ctx);
     }
 
     /**
@@ -139,7 +158,6 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(td.getTaskDefinitionArn());
         r.getAttributes().put("TaskDefinitionArn", td.getTaskDefinitionArn());
-        ReplacementCleanup.record(r, ctx);
     }
 
     /**
@@ -181,7 +199,6 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(svc.getServiceArn());
         r.getAttributes().put("Name", svc.getServiceName());
         r.getAttributes().put("ServiceArn", svc.getServiceArn());
-        ReplacementCleanup.record(r, ctx);
     }
 
     /** The cluster name a template value addresses: a name, an ARN's last segment, or the default. */
