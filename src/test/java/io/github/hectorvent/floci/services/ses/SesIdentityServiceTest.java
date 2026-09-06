@@ -187,6 +187,12 @@ class SesIdentityServiceTest {
         assertEquals("AlreadyExistsException", e.getErrorCode());
     }
 
+    /** Any parked state counts as contending, so a switch to e.g. ReentrantLock stays green. */
+    private static boolean isParked(Thread.State state) {
+        return state == Thread.State.BLOCKED || state == Thread.State.WAITING
+                || state == Thread.State.TIMED_WAITING;
+    }
+
     /** Counts put calls so the single-write guarantee is asserted, not inferred. */
     private static final class CountingStorage extends InMemoryStorage<String, Identity> {
         final AtomicInteger puts = new AtomicInteger();
@@ -249,7 +255,7 @@ class SesIdentityServiceTest {
             // The second create must park on the creation lock before the first is released; a
             // TERMINATED second thread means it completed without contending, i.e. the lock is gone.
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (second.getState() != Thread.State.BLOCKED) {
+            while (!isParked(second.getState())) {
                 assertTrue(second.getState() != Thread.State.TERMINATED,
                         "second create finished without blocking on the creation lock");
                 assertTrue(System.nanoTime() < deadline,
@@ -269,6 +275,67 @@ class SesIdentityServiceTest {
         assertEquals(1, store.puts.get());
         assertEquals("my-cs",
                 counted.find("alice@example.com", REGION).orElseThrow().getConfigurationSetName());
+    }
+
+    @Test
+    void verifyEmailIdentity_contendsWithCreate_neverClobbersTheFullRecord() throws Exception {
+        CountingStorage store = new CountingStorage();
+        SesIdentityService counted = new SesIdentityService(store, null, Clock.systemUTC());
+        CountDownLatch insideLock = new CountDownLatch(1);
+        CountDownLatch proceed = new CountDownLatch(1);
+        AtomicReference<Identity> verifyResult = new AtomicReference<>();
+
+        Thread creator = new Thread(() -> counted.createEmailIdentity(
+                "alice@example.com", "my-cs", List.of(new Tag("team", "floci")), REGION, () -> {
+                    insideLock.countDown();
+                    try {
+                        proceed.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }));
+        creator.start();
+
+        Thread verifier = new Thread(() ->
+                verifyResult.set(counted.verifyEmailIdentity("alice@example.com", REGION)));
+        try {
+            assertTrue(insideLock.await(5, TimeUnit.SECONDS), "create never entered the lock");
+            verifier.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            // The v1 verify path takes the same creation lock, so it must park here rather than
+            // overwrite the in-flight create with a bare identity (the lost-update it used to allow).
+            while (!isParked(verifier.getState())) {
+                assertTrue(verifier.getState() != Thread.State.TERMINATED,
+                        "verify finished without contending on the creation lock");
+                assertTrue(System.nanoTime() < deadline,
+                        "verify never blocked on the creation lock");
+                Thread.onSpinWait();
+            }
+        } finally {
+            proceed.countDown();
+        }
+        creator.join(TimeUnit.SECONDS.toMillis(5));
+        verifier.join(TimeUnit.SECONDS.toMillis(5));
+        assertTrue(!creator.isAlive() && !verifier.isAlive(), "threads did not finish in time");
+
+        // Verify returned the creator's record instead of replacing it; nothing was lost.
+        assertEquals("my-cs", verifyResult.get().getConfigurationSetName());
+        assertEquals(1, store.puts.get());
+        assertEquals("my-cs",
+                counted.find("alice@example.com", REGION).orElseThrow().getConfigurationSetName());
+    }
+
+    @Test
+    void createEmailIdentity_whitespace_keepsFieldSpecificWording() {
+        assertEquals("Email address must not contain leading or trailing whitespace.",
+                assertThrows(AwsException.class, () -> create(" alice@example.com")).getMessage());
+        assertEquals("Domain must not contain leading or trailing whitespace.",
+                assertThrows(AwsException.class, () -> create(" example.com")).getMessage());
+        assertTrue(service.listIdentities(null, REGION).isEmpty());
+    }
+
+    private void create(String identity) {
+        service.createEmailIdentity(identity, null, null, REGION, null);
     }
 
     @Test
