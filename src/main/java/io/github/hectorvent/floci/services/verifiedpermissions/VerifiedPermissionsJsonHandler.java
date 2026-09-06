@@ -234,7 +234,9 @@ public class VerifiedPermissionsJsonHandler {
     private ObjectNode identitySourceList(PaginatedResult<IdentitySource> result) {
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("identitySources");
-        for (IdentitySource source : result.items()) list.add(identitySourceDetail(source));
+        for (IdentitySource source : result.items()) {
+            list.add(identitySourceDetail(source));
+        }
         if (result.nextToken() != null) {
             out.put("nextToken", result.nextToken());
         }

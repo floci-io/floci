@@ -668,7 +668,9 @@ public class VerifiedPermissionsService implements Resettable {
         }
         for (JsonNode filter : filters) {
             if (filter.has("principalEntityType")
-                    && !filter.path("principalEntityType").asText().equals(source.principalEntityType())) return false;
+                    && !filter.path("principalEntityType").asText().equals(source.principalEntityType())) {
+                return false;
+            }
         }
         return true;
     }
@@ -734,7 +736,9 @@ public class VerifiedPermissionsService implements Resettable {
 
     private String requestFingerprint(JsonNode request) {
         JsonNode copy = request.deepCopy();
-        if (copy.isObject()) ((com.fasterxml.jackson.databind.node.ObjectNode) copy).remove("clientToken");
+        if (copy.isObject()) {
+            ((com.fasterxml.jackson.databind.node.ObjectNode) copy).remove("clientToken");
+        }
         try {
             return canonical(copy);
         } catch (JsonProcessingException e) {
