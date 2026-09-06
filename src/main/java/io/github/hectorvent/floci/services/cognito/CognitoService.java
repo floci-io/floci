@@ -2565,6 +2565,47 @@ public class CognitoService implements ResourceProvider {
         return response;
     }
 
+    public void verifyUserAttribute(String accessToken, String attributeName, String code) {
+        String username = extractUsernameFromToken(accessToken);
+        String poolId = extractPoolIdFromToken(accessToken);
+        String jti = extractJtiFromToken(accessToken);
+
+        if (username == null || poolId == null || jti == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+        }
+
+        validateTokenNotRevoked(jti, poolId, "access");
+        validateOriginJtiNotRevoked(accessToken, poolId);
+        Long iat = extractIatFromToken(accessToken);
+        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
+
+        if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid attribute name. Only phone_number and email can be verified.", 400);
+        }
+
+        CognitoUser user = adminGetUser(poolId, username);
+        if (blankToNull(user.getAttributes().get(attributeName)) == null) {
+            throw new AwsException("InvalidParameterException",
+                    "Unable to verify attribute: " + attributeName + " no value set to verify",
+                    400);
+        }
+
+        VerificationCode.Purpose purpose = "email".equals(attributeName)
+                ? VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION
+                : VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION;
+        ensureVerificationWiring();
+        try {
+            verificationCodeService.consume(poolId, user.getUsername(), purpose, code);
+        } catch (VerificationCodeException e) {
+            throw mapVerificationCodeException(e);
+        }
+
+        user.getAttributes().put(attributeName + "_verified", "true");
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(poolId, user.getUsername()), user);
+    }
+
     public void updateUserAttributes(String accessToken, Map<String, String> attributes) {
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);
