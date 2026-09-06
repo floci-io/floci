@@ -254,7 +254,9 @@ class RedshiftInterceptorIntegrationTest {
         StringBuilder all = new StringBuilder();
         objs.stream()
                 .sorted(Comparator.comparing(S3Object::getKey))
-                .forEach(o -> all.append(new String(o.getData(), StandardCharsets.UTF_8)));
+                // listObjects returns metadata-only entries; fetch each body with getObject.
+                .forEach(o -> all.append(new String(
+                        s3.getObject(bucket, o.getKey()).getData(), StandardCharsets.UTF_8)));
         assertEquals("1|alice\n2|bob\n", all.toString());
     }
 
@@ -274,8 +276,9 @@ class RedshiftInterceptorIntegrationTest {
         var objs = s3.listObjects(bucket, "g/", null, 100);
         assertEquals(1, objs.size());
         assertTrue(objs.get(0).getKey().endsWith(".gz"), objs.get(0).getKey());
+        byte[] data = s3.getObject(bucket, objs.get(0).getKey()).getData();
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
-        try (var in = new GZIPInputStream(new ByteArrayInputStream(objs.get(0).getData()))) {
+        try (var in = new GZIPInputStream(new ByteArrayInputStream(data))) {
             in.transferTo(raw);
         }
         assertEquals("7\n8\n", raw.toString(StandardCharsets.UTF_8));
