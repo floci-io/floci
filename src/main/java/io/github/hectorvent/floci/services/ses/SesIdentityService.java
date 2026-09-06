@@ -51,6 +51,9 @@ public class SesIdentityService {
     private final Route53Service route53Service;
     private final Clock clock;
     private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
+    // Serializes the v2 CreateEmailIdentity check-then-put so concurrent creates for the same
+    // identity can't both succeed (InMemoryStorage only makes each individual operation thread-safe).
+    private final Object identityCreationLock = new Object();
 
     @Inject
     public SesIdentityService(StorageFactory storageFactory, Route53Service route53Service, Clock clock) {
@@ -93,6 +96,13 @@ public class SesIdentityService {
             return existing;
         }
 
+        Identity identity = newDomainIdentity(domain);
+        identityStore.put(key, identity);
+        LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
+        return identity;
+    }
+
+    private Identity newDomainIdentity(String domain) {
         Identity identity = new Identity(domain, "Domain");
         regenerateDkimTokens(identity);
         identity.setVerificationStatus("Pending");
@@ -101,8 +111,45 @@ public class SesIdentityService {
         // CNAMEs yet); the first Get/List refresh transitions it to Pending. Matches AWS, where
         // CreateEmailIdentity returns NOT_STARTED but a subsequent GetEmailIdentity returns PENDING.
         identity.setDkimVerificationStatus("NotStarted");
-        identityStore.put(key, identity);
-        LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
+        return identity;
+    }
+
+    /**
+     * v2 CreateEmailIdentity: builds the complete identity (default configuration set and tags
+     * included) and persists it with a single write, so a failing validation leaves nothing behind,
+     * matching real SESv2 where the whole call fails and no resource is created (probe-confirmed
+     * 2026-09-06: a failed create leaves a 404 behind, not a half-created identity). The validation
+     * order is probe-confirmed too: AlreadyExists, then tag validation, then the caller-supplied
+     * configuration-set existence check (cross-domain, so the facade passes it in), then the write.
+     * The lock closes the check-then-put race where two concurrent creates for the same identity
+     * would both return 200; the loser now gets the AlreadyExists error, as on AWS.
+     */
+    public Identity createEmailIdentity(String emailIdentity, String configurationSetName,
+                                        List<Tag> tags, String region,
+                                        Runnable configurationSetExistsCheck) {
+        String key = identityKey(region, emailIdentity);
+        Identity identity;
+        synchronized (identityCreationLock) {
+            if (identityStore.get(key).isPresent()) {
+                throw new AwsException("AlreadyExistsException",
+                        "Email identity " + emailIdentity + " already exist.", 400);
+            }
+            SesTags.validate(tags);
+            if (configurationSetExistsCheck != null) {
+                configurationSetExistsCheck.run();
+            }
+            identity = emailIdentity.contains("@")
+                    ? new Identity(emailIdentity, "EmailAddress")
+                    : newDomainIdentity(emailIdentity);
+            if (configurationSetName != null) {
+                identity.setConfigurationSetName(configurationSetName);
+            }
+            if (tags != null) {
+                identity.setTags(tags);
+            }
+            identityStore.put(key, identity);
+        }
+        LOG.infov("Created email identity: {0} in region {1}", emailIdentity, region);
         return identity;
     }
 
@@ -291,13 +338,6 @@ public class SesIdentityService {
         identity.setTags(remaining);
         identityStore.put(identityKey(region, identityValue), identity);
         LOG.infov("Untagged SES identity: {0} (region {1}, -{2} keys)", identityValue, region, tagKeys.size());
-    }
-
-    public void setTags(String identityValue, String region, List<Tag> tags) {
-        SesTags.validate(tags);
-        Identity identity = requireForTags(identityValue, region);
-        identity.setTags(tags);
-        identityStore.put(identityKey(region, identityValue), identity);
     }
 
     private Identity requireForTags(String identityValue, String region) {
