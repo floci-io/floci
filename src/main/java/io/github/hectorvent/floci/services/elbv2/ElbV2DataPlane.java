@@ -120,6 +120,7 @@ public class ElbV2DataPlane {
         listenerBindings.put(listenerArn, binding);
         listenersByHostAndPort.computeIfAbsent(binding.port(), ignored -> new ConcurrentHashMap<>())
                 .put(binding.host(), listenerArn);
+        ensureReleaseHandlerRegistered();
         servers.computeIfAbsent(binding.port(), this::startPortServer);
     }
 
@@ -135,6 +136,7 @@ public class ElbV2DataPlane {
             listenerRegions.put(listenerArn, region);
             listenersByHostAndPort.computeIfAbsent(newBinding.port(), ignored -> new ConcurrentHashMap<>())
                     .put(newBinding.host(), listenerArn);
+            ensureReleaseHandlerRegistered();
             servers.computeIfAbsent(newBinding.port(), this::startPortServer);
             return;
         }
@@ -205,12 +207,24 @@ public class ElbV2DataPlane {
         }
     }
 
-    private HttpServer startPortServer(int port) {
-        // Registered on first use rather than at construction: the data plane is only live once a
-        // listener exists, and this keeps the proxy out of the mock-mode path entirely.
+    /**
+     * Subscribes to the proxy's released ports, once, on the first listener to need it: the data
+     * plane is only live once a listener exists, and this keeps the proxy out of the mock-mode
+     * path entirely.
+     *
+     * <p>Placement is load-bearing on both sides. It runs after the listener is in
+     * {@code listenersByHostAndPort}, so the replay of ports already given up finds it, and before
+     * {@code servers.computeIfAbsent}, because {@code onPortReleased} replays synchronously: doing
+     * this from inside the mapping function re-entered {@code computeIfAbsent} for the very key it
+     * was still computing, which a {@link ConcurrentHashMap} rejects outright.
+     */
+    private void ensureReleaseHandlerRegistered() {
         if (releaseHandlerRegistered.compareAndSet(false, true)) {
             tlsProxyServer.onPortReleased(this::bindListenersWaitingOn);
         }
+    }
+
+    private HttpServer startPortServer(int port) {
         if (isReservedByFloci(port)) {
             // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
             // The emulator's own port cannot be handed over, so the two cases need different
