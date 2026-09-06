@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
+import io.github.hectorvent.floci.services.backup.BackupService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
@@ -27,6 +28,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayDomainCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
@@ -162,6 +164,7 @@ final class CfnProvisionerFixture {
         private OrganizationsService organizationsService;
         private SqsService sqsService;
         private WafV2Service wafV2Service;
+        private BackupService backupService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
         private CfnDynamicReferences dynamicReferences;
@@ -279,6 +282,9 @@ final class CfnProvisionerFixture {
             }
             if (sqsService != null) {
                 discovered.add(new SqsCfnProvisioner(sqsService));
+            }
+            if (backupService != null) {
+                discovered.add(new BackupVaultCfnProvisioner(backupService));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
@@ -512,6 +518,11 @@ final class CfnProvisionerFixture {
 
         public Builder wafV2(WafV2Service v) {
             this.wafV2Service = v;
+            return this;
+        }
+
+        public Builder backup(BackupService v) {
+            this.backupService = v;
             return this;
         }
 
