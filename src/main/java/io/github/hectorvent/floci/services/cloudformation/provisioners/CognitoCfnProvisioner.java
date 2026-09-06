@@ -189,6 +189,9 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionUserPoolClient(StackResource r, JsonNode props, ProvisionContext ctx) {
         String userPoolId = ctx.resolveOptional(props, "UserPoolId");
+        if (userPoolId == null || userPoolId.isBlank()) {
+            throw new AwsException("ValidationError", "AWS::Cognito::UserPoolClient requires UserPoolId", 400);
+        }
         String clientName = ctx.resolveOptional(props, "ClientName");
         if (clientName == null || clientName.isBlank()) {
             clientName = ctx.generatePhysicalName(r.getLogicalId(), 128, false);
@@ -203,12 +206,12 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         List<String> callbackURLs = ctx.resolveStringList(props, "CallbackURLs");
         String defaultRedirectURI = ctx.resolveOptional(props, "DefaultRedirectURI");
         List<String> explicitAuthFlows = ctx.resolveStringList(props, "ExplicitAuthFlows");
-        Integer accessTokenValidity = parseIntegerOrNull(props, "AccessTokenValidity", ctx);
-        Integer idTokenValidity = parseIntegerOrNull(props, "IdTokenValidity", ctx);
+        Integer accessTokenValidity = parseInteger(props, "AccessTokenValidity", ctx);
+        Integer idTokenValidity = parseInteger(props, "IdTokenValidity", ctx);
         List<String> logoutURLs = ctx.resolveStringList(props, "LogoutURLs");
         String preventUserExistenceErrors = ctx.resolveOptional(props, "PreventUserExistenceErrors");
         List<String> readAttributes = ctx.resolveStringList(props, "ReadAttributes");
-        Integer refreshTokenValidity = parseIntegerOrNull(props, "RefreshTokenValidity", ctx);
+        Integer refreshTokenValidity = parseInteger(props, "RefreshTokenValidity", ctx);
         List<String> supportedIdentityProviders = ctx.resolveStringList(props, "SupportedIdentityProviders");
         Map<String, String> tokenValidityUnits = resolveStringMapOrNull(props, "TokenValidityUnits", ctx);
         List<String> writeAttributes = ctx.resolveStringList(props, "WriteAttributes");
@@ -361,7 +364,7 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         return (value != null && !value.isBlank()) ? value : defaultValue;
     }
 
-    private static Integer parseIntegerOrNull(JsonNode props, String name, ProvisionContext ctx) {
+    private static Integer parseInteger(JsonNode props, String name, ProvisionContext ctx) {
         String value = ctx.resolveOptional(props, name);
         if (value == null || value.isBlank()) {
             return null;
@@ -369,7 +372,7 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         try {
             return Integer.valueOf(value.trim());
         } catch (NumberFormatException e) {
-            return null;
+            throw new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
         }
     }
 

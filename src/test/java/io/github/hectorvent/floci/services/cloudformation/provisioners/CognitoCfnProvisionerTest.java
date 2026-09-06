@@ -670,6 +670,29 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
+    void userPoolClientWithoutAUserPoolIdIsRejected() {
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, mapper.createObjectNode().put("ClientName", "web"), ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
+        verifyNoClientCreate();
+    }
+
+    @Test
+    void nonIntegerTokenValidityIsRejectedInsteadOfDropped() {
+        for (String property : List.of("AccessTokenValidity", "IdTokenValidity", "RefreshTokenValidity")) {
+            StackResource r = resource(USER_POOL_CLIENT, "Client");
+            ObjectNode props = mapper.createObjectNode().put("UserPoolId", POOL_ID).put(property, "sixty");
+
+            AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()), property);
+            assertEquals("ValidationError", e.getErrorCode());
+            assertEquals("Value of property " + property + " must be an integer.", e.getMessage());
+        }
+        verifyNoClientCreate();
+    }
+
+    @Test
     void unknownTypeIsRejected() {
         StackResource r = resource("AWS::Cognito::IdentityPool", "Identity");
 
