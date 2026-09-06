@@ -151,16 +151,18 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionUserPool(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String poolName = ctx.resolveOptional(props, "UserPoolName");
-        if (poolName == null || poolName.isBlank()) {
-            poolName = ctx.generatePhysicalName(r.getLogicalId(), 128, false);
-        }
-
         Map<String, Object> req = new HashMap<>();
         if (props != null) {
             req.putAll(jsonObjectToMap(ctx.engine().resolveNode(props)));
         }
-        req.put("PoolName", poolName);
+        // UserPoolName is updatable in place. A pool the template does not name keeps the name its
+        // first execution generated: sending a fresh generated name on every update would rename it.
+        String poolName = ctx.resolveOptional(props, "UserPoolName");
+        if (poolName != null && !poolName.isBlank()) {
+            req.put("PoolName", poolName);
+        } else if (!ctx.isUpdate()) {
+            req.put("PoolName", ctx.generatePhysicalName(r.getLogicalId(), 128, false));
+        }
 
         Map<String, String> tags = resolveUserPoolTags(props, ctx);
         if (tags != null) {

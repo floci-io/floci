@@ -462,6 +462,34 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
+    void userPoolUpdateWithAnExplicitNameCarriesIt() {
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "renamed"));
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolName", "renamed"), ctx(POOL_ID));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).updateUserPool(request.capture(), eq(REGION));
+        assertEquals("renamed", request.getValue().get("PoolName"));
+    }
+
+    @Test
+    void userPoolUpdateWithoutANameKeepsTheCurrentOne() {
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "my-stack-Pool-abc123"));
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+
+        provisioner.provision(r, mapper.createObjectNode().put("MfaConfiguration", "OFF"), ctx(POOL_ID));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).updateUserPool(request.capture(), eq(REGION));
+        assertFalse(request.getValue().containsKey("PoolName"), "no PoolName means keep the current name");
+    }
+
+    @Test
     void userPoolClientCreatePassesEveryPropertyPositionally() {
         stubClientCreate(client("web", "s3cr3t"));
         ObjectNode props = mapper.createObjectNode()

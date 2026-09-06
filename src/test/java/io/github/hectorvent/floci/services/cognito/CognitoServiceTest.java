@@ -861,6 +861,17 @@ class CognitoServiceTest {
     }
 
     @Test
+    void updateUserPoolRenamesThePoolWhenPoolNameIsGiven() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "before"), "us-east-1");
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(), "PoolName", "after"), "us-east-1");
+        assertEquals("after", service.describeUserPool(pool.getId()).getName());
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(), "MfaConfiguration", "OFF"), "us-east-1");
+        assertEquals("after", service.describeUserPool(pool.getId()).getName());
+    }
+
+    @Test
     void updateUserPoolWithReservedTagStripsIt() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "PinnedPool"), "us-east-1");
 

@@ -255,6 +255,9 @@ public class CognitoService implements ResourceProvider {
         UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
         populateUserPool(updatedPool, request);
+        if (request.get("PoolName") instanceof String poolName && !poolName.isBlank()) {
+            updatedPool.setName(poolName);
+        }
 
         updatedPool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         poolStore.put(id, updatedPool);
