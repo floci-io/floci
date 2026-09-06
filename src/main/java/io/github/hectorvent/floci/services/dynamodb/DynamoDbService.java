@@ -2552,8 +2552,10 @@ public class DynamoDbService implements ResourceProvider {
         }
         return tokens;
     }
-    // Sets an existing list element or appends the value when the index is past the end.
-    // Pads arr with NULL elements up to idx-1, then sets/appends value at idx.
+    /**
+     * Replaces the element at idx when the index is within the list bounds;
+     * otherwise appends the value to the end of the list.
+    */
 
     private void setOrAppend(ArrayNode arr, long idx, JsonNode value) {
         if (idx < arr.size()) {
