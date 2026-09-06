@@ -586,13 +586,12 @@ public final class S3CopySimulator {
             }
         } catch (RuntimeException | IOException e) {
             LOG.warnv(e, "UNLOAD streaming failed");
-            closeAcc(acc, sink);
             if (spec.manifest()) {
                 deleteWritten(s3, spec.bucket(), writtenKeys);
             }
             String detail = e.getMessage() != null ? e.getMessage() : e.toString();
-            sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
-            return true;
+            return abortUnload(client, backend, backendDecoder, acc, sink,
+                    SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
         }
 
         // Flush the final (or only, possibly empty) slice.
@@ -609,6 +608,14 @@ public final class S3CopySimulator {
                 }
                 sendError(client, backend, SQLSTATE_INSUFFICIENT_PRIVILEGE,
                         "S3 access denied for s3://" + spec.bucket() + "/" + spec.prefix(), txStatus, onStatusChange);
+                return true;
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "UNLOAD final slice write failed");
+                if (spec.manifest()) {
+                    deleteWritten(s3, spec.bucket(), writtenKeys);
+                }
+                String detail = e.getMessage() != null ? e.getMessage() : e.toString();
+                sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
                 return true;
             }
             writtenKeys.add(key);

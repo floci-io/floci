@@ -377,6 +377,56 @@ class S3CopySimulatorTest {
         assertEquals('E', (char) z.body()[0]);
     }
 
+    @Test
+    void unloadStreamingFailureDrainsBackendAndSendsSingleError() throws Exception {
+        long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 8; // Force flush on first row
+        try {
+            when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+            when(s3.putObject(eq("wh"), any(), any(), any(), any()))
+                    .thenThrow(new RuntimeException("simulated S3 storage failure"));
+
+            CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
+
+            Thread backend = backendThread(() -> {
+                OutputStream out = testBackend.getOutputStream();
+                PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+                assertEquals('Q', in.nextMessage().type());
+                out.write(new byte[]{'H', 0, 0, 0, 7, 0, 0, 0});
+                // Send multiple rows so the backend has pending messages when putObject throws mid-stream on the first slice
+                byte[] row1 = "1|alice\n".getBytes(StandardCharsets.US_ASCII);
+                out.write('d');
+                out.write(intBytes(4 + row1.length));
+                out.write(row1);
+                byte[] row2 = "2|bob\n".getBytes(StandardCharsets.US_ASCII);
+                out.write('d');
+                out.write(intBytes(4 + row2.length));
+                out.write(row2);
+                out.write(new byte[]{'c', 0, 0, 0, 4});
+                byte[] tag = "COPY 2\0".getBytes(StandardCharsets.US_ASCII);
+                out.write('C');
+                out.write(intBytes(4 + tag.length));
+                out.write(tag);
+                out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+                out.flush();
+            });
+
+            boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            joinBackend(backend);
+
+            assertTrue(handled);
+            PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+            assertEquals('E', in.nextMessage().type());
+            assertEquals('Z', in.nextMessage().type());
+            testClient.setSoTimeout(400);
+            assertThrows(SocketTimeoutException.class, () -> testClient.getInputStream().read(),
+                    "no leftover or duplicate messages should reach client");
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = saved;
+        }
+    }
+
     /** Play a minimal happy-path PostgreSQL backend: 'G' then, after CopyDone, 'C' and 'Z'. */
     private void playHappyBackend(ByteArrayOutputStream capturedCopyData) throws IOException {
         OutputStream out = testBackend.getOutputStream();
