@@ -439,6 +439,14 @@ class Route53VpcAssociationIntegrationTest {
                 .body(containsString("<HostedZoneId>" + zoneId + "</HostedZoneId>"))
                 .body(containsString("<OwningAccount>" + ZONE_ACCOUNT + "</OwningAccount>"));
 
+        // AWS documents ListHostedZonesByVPC as cross-account discovery: callers can list
+        // associations for a VPC regardless of which account owns the VPC or hosted zone.
+        given().header("Authorization", route53Auth(OTHER_ACCOUNT))
+                .get("/2013-04-01/hostedzonesbyvpc?vpcid=" + spokeVpc + "&vpcregion=us-east-1")
+                .then().statusCode(200)
+                .body(containsString("<HostedZoneId>" + zoneId + "</HostedZoneId>"))
+                .body(containsString("<OwningAccount>" + ZONE_ACCOUNT + "</OwningAccount>"));
+
         // AWS recommends deleting the authorization after association. Success has an empty body,
         // and deleting it must not remove the established association.
         given().contentType(XML)
@@ -467,6 +475,90 @@ class Route53VpcAssociationIntegrationTest {
                 .post("/2013-04-01/hostedzone/" + zoneId + "/associatevpc")
                 .then().statusCode(401)
                 .body(containsString("<Code>NotAuthorizedException</Code>"));
+    }
+
+    @Test
+    void unownedAuthorizationCannotBeConsumedCrossAccount() {
+        String zoneVpc = createVpcForAccount(ZONE_ACCOUNT, "10.83.0.0/16");
+        String zoneId = createPrivateZoneForAccount(
+                ZONE_ACCOUNT, "unowned-auth.internal.", "vpc-assoc-unowned-auth", zoneVpc);
+        String unknownVpc = "vpc-unmodelled-cross-account";
+
+        given().contentType(XML)
+                .header("Authorization", route53Auth(ZONE_ACCOUNT))
+                .body(vpcRequest("CreateVPCAssociationAuthorizationRequest", unknownVpc, ""))
+                .post("/2013-04-01/hostedzone/" + zoneId + "/authorizevpcassociation")
+                .then().statusCode(200);
+
+        given().contentType(XML)
+                .header("Authorization", route53Auth(OTHER_ACCOUNT))
+                .body(vpcRequest("AssociateVPCWithHostedZoneRequest", unknownVpc, ""))
+                .post("/2013-04-01/hostedzone/" + zoneId + "/associatevpc")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidVPCId</Code>"));
+    }
+
+    @Test
+    void legacyAssociationWithoutOwnerStillRequiresVpcOrZoneOwner() {
+        String zoneVpc = createVpcForAccount(ZONE_ACCOUNT, "10.84.0.0/16");
+        String spokeVpc = createVpcForAccount(VPC_ACCOUNT, "10.85.0.0/16");
+        String zoneId = createPrivateZoneForAccount(
+                ZONE_ACCOUNT, "legacy-association.internal.", "vpc-assoc-legacy-owner", zoneVpc);
+
+        given().contentType(XML)
+                .header("Authorization", route53Auth(ZONE_ACCOUNT))
+                .body(vpcRequest("CreateVPCAssociationAuthorizationRequest", spokeVpc, ""))
+                .post("/2013-04-01/hostedzone/" + zoneId + "/authorizevpcassociation")
+                .then().statusCode(200);
+        given().contentType(XML)
+                .header("Authorization", route53Auth(VPC_ACCOUNT))
+                .body(vpcRequest("AssociateVPCWithHostedZoneRequest", spokeVpc, ""))
+                .post("/2013-04-01/hostedzone/" + zoneId + "/associatevpc")
+                .then().statusCode(200);
+
+        var zone = service.listHostedZonesByVpc(spokeVpc, "us-east-1").stream()
+                .filter(candidate -> candidate.getId().equals(zoneId))
+                .findFirst().orElseThrow();
+        zone.getVpcAssociations().stream()
+                .filter(association -> spokeVpc.equals(association.getVpcId()))
+                .findFirst().orElseThrow()
+                .setOwnerAccountId(null);
+
+        given().contentType(XML)
+                .header("Authorization", route53Auth(OTHER_ACCOUNT))
+                .body(vpcRequest("DisassociateVPCFromHostedZoneRequest", spokeVpc, ""))
+                .post("/2013-04-01/hostedzone/" + zoneId + "/disassociatevpc")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidVPCId</Code>"));
+
+        given().contentType(XML)
+                .header("Authorization", route53Auth(VPC_ACCOUNT))
+                .body(vpcRequest("DisassociateVPCFromHostedZoneRequest", spokeVpc, ""))
+                .post("/2013-04-01/hostedzone/" + zoneId + "/disassociatevpc")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void legacyNonDefaultZoneInfersOwnerFromStoragePartition() {
+        String zoneVpc = createVpcForAccount(ZONE_ACCOUNT, "10.86.0.0/16");
+        String zoneId = createPrivateZoneForAccount(
+                ZONE_ACCOUNT, "legacy-zone.internal.", "vpc-assoc-legacy-zone", zoneVpc);
+
+        var legacyZone = service.listHostedZonesByVpc(zoneVpc, "us-east-1").stream()
+                .filter(candidate -> candidate.getId().equals(zoneId))
+                .findFirst().orElseThrow();
+        legacyZone.setOwnerAccountId(null);
+
+        given().contentType(XML)
+                .header("Authorization", route53Auth(ZONE_ACCOUNT))
+                .body(vpcRequest("CreateVPCAssociationAuthorizationRequest", "vpc-legacy-zone-guest", ""))
+                .post("/2013-04-01/hostedzone/" + zoneId + "/authorizevpcassociation")
+                .then().statusCode(200);
+
+        given().header("Authorization", route53Auth(ZONE_ACCOUNT))
+                .get("/2013-04-01/hostedzone/" + zoneId + "/authorizevpcassociation")
+                .then().statusCode(200)
+                .body(containsString("<VPCId>vpc-legacy-zone-guest</VPCId>"));
     }
 
     @Test

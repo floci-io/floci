@@ -241,11 +241,21 @@ public class Route53Service {
         if (findAssociation(zone, vpc) == null) {
             String callerAccountId = callerAccountId();
             validateVpcOwnershipIfKnown(vpc, callerAccountId);
-            VpcAssociation authorization = findAssociation(
-                    getVpcAuthorizationsForAccount(ownedZone.accountId(), zoneId), vpc);
-            if (!callerAccountId.equals(ownerAccountId(zone)) && authorization == null) {
+            List<VpcAssociation> authorizations = new ArrayList<>(
+                    getVpcAuthorizationsForAccount(ownedZone.accountId(), zoneId));
+            VpcAssociation authorization = findAssociation(authorizations, vpc);
+            boolean crossAccount = !callerAccountId.equals(ownerAccountId(zone));
+            if (crossAccount && authorization == null) {
                 throw new AwsException("NotAuthorizedException",
                         "Associating the specified VPC with the specified hosted zone has not been authorized.", 401);
+            }
+            if (crossAccount && authorization.getOwnerAccountId() == null) {
+                String resolvedOwner = resolveVpcOwnerAccount(vpc).orElseThrow(() ->
+                        new AwsException("InvalidVPCId",
+                                "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                                400));
+                authorization.setOwnerAccountId(resolvedOwner);
+                putVpcAuthorizationsForAccount(ownedZone.accountId(), zoneId, authorizations);
             }
             if (authorization != null && authorization.getOwnerAccountId() != null
                     && !authorization.getOwnerAccountId().equals(callerAccountId)) {
@@ -288,9 +298,23 @@ public class Route53Service {
         }
         String associationOwner = existing.getOwnerAccountId();
         String callerAccountId = callerAccountId();
+        String zoneOwner = ownerAccountId(zone);
+        if (associationOwner == null && !zoneOwner.equals(callerAccountId)) {
+            associationOwner = resolveVpcOwnerAccount(existing).orElseThrow(() ->
+                    new AwsException("InvalidVPCId",
+                            "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                            400));
+            if (!associationOwner.equals(callerAccountId)) {
+                throw new AwsException("InvalidVPCId",
+                        "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                        400);
+            }
+            existing.setOwnerAccountId(associationOwner);
+            putZoneForAccount(ownedZone.accountId(), zoneId, zone);
+        }
         if (associationOwner != null
                 && !associationOwner.equals(callerAccountId)
-                && !ownerAccountId(zone).equals(callerAccountId)) {
+                && !zoneOwner.equals(callerAccountId)) {
             throw new AwsException("InvalidVPCId",
                     "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
                     400);
@@ -565,9 +589,47 @@ public class Route53Service {
         return vpcAuthorizationStore.get(zoneId).orElse(List.of());
     }
 
+    private void putVpcAuthorizationsForAccount(String accountId, String zoneId,
+                                                        List<VpcAssociation> authorizations) {
+        if (vpcAuthorizationStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<List<VpcAssociation>> accountAware =
+                    (AccountAwareStorageBackend<List<VpcAssociation>>) rawAccountAware;
+            accountAware.putForAccount(accountId, zoneId, authorizations);
+            return;
+        }
+        vpcAuthorizationStore.put(zoneId, authorizations);
+    }
+
     private HostedZone getHostedZoneOwnedByCaller(String zoneId) {
+        String callerAccountId = callerAccountId();
+        if (zoneStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<HostedZone> accountAware =
+                    (AccountAwareStorageBackend<HostedZone>) rawAccountAware;
+            HostedZone zone = accountAware.getForAccount(callerAccountId, zoneId).orElse(null);
+            if (zone == null && callerAccountId.equals(defaultAccountId)) {
+                // Only the configured default account can claim pre-account-isolation unscoped data.
+                // AccountAwareStorageBackend#get migrates that legacy shape into the caller partition.
+                zone = accountAware.get(zoneId).orElse(null);
+            }
+            if (zone == null) {
+                throw new AwsException("NoSuchHostedZone",
+                        "No hosted zone found with ID: " + zoneId, 404);
+            }
+            if (zone.getOwnerAccountId() == null) {
+                zone.setOwnerAccountId(callerAccountId);
+                accountAware.putForAccount(callerAccountId, zoneId, zone);
+            }
+            if (!callerAccountId.equals(zone.getOwnerAccountId())) {
+                throw new AwsException("NoSuchHostedZone",
+                        "No hosted zone found with ID: " + zoneId, 404);
+            }
+            return zone;
+        }
+
         HostedZone zone = getHostedZone(zoneId);
-        if (!ownerAccountId(zone).equals(callerAccountId())) {
+        if (!ownerAccountId(zone).equals(callerAccountId)) {
             throw new AwsException("NoSuchHostedZone",
                     "No hosted zone found with ID: " + zoneId, 404);
         }
