@@ -514,10 +514,20 @@ public final class S3CopySimulator {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
         OutputStream acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
         long rawSlice = 0;
+        // Data-row bytes in the current slice, excluding a repeated header. Drives the size split so a
+        // header-only slice is never cut off on its own.
+        long slicePayload = 0;
         long rawTotal = 0;
         boolean lastByteNewline = true;
         boolean warned = false;
         int sliceIndex = 0;
+
+        // With HEADER the backend emits the header row once, at the top of the stream. Capture it so
+        // it can be repeated at the start of every later slice, the way real Redshift writes one
+        // header per output file.
+        ByteArrayOutputStream headerBuf = spec.header() ? new ByteArrayOutputStream() : null;
+        byte[] headerBytes = null;
+        boolean capturingHeader = spec.header();
 
         try {
             while (true) {
@@ -536,9 +546,32 @@ public final class S3CopySimulator {
                 char t = m.type();
                 if (t == 'd') {
                     byte[] body = m.body();
+                    int dataStart = 0;
+                    if (capturingHeader) {
+                        int nl = -1;
+                        for (int i = 0; i < body.length; i++) {
+                            if (body[i] == '\n') {
+                                nl = i;
+                                break;
+                            }
+                        }
+                        int end = nl >= 0 ? nl + 1 : body.length;
+                        headerBuf.write(body, 0, end);
+                        if (nl >= 0) {
+                            headerBytes = headerBuf.toByteArray();
+                            headerBuf = null;
+                            capturingHeader = false;
+                        }
+                        dataStart = end;
+                    } else if (headerBytes != null && sliceIndex > 0 && rawSlice == 0) {
+                        // First data of a later slice: repeat the captured header row.
+                        acc.write(headerBytes);
+                        rawSlice += headerBytes.length;
+                    }
                     acc.write(body, 0, body.length);
                     rawSlice += body.length;
                     rawTotal += body.length;
+                    slicePayload += body.length - dataStart;
                     if (body.length > 0) {
                         lastByteNewline = body[body.length - 1] == '\n';
                     }
@@ -570,7 +603,7 @@ public final class S3CopySimulator {
                         closeQuietly(client);
                         return true;
                     }
-                    if (rawSlice >= threshold && lastByteNewline) {
+                    if (slicePayload >= threshold && lastByteNewline) {
                         byte[] payload = finishSlice(acc, sink);
                         String key = unloadDataKey(spec, sliceIndex);
                         try {
@@ -593,6 +626,7 @@ public final class S3CopySimulator {
                             heldMib[0] = UNLOAD_INITIAL_MIB;
                         }
                         rawSlice = 0;
+                        slicePayload = 0;
                         lastByteNewline = true;
                         sink = new ByteArrayOutputStream();
                         acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
@@ -635,10 +669,11 @@ public final class S3CopySimulator {
         }
 
         // Flush the final slice. Write it when it carries rows, or when nothing has been written yet
-        // (a zero-row UNLOAD still emits one empty object). A result that ended exactly on a slice
-        // boundary leaves rawSlice == 0 with slices already written, so no empty trailer is produced.
+        // (a zero-row UNLOAD still emits one object, header only when HEADER was asked for). A result
+        // that ended exactly on a slice boundary leaves slicePayload == 0 with slices already written,
+        // so neither an empty nor a header-only trailer is produced.
         byte[] payload = finishSlice(acc, sink);
-        if (rawSlice > 0 || writtenKeys.isEmpty()) {
+        if (slicePayload > 0 || writtenKeys.isEmpty()) {
             String key = unloadDataKey(spec, sliceIndex);
             try {
                 s3.authorizeAnonymousPutObject(spec.bucket(), key);

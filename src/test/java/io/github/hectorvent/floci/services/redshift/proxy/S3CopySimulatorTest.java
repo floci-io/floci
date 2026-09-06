@@ -170,6 +170,37 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void unloadRepeatsTheHeaderRowInEverySlice() throws Exception {
+        long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 4; // one data row per slice
+        try {
+            Map<String, byte[]> written = new ConcurrentHashMap<>();
+            when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+                written.put(inv.getArgument(1), inv.getArgument(2));
+                return null;
+            });
+            when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+
+            CopyStatementParser.S3Unload spec = new CopyStatementParser.S3Unload(
+                    "select a,b from t", "wh", "out/", "|", true, false, true, false, null,
+                    false, false, true, 0);
+            // The fake backend stands in for PostgreSQL: the first CopyData frame is the header row.
+            Thread backend = backendThread(() -> playUnloadBackend("h1|h2\n", "1|a\n", "2|b\n", "3|c\n"));
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            joinBackend(backend);
+
+            assertEquals(3, written.size(), written.keySet().toString());
+            for (Map.Entry<String, byte[]> e : written.entrySet()) {
+                String body = new String(e.getValue(), StandardCharsets.US_ASCII);
+                assertTrue(body.startsWith("h1|h2\n"), e.getKey() + " -> " + body);
+            }
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = saved;
+        }
+    }
+
+    @Test
     void unloadSplitsIntoMultipleObjectsOnNewlineBoundaries() throws Exception {
         long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
         S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 6; // force a split after each row
