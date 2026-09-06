@@ -608,6 +608,44 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void unloadManifestFailureUnderAllowOverwriteDeletesOnlyNewlyCreatedObjects() throws Exception {
+        long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 4; // one data row per slice
+        try {
+            List<String> deleted = new ArrayList<>();
+            when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+            // Slice 0 replaces a pre-existing object; slice 1 is new.
+            when(s3.objectExists("wh", "out/0000_part_00")).thenReturn(true);
+            when(s3.objectExists("wh", "out/0001_part_00")).thenReturn(false);
+            when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+                if (((String) inv.getArgument(1)).endsWith("manifest")) {
+                    throw new RuntimeException("disk full writing manifest");
+                }
+                return null;
+            });
+            when(s3.deleteObject(eq("wh"), any())).thenAnswer(inv -> {
+                deleted.add(inv.getArgument(1));
+                return null;
+            });
+
+            CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, true, true, true, 0);
+            Thread backend = backendThread(() -> playUnloadBackend("1|a\n", "2|b\n"));
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            joinBackend(backend);
+
+            assertEquals(List.of("out/0001_part_00"), deleted,
+                    "the overwritten pre-existing object must be kept; only the new slice is removed");
+
+            PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+            assertEquals('E', in.nextMessage().type());
+            assertEquals('Z', in.nextMessage().type());
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = saved;
+        }
+    }
+
+    @Test
     void unloadWithoutAllowOverwriteFailsIfListBucketDenied() throws Exception {
         doThrow(new AwsException("AccessDenied", "Access Denied", 403))
                 .when(s3).authorizeAnonymousListBucket(eq("wh"));
