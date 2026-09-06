@@ -19,11 +19,6 @@ import io.vertx.core.Vertx;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.header.Header;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
@@ -341,20 +336,41 @@ public class PipesPoller implements Resettable {
     }
 
     void pollKafka(Pipe pipe, String region) {
-        ConsumerRecords<byte[], byte[]> records = kafkaConsumerManager.poll(pipe);
+        List<KafkaRecordDto> records = kafkaConsumerManager.poll(pipe);
         if (records.isEmpty()) {
             return;
         }
 
-        List<ConsumerRecord<byte[], byte[]>> batch = new ArrayList<>(records.count());
-        records.forEach(batch::add);
+        LOG.infov("Pipe {0}: received {1} Kafka record(s)", pipe.getName(), records.size());
+        int batchSize = kafkaConsumerManager.resolveBatchSize(pipe, DEFAULT_BATCH_SIZE);
+        Set<KafkaTopicPartition> blockedPartitions = new HashSet<>();
+        for (List<KafkaRecordDto> batch : partition(records, batchSize)) {
+            deliverKafkaBatch(pipe, region, batch, blockedPartitions);
+        }
+    }
 
-        LOG.infov("Pipe {0}: received {1} Kafka record(s)", pipe.getName(), batch.size());
-        List<ObjectNode> deliveryNodes = buildKafkaRecordNodes(batch, pipe);
-        List<ObjectNode> filterNodes = buildKafkaFilterNodes(deliveryNodes, batch);
+    /**
+     * A REST Proxy poll can return more records than one Pipe {@code BatchSize} worth (unlike the
+     * native consumer, it has no per-call record cap), so one poll cycle may deliver several
+     * batches in sequence. {@code blockedPartitions} is shared across that whole sequence: once a
+     * partition fails delivery in one batch, its records in every later batch this cycle are left
+     * uncommitted too, so a later batch's success can never commit past an earlier record that is
+     * still awaiting redelivery.
+     */
+    private void deliverKafkaBatch(Pipe pipe, String region, List<KafkaRecordDto> batch,
+                                    Set<KafkaTopicPartition> blockedPartitions) {
+        List<KafkaRecordDto> deliverable = batch.stream()
+                .filter(record -> !blockedPartitions.contains(new KafkaTopicPartition(record.topic(), record.partition())))
+                .toList();
+        if (deliverable.isEmpty()) {
+            return;
+        }
+
+        List<ObjectNode> deliveryNodes = buildKafkaRecordNodes(deliverable, pipe);
+        List<ObjectNode> filterNodes = buildKafkaFilterNodes(deliveryNodes, deliverable);
         List<JsonNode> filtered = filterMatcher.applyFilterCriteria(new ArrayList<>(filterNodes), pipe.getSourceParameters());
         if (filtered.isEmpty()) {
-            kafkaConsumerManager.commit(pipe);
+            commitWholeBatch(pipe, deliverable);
             return;
         }
 
@@ -371,13 +387,13 @@ public class PipesPoller implements Resettable {
             }
         }
         if (deliveryRecords.isEmpty()) {
-            kafkaConsumerManager.commit(pipe);
+            commitWholeBatch(pipe, deliverable);
             return;
         }
 
         int failed = isLambdaTarget(pipe)
-                ? deliverKafkaLambdaRecords(pipe, region, batch, deliveryRecordsByIdentity, filtered)
-                : deliverKafkaRecords(pipe, region, batch, deliveryRecordsByIdentity, filtered);
+                ? deliverKafkaLambdaRecords(pipe, region, deliverable, deliveryRecordsByIdentity, filtered, blockedPartitions)
+                : deliverKafkaRecords(pipe, region, deliverable, deliveryRecordsByIdentity, filtered, blockedPartitions);
         if (failed == 0) {
             return;
         }
@@ -388,48 +404,51 @@ public class PipesPoller implements Resettable {
 
     private int deliverKafkaLambdaRecords(Pipe pipe,
                                           String region,
-                                          List<ConsumerRecord<byte[], byte[]>> batch,
+                                          List<KafkaRecordDto> batch,
                                           Map<String, JsonNode> deliveryRecordsByIdentity,
-                                          List<JsonNode> filtered) {
+                                          List<JsonNode> filtered,
+                                          Set<KafkaTopicPartition> blockedPartitions) {
         Set<String> matchedIdentities = new HashSet<>(filtered.size());
         filtered.forEach(record -> matchedIdentities.add(kafkaRecordIdentity(record)));
 
-        Map<TopicPartition, OffsetAndMetadata> offsetsToCommit = new HashMap<>();
-        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> recordsByPartition = groupKafkaRecordsByPartition(batch);
+        Map<KafkaTopicPartition, Long> offsetsToCommit = new HashMap<>();
+        Map<KafkaTopicPartition, List<KafkaRecordDto>> recordsByPartition = groupKafkaRecordsByPartition(batch);
         int failed = 0;
 
-        for (Map.Entry<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> entry : recordsByPartition.entrySet()) {
-            failed += deliverKafkaLambdaPartition(pipe, region, entry.getKey(), entry.getValue(),
+        for (Map.Entry<KafkaTopicPartition, List<KafkaRecordDto>> entry : recordsByPartition.entrySet()) {
+            int partitionFailed = deliverKafkaLambdaPartition(pipe, region, entry.getKey(), entry.getValue(),
                     deliveryRecordsByIdentity, matchedIdentities, offsetsToCommit);
+            if (partitionFailed > 0) {
+                blockedPartitions.add(entry.getKey());
+            }
+            failed += partitionFailed;
         }
 
-        if (!offsetsToCommit.isEmpty()) {
-            kafkaConsumerManager.commit(pipe, offsetsToCommit);
-        }
+        commitOffsets(pipe, offsetsToCommit);
         return failed;
     }
 
     private int deliverKafkaLambdaPartition(Pipe pipe,
                                             String region,
-                                            TopicPartition partition,
-                                            List<ConsumerRecord<byte[], byte[]>> partitionRecords,
+                                            KafkaTopicPartition partition,
+                                            List<KafkaRecordDto> partitionRecords,
                                             Map<String, JsonNode> deliveryRecordsByIdentity,
                                             Set<String> matchedIdentities,
-                                            Map<TopicPartition, OffsetAndMetadata> offsetsToCommit) {
+                                            Map<KafkaTopicPartition, Long> offsetsToCommit) {
         List<JsonNode> pendingBatch = new ArrayList<>();
         long pendingOffset = -1L;
 
-        for (ConsumerRecord<byte[], byte[]> record : partitionRecords) {
+        for (KafkaRecordDto record : partitionRecords) {
             String identity = kafkaRecordIdentity(record);
             if (!matchedIdentities.contains(identity)) {
                 if (!pendingBatch.isEmpty()) {
                     if (!invokeWithDlq(pipe, wrapRecords(pendingBatch), region)) {
                         return pendingBatch.size();
                     }
-                    offsetsToCommit.put(partition, new OffsetAndMetadata(pendingOffset));
+                    offsetsToCommit.put(partition, pendingOffset);
                     pendingBatch.clear();
                 }
-                offsetsToCommit.put(partition, new OffsetAndMetadata(record.offset() + 1));
+                offsetsToCommit.put(partition, record.offset() + 1);
                 continue;
             }
 
@@ -444,38 +463,38 @@ public class PipesPoller implements Resettable {
             if (!invokeWithDlq(pipe, wrapRecords(pendingBatch), region)) {
                 return pendingBatch.size();
             }
-            offsetsToCommit.put(partition, new OffsetAndMetadata(pendingOffset));
+            offsetsToCommit.put(partition, pendingOffset);
         }
         return 0;
     }
 
     private int deliverKafkaRecords(Pipe pipe,
                                     String region,
-                                    List<ConsumerRecord<byte[], byte[]>> batch,
+                                    List<KafkaRecordDto> batch,
                                     Map<String, JsonNode> deliveryRecordsByIdentity,
-                                    List<JsonNode> filtered) {
+                                    List<JsonNode> filtered,
+                                    Set<KafkaTopicPartition> blockedPartitions) {
         Set<String> matchedIdentities = new HashSet<>(filtered.size());
         filtered.forEach(record -> matchedIdentities.add(kafkaRecordIdentity(record)));
 
-        Map<TopicPartition, OffsetAndMetadata> offsetsToCommit = new HashMap<>();
-        Set<TopicPartition> blockedPartitions = new HashSet<>();
+        Map<KafkaTopicPartition, Long> offsetsToCommit = new HashMap<>();
         int failed = 0;
 
-        for (ConsumerRecord<byte[], byte[]> record : batch) {
-            TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+        for (KafkaRecordDto record : batch) {
+            KafkaTopicPartition partition = new KafkaTopicPartition(record.topic(), record.partition());
             if (blockedPartitions.contains(partition)) {
                 continue;
             }
 
             String identity = kafkaRecordIdentity(record);
             if (!matchedIdentities.contains(identity)) {
-                offsetsToCommit.put(partition, new OffsetAndMetadata(record.offset() + 1));
+                offsetsToCommit.put(partition, record.offset() + 1);
                 continue;
             }
 
             JsonNode deliveryRecord = deliveryRecordsByIdentity.get(identity);
             if (deliveryRecord != null && invokeWithDlq(pipe, deliveryRecord.toString(), region)) {
-                offsetsToCommit.put(partition, new OffsetAndMetadata(record.offset() + 1));
+                offsetsToCommit.put(partition, record.offset() + 1);
                 continue;
             }
 
@@ -483,9 +502,7 @@ public class PipesPoller implements Resettable {
             failed++;
         }
 
-        if (!offsetsToCommit.isEmpty()) {
-            kafkaConsumerManager.commit(pipe, offsetsToCommit);
-        }
+        commitOffsets(pipe, offsetsToCommit);
         return failed;
     }
 
@@ -722,11 +739,11 @@ public class PipesPoller implements Resettable {
         return nodes;
     }
 
-    private List<ObjectNode> buildKafkaRecordNodes(List<ConsumerRecord<byte[], byte[]>> records, Pipe pipe) {
+    private List<ObjectNode> buildKafkaRecordNodes(List<KafkaRecordDto> records, Pipe pipe) {
         List<ObjectNode> nodes = new ArrayList<>();
         String eventSource = pipe.getSource().contains(":kafka:") ? "aws:kafka" : "SelfManagedKafka";
         String bootstrapServers = kafkaConsumerManager.resolveBootstrapServers(pipe);
-        for (ConsumerRecord<byte[], byte[]> record : records) {
+        for (KafkaRecordDto record : records) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("eventSource", eventSource);
             if (pipe.getSource().contains(":kafka:")) {
@@ -738,12 +755,12 @@ public class PipesPoller implements Resettable {
             node.put("partition", record.partition());
             node.put("offset", record.offset());
             node.put("timestamp", record.timestamp());
-            node.put("timestampType", record.timestampType().name());
+            node.put("timestampType", record.timestampType());
             putKafkaBinaryField(node, "key", record.key());
             putKafkaBinaryField(node, "value", record.value());
 
             var headersNode = node.putArray("headers");
-            for (Header header : record.headers()) {
+            for (KafkaHeaderDto header : record.headers()) {
                 ObjectNode headerNode = objectMapper.createObjectNode();
                 byte[] headerValue = header.value();
                 if (headerValue == null) {
@@ -761,12 +778,11 @@ public class PipesPoller implements Resettable {
         return nodes;
     }
 
-    private List<ObjectNode> buildKafkaFilterNodes(List<ObjectNode> deliveryNodes,
-                                                   List<ConsumerRecord<byte[], byte[]>> records) {
+    private List<ObjectNode> buildKafkaFilterNodes(List<ObjectNode> deliveryNodes, List<KafkaRecordDto> records) {
         List<ObjectNode> nodes = new ArrayList<>(deliveryNodes.size());
         for (int i = 0; i < deliveryNodes.size(); i++) {
             ObjectNode node = deliveryNodes.get(i).deepCopy();
-            ConsumerRecord<byte[], byte[]> record = records.get(i);
+            KafkaRecordDto record = records.get(i);
             applyDecodedKafkaField(node, "key", record.key());
             applyDecodedKafkaField(node, "value", record.value());
             nodes.add(node);
@@ -795,7 +811,7 @@ public class PipesPoller implements Resettable {
                 + record.path("offset").asText();
     }
 
-    private static String kafkaRecordIdentity(ConsumerRecord<byte[], byte[]> record) {
+    private static String kafkaRecordIdentity(KafkaRecordDto record) {
         return record.topic() + ":" + record.partition() + ":" + record.offset();
     }
 
@@ -822,14 +838,47 @@ public class PipesPoller implements Resettable {
         node.put(fieldName, base64(value));
     }
 
-    private Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> groupKafkaRecordsByPartition(
-            List<ConsumerRecord<byte[], byte[]>> records) {
-        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> recordsByPartition = new HashMap<>();
-        for (ConsumerRecord<byte[], byte[]> record : records) {
-            TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+    private Map<KafkaTopicPartition, List<KafkaRecordDto>> groupKafkaRecordsByPartition(List<KafkaRecordDto> records) {
+        Map<KafkaTopicPartition, List<KafkaRecordDto>> recordsByPartition = new HashMap<>();
+        for (KafkaRecordDto record : records) {
+            KafkaTopicPartition partition = new KafkaTopicPartition(record.topic(), record.partition());
             recordsByPartition.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(record);
         }
         return recordsByPartition;
+    }
+
+    /**
+     * Commits past every record in {@code batch}, for when none of them are being delivered (no
+     * filter match). The REST Proxy has no "commit everything consumed" shortcut (unlike the
+     * native consumer's no-args {@code commitSync()}), so this computes the equivalent explicitly:
+     * the highest offset seen per partition, plus one.
+     */
+    private void commitWholeBatch(Pipe pipe, List<KafkaRecordDto> batch) {
+        Map<KafkaTopicPartition, Long> offsetsToCommit = new HashMap<>();
+        for (KafkaRecordDto record : batch) {
+            KafkaTopicPartition partition = new KafkaTopicPartition(record.topic(), record.partition());
+            offsetsToCommit.merge(partition, record.offset() + 1, Math::max);
+        }
+        commitOffsets(pipe, offsetsToCommit);
+    }
+
+    private void commitOffsets(Pipe pipe, Map<KafkaTopicPartition, Long> offsetsToCommit) {
+        if (offsetsToCommit.isEmpty()) {
+            return;
+        }
+        List<KafkaOffsetDto> offsets = new ArrayList<>(offsetsToCommit.size());
+        offsetsToCommit.forEach((partition, offset) ->
+                offsets.add(new KafkaOffsetDto(partition.topic(), partition.partition(), offset)));
+        kafkaConsumerManager.commit(pipe, offsets);
+    }
+
+    private static <T> List<List<T>> partition(List<T> list, int size) {
+        int step = Math.max(1, size);
+        List<List<T>> partitions = new ArrayList<>();
+        for (int i = 0; i < list.size(); i += step) {
+            partitions.add(list.subList(i, Math.min(i + step, list.size())));
+        }
+        return partitions;
     }
 
     private static String pipeKey(Pipe pipe) {

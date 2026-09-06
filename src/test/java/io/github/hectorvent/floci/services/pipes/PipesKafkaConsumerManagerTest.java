@@ -8,8 +8,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.net.URI;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PipesKafkaConsumerManagerTest {
@@ -17,12 +24,45 @@ class PipesKafkaConsumerManagerTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private MskService mskService;
+    private KarapaceManager karapaceManager;
+    private PipesKafkaRestClient restClient;
     private PipesKafkaConsumerManager manager;
 
     @BeforeEach
     void setUp() {
         mskService = Mockito.mock(MskService.class);
-        manager = new PipesKafkaConsumerManager(mskService);
+        karapaceManager = Mockito.mock(KarapaceManager.class);
+        restClient = Mockito.mock(PipesKafkaRestClient.class);
+        manager = new PipesKafkaConsumerManager(mskService, karapaceManager, restClient);
+    }
+
+    @Test
+    void pollClosesOrphanedConsumerWhenSubscriptionFails() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setArn("arn:aws:pipes:us-east-1:000000000000:pipe/orders-pipe");
+        pipe.setName("orders-pipe");
+        pipe.setSource("smk://broker-1:9092");
+        pipe.setSourceParameters(MAPPER.readTree("""
+                {
+                  "SelfManagedKafkaParameters": {
+                    "TopicName": "orders"
+                  }
+                }
+                """));
+
+        URI restBaseUri = URI.create("http://localhost:8082/");
+        KafkaConsumerHandle handle = new KafkaConsumerHandle("instance-1",
+                URI.create("http://localhost:8082/consumers/g/instances/instance-1"));
+        when(karapaceManager.ensureStarted("broker-1:9092")).thenReturn(restBaseUri);
+        when(restClient.createConsumer(eq(restBaseUri), anyString(), anyString())).thenReturn(handle);
+        Mockito.doThrow(new RuntimeException("subscribe failed"))
+                .when(restClient).subscribe(eq(handle), anyList());
+
+        assertThrows(RuntimeException.class, () -> manager.poll(pipe));
+
+        // The consumer already exists server-side once createConsumer succeeds; a failed
+        // subscribe must delete it here, since the map never learns its handle to close it later.
+        verify(restClient).close(handle);
     }
 
     @Test
