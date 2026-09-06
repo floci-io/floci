@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -23,9 +24,10 @@ import java.util.Set;
  * <p>{@code AWS::Cognito::UserPool}: the physical id is the pool id, the whole resolved property
  * set is handed to the service as the API request, and the pool name falls back to a generated one.
  * {@code AWS::Cognito::UserPoolClient}: the physical id is the client id and {@code ClientSecret}
- * is only an attribute when the client has one, as on AWS. Both are updated in place; a provision
- * that leaves either with a new physical id is a replacement, whose displaced entity the
- * {@link ReplacementCleanup} record deletes once the update commits or restores on rollback.
+ * is only an attribute when the client has one, as on AWS. A pool is updated in place. A client is
+ * updated in place unless {@code UserPoolId} or {@code GenerateSecret}, its create-only properties,
+ * changed, in which case a new client is created and the {@link ReplacementCleanup} record deletes
+ * the displaced one once the update commits or restores it on rollback, as CloudFormation does.
  *
  * <p>{@code AWS::Cognito::UserPoolDomain}: the physical id is the domain name, as in AWS, and
  * {@code Fn::GetAtt CloudFrontDistribution} is the CloudFront name a custom domain's DNS alias
@@ -206,10 +208,15 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         Map<String, Object> refreshTokenRotation = resolveMapOrNull(props, "RefreshTokenRotation", ctx);
         Boolean enableTokenRevocation = parseBooleanOrNull(ctx.resolveOptional(props, "EnableTokenRevocation"));
 
+        // UserPoolId and GenerateSecret are createOnly in the schema: a change to either replaces
+        // the client, as on AWS, and the service's own update would refuse the pool move anyway,
+        // since a client is only found through the pool that owns it.
+        UserPoolClient prior = ctx.isUpdate() ? priorClient(ctx.priorPhysicalId()) : null;
         UserPoolClient client;
-        if (ctx.isUpdate()) {
+        if (prior != null && Objects.equals(userPoolId, prior.getUserPoolId())
+                && generateSecret == prior.isGenerateSecret()) {
             client = cognitoService.updateUserPoolClient(
-                    userPoolId, ctx.priorPhysicalId(), clientName, allowedOAuthFlowsUserPoolClient,
+                    userPoolId, prior.getClientId(), clientName, allowedOAuthFlowsUserPoolClient,
                     allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
                     defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
                     logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
@@ -265,6 +272,18 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("UserPoolId", userPoolId);
         r.getAttributes().put("CloudFrontDistribution",
                 provisioned.getCloudFrontDistribution() == null ? "" : provisioned.getCloudFrontDistribution());
+    }
+
+    private UserPoolClient priorClient(String clientId) {
+        try {
+            return cognitoService.describeUserPoolClient(clientId);
+        } catch (AwsException e) {
+            if (!NOT_FOUND.equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("User pool client {0} is gone; creating it anew", clientId);
+            return null;
+        }
     }
 
     private void deleteDomain(String domain, String userPoolId) {

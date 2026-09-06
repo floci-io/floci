@@ -657,12 +657,17 @@ public class CognitoService implements ResourceProvider {
     }
 
     public UserPoolClient describeUserPoolClient(String userPoolId, String clientId) {
-        UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+        UserPoolClient client = describeUserPoolClient(clientId);
         if (!client.getUserPoolId().equals(userPoolId)) {
             throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
         }
         return client;
+    }
+
+    /** By id alone, for callers that hold only the client id, such as a CloudFormation stack resource. */
+    public UserPoolClient describeUserPoolClient(String clientId) {
+        return clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
     }
 
     public List<UserPoolClient> listUserPoolClients(String userPoolId) {

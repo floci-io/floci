@@ -20,6 +20,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -106,12 +107,27 @@ class CognitoCfnProvisionerTest {
     }
 
     private static UserPoolClient client(String name, String secret) {
+        return client(CLIENT_ID, POOL_ID, name, secret);
+    }
+
+    private static UserPoolClient client(String id, String poolId, String name, String secret) {
         UserPoolClient c = new UserPoolClient();
-        c.setClientId(CLIENT_ID);
-        c.setUserPoolId(POOL_ID);
+        c.setClientId(id);
+        c.setUserPoolId(poolId);
         c.setClientName(name);
         c.setClientSecret(secret);
+        c.setGenerateSecret(secret != null);
         return c;
+    }
+
+    private void verifyNoClientCreate() {
+        verify(cognito, never()).createUserPoolClient(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    private void verifyNoClientUpdate() {
+        verify(cognito, never()).updateUserPoolClient(any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     private void stubClientCreate(UserPoolClient created) {
@@ -452,6 +468,7 @@ class CognitoCfnProvisionerTest {
 
     @Test
     void userPoolClientUpdateUpdatesThePriorClientInPlace() {
+        when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client("old-name", null));
         stubClientUpdate(client("web", null));
         StackResource r = resource(USER_POOL_CLIENT, "Client");
         r.setPhysicalId(CLIENT_ID);
@@ -464,9 +481,117 @@ class CognitoCfnProvisionerTest {
                 eq(List.of()), eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), isNull(),
                 eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()),
                 isNull(), eq(Boolean.TRUE));
-        verify(cognito, never()).createUserPoolClient(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verifyNoClientCreate();
         assertEquals(CLIENT_ID, r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void movingAUserPoolClientToAnotherPoolReplacesIt() {
+        when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client(CLIENT_ID, POOL_ID, "web", null));
+        stubClientCreate(client("replacement-client", "us-east-1_OtherPool", "web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+        r.getAttributes().putAll(Map.of("ClientId", CLIENT_ID, "ClientName", "web", "Name", "web"));
+        ObjectNode props = mapper.createObjectNode().put("UserPoolId", "us-east-1_OtherPool").put("ClientName", "web");
+
+        provisioner.provision(r, props, ctx(CLIENT_ID));
+
+        verify(cognito).createUserPoolClient(eq("us-east-1_OtherPool"), eq("web"), eq(false), anyBoolean(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verifyNoClientUpdate();
+        assertEquals("replacement-client", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(CLIENT_ID, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void changingGenerateSecretReplacesTheUserPoolClient() {
+        when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client(CLIENT_ID, POOL_ID, "web", null));
+        stubClientCreate(client("replacement-client", POOL_ID, "web", "s3cr3t"));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+        ObjectNode props = mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web")
+                .put("GenerateSecret", true);
+
+        provisioner.provision(r, props, ctx(CLIENT_ID));
+
+        verify(cognito).createUserPoolClient(eq(POOL_ID), eq("web"), eq(true), anyBoolean(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verifyNoClientUpdate();
+        assertEquals("replacement-client", r.getPhysicalId());
+        assertEquals("s3cr3t", r.getAttributes().get("ClientSecret"));
+        assertEquals(CLIENT_ID, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void replacedUserPoolClientIsDeletedWhenTheUpdateCompletes() {
+        when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client(CLIENT_ID, POOL_ID, "web", null));
+        stubClientCreate(client("replacement-client", "us-east-1_OtherPool", "web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", "us-east-1_OtherPool"), ctx(CLIENT_ID));
+
+        provisioner.completeUpdate(r);
+
+        verify(cognito).deleteUserPoolClient(CLIENT_ID);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void rollingBackAReplacedUserPoolClientRestoresThePriorOneAndDeletesTheReplacement() {
+        when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client(CLIENT_ID, POOL_ID, "web", null));
+        stubClientCreate(client("replacement-client", "us-east-1_OtherPool", "web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+        r.getAttributes().putAll(Map.of("ClientId", CLIENT_ID, "ClientName", "web", "Name", "web"));
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", "us-east-1_OtherPool"), ctx(CLIENT_ID));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cognito).deleteUserPoolClient("replacement-client");
+        verify(cognito, never()).deleteUserPoolClient(CLIENT_ID);
+        assertEquals(CLIENT_ID, r.getPhysicalId());
+        assertEquals(CLIENT_ID, r.getAttributes().get("ClientId"));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void anInPlaceUserPoolClientUpdateCannotBeRolledBack() {
+        when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client("web", null));
+        stubClientUpdate(client("web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID), ctx(CLIENT_ID));
+
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void aPriorUserPoolClientThatIsGoneIsCreatedAnew() {
+        when(cognito.describeUserPoolClient(CLIENT_ID))
+                .thenThrow(new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+        stubClientCreate(client("web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+
+        assertDoesNotThrow(() -> provisioner.provision(r,
+                mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web"), ctx(CLIENT_ID)));
+
+        verifyNoClientUpdate();
+        assertEquals(CLIENT_ID, r.getPhysicalId());
+    }
+
+    @Test
+    void aFailingPriorUserPoolClientLookupPropagates() {
+        when(cognito.describeUserPoolClient(CLIENT_ID))
+                .thenThrow(new AwsException("InternalErrorException", "storage unavailable", 500));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode().put("UserPoolId", POOL_ID), ctx(CLIENT_ID)));
+        assertEquals("InternalErrorException", e.getErrorCode());
     }
 
     @Test
