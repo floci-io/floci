@@ -1,4 +1,5 @@
 AWS::ApiGateway::Account	ApiGatewayAccountCfnProvisioner
+AWS::ApiGateway::ApiKey	ApiGatewayApiKeyCfnProvisioner
 AWS::ApiGateway::Authorizer	LEGACY_SWITCH
 AWS::ApiGateway::BasePathMapping	ApiGatewayDomainCfnProvisioner
 AWS::ApiGateway::Deployment	LEGACY_SWITCH
@@ -16,6 +17,7 @@ AWS::ApiGatewayV2::Stage	LEGACY_SWITCH
 AWS::AutoScaling::AutoScalingGroup	LEGACY_SWITCH
 AWS::AutoScaling::LaunchConfiguration	LEGACY_SWITCH
 AWS::AutoScaling::LifecycleHook	AutoScalingLifecycleHookCfnProvisioner
+AWS::AutoScaling::ScalingPolicy	AutoScalingScalingPolicyCfnProvisioner
 AWS::Batch::ComputeEnvironment	LEGACY_SWITCH
 AWS::Batch::JobDefinition	LEGACY_SWITCH
 AWS::Batch::JobQueue	LEGACY_SWITCH
@@ -110,6 +112,7 @@ AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner
 AWS::SNS::Topic	SnsCfnProvisioner
+AWS::SNS::TopicPolicy	SnsCfnProvisioner
 AWS::SQS::Queue	SqsCfnProvisioner
 AWS::SQS::QueuePolicy	SqsCfnProvisioner
 AWS::SSM::Parameter	SsmCfnProvisioner

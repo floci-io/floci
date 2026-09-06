@@ -6,6 +6,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -990,6 +991,29 @@ public class ApiGatewayService {
                 }
             }
         }
+        key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
+        return key;
+    }
+
+    /**
+     * Replaces an API key's tags wholesale. CloudFormation drives a resource's tags to the
+     * template's desired state on update, so a dropped key has to disappear, which the additive
+     * TagResource shape cannot express.
+     */
+    public ApiKey replaceApiKeyTags(String region, String apiKeyId, Map<String, String> tags) {
+        ApiKey key = getApiKey(region, apiKeyId);
+        // A reserved tag is an id override and only means something at create time, so adding or
+        // changing one here is refused. One the key already carries from its creation may stay, or
+        // a template that pins an id could never change any other tag afterwards.
+        Map<String, String> changed = new HashMap<>();
+        tags.forEach((tagKey, value) -> {
+            if (!Objects.equals(value, key.getTags().get(tagKey))) {
+                changed.put(tagKey, value);
+            }
+        });
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(changed);
+        key.setTags(new HashMap<>(tags));
         key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
         apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
         return key;

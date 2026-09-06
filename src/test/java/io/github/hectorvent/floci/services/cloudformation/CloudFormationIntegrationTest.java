@@ -80,6 +80,36 @@ class CloudFormationIntegrationTest {
         }
     }
 
+    /**
+     * DeleteStack answers before the stack is gone: the deletion runs on an executor. Waits until
+     * DescribeStacks reports DELETE_COMPLETE or no longer knows the stack, and fails on DELETE_FAILED
+     * or after ten seconds, so a test can assert on the deleted resources afterwards.
+     */
+    private static void awaitStackDeleted(String stackNameOrArn) {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            String statusXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackNameOrArn)
+            .when()
+                .post("/")
+            .then()
+                .extract().body().asString();
+            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>") || statusXml.contains("does not exist")) {
+                return;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting for stack " + stackNameOrArn + " to be deleted", e);
+            }
+        }
+        throw new AssertionError("Stack " + stackNameOrArn + " did not reach DELETE_COMPLETE within timeout");
+    }
+
     private static String firstPhysicalResourceId(String xml) {
         assertThat(xml, containsString("<PhysicalResourceId>"));
         String startMarker = "<PhysicalResourceId>";
@@ -2006,26 +2036,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            String statusXml = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", "cfn-1668-delete-stack")
-            .when()
-                .post("/")
-            .then()
-                .extract().body().asString();
-
-            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
-
-            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")
-                    || statusXml.contains("does not exist")) {
-                return;
-            }
-            Thread.sleep(200);
-        }
-        throw new AssertionError("Stack did not reach DELETE_COMPLETE within timeout");
+        awaitStackDeleted("cfn-1668-delete-stack");
     }
 
     // Regression: issue #1966. A resource removed outside CloudFormation must be treated as
@@ -2108,24 +2119,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
-        long deleteDeadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deleteDeadline) {
-            String statusXml = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackArn)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract().asString();
-            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
-                return;
-            }
-            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
-            Thread.sleep(200);
-        }
-        throw new AssertionError("Stack did not reach DELETE_COMPLETE within timeout");
+        awaitStackDeleted(stackArn);
     }
 
     @Test
@@ -4766,22 +4760,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Wait for async stack deletion to complete
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            String deleteStatus = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when()
-                .post("/")
-            .then()
-                .extract().body().asString();
-            if (deleteStatus.contains("DELETE_COMPLETE") || deleteStatus.contains("does not exist")) {
-                break;
-            }
-            Thread.sleep(200);
-        }
+        awaitStackDeleted(stackName);
 
         given()
         .when()
@@ -6433,6 +6412,8 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackDeleted(stackName);
+
         // 6. Verify resources are deleted
         given()
             .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
@@ -7078,6 +7059,7 @@ class CloudFormationIntegrationTest {
                 .formParam("StackName", stackName)
                 .when().post("/")
                 .then().statusCode(200);
+        awaitStackDeleted(stackName);
 
         given()
                 .formParam("Action", "DescribeSecurityGroups")
@@ -7167,6 +7149,8 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        awaitStackDeleted(stackName);
 
         // Cluster is gone (deleted in reverse order, after the service)
         given()
@@ -7521,6 +7505,8 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        awaitStackDeleted(stackName);
 
         // Load balancer is gone
         given()
@@ -9861,6 +9847,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
         given().when().delete("/" + bucket + "/" + key).then().statusCode(204);
         given().when().delete("/" + bucket).then().statusCode(204);
     }
@@ -10726,6 +10713,7 @@ class CloudFormationIntegrationTest {
             .formParam("Action", "DeleteStack")
             .formParam("StackName", stackName)
         .when().post("/").then().statusCode(200);
+        awaitStackDeleted(stackName);
 
         String workingTemplate = """
             {
@@ -11231,6 +11219,7 @@ class CloudFormationIntegrationTest {
             .formParam("Action", "DeleteStack")
             .formParam("StackName", "cfn-teardown-stack")
         .when().post("/").then().statusCode(200);
+        awaitStackDeleted("cfn-teardown-stack");
 
         // The rule is gone from the custom bus...
         given()

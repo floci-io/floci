@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.lifecycle;
 
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
@@ -18,6 +19,7 @@ import jakarta.ws.rs.POST;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.security.GeneralSecurityException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -105,22 +107,21 @@ public class EmulatorInfoController {
      * The PEM a client needs to trust Floci. With the default configuration that is the local root
      * CA alone: it signs the HTTPS certificate and every certificate Floci issues. With a
      * user-provided certificate ({@code floci.tls.cert-path}) the HTTPS endpoint is signed by that
-     * certificate's issuer instead, so the response is a bundle: the user certificate file first
-     * (the same file the Lambda launcher mounts into containers), then the local CA, which still
-     * signs what Floci itself issues. Trust the file once ({@code AWS_CA_BUNDLE},
+     * certificate's issuer instead, so the response is a bundle: the certificates in the user
+     * certificate file first (never a private key that file may also hold), then the local CA,
+     * which still signs what Floci itself issues. Trust the file once ({@code AWS_CA_BUNDLE},
      * {@code NODE_EXTRA_CA_CERTS}, a keychain) and both validate.
      */
     @GET
     @Path("/ca.pem")
     @Produces(MediaType.TEXT_PLAIN)
-    public String caPem() throws IOException {
+    public String caPem() throws IOException, GeneralSecurityException {
         String localCa = certificateAuthority.caPem();
         Optional<String> userCertificate = userCertificatePath();
         if (userCertificate.isEmpty()) {
             return localCa;
         }
-        String userPem = Files.readString(java.nio.file.Path.of(userCertificate.get()));
-        return userPem.endsWith("\n") ? userPem + localCa : userPem + "\n" + localCa;
+        return ContainerCaBundle.certificatePem(Files.readString(java.nio.file.Path.of(userCertificate.get()))) + localCa;
     }
 
     /** Set when TLS serves a user-provided certificate, the same condition {@code TlsConfigSource} applies. */
