@@ -201,7 +201,10 @@ the result to S3 as one or more objects under `<prefix>`.
 - `MANIFEST` writes `<prefix>manifest` listing every object with its
   `content_length`.
 - Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select
-  does not run.
+  does not run. A failed UNLOAD then removes any objects it had already written. With
+  `ALLOWOVERWRITE` a failed UNLOAD leaves its objects in place (they may have replaced prior data,
+  so they are not deleted); a `MANIFEST` request that fails this way can leave data objects without
+  a manifest, and rerunning the same statement overwrites them.
 - S3 access is authorized as an unsigned request, like COPY from S3.
 - Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `IAM_ROLE` / `CREDENTIALS`,
   `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the

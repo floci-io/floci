@@ -13,10 +13,8 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.function.IntConsumer;
 import java.util.zip.GZIPInputStream;
@@ -515,9 +513,6 @@ public final class S3CopySimulator {
         String contentType = spec.gzip() ? "application/gzip" : "text/plain";
         List<String> writtenKeys = new ArrayList<>();
         List<Integer> writtenLengths = new ArrayList<>();
-        // Slice keys that already existed when we overwrote them (only possible under ALLOWOVERWRITE).
-        // Failure cleanup must not delete these: doing so would destroy data the caller never created.
-        Set<String> preExistingKeys = new HashSet<>();
 
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
         OutputStream acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
@@ -544,7 +539,7 @@ public final class S3CopySimulator {
                     closeAcc(acc, sink);
                     closeQuietly(backend);
                     if (spec.manifest()) {
-                        deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                        deleteWritten(s3, spec, writtenKeys);
                     }
                     sendError(client, null, SQLSTATE_INTERNAL,
                             "UNLOAD failed: backend closed mid-stream", txStatus, onStatusChange);
@@ -602,7 +597,7 @@ public final class S3CopySimulator {
                         closeAcc(acc, sink);
                         closeQuietly(backend);
                         if (spec.manifest()) {
-                            deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                            deleteWritten(s3, spec, writtenKeys);
                         }
                         sendError(client, null,
                                 SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
@@ -616,14 +611,11 @@ public final class S3CopySimulator {
                         String key = unloadDataKey(spec, sliceIndex);
                         try {
                             s3.authorizeAnonymousPutObject(spec.bucket(), key);
-                            if (spec.allowOverwrite() && s3.objectExists(spec.bucket(), key)) {
-                                preExistingKeys.add(key);
-                            }
                             s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
                         } catch (AwsException e) {
                             LOG.debugv(e, "UNLOAD slice write to s3://{0}/{1} failed", spec.bucket(), key);
                             if (spec.manifest()) {
-                                deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                                deleteWritten(s3, spec, writtenKeys);
                             }
                             return abortUnload(client, backend, backendDecoder, sink, sink,
                                     unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
@@ -653,7 +645,7 @@ public final class S3CopySimulator {
                 } else if (t == 'E') {
                     closeAcc(acc, sink);
                     if (spec.manifest()) {
-                        deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                        deleteWritten(s3, spec, writtenKeys);
                     }
                     forward(client, m);
                     drainToReadyForQuery(backendDecoder, client, onStatusChange);
@@ -665,14 +657,14 @@ public final class S3CopySimulator {
         } catch (AwsException e) {
             LOG.debugv(e, "UNLOAD S3 operation failed during streaming");
             if (spec.manifest()) {
-                deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                deleteWritten(s3, spec, writtenKeys);
             }
             return abortUnload(client, backend, backendDecoder, acc, sink,
                     unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
         } catch (RuntimeException | IOException e) {
             LOG.warnv(e, "UNLOAD streaming failed");
             if (spec.manifest()) {
-                deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                deleteWritten(s3, spec, writtenKeys);
             }
             String detail = e.getMessage() != null ? e.getMessage() : e.toString();
             return abortUnload(client, backend, backendDecoder, acc, sink,
@@ -688,14 +680,11 @@ public final class S3CopySimulator {
             String key = unloadDataKey(spec, sliceIndex);
             try {
                 s3.authorizeAnonymousPutObject(spec.bucket(), key);
-                if (spec.allowOverwrite() && s3.objectExists(spec.bucket(), key)) {
-                    preExistingKeys.add(key);
-                }
                 s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
             } catch (AwsException e) {
                 LOG.debugv(e, "UNLOAD final slice write to s3://{0}/{1} failed", spec.bucket(), key);
                 if (spec.manifest()) {
-                    deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                    deleteWritten(s3, spec, writtenKeys);
                 }
                 sendError(client, backend, unloadWriteSqlState(e), unloadWriteMessage(e, spec),
                         txStatus, onStatusChange);
@@ -703,7 +692,7 @@ public final class S3CopySimulator {
             } catch (RuntimeException e) {
                 LOG.warnv(e, "UNLOAD final slice write failed");
                 if (spec.manifest()) {
-                    deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                    deleteWritten(s3, spec, writtenKeys);
                 }
                 String detail = e.getMessage() != null ? e.getMessage() : e.toString();
                 sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
@@ -721,7 +710,7 @@ public final class S3CopySimulator {
                         "application/json", Map.of());
             } catch (RuntimeException e) {
                 LOG.warnv(e, "UNLOAD manifest write failed; removing partial data objects");
-                deleteWritten(s3, spec, writtenKeys, preExistingKeys);
+                deleteWritten(s3, spec, writtenKeys);
                 sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD manifest write failed", txStatus, onStatusChange);
                 return true;
             }
@@ -826,15 +815,19 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void deleteWritten(S3Service s3, CopyStatementParser.S3Unload spec,
-            List<String> keys, Set<String> preExistingKeys) {
+    private static void deleteWritten(S3Service s3, CopyStatementParser.S3Unload spec, List<String> keys) {
+        if (spec.allowOverwrite()) {
+            // Under ALLOWOVERWRITE a slice key may have replaced a pre-existing object, and there is no
+            // reliable way to tell an overwrite from a fresh write (the check and the write are not
+            // atomic, and a concurrent UNLOAD to the same prefix could own the stored object). Rather
+            // than risk deleting data this operation did not create, leave every written object in
+            // place. A failed MANIFEST + ALLOWOVERWRITE UNLOAD can therefore leave valid data objects
+            // without a manifest; rerunning the same statement overwrites them cleanly.
+            return;
+        }
+        // Non-overwrite runs verified the prefix was empty before streaming, so every written key was
+        // created by this operation and is safe to remove.
         for (String k : keys) {
-            if (preExistingKeys.contains(k)) {
-                // This slice key overwrote a pre-existing object (ALLOWOVERWRITE). Removing it would
-                // destroy data the caller never created, so it is left in place even though the
-                // UNLOAD as a whole failed. Newly created slice keys are still cleaned up below.
-                continue;
-            }
             try {
                 s3.authorizeAnonymousDeleteObject(spec.bucket(), k);
                 s3.deleteObject(spec.bucket(), k);
