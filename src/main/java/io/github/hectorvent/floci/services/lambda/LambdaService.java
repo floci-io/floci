@@ -490,8 +490,10 @@ public class LambdaService implements ResourceProvider {
             getFunction(region, functionName, null);
             return true;
         } catch (AwsException e) {
-            // Covers both a plain miss and a name/ARN the resolver rejects; the caller only
-            // needs a yes/no answer, so the specific rejection reason is intentionally dropped.
+            // Covers both a plain miss and a name/ARN the resolver rejects: the exception is
+            // this predicate's negative answer, logged at debug so a surprising false stays
+            // diagnosable without turning ordinary existence misses into log noise.
+            LOG.debugv("functionExists({0}, {1}) is false: {2}", region, functionName, e.getMessage());
             return false;
         }
     }
