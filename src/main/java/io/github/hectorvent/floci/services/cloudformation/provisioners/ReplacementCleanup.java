@@ -140,7 +140,32 @@ final class ReplacementCleanup {
         return null;
     }
 
+    /**
+     * Drops what the cleanup is done with: the record when nothing is owed any more, and otherwise
+     * only the entries that used up their attempts. The engine calls this once the resource's
+     * cleanup either completed or gave up, and giving up on one entity must not forget another
+     * that still has attempts left; that one stays owed for the next committed update or the
+     * stack delete.
+     */
     static void clear(StackResource r) {
+        ObjectNode cleanup = read(r);
+        if (cleanup == null) {
+            return;
+        }
+        ArrayNode displaced = cleanup.withArray("displaced");
+        ArrayNode kept = MAPPER.createArrayNode();
+        for (JsonNode entry : displaced) {
+            if (entry.path("cleanupAttempts").asInt(0) < MAX_ATTEMPTS) {
+                kept.add(entry);
+            }
+        }
+        cleanup.set("displaced", kept);
+        cleanup.remove("priorPhysicalId");
+        cleanup.remove("priorAttributes");
+        write(r, cleanup);
+    }
+
+    private static void drop(StackResource r) {
         r.getAttributes().remove(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
     }
 
@@ -148,7 +173,9 @@ final class ReplacementCleanup {
      * One delete attempt for every entity still owed one. An entity whose delete succeeds leaves
      * the list; one whose delete throws keeps its attempt count and last failure, so the caller's
      * retries continue where this one stopped and no entity is left untried because another kept
-     * failing. {@code UpdateReplacePolicy: Retain} keeps the entity a committed replacement
+     * failing. The result reports the lowest attempt count among what remains: the engine retries
+     * while that is below three, so it stops only once every remaining entity has used up its own
+     * attempts. {@code UpdateReplacePolicy: Retain} keeps the entity a committed replacement
      * displaced, not a replacement a failed update created.
      */
     static UpdateCleanupResult complete(StackResource r, Deleter deleter) {
@@ -159,7 +186,7 @@ final class ReplacementCleanup {
         boolean retain = "Retain".equals(r.getUpdateReplacePolicy());
         ArrayNode displaced = cleanup.withArray("displaced");
         ArrayNode remaining = MAPPER.createArrayNode();
-        int attempts = 0;
+        int attempts = Integer.MAX_VALUE;
         String failureReason = null;
         String firstRemaining = null;
         for (JsonNode node : displaced) {
@@ -182,12 +209,12 @@ final class ReplacementCleanup {
                 }
             }
             remaining.add(entry);
-            if (firstRemaining == null) {
-                firstRemaining = physicalId;
-            }
-            if (entryAttempts > attempts) {
+            // The result names the entity with the fewest attempts, the one the engine's retries
+            // are still for, so its DELETE_FAILED event points at what is actually still owed.
+            if (entryAttempts < attempts) {
                 attempts = entryAttempts;
                 failureReason = entry.path("cleanupFailureReason").asText(null);
+                firstRemaining = physicalId;
             }
         }
         cleanup.set("displaced", remaining);
@@ -236,7 +263,7 @@ final class ReplacementCleanup {
 
     private static void write(StackResource r, ObjectNode cleanup) {
         if (cleanup.path("displaced").size() == 0 && cleanup.path("priorPhysicalId").asText(null) == null) {
-            clear(r);
+            drop(r);
             return;
         }
         r.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, cleanup.toString());
@@ -257,7 +284,7 @@ final class ReplacementCleanup {
             return node.isObject() ? (ObjectNode) node : null;
         } catch (JsonProcessingException e) {
             LOG.warnv("Unreadable replacement cleanup record on {0}, dropping it: {1}", r.getLogicalId(), e.getMessage());
-            clear(r);
+            drop(r);
             return null;
         }
     }

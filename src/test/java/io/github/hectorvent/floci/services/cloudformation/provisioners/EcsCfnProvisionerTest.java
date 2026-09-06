@@ -474,6 +474,72 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
+    void givingUpOnOneEntityDoesNotForgetAnotherThatStillHasAttemptsLeft() {
+        String orphan = TASK_DEF_ARN.replace(":3", ":4");
+        TaskDefinition next = new TaskDefinition();
+        next.setTaskDefinitionArn(orphan);
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(next);
+        doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(orphan, REGION);
+        StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
+        r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);
+        provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        // The orphan uses up its three attempts in a cleanup where it is the only entry.
+        for (int i = 0; i < 3; i++) {
+            provisioner.completeUpdate(r);
+        }
+        assertEquals(3, provisioner.completeUpdate(r).attempts());
+
+        // A later replacement adds revision 3 to the list; its delete also fails at first.
+        TaskDefinition fifth = new TaskDefinition();
+        fifth.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":5"));
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(fifth);
+        provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+        doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+
+        // The result reports the entry with attempts left, so the engine keeps retrying it rather
+        // than giving up on the strength of the exhausted orphan.
+        UpdateCleanupResult first = provisioner.completeUpdate(r);
+        assertFalse(first.complete());
+        assertEquals(1, first.attempts());
+        assertEquals(TASK_DEF_ARN, first.previousPhysicalId());
+
+        // The engine gives up once the lowest count reaches three and clears; only the exhausted
+        // entries go, and an entry that succeeded meanwhile is gone already.
+        org.mockito.Mockito.doReturn(new TaskDefinition()).when(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+        UpdateCleanupResult second = provisioner.completeUpdate(r);
+        assertFalse(second.complete(), "the exhausted orphan is still listed");
+        assertEquals(3, second.attempts());
+        assertEquals(orphan, second.previousPhysicalId());
+        provisioner.clearUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r), "nothing with attempts left remains");
+        // One delete during the failed rollback, then the three cleanup attempts, never a fifth.
+        verify(ecs, org.mockito.Mockito.times(4)).deregisterTaskDefinition(orphan, REGION);
+    }
+
+    @Test
+    void clearingAfterAGiveUpKeepsAnEntryThatStillHasAttemptsLeft() {
+        String orphan = TASK_DEF_ARN.replace(":3", ":4");
+        TaskDefinition next = new TaskDefinition();
+        next.setTaskDefinitionArn(orphan);
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(next);
+        doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(orphan, REGION);
+        StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
+        r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);
+        provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        provisioner.completeUpdate(r);
+
+        // Cleared with one attempt used: the orphan is not forgotten.
+        provisioner.clearUpdate(r);
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(orphan, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
     void aNonIntegerDesiredCountIsAValidationError() {
         StackResource r = resource("AWS::ECS::Service", "Service");
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
