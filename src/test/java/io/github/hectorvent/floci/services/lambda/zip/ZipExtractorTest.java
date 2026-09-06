@@ -23,6 +23,17 @@ class ZipExtractorTest {
 
     private final ZipExtractor extractor = new ZipExtractor();
 
+    private static final int LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+    private static final int CENTRAL_DIRECTORY_HEADER_SIGNATURE = 0x02014b50;
+    private static final int END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+    private static final int DATA_DESCRIPTOR_SIGNATURE = 0x08074b50;
+    private static final int DATA_DESCRIPTOR_FLAG = 0x0008;
+
+    /** Entry metadata for fixtures that need to control central-directory declarations. */
+    private record RawZipEntry(String name, int method, int flags, byte[] payload,
+                               long crc, long expandedSize, long descriptorExpandedSize) {
+    }
+
     /** Build a ZIP whose entry names use the given separator, as PowerShell does. */
     private static byte[] zipWith(String entryName, String content) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -47,64 +58,15 @@ class ZipExtractorTest {
     }
 
     private static byte[] zipWithDeclaredSizes(long... sizes) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        List<Integer> offsets = new ArrayList<>();
-        List<byte[]> names = new ArrayList<>();
         byte[] content = new byte[]{'x'};
         CRC32 crc = new CRC32();
         crc.update(content);
-
+        RawZipEntry[] entries = new RawZipEntry[sizes.length];
         for (int i = 0; i < sizes.length; i++) {
-            byte[] name = ("entry" + i).getBytes(StandardCharsets.UTF_8);
-            offsets.add(out.size());
-            names.add(name);
-            le32(out, 0x04034b50L);
-            le16(out, 20);
-            le16(out, 0);
-            le16(out, 0);
-            le16(out, 0);
-            le16(out, 0);
-            le32(out, crc.getValue());
-            le32(out, content.length);
-            le32(out, sizes[i]);
-            le16(out, name.length);
-            le16(out, 0);
-            out.write(name);
-            out.write(content);
+            entries[i] = new RawZipEntry("entry" + i, 0, 0, content,
+                    crc.getValue(), sizes[i], 0);
         }
-
-        int centralOffset = out.size();
-        for (int i = 0; i < sizes.length; i++) {
-            byte[] name = names.get(i);
-            le32(out, 0x02014b50L);
-            le16(out, 20);
-            le16(out, 20);
-            le16(out, 0);
-            le16(out, 0);
-            le16(out, 0);
-            le16(out, 0);
-            le32(out, crc.getValue());
-            le32(out, content.length);
-            le32(out, sizes[i]);
-            le16(out, name.length);
-            le16(out, 0);
-            le16(out, 0);
-            le16(out, 0);
-            le16(out, 0);
-            le32(out, 0);
-            le32(out, offsets.get(i));
-            out.write(name);
-        }
-        int centralSize = out.size() - centralOffset;
-        le32(out, 0x06054b50L);
-        le16(out, 0);
-        le16(out, 0);
-        le16(out, sizes.length);
-        le16(out, sizes.length);
-        le32(out, centralSize);
-        le32(out, centralOffset);
-        le16(out, 0);
-        return out.toByteArray();
+        return rawZip(entries);
     }
 
     @Test
@@ -226,76 +188,101 @@ class ZipExtractorTest {
      * the bytes are assembled by hand.
      */
     private static byte[] streamedZip(StreamedEntry... entries) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        List<int[]> localOffsets = new ArrayList<>();
-        List<byte[]> names = new ArrayList<>();
-        List<long[]> meta = new ArrayList<>();
-
-        for (StreamedEntry entry : entries) {
-            byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        RawZipEntry[] rawEntries = new RawZipEntry[entries.length];
+        for (int i = 0; i < entries.length; i++) {
+            StreamedEntry entry = entries[i];
             byte[] raw = entry.content().getBytes(StandardCharsets.UTF_8);
             byte[] payload = entry.stored() ? raw : deflate(raw);
             CRC32 crc = new CRC32();
             crc.update(raw);
             int method = entry.stored() ? 0 : 8;
+            rawEntries[i] = new RawZipEntry(entry.name(), method, DATA_DESCRIPTOR_FLAG, payload,
+                    crc.getValue(), raw.length, raw.length);
+        }
+        return rawZip(rawEntries);
+    }
 
-            localOffsets.add(new int[]{out.size()});
-            le32(out, 0x04034b50L);          // local file header signature
-            le16(out, 20);                   // version needed
-            le16(out, 0x0008);               // general-purpose bit 3: data descriptor follows
-            le16(out, method);
-            le16(out, 0);                    // mod time
-            le16(out, 0);                    // mod date
-            le32(out, 0);                    // crc-32       — deferred to the descriptor
-            le32(out, 0);                    // compressed   — deferred to the descriptor
-            le32(out, 0);                    // uncompressed — deferred to the descriptor
-            le16(out, name.length);
-            le16(out, 0);                    // extra length
-            out.write(name);
-            out.write(payload);
-            le32(out, 0x08074b50L);          // data descriptor signature
-            le32(out, crc.getValue());
-            le32(out, payload.length);
-            le32(out, raw.length);
+    /** Writes a raw archive so tests can use valid data with deliberately invalid declarations. */
+    private static byte[] rawZip(RawZipEntry... entries) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        List<Integer> localOffsets = new ArrayList<>();
 
-            names.add(name);
-            meta.add(new long[]{crc.getValue(), payload.length, raw.length, method});
+        for (RawZipEntry entry : entries) {
+            localOffsets.add(out.size());
+            writeLocalHeader(out, entry);
+            out.write(entry.payload());
+            if ((entry.flags() & DATA_DESCRIPTOR_FLAG) != 0) {
+                writeDataDescriptor(out, entry);
+            }
         }
 
         int centralOffset = out.size();
         for (int i = 0; i < entries.length; i++) {
-            byte[] name = names.get(i);
-            long[] m = meta.get(i);
-            le32(out, 0x02014b50L);          // central directory header signature
-            le16(out, 20);                   // version made by
-            le16(out, 20);                   // version needed
-            le16(out, 0x0008);               // same descriptor flag as the local header
-            le16(out, (int) m[3]);
-            le16(out, 0);
-            le16(out, 0);
-            le32(out, m[0]);                 // crc-32       — the real value lives here
-            le32(out, m[1]);                 // compressed   — the real value lives here
-            le32(out, m[2]);                 // uncompressed — the real value lives here
-            le16(out, name.length);
-            le16(out, 0);                    // extra length
-            le16(out, 0);                    // comment length
-            le16(out, 0);                    // disk number start
-            le16(out, 0);                    // internal attributes
-            le32(out, 0);                    // external attributes
-            le32(out, localOffsets.get(i)[0]);
-            out.write(name);
+            writeCentralDirectoryHeader(out, entries[i], localOffsets.get(i));
         }
         int centralSize = out.size() - centralOffset;
+        writeEndOfCentralDirectory(out, entries.length, centralSize, centralOffset);
+        return out.toByteArray();
+    }
 
-        le32(out, 0x06054b50L);              // end of central directory signature
-        le16(out, 0);                        // this disk
-        le16(out, 0);                        // disk with central directory
-        le16(out, entries.length);
-        le16(out, entries.length);
+    private static void writeLocalHeader(ByteArrayOutputStream out, RawZipEntry entry) {
+        boolean hasDescriptor = (entry.flags() & DATA_DESCRIPTOR_FLAG) != 0;
+        byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        le32(out, LOCAL_FILE_HEADER_SIGNATURE);
+        le16(out, 20);
+        le16(out, entry.flags());
+        le16(out, entry.method());
+        le16(out, 0);
+        le16(out, 0);
+        le32(out, hasDescriptor ? 0 : entry.crc());
+        le32(out, hasDescriptor ? 0 : entry.payload().length);
+        le32(out, hasDescriptor ? 0 : entry.expandedSize());
+        le16(out, name.length);
+        le16(out, 0);
+        out.writeBytes(name);
+    }
+
+    private static void writeDataDescriptor(ByteArrayOutputStream out, RawZipEntry entry) {
+        le32(out, DATA_DESCRIPTOR_SIGNATURE);
+        le32(out, entry.crc());
+        le32(out, entry.payload().length);
+        le32(out, entry.descriptorExpandedSize());
+    }
+
+    private static void writeCentralDirectoryHeader(ByteArrayOutputStream out,
+                                                    RawZipEntry entry, int localOffset) {
+        byte[] name = entry.name().getBytes(StandardCharsets.UTF_8);
+        le32(out, CENTRAL_DIRECTORY_HEADER_SIGNATURE);
+        le16(out, 20);
+        le16(out, 20);
+        le16(out, entry.flags());
+        le16(out, entry.method());
+        le16(out, 0);
+        le16(out, 0);
+        le32(out, entry.crc());
+        le32(out, entry.payload().length);
+        le32(out, entry.expandedSize());
+        le16(out, name.length);
+        le16(out, 0);
+        le16(out, 0);
+        le16(out, 0);
+        le16(out, 0);
+        le32(out, 0);
+        le32(out, localOffset);
+        out.writeBytes(name);
+    }
+
+    private static void writeEndOfCentralDirectory(ByteArrayOutputStream out,
+                                                   int entryCount, int centralSize,
+                                                   int centralOffset) {
+        le32(out, END_OF_CENTRAL_DIRECTORY_SIGNATURE);
+        le16(out, 0);
+        le16(out, 0);
+        le16(out, entryCount);
+        le16(out, entryCount);
         le32(out, centralSize);
         le32(out, centralOffset);
-        le16(out, 0);                        // comment length
-        return out.toByteArray();
+        le16(out, 0);
     }
 
     private static byte[] deflate(byte[] raw) {
