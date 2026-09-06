@@ -244,6 +244,45 @@ class SesReceiptRuleV1IntegrationTest {
 
     @Test
     @Order(9)
+    void leadingZeroIndex_isParsedUnderItsOriginalSpelling() {
+        // Probed: member.01 on its own is a valid slot 1 and the action must not be dropped.
+        req("CreateReceiptRule").formParam("RuleSetName", RS)
+                .formParam("Rule.Name", "leadzero")
+                .formParam("Rule.Actions.member.01.StopAction.Scope", "RuleSet")
+        .when().post("/").then().statusCode(200);
+
+        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+                .formParam("RuleName", "leadzero")
+        .when().post("/").then().statusCode(200)
+                .body(containsString("<Scope>RuleSet</Scope>"));
+
+        // Probed: mixed spellings order by (length, lex), so 01 followed by 2 puts the
+        // one-digit token first and slot 1 is an empty pad.
+        req("CreateReceiptRule").formParam("RuleSetName", RS)
+                .formParam("Rule.Name", "leadzero2")
+                .formParam("Rule.Actions.member.01.AddHeaderAction.HeaderName", "X-A")
+                .formParam("Rule.Actions.member.01.AddHeaderAction.HeaderValue", "v")
+                .formParam("Rule.Actions.member.2.AddHeaderAction.HeaderName", "X-B")
+                .formParam("Rule.Actions.member.2.AddHeaderAction.HeaderValue", "v")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("Exactly one action type must be specified for each ReceiptAction"));
+    }
+
+    @Test
+    @Order(9)
+    void stopAction_mustBeLast() {
+        req("CreateReceiptRule").formParam("RuleSetName", RS)
+                .formParam("Rule.Name", "stopfirst")
+                .formParam("Rule.Actions.member.1.StopAction.Scope", "RuleSet")
+                .formParam("Rule.Actions.member.2.AddHeaderAction.HeaderName", "X-A")
+                .formParam("Rule.Actions.member.2.AddHeaderAction.HeaderValue", "v")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("Stop action, if any, must be placed at the end of the actions list"));
+    }
+
+    @Test
+    @Order(9)
     void actionIndexZero_isRejectedAsMalformedInput() {
         req("CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "zeroidx")

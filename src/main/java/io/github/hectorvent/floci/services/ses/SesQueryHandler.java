@@ -29,11 +29,10 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.SortedSet;
-import java.util.TreeSet;
 
 /**
  * Query-protocol handler for SES actions.
@@ -1073,34 +1072,33 @@ public class SesQueryHandler {
         rule.setScanEnabled(parseXsdBoolean(params, "Rule.ScanEnabled"));
         rule.setTlsPolicy(getParam(params, "Rule.TlsPolicy"));
         rule.setRecipients(extractMembers(params, "Rule.Recipients"));
-        // Indexes are collected from the submitted keys rather than counted up sequentially: an
-        // action serialized as an empty structure contributes no keys at all, so the list can
-        // arrive with gaps (e.g. member.2 only). AWS pads such a gap into an empty action slot
-        // and rejects it because the slot carries no action type (probed), and index 0 has its
-        // own MalformedInput error, so neither may be silently dropped or compacted here.
+        // Index tokens are collected from the submitted keys rather than counted up sequentially:
+        // an action serialized as an empty structure contributes no keys at all, so the list can
+        // arrive with gaps (e.g. member.2 only). Probing pinned AWS's exact semantics: tokens are
+        // grouped by numeric value, ordered by (length, then lexicographically), and the i-th
+        // token must parse to i, or the padded empty slot is rejected because it carries no
+        // action type. A leading-zero token such as member.01 is therefore VALID on its own, and
+        // must be parsed under its original spelling rather than a rebuilt canonical one.
         List<ReceiptAction> actions = new ArrayList<>();
-        int highestRecognized = 0;
-        for (int i : receiptActionIndexes(params)) {
-            ReceiptAction action = parseReceiptAction(params, "Rule.Actions.member." + i + ".");
+        int position = 1;
+        for (String token : receiptActionIndexTokens(params)) {
+            if (Integer.parseInt(token) != position) {
+                throw new AwsException("InvalidParameterValue",
+                        "Exactly one action type must be specified for each ReceiptAction", 400);
+            }
+            ReceiptAction action = parseReceiptAction(params, "Rule.Actions.member." + token + ".");
             if (action != null) {
                 actions.add(action);
-                highestRecognized = i;
+                position++;
             }
-        }
-        // Keys whose action type AWS does not model contribute nothing on the AWS side either,
-        // so contiguity is judged on the recognized actions alone: a higher index than the count
-        // means a padded empty slot existed between (or before) them.
-        if (highestRecognized != actions.size()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Exactly one action type must be specified for each ReceiptAction", 400);
         }
         rule.setActions(actions);
         return rule;
     }
 
-    private SortedSet<Integer> receiptActionIndexes(MultivaluedMap<String, String> params) {
+    private List<String> receiptActionIndexTokens(MultivaluedMap<String, String> params) {
         String prefix = "Rule.Actions.member.";
-        SortedSet<Integer> indexes = new TreeSet<>();
+        Map<Integer, String> byValue = new java.util.HashMap<>();
         for (String key : params.keySet()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -1109,24 +1107,32 @@ public class SesQueryHandler {
             if (dot < 0) {
                 continue;
             }
-            String index = key.substring(prefix.length(), dot);
-            if (index.isEmpty() || !index.chars().allMatch(Character::isDigit)) {
+            String token = key.substring(prefix.length(), dot);
+            if (token.isEmpty() || !token.chars().allMatch(Character::isDigit)) {
                 continue;
             }
             // A digit run that overflows int implies an index far beyond any contiguous list,
-            // which AWS's gap padding turns into the empty-slot rejection below.
-            if (index.length() > 9) {
+            // which AWS's gap padding turns into the empty-slot rejection.
+            if (token.length() > 9) {
                 throw new AwsException("InvalidParameterValue",
                         "Exactly one action type must be specified for each ReceiptAction", 400);
             }
-            int parsed = Integer.parseInt(index);
-            if (parsed == 0) {
+            int value = Integer.parseInt(token);
+            if (value == 0) {
                 // Probed: AWS rejects member.0 outright.
                 throw new AwsException("MalformedInput", "0 is not a valid index", 400);
             }
-            indexes.add(parsed);
+            // Two spellings of the same numeric index keep one struct on AWS too; the probe
+            // showed the padded spelling winning, so prefer the longer token deterministically.
+            String existing = byValue.get(value);
+            if (existing == null || token.length() > existing.length()
+                    || (token.length() == existing.length() && token.compareTo(existing) > 0)) {
+                byValue.put(value, token);
+            }
         }
-        return indexes;
+        List<String> tokens = new ArrayList<>(byValue.values());
+        tokens.sort(Comparator.comparingInt(String::length).thenComparing(Comparator.naturalOrder()));
+        return tokens;
     }
 
     private ReceiptAction parseReceiptAction(MultivaluedMap<String, String> params, String prefix) {

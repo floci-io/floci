@@ -443,6 +443,13 @@ public class SesReceiptRuleService {
             // Probed: the 11th action is rejected at the service layer, like the rules-per-set cap.
             throw new AwsException("LimitExceeded", "Too many actions", 400);
         }
+        for (int i = 0; i < rule.getActions().size() - 1; i++) {
+            // Probed: a stop action anywhere but the last position is rejected.
+            if (rule.getActions().get(i).is("StopAction")) {
+                throw new AwsException("InvalidParameterValue",
+                        "Stop action, if any, must be placed at the end of the actions list", 400);
+            }
+        }
         for (ReceiptAction action : rule.getActions()) {
             String headerName = action.property("HeaderName");
             if (action.is("AddHeaderAction") && headerName != null
