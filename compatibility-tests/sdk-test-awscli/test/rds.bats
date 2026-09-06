@@ -5,11 +5,13 @@ setup() {
     load 'test_helper/common-setup'
     DB_ID="bats-rds-$(unique_name)"
     DB_ID_2="bats-rds-2-$(unique_name)"
+    RDS_CLUSTER_ID="bats-rds-cluster-$(unique_name)"
 }
 
 teardown() {
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID" --skip-final-snapshot >/dev/null 2>&1 || true
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID_2" --skip-final-snapshot >/dev/null 2>&1 || true
+    aws_cmd rds delete-db-cluster --db-cluster-identifier "$RDS_CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
     if [ -n "${MANAGED_SECRET_ARN:-}" ]; then
         aws_cmd secretsmanager delete-secret --secret-id "$MANAGED_SECRET_ARN" \
             --force-delete-without-recovery >/dev/null 2>&1 || true
@@ -134,6 +136,27 @@ teardown() {
     assert_success
     [ "$(json_get "$output" '.RotationEnabled')" = "true" ]
     [ "$(json_get "$output" '.RotationRules.AutomaticallyAfterDays')" = "7" ]
+}
+
+@test "RDS: Aurora cluster with managed master user password populates MasterUserSecret" {
+    run aws_cmd rds create-db-cluster \
+        --db-cluster-identifier "$RDS_CLUSTER_ID" \
+        --engine aurora-postgresql \
+        --master-username omni_admin \
+        --manage-master-user-password
+    assert_success
+
+    MANAGED_SECRET_ARN=$(json_get "$output" '.DBCluster.MasterUserSecret.SecretArn')
+    [ -n "$MANAGED_SECRET_ARN" ]
+    [ "$(json_get "$output" '.DBCluster.MasterUserSecret.SecretStatus')" = "active" ]
+
+    run aws_cmd rds describe-db-clusters --db-cluster-identifier "$RDS_CLUSTER_ID"
+    assert_success
+    [ "$(json_get "$output" '.DBClusters[0].MasterUserSecret.SecretArn')" = "$MANAGED_SECRET_ARN" ]
+
+    run aws_cmd secretsmanager describe-secret --secret-id "$MANAGED_SECRET_ARN"
+    assert_success
+    [ "$(json_get "$output" '.OwningService')" = "rds" ]
 }
 
 @test "RDS: describe global clusters returns an empty list" {

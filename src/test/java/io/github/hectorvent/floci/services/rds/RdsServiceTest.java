@@ -551,6 +551,115 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbClusterWithManagedMasterPasswordCreatesSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-ABC");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        DbCluster cluster = service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "omni_admin", null, "omni", false, null, null, null, false, "us-east-1",
+                0.5, 1.0, null, true, "kms-key-1");
+
+        assertEquals("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-ABC",
+                cluster.getMasterUserSecretArn());
+        assertEquals("active", cluster.getMasterUserSecretStatus());
+        assertEquals("kms-key-1", cluster.getMasterUserSecretKmsKeyId());
+        assertNotNull(cluster.getMasterPassword());
+        assertTrue(cluster.getMasterPassword().startsWith("floci-"));
+
+        ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> secretString = ArgumentCaptor.forClass(String.class);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Secret.Tag>> secretTags = ArgumentCaptor.forClass(List.class);
+        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(),
+                eq("kms-key-1"), secretTags.capture(), eq("rds"), eq("us-east-1"));
+        assertTrue(secretName.getValue().startsWith("rds!cluster-"));
+        assertTrue(secretString.getValue().contains("\"username\":\"omni_admin\""));
+        assertTrue(secretString.getValue().contains("\"password\":\"" + cluster.getMasterPassword() + "\""));
+        assertTrue(secretString.getValue().contains("\"dbClusterIdentifier\":\"cluster1\""));
+
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:secretsmanager:owningService", "rds")));
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:rds:primaryDBClusterArn", cluster.getDbClusterArn())));
+    }
+
+    @Test
+    void modifyDbClusterEnablingManagedMasterPasswordCreatesSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-MOD");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "omni", false, null);
+
+        DbCluster cluster = service.modifyDbCluster("cluster1", null, null,
+                null, null, null, true, null, "us-east-1");
+
+        assertEquals("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-MOD",
+                cluster.getMasterUserSecretArn());
+        assertEquals("active", cluster.getMasterUserSecretStatus());
+        verify(secretsManager).createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1"));
+    }
+
+    @Test
+    void deleteDbClusterDeletesManagedMasterUserSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-DEL";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null);
+
+        service.deleteDbCluster("cluster1", "us-east-1");
+
+        verify(secretsManager).deleteSecret(eq(secretArn), any(), eq(true), eq("us-east-1"));
+    }
+
+    @Test
+    void backfillMarksMasterUserSecretsOfPersistedClusters() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-BF";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null);
+
+        service.backfillManagedSecretOwnership();
+
+        verify(secretsManager).markOwnedByService(secretArn, "rds");
+    }
+
+    @Test
     void backfillMarksMasterUserSecretsOfPersistedInstances() {
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
         Secret secret = new Secret();
