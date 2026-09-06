@@ -189,6 +189,11 @@ public final class CopyStatementParser {
                 }
                 seenMaxFileSize = true;
                 maxFileSizeBytes = maxFileSizeToBytes(maxFileSizeM.group(1), maxFileSizeM.group(2));
+                if (maxFileSizeBytes > S3CopySimulator.UNLOAD_MAX_TOTAL_BYTES) {
+                    // A per-file size the simulator cannot buffer: fail open so PostgreSQL,
+                    // rather than an unrelated late "result too large" error, reports it.
+                    return null;
+                }
                 offset = maxFileSizeM.end();
             } else if (matchClause(csvM, offset, len)) {
                 if (seenCsv) {

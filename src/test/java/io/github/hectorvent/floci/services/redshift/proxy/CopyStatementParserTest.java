@@ -224,8 +224,15 @@ class CopyStatementParserTest {
     @Test
     void unloadParsesMaxFileSizeUnits() {
         assertEquals(10L * 1024 * 1024, unload("UNLOAD ('select 1') TO 's3://b/p/' MAXFILESIZE 10 MB").maxFileSizeBytes());
-        assertEquals(2L * 1024 * 1024 * 1024, unload("UNLOAD ('select 1') TO 's3://b/p/' MAXFILESIZE 2 GB").maxFileSizeBytes());
+        assertEquals(1024L * 1024 * 1024 / 8, unload("UNLOAD ('select 1') TO 's3://b/p/' MAXFILESIZE 0.125 GB").maxFileSizeBytes());
         assertEquals(4096L, unload("UNLOAD ('select 1') TO 's3://b/p/' MAXFILESIZE 4096").maxFileSizeBytes());
+    }
+
+    @Test
+    void unloadRejectsMaxFileSizeAboveTheBufferingCeiling() {
+        // The simulator buffers a file at a time, so a per-file size it cannot hold fails open.
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/p/' MAXFILESIZE 2 GB"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/p/' MAXFILESIZE 500 MB"));
     }
 
     @Test
