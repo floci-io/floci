@@ -15,6 +15,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.HashSet;
@@ -1466,5 +1468,95 @@ class LambdaServiceTest {
         assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
                 "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:other-region-fn"
         )));
+    }
+
+    /**
+     * Issue #2958: a published version stored a reference to {@code $LATEST}'s code directory
+     * rather than a copy of the code, and extraction replaces that directory wholesale on every
+     * deploy. A later UpdateFunctionCode therefore rewrote what an already-published version would
+     * run, leaving the version advertising one CodeSha256 over a different build.
+     */
+    @Test
+    void aPublishedVersionKeepsItsOwnCodeWhenLatestIsRedeployed() throws Exception {
+        Map<String, Object> request = baseRequest("version-code-isolation-fn");
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        service.createFunction(REGION, request);
+
+        LambdaFunction v1 = service.publishVersion(REGION, "version-code-isolation-fn", null);
+        Path v1Path = Path.of(v1.getCodeLocalPath());
+        String v1Sha = v1.getCodeSha256();
+
+        assertTrue(Files.isDirectory(v1Path), "a published version must have its own code directory");
+        assertEquals("v1", Files.readString(v1Path.resolve("index.js")).trim());
+
+        // Redeploy $LATEST. Extraction replaces its directory wholesale, which is what used to take
+        // the published version's code with it.
+        service.updateFunctionCode(REGION, "version-code-isolation-fn",
+                Map.of("ZipFile", zipWithBody("v2")));
+
+        LambdaFunction latest = service.getFunction(REGION, "version-code-isolation-fn");
+        assertNotEquals(v1Path.toString(), latest.getCodeLocalPath(),
+                "a version must not share $LATEST's directory");
+        assertEquals("v2",
+                Files.readString(Path.of(latest.getCodeLocalPath()).resolve("index.js")).trim());
+
+        // The version still holds the bytes it was published from, and they still match the hash it
+        // advertises, which is the guarantee that was broken.
+        assertTrue(Files.isDirectory(v1Path), "the version's code must survive a redeploy of $LATEST");
+        assertEquals("v1", Files.readString(v1Path.resolve("index.js")).trim());
+        assertEquals(v1Sha, v1.getCodeSha256());
+    }
+
+    @Test
+    void deletingAFunctionRemovesItsPublishedVersionsCode() throws Exception {
+        Map<String, Object> request = baseRequest("version-code-delete-fn");
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        service.createFunction(REGION, request);
+
+        LambdaFunction v1 = service.publishVersion(REGION, "version-code-delete-fn", null);
+        Path v1Path = Path.of(v1.getCodeLocalPath());
+        assertTrue(Files.isDirectory(v1Path));
+
+        service.deleteFunction(REGION, "version-code-delete-fn");
+
+        assertFalse(Files.exists(v1Path),
+                "a version's code must not outlive the function it belongs to");
+    }
+
+    @Test
+    void deletingOnePublishedVersionReclaimsOnlyThatVersionsCode() throws Exception {
+        Map<String, Object> request = baseRequest("version-code-reclaim-fn");
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        service.createFunction(REGION, request);
+
+        LambdaFunction v1 = service.publishVersion(REGION, "version-code-reclaim-fn", null);
+        service.updateFunctionCode(REGION, "version-code-reclaim-fn",
+                Map.of("ZipFile", zipWithBody("v2")));
+        LambdaFunction v2 = service.publishVersion(REGION, "version-code-reclaim-fn", null);
+
+        Path v1Path = Path.of(v1.getCodeLocalPath());
+        Path v2Path = Path.of(v2.getCodeLocalPath());
+        Path latestPath = Path.of(
+                service.getFunction(REGION, "version-code-reclaim-fn").getCodeLocalPath());
+        assertNotEquals(v1Path, v2Path, "two versions must not share one code directory");
+
+        service.deleteFunction(REGION, "version-code-reclaim-fn", v1.getVersion());
+
+        // Only whole-function delete reclaimed any of this before, so every version ever published
+        // stayed on disk for as long as the data directory lived.
+        assertFalse(Files.exists(v1Path), "the deleted version's code must be reclaimed");
+        assertTrue(Files.isDirectory(v2Path), "a surviving version's code must be left alone");
+        assertEquals("v2", Files.readString(v2Path.resolve("index.js")).trim());
+        assertTrue(Files.isDirectory(latestPath), "$LATEST's code must be left alone");
+    }
+
+    private static String zipWithBody(String body) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write((body + "\n").getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        return Base64.getEncoder().encodeToString(baos.toByteArray());
     }
 }

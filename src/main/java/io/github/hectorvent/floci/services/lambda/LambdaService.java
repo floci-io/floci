@@ -850,7 +850,8 @@ public class LambdaService implements ResourceProvider {
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.drainEnvironment(version.get());
             functionStore.deleteVersion(region, name, qualifier);
-            // The snapshot shares $LATEST's code directory, so this only reclaims once no
+            reclaimVersionCodeDirectory(fn, qualifier, version.get());
+            // The snapshot may still share $LATEST's code directory, so this only reclaims once no
             // remaining version references it.
             reclaimLegacyCodeDirectoryIfUnused(name);
         }
@@ -894,6 +895,28 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+    }
+
+    /**
+     * Drops the code directory a deleted version owned. Without this the only thing that ever
+     * reclaimed version code was deleting the whole function, so a repeated publish/delete cycle
+     * left one package on disk per version ever published.
+     *
+     * <p>Guarded on the version actually owning that directory rather than deleting it outright.
+     * A version whose copy could not be made fell back to {@code $LATEST}'s path, and image-backed
+     * and hot-reload versions never had a copy at all: for those the recorded path is the live
+     * function's own directory, and removing it would delete the code {@code $LATEST} still runs.
+     */
+    private void reclaimVersionCodeDirectory(LambdaFunction fn, String version, LambdaFunction snapshot) {
+        String recorded = snapshot.getCodeLocalPath();
+        if (recorded == null) {
+            return;
+        }
+        String owned = codeStore.getVersionCodePath(ownerAccount(fn), fn.getFunctionName(), version)
+                .toAbsolutePath().normalize().toString();
+        if (owned.equals(Path.of(recorded).toAbsolutePath().normalize().toString())) {
+            codeStore.deleteVersion(ownerAccount(fn), fn.getFunctionName(), version);
+        }
     }
 
     /**
@@ -1792,6 +1815,31 @@ public class LambdaService implements ResourceProvider {
                 .max(java.util.Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
     }
 
+    /**
+     * Copies the function's current code into a directory belonging to this version, falling back
+     * to {@code $LATEST}'s path if there is nothing to copy or the copy fails.
+     *
+     * <p>A copy failure must not fail the publish: the version is still a correct snapshot of the
+     * configuration, and falling back leaves it exactly as good as every version published before
+     * this existed, rather than turning a working call into an error.
+     */
+    private String versionCodePath(LambdaFunction fn, String version) {
+        String current = fn.getCodeLocalPath();
+        if (current == null || fn.getHotReloadHostPath() != null) {
+            return current;
+        }
+        try {
+            Path copied = codeStore.copyForVersion(
+                    ownerAccount(fn), fn.getFunctionName(), version, Path.of(current));
+            return copied == null ? current : copied.toAbsolutePath().normalize().toString();
+        } catch (IOException e) {
+            LOG.warnv("Could not give version {0} of {1} its own code directory, "
+                            + "falling back to the shared one: {2}",
+                    version, fn.getFunctionName(), e.getMessage());
+            return current;
+        }
+    }
+
     private int nextVersionNumber(String counterKey, String legacyCounterKey) {
         synchronized (versionCounterLocks.computeIfAbsent(counterKey, k -> new Object())) {
             Integer current = versionCounters.get(counterKey);
@@ -1908,7 +1956,13 @@ public class LambdaService implements ResourceProvider {
             // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
             // published version is an immutable snapshot of code plus configuration, so it carries the
             // code location for every package type, not only Zip.
-            snapshot.setCodeLocalPath(fn.getCodeLocalPath());
+            // A version's own copy of the code, not a reference to $LATEST's directory. Sharing that
+            // directory meant a later UpdateFunctionCode rewrote what an already-published version
+            // ran, so the version advertised one CodeSha256 over a different build (issue #2958).
+            // Nothing to copy for image-backed or hot-reload functions, which keep the reference
+            // they had: an image is already immutable by digest, and a hot-reload function's whole
+            // point is that its bind-mounted directory tracks the developer's working tree.
+            snapshot.setCodeLocalPath(versionCodePath(fn, String.valueOf(version)));
             snapshot.setCodeSha256(fn.getCodeSha256());
             snapshot.setS3Bucket(fn.getS3Bucket());
             snapshot.setS3Key(fn.getS3Key());
