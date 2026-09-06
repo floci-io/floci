@@ -299,9 +299,10 @@ public class SesReceiptRuleService {
     /**
      * The Smithy-model layer of rule validation, reproduced from probing real SES: violations
      * across the rule name, TlsPolicy, and every action member collect into one
-     * {@code ValidationError} ("N validation errors detected: ...; ..."). Only the members real
-     * SES enforces are enforced; the documented-required S3 BucketName, SNS TopicArn, and Stop
-     * Scope are accepted absent on the wire (probed), so they are not checked here.
+     * {@code ValidationError} ("N validation errors detected: ...; ..."). A type's required
+     * members are enforced whenever the action carries any member at all; an action struct with
+     * no members never reaches this layer, because it serializes to no Query keys and AWS then
+     * rejects the padded empty slot in the parser (probed).
      */
     private static void collectRuleShapeViolations(ReceiptRule rule, List<String> violations) {
         String name = rule.getName();
@@ -322,10 +323,10 @@ public class SesReceiptRuleService {
                 requireMember(violations, action, "HeaderName", prefix + "addHeaderAction.headerName");
                 requireMember(violations, action, "HeaderValue", prefix + "addHeaderAction.headerValue");
             } else if (action.is("BounceAction")) {
-                // Probed order: sender is reported before message.
+                // Probed order: smtpReplyCode, then sender, then message.
+                requireMember(violations, action, "SmtpReplyCode", prefix + "bounceAction.smtpReplyCode");
                 requireMember(violations, action, "Sender", prefix + "bounceAction.sender");
                 requireMember(violations, action, "Message", prefix + "bounceAction.message");
-                requireMember(violations, action, "SmtpReplyCode", prefix + "bounceAction.smtpReplyCode");
             } else if (action.is("ConnectAction")) {
                 requireMember(violations, action, "InstanceARN", prefix + "connectAction.instanceARN");
                 requireMember(violations, action, "IAMRoleARN", prefix + "connectAction.iAMRoleARN");
@@ -338,10 +339,15 @@ public class SesReceiptRuleService {
                             "[RequestResponse, Event]"));
                 }
             } else if (action.is("SNSAction")) {
+                // Probed order: the encoding enum violation is reported before the missing topic.
                 if (invalidEnum(action, "Encoding", "Base64", "UTF-8")) {
                     violations.add(enumViolation(prefix + "sNSAction.encoding", "[Base64, UTF-8]"));
                 }
+                requireMember(violations, action, "TopicArn", prefix + "sNSAction.topicArn");
+            } else if (action.is("S3Action")) {
+                requireMember(violations, action, "BucketName", prefix + "s3Action.bucketName");
             } else if (action.is("StopAction")) {
+                requireMember(violations, action, "Scope", prefix + "stopAction.scope");
                 if (invalidEnum(action, "Scope", "RuleSet")) {
                     violations.add(enumViolation(prefix + "stopAction.scope", "[RuleSet]"));
                 }

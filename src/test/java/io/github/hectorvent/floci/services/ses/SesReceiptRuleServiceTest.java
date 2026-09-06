@@ -244,14 +244,37 @@ class SesReceiptRuleServiceTest {
     }
 
     @Test
-    void createRule_optionalActionMembersMayBeAbsent() {
-        // Real SES accepts S3Action/SNSAction/StopAction with every member absent; resource
-        // validation fires only for members that are present.
+    void presentActionStructs_enforceTheirRequiredMembers() {
+        // Probed: once an action carries any member, the type's required members are Smithy
+        // violations (an all-empty struct never reaches this layer; it has no wire keys).
         service.createReceiptRuleSet("rules-a", REGION);
-        service.createReceiptRule("rules-a",
-                rule("r1", action("S3Action"), action("SNSAction"), action("StopAction")),
-                null, REGION, ANY_SENDER_VERIFIED);
-        assertEquals(3, service.describeReceiptRule("rules-a", "r1", REGION).getActions().size());
+
+        AwsException s3 = assertThrows(AwsException.class, () -> service.createReceiptRule(
+                "rules-a", rule("r1", action("S3Action", "ObjectKeyPrefix", "inbox/")),
+                null, REGION, ANY_SENDER_VERIFIED));
+        assertTrue(s3.getMessage().contains("'rule.actions.1.member.s3Action.bucketName'"));
+
+        AwsException stop = assertThrows(AwsException.class, () -> service.createReceiptRule(
+                "rules-a", rule("r1", action("StopAction", "TopicArn",
+                        "arn:aws:sns:us-east-1:000000000000:topic")),
+                null, REGION, ANY_SENDER_VERIFIED));
+        assertTrue(stop.getMessage().contains("'rule.actions.1.member.stopAction.scope'"));
+
+        AwsException sns = assertThrows(AwsException.class, () -> service.createReceiptRule(
+                "rules-a", rule("r1", action("SNSAction", "Encoding", "UTF-8")),
+                null, REGION, ANY_SENDER_VERIFIED));
+        assertTrue(sns.getMessage().contains("'rule.actions.1.member.sNSAction.topicArn'"));
+
+        // Probed order for a bounce action with only TopicArn: smtpReplyCode, sender, message.
+        AwsException bounce = assertThrows(AwsException.class, () -> service.createReceiptRule(
+                "rules-a", rule("r1", action("BounceAction", "TopicArn",
+                        "arn:aws:sns:us-east-1:000000000000:topic")),
+                null, REGION, ANY_SENDER_VERIFIED));
+        assertTrue(bounce.getMessage().startsWith("3 validation errors detected: "));
+        assertTrue(bounce.getMessage().indexOf("bounceAction.smtpReplyCode")
+                < bounce.getMessage().indexOf("bounceAction.sender"));
+        assertTrue(bounce.getMessage().indexOf("bounceAction.sender")
+                < bounce.getMessage().indexOf("bounceAction.message"));
     }
 
     @Test

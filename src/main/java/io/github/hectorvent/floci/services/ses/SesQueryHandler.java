@@ -1075,16 +1075,28 @@ public class SesQueryHandler {
         rule.setRecipients(extractMembers(params, "Rule.Recipients"));
         // Indexes are collected from the submitted keys rather than counted up sequentially: an
         // action serialized as an empty structure contributes no keys at all, so the list can
-        // arrive with gaps (e.g. member.2 only) and a sequential scan would drop the rest.
+        // arrive with gaps (e.g. member.2 only). AWS pads such a gap into an empty action slot
+        // and rejects it because the slot carries no action type (probed), and index 0 has its
+        // own MalformedInput error, so neither may be silently dropped or compacted here.
+        List<ReceiptAction> actions = new ArrayList<>();
+        int highestRecognized = 0;
         for (int i : receiptActionIndexes(params)) {
             ReceiptAction action = parseReceiptAction(params, "Rule.Actions.member." + i + ".");
             if (action != null) {
-                rule.getActions().add(action);
+                actions.add(action);
+                highestRecognized = i;
             }
         }
+        // Keys whose action type AWS does not model contribute nothing on the AWS side either,
+        // so contiguity is judged on the recognized actions alone: a higher index than the count
+        // means a padded empty slot existed between (or before) them.
+        if (highestRecognized != actions.size()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Exactly one action type must be specified for each ReceiptAction", 400);
+        }
+        rule.setActions(actions);
         return rule;
     }
-
 
     private SortedSet<Integer> receiptActionIndexes(MultivaluedMap<String, String> params) {
         String prefix = "Rule.Actions.member.";
@@ -1098,12 +1110,21 @@ public class SesQueryHandler {
                 continue;
             }
             String index = key.substring(prefix.length(), dot);
-            // The length cap keeps a digit run that overflows int (never produced by an SDK)
-            // from escaping parseInt as a server error; such a key is ignored like any other
-            // unrecognized parameter.
-            if (!index.isEmpty() && index.length() <= 9 && index.chars().allMatch(Character::isDigit)) {
-                indexes.add(Integer.parseInt(index));
+            if (index.isEmpty() || !index.chars().allMatch(Character::isDigit)) {
+                continue;
             }
+            // A digit run that overflows int implies an index far beyond any contiguous list,
+            // which AWS's gap padding turns into the empty-slot rejection below.
+            if (index.length() > 9) {
+                throw new AwsException("InvalidParameterValue",
+                        "Exactly one action type must be specified for each ReceiptAction", 400);
+            }
+            int parsed = Integer.parseInt(index);
+            if (parsed == 0) {
+                // Probed: AWS rejects member.0 outright.
+                throw new AwsException("MalformedInput", "0 is not a valid index", 400);
+            }
+            indexes.add(parsed);
         }
         return indexes;
     }

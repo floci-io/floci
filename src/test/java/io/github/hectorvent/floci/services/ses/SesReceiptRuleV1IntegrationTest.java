@@ -230,18 +230,27 @@ class SesReceiptRuleV1IntegrationTest {
 
     @Test
     @Order(9)
-    void sparseActionIndexes_areNotDropped() {
+    void sparseActionIndexes_areRejectedAsEmptySlots() {
         // An action serialized as an empty structure contributes no keys, so a list can arrive
-        // starting at member.2; the later actions must still be parsed.
+        // starting at member.2. AWS pads the gap into an empty action slot and rejects it
+        // because the slot carries no action type (probed).
         req("CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "sparse")
                 .formParam("Rule.Actions.member.2.StopAction.Scope", "RuleSet")
-        .when().post("/").then().statusCode(200);
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("Exactly one action type must be specified for each ReceiptAction"));
+    }
 
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
-                .formParam("RuleName", "sparse")
-        .when().post("/").then().statusCode(200)
-                .body(containsString("<Scope>RuleSet</Scope>"));
+    @Test
+    @Order(9)
+    void actionIndexZero_isRejectedAsMalformedInput() {
+        req("CreateReceiptRule").formParam("RuleSetName", RS)
+                .formParam("Rule.Name", "zeroidx")
+                .formParam("Rule.Actions.member.0.StopAction.Scope", "RuleSet")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>MalformedInput</Code>"))
+                .body(containsString("0 is not a valid index"));
     }
 
     @Test
@@ -286,16 +295,14 @@ class SesReceiptRuleV1IntegrationTest {
 
     @Test
     @Order(9)
-    void overflowingActionIndex_isIgnoredNotAServerError() {
+    void overflowingActionIndex_isRejectedNotAServerError() {
+        // A digit run that overflows int implies an index far beyond any contiguous list; the
+        // gap padding turns it into the probed empty-slot rejection instead of a 500.
         req("CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "hugeidx")
                 .formParam("Rule.Actions.member.999999999999999999999.StopAction.Scope", "RuleSet")
-        .when().post("/").then().statusCode(200);
-
-        req("DescribeReceiptRule").formParam("RuleSetName", RS)
-                .formParam("RuleName", "hugeidx")
-        .when().post("/").then().statusCode(200)
-                .body(containsString("<Actions></Actions>"));
+        .when().post("/").then().statusCode(400)
+                .body(containsString("Exactly one action type must be specified for each ReceiptAction"));
     }
 
     @Test
