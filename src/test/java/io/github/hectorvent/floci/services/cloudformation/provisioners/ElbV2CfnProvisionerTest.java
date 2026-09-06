@@ -557,6 +557,8 @@ class ElbV2CfnProvisionerTest {
         assertFalse(first.complete());
         assertEquals(1, first.attempts(), "the entry with attempts left is what the engine retries for");
         assertEquals(LB_ARN, first.previousPhysicalId());
+        assertEquals(first.previousPhysicalId(), provisioner.updateCleanupPhysicalId(r),
+                "progress and failure events name the same entity");
 
         org.mockito.Mockito.doNothing().when(elb).deleteLoadBalancer(REGION, LB_ARN);
         UpdateCleanupResult second = provisioner.completeUpdate(r);
@@ -612,6 +614,10 @@ class ElbV2CfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> provisioner.delete("AWS::ElasticLoadBalancingV2::TargetGroup", TG_ARN, REGION));
         assertEquals("ResourceInUse", e.getErrorCode());
+
+        // Only the type's own not-found code is delete-complete.
+        doThrow(new AwsException("LoadBalancerNotFound", "gone", 400)).when(elb).deleteLoadBalancer(REGION, "gone-arn");
+        provisioner.delete("AWS::ElasticLoadBalancingV2::LoadBalancer", "gone-arn", REGION);
 
         provisioner.delete("AWS::ElasticLoadBalancingV2::LoadBalancer", null, REGION);
         verify(elb, never()).deleteLoadBalancer(eq(REGION), isNull());

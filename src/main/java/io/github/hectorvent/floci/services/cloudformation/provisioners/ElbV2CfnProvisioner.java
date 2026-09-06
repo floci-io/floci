@@ -64,9 +64,10 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * No already-gone tolerance is needed here: ElbV2Service returns silently for an unknown ARN on
-     * all four deletes, and its real refusals (ResourceInUse on a target group a listener still
-     * forwards to, OperationNotPermitted on a listener's default rule) must fail the stack delete.
+     * Each delete tolerates only the not-found code ElbV2Service defines for that type, so an
+     * entity already gone is delete-complete, while the service's refusals (ResourceInUse on a
+     * target group a listener still forwards to, OperationNotPermitted on a listener's default
+     * rule) keep failing the stack delete.
      */
     @Override
     public void delete(String resourceType, String physicalId, String region) {
@@ -74,10 +75,14 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case LOAD_BALANCER -> elbV2Service.deleteLoadBalancer(region, physicalId);
-            case TARGET_GROUP -> elbV2Service.deleteTargetGroup(region, physicalId);
-            case LISTENER -> elbV2Service.deleteListener(region, physicalId);
-            case LISTENER_RULE -> elbV2Service.deleteRule(region, physicalId);
+            case LOAD_BALANCER -> CfnDeletes.safeDelete("load balancer", physicalId,
+                    () -> elbV2Service.deleteLoadBalancer(region, physicalId), "LoadBalancerNotFound");
+            case TARGET_GROUP -> CfnDeletes.safeDelete("target group", physicalId,
+                    () -> elbV2Service.deleteTargetGroup(region, physicalId), "TargetGroupNotFound");
+            case LISTENER -> CfnDeletes.safeDelete("listener", physicalId,
+                    () -> elbV2Service.deleteListener(region, physicalId), "ListenerNotFound");
+            case LISTENER_RULE -> CfnDeletes.safeDelete("listener rule", physicalId,
+                    () -> elbV2Service.deleteRule(region, physicalId), "RuleNotFound");
             default -> { }
         }
     }
