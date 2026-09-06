@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
 import io.github.hectorvent.floci.services.swf.SwfJsonHandler;
+import io.github.hectorvent.floci.services.verifiedpermissions.VerifiedPermissionsJsonHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -49,6 +50,7 @@ public class AwsJsonController {
     private final CloudControlJsonHandler cloudControlJsonHandler;
     private final SwfJsonHandler swfJsonHandler;
     private final NetworkFirewallJsonHandler networkFirewallJsonHandler;
+    private final VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler;
 
     @Inject
     public AwsJsonController(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -60,7 +62,8 @@ public class AwsJsonController {
                              CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler,
                              CloudControlJsonHandler cloudControlJsonHandler,
                              SwfJsonHandler swfJsonHandler,
-                             NetworkFirewallJsonHandler networkFirewallJsonHandler) {
+                             NetworkFirewallJsonHandler networkFirewallJsonHandler,
+                             VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -74,6 +77,7 @@ public class AwsJsonController {
         this.cloudControlJsonHandler = cloudControlJsonHandler;
         this.swfJsonHandler = swfJsonHandler;
         this.networkFirewallJsonHandler = networkFirewallJsonHandler;
+        this.verifiedPermissionsJsonHandler = verifiedPermissionsJsonHandler;
     }
 
     @POST
@@ -123,6 +127,7 @@ public class AwsJsonController {
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 case "network-firewall" -> networkFirewallJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
+                case "verifiedpermissions" -> verifiedPermissionsJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.1 target

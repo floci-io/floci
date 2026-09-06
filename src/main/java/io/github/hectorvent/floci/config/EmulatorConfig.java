@@ -714,6 +714,7 @@ public interface EmulatorConfig {
         AccountServiceConfig account();
         AccessAnalyzerServiceConfig accessanalyzer();
         ServiceQuotasServiceConfig servicequotas();
+        VerifiedPermissionsServiceConfig verifiedpermissions();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
         ConnectServiceConfig connect();
@@ -846,6 +847,11 @@ public interface EmulatorConfig {
     }
 
     interface ServiceQuotasServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface VerifiedPermissionsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

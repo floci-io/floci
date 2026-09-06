@@ -20,6 +20,7 @@
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
         <wire.version>6.4.5</wire.version>
+        <cedar.version>4.10.0</cedar.version>
     </properties>
 
     <dependencyManagement>
@@ -149,6 +150,14 @@
         <dependency>
             <groupId>io.vertx</groupId>
             <artifactId>vertx-mqtt</artifactId>
+        </dependency>
+
+        <!-- Official Cedar authorization engine for Amazon Verified Permissions emulation -->
+        <dependency>
+            <groupId>com.cedarpolicy</groupId>
+            <artifactId>cedar-java</artifactId>
+            <version>${cedar.version}</version>
+            <classifier>uber</classifier>
         </dependency>
 
         <!-- cron-utils for EventBridge schedule expression parsing -->
@@ -472,6 +481,73 @@
                 <quarkus.native.enabled>true</quarkus.native.enabled>
                 <maven.compiler.release>24</maven.compiler.release>
             </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>stage-cedar-native-library</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                                <configuration>
+                                    <target>
+                                        <condition property="cedar.native.platform" value="macos/aarch64">
+                                            <and>
+                                                <os family="mac"/>
+                                                <matches string="${os.arch}" pattern="^(aarch64|arm64)$"/>
+                                            </and>
+                                        </condition>
+                                        <condition property="cedar.native.platform" value="macos/x86_64">
+                                            <and>
+                                                <os family="mac"/>
+                                                <matches string="${os.arch}" pattern="^(amd64|x86_64)$"/>
+                                            </and>
+                                        </condition>
+                                        <condition property="cedar.native.platform" value="windows/x86_64">
+                                            <and>
+                                                <os family="windows"/>
+                                                <matches string="${os.arch}" pattern="^(amd64|x86_64)$"/>
+                                            </and>
+                                        </condition>
+                                        <condition property="cedar.native.platform" value="linux/aarch64">
+                                            <and>
+                                                <not><os family="mac"/></not>
+                                                <os family="unix"/>
+                                                <matches string="${os.arch}" pattern="^(aarch64|arm64)$"/>
+                                            </and>
+                                        </condition>
+                                        <condition property="cedar.native.platform" value="linux/x86_64">
+                                            <and>
+                                                <not><os family="mac"/></not>
+                                                <os family="unix"/>
+                                                <matches string="${os.arch}" pattern="^(amd64|x86_64)$"/>
+                                            </and>
+                                        </condition>
+                                        <fail unless="cedar.native.platform"
+                                              message="Unsupported native platform for Cedar Java FFI: ${os.name}/${os.arch}"/>
+                                        <mkdir dir="${project.build.directory}/cedar-native"/>
+                                        <unzip src="${settings.localRepository}/com/cedarpolicy/cedar-java/${cedar.version}/cedar-java-${cedar.version}-uber.jar"
+                                               dest="${project.build.directory}/cedar-native">
+                                            <patternset>
+                                                <include name="jne/${cedar.native.platform}/*cedar_java_ffi.*"/>
+                                            </patternset>
+                                        </unzip>
+                                        <copy todir="${project.build.directory}" flatten="true">
+                                            <fileset dir="${project.build.directory}/cedar-native/jne/${cedar.native.platform}"
+                                                     includes="*cedar_java_ffi.*"/>
+                                        </copy>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
     </profiles>
 </project>

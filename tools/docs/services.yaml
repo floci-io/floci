@@ -218,6 +218,10 @@ services:
     doc: docs/services/ssoadmin.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java, mode: switch }
+  - service: verifiedpermissions
+    doc: docs/services/verifiedpermissions.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/verifiedpermissions/VerifiedPermissionsJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:
