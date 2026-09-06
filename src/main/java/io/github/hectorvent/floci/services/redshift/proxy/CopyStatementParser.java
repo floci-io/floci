@@ -6,9 +6,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Recognises a Simple Query statement that is an S3 {@code COPY <table> FROM 's3://...'}.
- * Any other statement, or a COPY that uses an option this simulator cannot honour, returns
- * {@code null} so the bridge falls back to DDL rewriting and PostgreSQL reports its own error.
+ * Recognises a Simple Query statement that is an S3 {@code COPY <table> FROM 's3://...'}
+ * or {@code UNLOAD ('<select>') TO 's3://...'}. Any other statement, or a statement that uses
+ * an option this simulator cannot honour, returns {@code null} so the bridge falls back to DDL
+ * rewriting and PostgreSQL reports its own error.
  */
 public final class CopyStatementParser {
 
@@ -521,8 +522,33 @@ public final class CopyStatementParser {
                 continue;
             }
             switch (c) {
-                case '\'' -> inSingle = true;
-                case '"' -> inDouble = true;
+                case '\'' -> {
+                    if (i > 0) {
+                        char prev = q.charAt(i - 1);
+                        if (prev == 'E' || prev == 'e') {
+                            return false; // C-style escape string literal
+                        }
+                        if (prev == '&' && i > 1) {
+                            char prev2 = q.charAt(i - 2);
+                            if (prev2 == 'U' || prev2 == 'u') {
+                                return false; // Unicode escape string literal
+                            }
+                        }
+                    }
+                    inSingle = true;
+                }
+                case '"' -> {
+                    if (i > 1 && q.charAt(i - 1) == '&') {
+                        char prev2 = q.charAt(i - 2);
+                        if (prev2 == 'U' || prev2 == 'u') {
+                            return false; // Unicode escape identifier
+                        }
+                    }
+                    inDouble = true;
+                }
+                case '\\' -> {
+                    return false; // backslash outside quotes
+                }
                 case '(' -> depth++;
                 case ')' -> {
                     if (--depth < 0) {

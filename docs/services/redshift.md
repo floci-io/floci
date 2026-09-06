@@ -184,18 +184,18 @@ the result to S3 as one or more objects under `<prefix>`.
 
 - Framing defaults to pipe-delimited text; `FORMAT CSV` (or `CSV`) switches to CSV
   with a `,` default. `DELIMITER`, `HEADER`, `NULL AS`, and `ADDQUOTES` are honoured
-  (`ADDQUOTES` forces CSV framing).
+  (`ADDQUOTES` and `HEADER` force CSV framing on PostgreSQL 15).
 - `PARALLEL ON` (default) names objects `<prefix>0000_part_00`,
   `<prefix>0001_part_00`, and so on; `PARALLEL OFF` names them `<prefix>000`,
   `<prefix>001`, and so on. The emulator has a single backend node, so more than one
   object appears only when the result exceeds the per-file size.
 - `MAXFILESIZE [AS] <n> [MB|GB]` sets the per-file size. Each file is buffered in
   memory, so the default is 6 MiB (real Redshift defaults to 6.2 GB) and a whole
-  UNLOAD result is capped at 256 MiB; a larger result fails with a SQL error.
+  UNLOAD result is capped at 256 MiB; a larger result fails with a SQL error (54000).
 - `GZIP` compresses each object and appends `.gz` to its key.
 - `MANIFEST` writes `<prefix>manifest` listing every object with its
   `content_length`.
-- Without `ALLOWOVERWRITE`, a non-empty target prefix is an error and the select
+- Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select
   does not run.
 - S3 access is authorized as an unsigned request, like COPY from S3.
 - Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `IAM_ROLE` / `CREDENTIALS`,

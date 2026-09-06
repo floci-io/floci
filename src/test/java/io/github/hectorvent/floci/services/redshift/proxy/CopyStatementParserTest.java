@@ -247,6 +247,9 @@ class CopyStatementParserTest {
         assertNull(CopyStatementParser.parse("UNLOAD ('select 1)') TO 's3://b/p/'"));
         assertNull(CopyStatementParser.parse("UNLOAD ('delete from t') TO 's3://b/p/'"));
         assertNull(CopyStatementParser.parse("UNLOAD ('select 1 /* c */') TO 's3://b/p/'"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select E''breakout''') TO 's3://b/p/'"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select U&''breakout''') TO 's3://b/p/'"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select \\1') TO 's3://b/p/'"));
     }
 
     @Test
