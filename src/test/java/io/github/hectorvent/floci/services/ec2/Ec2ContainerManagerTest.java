@@ -30,16 +30,19 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
+import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -771,6 +774,89 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchAppliesBackpressureWhenDockerLaunchesAreSaturated() throws Exception {
+        ThreadPoolExecutor launchExecutor = new ThreadPoolExecutor(
+                1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1),
+                Ec2ContainerManager.BLOCKING_BACKPRESSURE);
+        LaunchHarness harness = launchHarness(launchExecutor, Duration.ofSeconds(1));
+        ExecutorService callerExecutor = Executors.newSingleThreadExecutor();
+        CountDownLatch createEntered = new CountDownLatch(1);
+        CountDownLatch releaseCreate = new CountDownLatch(1);
+        when(harness.lifecycleManager().create(any(ContainerSpec.class))).thenAnswer(invocation -> {
+            createEntered.countDown();
+            releaseCreate.await(2, TimeUnit.SECONDS);
+            throw new RuntimeException("test launch failure");
+        });
+
+        try {
+            harness.manager().launch(instance("i-backpressure-1"), "ubuntu:24.04", null, "us-west-2");
+            harness.manager().launch(instance("i-backpressure-2"), "ubuntu:24.04", null, "us-west-2");
+            Future<?> waitingLaunch = callerExecutor.submit(() ->
+                    harness.manager().launch(instance("i-backpressure-3"), "ubuntu:24.04", null, "us-west-2"));
+
+            assertTrue(createEntered.await(2, TimeUnit.SECONDS), "worker launch should enter Docker launch");
+            assertFalse(waitingLaunch.isDone(), "saturated launch should wait for queue capacity");
+
+            releaseCreate.countDown();
+            waitingLaunch.get(2, TimeUnit.SECONDS);
+        } finally {
+            releaseCreate.countDown();
+            harness.manager().stop();
+            callerExecutor.shutdownNow();
+            launchExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void userDataTimeoutClosesDockerExecStream() throws Exception {
+        LaunchHarness harness = launchHarness(new ThreadPoolExecutor(
+                1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1),
+                new ThreadPoolExecutor.CallerRunsPolicy()), Duration.ofMillis(50));
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient().inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.30");
+        when(inspect.exec()).thenReturn(withIp);
+        Closeable stream = mock(Closeable.class);
+        CountDownLatch userDataStarted = new CountDownLatch(1);
+        stubUserDataCallback(harness, stream, userDataStarted);
+        Instance instance = instance("i-userdata-timeout");
+        instance.setUserData("#!/bin/sh\necho ready\n");
+
+        try {
+            harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+            assertTrue(userDataStarted.await(2, TimeUnit.SECONDS), "user data should start");
+            verify(stream, timeout(2_000)).close();
+        } finally {
+            harness.manager().stop();
+        }
+    }
+
+    @Test
+    void shutdownClosesActiveUserDataExecStream() throws Exception {
+        LaunchHarness harness = launchHarness();
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient().inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.31");
+        when(inspect.exec()).thenReturn(withIp);
+        Closeable stream = mock(Closeable.class);
+        CountDownLatch userDataStarted = new CountDownLatch(1);
+        stubUserDataCallback(harness, stream, userDataStarted);
+        Instance instance = instance("i-userdata-shutdown");
+        instance.setUserData("#!/bin/sh\necho ready\n");
+
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+        assertTrue(userDataStarted.await(2, TimeUnit.SECONDS), "user data should start");
+
+        harness.manager().stop();
+
+        verify(stream, timeout(2_000)).close();
+    }
+
+    @Test
     void launchCreatesSshdPrivilegeSeparationDirectoryBeforeStartingSshd() throws Exception {
         Ec2ContainerManager.containerBridgeIpAttempts = 1;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;
@@ -921,6 +1007,10 @@ class Ec2ContainerManagerTest {
     }
 
     private static LaunchHarness launchHarness() {
+        return launchHarness(null, Duration.ofMinutes(30));
+    }
+
+    private static LaunchHarness launchHarness(ExecutorService executor, Duration userDataTimeout) {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(RETURNS_SELF));
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
@@ -951,21 +1041,87 @@ class Ec2ContainerManagerTest {
         Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
-        Ec2ContainerManager manager = new Ec2ContainerManager(
-                containerBuilder,
-                lifecycleManager,
-                logStreamer,
-                mock(ContainerDetector.class),
-                dockerHostResolver,
-                dockerClient,
-                portAllocator,
-                config,
-                metadataServer,
-                portForwardManager,
-                regionResolver,
-                mock(ContainerNetworkReachability.class));
+        Ec2ContainerManager manager = executor == null
+                ? new Ec2ContainerManager(
+                        containerBuilder,
+                        lifecycleManager,
+                        logStreamer,
+                        mock(ContainerDetector.class),
+                        dockerHostResolver,
+                        dockerClient,
+                        portAllocator,
+                        config,
+                        metadataServer,
+                        portForwardManager,
+                        regionResolver,
+                        mock(ContainerNetworkReachability.class))
+                : new Ec2ContainerManager(
+                        containerBuilder,
+                        lifecycleManager,
+                        logStreamer,
+                        mock(ContainerDetector.class),
+                        dockerHostResolver,
+                        dockerClient,
+                        portAllocator,
+                        config,
+                        metadataServer,
+                        portForwardManager,
+                        regionResolver,
+                        mock(ContainerNetworkReachability.class),
+                        executor,
+                        userDataTimeout);
         return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
                 portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
+    }
+
+    private static void stubUserDataCallback(LaunchHarness harness, Closeable stream,
+                                             CountDownLatch userDataStarted) throws Exception {
+        AtomicReference<String[]> currentCommand = new AtomicReference<>();
+        ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        ExecCreateCmdResponse metadataExec = mock(ExecCreateCmdResponse.class);
+        ExecCreateCmdResponse userDataExec = mock(ExecCreateCmdResponse.class);
+        when(metadataExec.getId()).thenReturn("metadata-exec");
+        when(userDataExec.getId()).thenReturn("userdata-exec");
+        when(harness.dockerClient().execCreateCmd(TEST_CONTAINER_ID)).thenReturn(execCreate);
+        when(execCreate.withCmd(any(String[].class))).thenAnswer(invocation -> {
+            Object[] args = invocation.getArguments();
+            currentCommand.set(args.length == 1 && args[0] instanceof String[] command
+                    ? command : Arrays.copyOf(args, args.length, String[].class));
+            return execCreate;
+        });
+        when(execCreate.exec()).thenAnswer(invocation -> {
+            String[] command = currentCommand.get();
+            return command != null && command.length == 1 && "/tmp/user-data.sh".equals(command[0])
+                    ? userDataExec : metadataExec;
+        });
+
+        when(harness.dockerClient().execStartCmd(anyString())).thenAnswer(invocation -> {
+            String execId = invocation.getArgument(0);
+            ExecStartCmd execStart = mock(ExecStartCmd.class);
+            when(execStart.exec(any())).thenAnswer(startInvocation -> {
+                @SuppressWarnings("unchecked")
+                ResultCallback<Frame> callback = startInvocation.getArgument(0);
+                if ("userdata-exec".equals(execId)) {
+                    callback.onStart(stream);
+                    userDataStarted.countDown();
+                } else {
+                    callback.onComplete();
+                }
+                return callback;
+            });
+            return execStart;
+        });
+
+        InspectExecCmd inspectExec = mock(InspectExecCmd.class);
+        InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);
+        when(inspectExecResponse.getExitCodeLong()).thenReturn(0L);
+        when(inspectExec.exec()).thenReturn(inspectExecResponse);
+        when(harness.dockerClient().inspectExecCmd(anyString())).thenReturn(inspectExec);
+
+        CopyArchiveToContainerCmd copy = mock(CopyArchiveToContainerCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        when(harness.dockerClient().copyArchiveToContainerCmd(TEST_CONTAINER_ID)).thenReturn(copy);
+        when(copy.withTarInputStream(any(InputStream.class))).thenReturn(copy);
+        when(harness.logStreamer().generateLogStreamName(anyString())).thenReturn(TEST_LOG_STREAM_NAME);
     }
 
     /**
