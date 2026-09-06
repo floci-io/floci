@@ -198,6 +198,10 @@ services:
     doc: docs/services/servicequotas.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/servicequotas/ServiceQuotasJsonHandler.java, mode: switch }
+  - service: ssoadmin
+    doc: docs/services/ssoadmin.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:
@@ -219,7 +223,6 @@ services:
 # Switch handlers that exist but are intentionally not yet covered (see reasons).
 # A NEW switch handler not listed here and not registered above fails `--strict`.
 deferred_handlers:
-  - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java }  # single-op Identity Center stub, no standalone doc page yet
   - { path: src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2JsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/applicationautoscaling/ScalingPolicyAlarmActionHandler.java }  # not a JSON/Query action dispatcher — its `case "X" ->` arms are the StepScaling AdjustmentType switch, not AWS actions
   - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)

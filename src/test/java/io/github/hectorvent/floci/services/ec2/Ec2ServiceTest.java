@@ -838,6 +838,56 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesRejectsIncompatibleInstanceTypeForCreatedArmImage() {
+        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
+        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
+        source.imageId = "ami-arm-source";
+        source.architecture = "arm64";
+        source.rootDeviceName = "/dev/xvda";
+        when(catalog.findByIdOrAlias("ami-arm-source")).thenReturn(Optional.of(source));
+
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        when(resolver.resolveImage("ami-arm-source"))
+                .thenReturn(new ResolvedAmiImage("arm-image", ResolvedAmiImage.DEFAULT_RUNTIME, false,
+                        "linux/arm64"));
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), resolver, catalog);
+        Reservation sourceReservation = service.runInstances("us-east-1", "ami-arm-source", "t4g.medium",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        String createdAmi = service.createImage("us-east-1",
+                sourceReservation.getInstances().getFirst().getInstanceId(), "captured-arm", null, true)
+                .getImageId();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", createdAmi, "t3.micro", 1, 1,
+                        null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        verify(resolver, never()).resolveImage(createdAmi);
+
+        Reservation compatible = service.runInstances("us-east-1", createdAmi, "t4g.medium", 1, 1,
+                null, List.of(), null, null, List.of(), null, null);
+        assertEquals("arm64", compatible.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesRejectsUnsupportedImageBeforeCreatingInstance() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        AwsException unsupported = new AwsException("UnsupportedOperation", "Windows AMIs are not supported", 400);
+        when(resolver.resolveImage("ami-windows")).thenThrow(unsupported);
+        Ec2Service service = liveService(containerManager, resolver);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-windows", "t3.micro", 1, 1,
+                        null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("UnsupportedOperation", error.getErrorCode());
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
+        verifyNoInteractions(containerManager);
+    }
+
+    @Test
     void createImageOnACatalogSourceCarriesItsRootDevice() {
         Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
         Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();

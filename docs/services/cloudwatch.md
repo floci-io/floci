@@ -38,6 +38,10 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `DeleteSubscriptionFilter` | Delete a subscription filter |
 | `PutResourcePolicy` | Create or update an account-level resource policy |
 | `DescribeResourcePolicies` | List account-level resource policies |
+| `PutDestination` | Create or update a cross-account subscription destination |
+| `PutDestinationPolicy` | Create or update the access policy for a destination |
+| `PutAccountPolicy` | Create or update an account-level Logs policy |
+| `DescribeAccountPolicies` | List account-level Logs policies by type and optional name |
 | `GetDataProtectionPolicy` | Return the resolved log group identifier (see note below) |
 | `StartQuery` | Start a Logs Insights query (see [Logs Insights](#logs-insights)) |
 | `GetQueryResults` | Get the status and results of a Logs Insights query |

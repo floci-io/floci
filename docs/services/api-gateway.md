@@ -120,6 +120,10 @@ already has one is a `ConflictException`. A `PRIVATE` endpoint type is refused: 
 domains are not emulated. Mutual TLS, ownership verification certificates, routing modes and
 endpoint access modes are accepted and ignored.
 
+With TLS enabled, `CreateDomainName` also adds the domain to Floci's server certificate, so
+`https://<domain>` verifies against the ACM chain without a restart. The name must sit under a
+local suffix such as `localhost.floci.io`; see [TLS](../configuration/tls.md).
+
 Templates can create domains and mappings with `AWS::ApiGateway::DomainName` and
 `AWS::ApiGateway::BasePathMapping`; see [CloudFormation](cloudformation.md).
 

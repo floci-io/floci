@@ -1483,13 +1483,13 @@ public class SesService {
         ResourceRef ref = parseSesArn(arn);
         requireCallerAccount(ref);
         List<Tag> tags = switch (ref.type()) {
-            case "configuration-set" -> listConfigurationSetTags(ref.name(), region);
-            case "template" -> listEmailTemplateTags(ref.name(), region);
+            case "configuration-set" -> configSetService.listTags(ref.name(), region);
+            case "template" -> templateService.listTags(ref.name(), region);
             case "identity" -> identityService.listTags(ref.name(), region);
             case "contact-list" -> contactService.listTags(ref.name(), region);
             case "custom-verification-email-template" -> cvetService.listTags(ref.name(), region);
             case "dedicated-ip-pool" -> dedicatedIpService.listTags(ref.name(), region);
-            case "tenant" -> listTenantTags(ref.name(), region);
+            case "tenant" -> tenantService.listTags(ref.name(), region);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         };
@@ -1514,13 +1514,13 @@ public class SesService {
         List<Tag> tags = newTags == null ? List.of() : newTags;
         SesTags.validate(tags);
         switch (ref.type()) {
-            case "configuration-set" -> tagConfigurationSet(ref.name(), region, tags);
-            case "template" -> tagEmailTemplate(ref.name(), region, tags);
+            case "configuration-set" -> configSetService.tag(ref.name(), region, tags);
+            case "template" -> templateService.tag(ref.name(), region, tags);
             case "identity" -> identityService.tag(ref.name(), region, tags);
             case "contact-list" -> contactService.tag(ref.name(), region, tags);
             case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
             case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
-            case "tenant" -> tagTenant(ref.name(), region, tags);
+            case "tenant" -> tenantService.tag(ref.name(), region, tags);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -1541,109 +1541,24 @@ public class SesService {
             throw new AwsException("BadRequestException", "Failed to untag resource", 400);
         }
         switch (ref.type()) {
-            case "configuration-set" -> untagConfigurationSet(ref.name(), region, tagKeys);
-            case "template" -> untagEmailTemplate(ref.name(), region, tagKeys);
+            case "configuration-set" -> configSetService.untag(ref.name(), region, tagKeys);
+            case "template" -> templateService.untag(ref.name(), region, tagKeys);
             case "identity" -> identityService.untag(ref.name(), region, tagKeys);
             case "contact-list" -> contactService.untag(ref.name(), region, tagKeys);
             case "custom-verification-email-template" -> cvetService.untag(ref.name(), region, tagKeys);
             case "dedicated-ip-pool" -> dedicatedIpService.untag(ref.name(), region, tagKeys);
-            case "tenant" -> untagTenant(ref.name(), region, tagKeys);
+            case "tenant" -> tenantService.untag(ref.name(), region, tagKeys);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
-    }
-
-    // A tenant tag ARN carries two path segments (tenant/<name>/<tenantId>), so parseSesArn's
-    // first-slash split leaves "<name>/<tenantId>" as the resource name; the tenant domain owns
-    // that remainder's decomposition and the id-only resolution (see SesTenantService.TenantTagArn).
-
-    private List<Tag> listTenantTags(String resourceName, String region) {
-        Tenant tenant = tenantService.tenantForTagArn(resourceName, region);
-        // AWS returns a tenant's tags ordered by key (probe-confirmed).
-        return (tenant.tags() == null ? List.<Tag>of() : tenant.tags()).stream()
-                .sorted(Comparator.comparing(Tag::key, Comparator.nullsLast(Comparator.naturalOrder())))
-                .toList();
-    }
-
-    private void tagTenant(String resourceName, String region, List<Tag> newTags) {
-        tenantService.mutateTags(resourceName, region, tags -> SesTags.merge(tags, newTags));
-        LOG.infov("Tagged SES tenant <{0}> (region {1}, +{2} tags)",
-                resourceName, region, newTags.size());
-    }
-
-    private void untagTenant(String resourceName, String region, List<String> tagKeys) {
-        Set<String> toRemove = new HashSet<>(tagKeys);
-        tenantService.mutateTags(resourceName, region, tags -> {
-            List<Tag> remaining = new ArrayList<>(tags);
-            remaining.removeIf(t -> toRemove.contains(t.key()));
-            return remaining;
-        });
-        LOG.infov("Untagged SES tenant <{0}> (region {1}, -{2} keys)",
-                resourceName, region, tagKeys.size());
-    }
-
-    private List<Tag> listConfigurationSetTags(String name, String region) {
-        ConfigurationSet cs = configSetService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No ConfigurationSet present with name: " + name, 404));
-        return new ArrayList<>(cs.getTags());
-    }
-
-    private void tagConfigurationSet(String name, String region, List<Tag> newTags) {
-        ConfigurationSet cs = configSetService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No ConfigurationSet present with name: " + name, 404));
-        cs.setTags(SesTags.merge(cs.getTags(), newTags));
-        configSetService.save(cs, region);
-        LOG.infov("Tagged SES configuration set: {0} (region {1}, +{2} tags)", name, region, newTags.size());
-    }
-
-    private void untagConfigurationSet(String name, String region, List<String> tagKeys) {
-        ConfigurationSet cs = configSetService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No ConfigurationSet present with name: " + name, 404));
-        Set<String> toRemove = new HashSet<>(tagKeys);
-        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
-        List<Tag> remaining = new ArrayList<>(cs.getTags());
-        remaining.removeIf(t -> toRemove.contains(t.key()));
-        cs.setTags(remaining);
-        configSetService.save(cs, region);
-        LOG.infov("Untagged SES configuration set: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
-    }
-
-    private List<Tag> listEmailTemplateTags(String name, String region) {
-        EmailTemplate template = templateService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No Template present with name: " + name, 404));
-        return new ArrayList<>(template.getTags());
-    }
-
-    private void tagEmailTemplate(String name, String region, List<Tag> newTags) {
-        EmailTemplate template = templateService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No Template present with name: " + name, 404));
-        template.setTags(SesTags.merge(template.getTags(), newTags));
-        templateService.save(template, region);
-        LOG.infov("Tagged SES template: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
 
     public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
         identityService.setTags(identityValue, region, tags);
     }
 
-    private void untagEmailTemplate(String name, String region, List<String> tagKeys) {
-        EmailTemplate template = templateService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No Template present with name: " + name, 404));
-        Set<String> toRemove = new HashSet<>(tagKeys);
-        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
-        List<Tag> remaining = new ArrayList<>(template.getTags());
-        remaining.removeIf(t -> toRemove.contains(t.key()));
-        template.setTags(remaining);
-        templateService.save(template, region);
-        LOG.infov("Untagged SES template: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
-    }
-
+    // name is everything after the type's first slash and may itself contain one: a tenant ARN's
+    // <name>/<tenantId> remainder passes through whole, decomposed by the tenant domain.
     private record ResourceRef(String account, String region, String type, String name) {}
 
     /**

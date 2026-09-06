@@ -229,16 +229,17 @@ public class ElastiCacheService implements ResourceProvider {
 
         ElastiCacheContainerHandle handle = null;
         try {
-            handle = containerManager.start(groupId, image);
+            // A replication group record is metadata: its id, endpoint host and proxy port are
+            // derived from configuration and need no Docker, so the group is created and reaches
+            // 'available' even when no daemon is reachable. Only connecting to the cache needs
+            // the container.
+            handle = containerManager.tryStart(groupId, image);
 
             String endpointHost = resolveEndpointHost();
             Endpoint endpoint = new Endpoint(endpointHost, proxyPort);
             ReplicationGroup group = new ReplicationGroup(
                     groupId, request.description(), ReplicationGroupStatus.AVAILABLE,
                     authMode, endpoint, Instant.now(), proxyPort);
-            group.setContainerId(handle.getContainerId());
-            group.setContainerHost(handle.getHost());
-            group.setContainerPort(handle.getPort());
             group.setAuthToken(request.authToken());
             group.setArn(regionResolver.buildArn("elasticache", request.region(),
                     "replicationgroup:" + groupId));
@@ -248,11 +249,23 @@ public class ElastiCacheService implements ResourceProvider {
                     : 1);
             applyCommonAttributes(group, request, resolvedSettings);
 
+            if (handle != null) {
+                group.setContainerId(handle.getContainerId());
+                group.setContainerHost(handle.getHost());
+                group.setContainerPort(handle.getPort());
+            }
+
             synchronized (lockFor("rg:" + groupId)) {
                 groups.put(groupId, group);
-                proxyManager.startProxy(groupId, authMode, proxyPort,
-                        handle.getHost(), handle.getPort(),
-                        (username, password) -> validatePassword(groupId, username, password));
+                if (handle != null) {
+                    proxyManager.startProxy(groupId, authMode, proxyPort,
+                            handle.getHost(), handle.getPort(),
+                            (username, password) -> validatePassword(groupId, username, password));
+                } else {
+                    LOG.warnv("Replication group {0} created without a backing cache container: no "
+                            + "Docker daemon is reachable. Metadata operations work; connections to "
+                            + "the cache do not until a daemon appears.", groupId);
+                }
             }
 
             LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));

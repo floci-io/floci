@@ -33,6 +33,7 @@ import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
 import io.github.hectorvent.floci.services.aps.ApsController;
+import io.github.hectorvent.floci.services.controltower.ControlTowerControlController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
 import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
@@ -572,7 +573,7 @@ public class ResolvedServiceCatalog {
                         "controltower", storageMode(config.storage().services().controltower().mode(), config.storage().mode()),
                         config.storage().services().controltower().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("controltower"), Set.of(), Set.of(ControlTowerController.class)),
+                        Set.of(), Set.of("controltower"), Set.of(), Set.of(ControlTowerController.class, ControlTowerControlController.class)),
                 descriptor("aps", "aps", config.services().aps().enabled(), true,
                         "aps", storageMode(config.storage().services().aps().mode(), config.storage().mode()),
                         config.storage().services().aps().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

@@ -133,7 +133,9 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .contentType("application/xml")
             .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"))
-            .body(containsString("<ClusterStatus>available</ClusterStatus>"));
+            .body(containsString("<ClusterStatus>available</ClusterStatus>"))
+            .body(containsString("<ClusterAvailabilityStatus>Available</ClusterAvailabilityStatus>"))
+            .body(containsString("<AvailabilityZoneRelocationStatus>disabled</AvailabilityZoneRelocationStatus>"));
 
         // 1b. RebootCluster — must preserve data (no Docker volume backs this container)
         when(containerManager.getContainer(any(), eq("cluster-src")))

@@ -1,16 +1,32 @@
 ARG VERSION=latest
-# This must be the UBI-based image produced by Dockerfile.native-package.
-# Release and nightly tags use VERSION; reusable builds override BASE_IMAGE
-# with the digest-qualified native image they just published.
+# BASE_IMAGE is the image produced by Dockerfile.native-package. Release and nightly
+# tags use VERSION; reusable builds override BASE_IMAGE with the digest-qualified
+# native image they just published.
+#
+# That image is ubi9-micro and has no package manager, so this image cannot extend it.
 ARG BASE_IMAGE=floci/floci:${VERSION}
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS native
+
+# Everything that does not depend on the Floci version. CI builds this stage alone
+# (target: tools) to test the aws CLI shim and to warm the layer cache.
+FROM registry.access.redhat.com/ubi9-minimal:9.7 AS tools
 
 LABEL org.opencontainers.image.title="Floci (compat)" \
       org.opencontainers.image.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
       org.opencontainers.image.url="https://floci.io" \
       org.opencontainers.image.source="https://github.com/floci-io/floci" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="Floci"
+      org.opencontainers.image.vendor="Floci" \
+      description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
+      io.k8s.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
+      io.k8s.display-name="Floci (compat)" \
+      io.openshift.expose-services="4566:tcp" \
+      io.openshift.tags="floci aws-emulator" \
+      maintainer="Floci <https://github.com/floci-io/floci>" \
+      name="floci/floci" \
+      summary="Floci compatibility image with AWS CLI and boto3 pre-installed" \
+      url="https://floci.io" \
+      vendor="Floci"
 
 ENV AWS_DEFAULT_REGION=us-east-1
 ENV AWS_ACCESS_KEY_ID=test
@@ -36,8 +52,8 @@ ENV AWS_PAGER=""
 # a v2 install against real AWS. A hook passing raw bytes (e.g.
 # aws lambda invoke --payload) needs --cli-binary-format raw-in-base64-out.
 ARG AWSCLI_VERSION=2.36.24
-USER root
-RUN microdnf install -y --nodocs python3 python3-pip unzip \
+RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
+    && microdnf install -y --nodocs python3 python3-pip unzip \
     && pip3 install --no-cache-dir boto3 \
     && case "$(uname -m)" in \
          x86_64)  arch=x86_64 ;; \
@@ -48,12 +64,21 @@ RUN microdnf install -y --nodocs python3 python3-pip unzip \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install --bin-dir /usr/bin --install-dir /usr/local/aws-cli \
     && rm -rf /tmp/awscliv2.zip /tmp/aws \
+    # The CLI's `aws <cmd> help` example pages are 26 MB of text nobody reads inside a container;
+    # the command reference itself (dist/awscli/data) stays. unzip exists only to unpack the CLI.
+    # pip stays: the image documents it and init hooks use it to install packages.
+    && rm -rf /usr/local/aws-cli/v2/*/dist/awscli/examples \
+    # Tab completion has no user inside a container: aws_completer and its 21 MB ac.index go.
+    # The system Python keeps pip, setuptools and what boto3 imports; the optimised .pyc
+    # variants, lib2to3 and ensurepip (pip is already installed) are build-time extras.
+    && rm -rf /usr/local/aws-cli/v2/*/dist/awscli/data/ac.index /usr/local/aws-cli/v2/*/dist/aws_completer /usr/bin/aws_completer \
+    && rm -rf /usr/lib64/python3.9/lib2to3 /usr/lib64/python3.9/ensurepip \
+    && python3 -c 'import pathlib; [p.unlink() for d in ("/usr/lib64/python3.9","/usr/lib/python3.9") for p in pathlib.Path(d).rglob("*.opt-[12].pyc")]' \
     && microdnf remove -y unzip \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
 
-COPY bin/awslocal /usr/local/bin/awslocal
-RUN chmod +x /usr/local/bin/awslocal
+COPY --chmod=755 bin/awslocal /usr/local/bin/awslocal
 
 # Pre-create the init-hook directories so archive-based copies (Testcontainers
 # withCopyFileToContainer / `docker cp`) can drop hooks straight into them.
@@ -63,5 +88,29 @@ RUN chmod +x /usr/local/bin/awslocal
 RUN mkdir -p /etc/localstack/init/boot.d /etc/localstack/init/start.d /etc/localstack/init/ready.d \
              /etc/floci/init/boot.d /etc/floci/init/start.d /etc/floci/init/ready.d \
     && chown -R 1001:root /etc/localstack /etc/floci
+
+WORKDIR /app
+# A chmod after the copy below would rewrite the 200 MB binary into a second layer.
+RUN chown 1001:root /app && chmod g+rwX /app
+
+FROM tools
+
+ARG VERSION
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+
+COPY --from=native --chown=1001:root /app/ /app/
+VOLUME /app/data
+
+COPY --from=native /usr/local/bin/docker-entrypoint.sh /usr/local/bin/localstack-parity.sh /usr/local/bin/
+# From the build context, not the native image: a published native image may predate the script.
+COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/
+
+EXPOSE 4566
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthcheck.sh"]
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]
 
 USER 1001

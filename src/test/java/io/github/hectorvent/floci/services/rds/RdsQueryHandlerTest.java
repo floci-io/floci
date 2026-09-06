@@ -99,6 +99,37 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_defaultParameterGroupNameUsesHyphenAndMajorOnlyForAuroraPostgresql() {
+        DbInstance instance = makeInstance("aurora-pg");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        instance.setEngineIdentifier("aurora-postgresql");
+        instance.setEngineVersion("16.3");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupName>default.aurora-postgresql16</DBParameterGroupName>"),
+                "Expected hyphenated aurora-postgresql with major-only version, got: " + body);
+        assertFalse(body.contains("aurora_postgresql"), "Parameter group name must not contain underscores");
+    }
+
+    @Test
+    void describeDbInstances_defaultParameterGroupNameUsesMajorMinorForAuroraMysql() {
+        DbInstance instance = makeInstance("aurora-my");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.MYSQL);
+        instance.setEngineIdentifier("aurora-mysql");
+        instance.setEngineVersion("8.0.36");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupName>default.aurora-mysql8.0</DBParameterGroupName>"),
+                "AWS uses major.minor for the MySQL family, got: " + body);
+    }
+
+    @Test
     void describeDbInstances_filterByDirectIdentifier() {
         DbInstance instance = makeInstance("mydb");
         when(service.listDbInstances("mydb", null)).thenReturn(List.of(instance));

@@ -1376,16 +1376,19 @@ public class RdsQueryHandler {
             return name;
         }
 
-        String engine = instance.getEngine() != null
-                ? instance.getEngine().name().toLowerCase()
-                : "unknown";
-        return "default." + engine + dbEngineMajorVersion(instance);
+        String engine = instanceEngine(instance);
+        return "default." + (engine.isEmpty() ? "unknown" : engine) + dbEngineMajorVersion(instance, engine);
     }
 
-    private static String dbEngineMajorVersion(DbInstance instance) {
+    /**
+     * AWS uses major.minor for the MySQL family's default parameter group name
+     * (e.g. {@code default.aurora-mysql8.0}), but only the major version for the
+     * Postgres family ({@code default.aurora-postgresql16}).
+     */
+    private static String dbEngineMajorVersion(DbInstance instance, String engine) {
         String engineVersion = instance.getEngineVersion();
         if ((engineVersion == null || engineVersion.isBlank()) && instance.getEngine() != null) {
-            engineVersion = defaultEngineVersion(instance.getEngine().name());
+            engineVersion = defaultEngineVersion(engine);
         }
         if (engineVersion == null || engineVersion.isBlank()) {
             return "";
@@ -1396,7 +1399,18 @@ public class RdsQueryHandler {
         while (end < trimmed.length() && Character.isDigit(trimmed.charAt(end))) {
             end++;
         }
-        return end == 0 ? "" : trimmed.substring(0, end);
+        if (end == 0) {
+            return "";
+        }
+        boolean majorMinor = engine.contains("mysql") || engine.equals("mariadb");
+        if (!majorMinor || end >= trimmed.length() || trimmed.charAt(end) != '.') {
+            return trimmed.substring(0, end);
+        }
+        int minorEnd = end + 1;
+        while (minorEnd < trimmed.length() && Character.isDigit(trimmed.charAt(minorEnd))) {
+            minorEnd++;
+        }
+        return minorEnd == end + 1 ? trimmed.substring(0, end) : trimmed.substring(0, minorEnd);
     }
 
     private static void writeTags(XmlBuilder xml, Map<String, String> tags) {

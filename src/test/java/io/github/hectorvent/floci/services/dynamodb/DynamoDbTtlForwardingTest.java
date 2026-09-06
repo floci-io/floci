@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,14 +28,29 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
  * TTL sweep must forward a REMOVE per expired item to Kinesis (happy path) and must isolate
- * forwarding failures: a throwing forwarder cannot abort the sweep or block persistence.
- * See issue #571.
+ * forwarding from Kinesis health: because forwarding is now enqueue-only (delivered/retried on a
+ * background drain, see {@link KinesisStreamingForwarderTest}), a broken Kinesis cannot abort the
+ * sweep, block persistence, or silently drop the change events. See issue #571.
  */
 class DynamoDbTtlForwardingTest {
+
+    /** A Scheduler that never runs the drain, so buffered CDC records stay put for inspection. */
+    private static final KinesisStreamingForwarder.Scheduler NO_DRAIN =
+            new KinesisStreamingForwarder.Scheduler() {
+                @Override
+                public void schedule(Runnable task, long delayMillis) {
+                    // intentionally never executes the drain
+                }
+
+                @Override
+                public void shutdown() {
+                }
+            };
 
     private static final String REGION = "us-east-1";
 
@@ -109,6 +125,8 @@ class DynamoDbTtlForwardingTest {
         table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(stream.getStreamArn()));
 
         svc.deleteExpiredItems();
+        // Delivery is asynchronous now; wait for the background drain to flush before reading the stream.
+        assertTrue(forwarder.awaitIdle(Duration.ofSeconds(5)), "CDC forwards should drain promptly");
 
         List<KinesisRecord> drained = drain(kinesis, "ttl-stream");
         assertEquals(expired, drained.size(), "one Kinesis record per expired item");
@@ -131,9 +149,9 @@ class DynamoDbTtlForwardingTest {
         StorageBackend<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
 
         KinesisService throwingKinesis = mock(KinesisService.class);
-        when(throwingKinesis.putRecord(anyString(), any(byte[].class), anyString(), anyString()))
-                .thenThrow(new RuntimeException("kinesis unavailable"));
-        KinesisStreamingForwarder forwarder = new KinesisStreamingForwarder(throwingKinesis, mapper);
+        // No-drain scheduler: the sweep only ENQUEUES, so Kinesis is never touched during the sweep at
+        // all. (Retry/give-up drop accounting on the drain is covered by KinesisStreamingForwarderTest.)
+        KinesisStreamingForwarder forwarder = new KinesisStreamingForwarder(throwingKinesis, mapper, NO_DRAIN);
         DynamoDbService svc = new DynamoDbService(
                 tableStore, itemStore, new RegionResolver("us-east-1", "000000000000"), null, forwarder);
 
@@ -143,11 +161,16 @@ class DynamoDbTtlForwardingTest {
         table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(
                 "arn:aws:kinesis:us-east-1:000000000000:stream/ttl-stream"));
 
-        // A forwarding failure must not propagate out of the sweep.
+        // A dead Kinesis must not propagate out of the sweep, and must not be called synchronously by it.
         assertDoesNotThrow(svc::deleteExpiredItems);
+        verifyNoInteractions(throwingKinesis);
 
-        assertEquals(expired, forwarder.getForwardFailureCount(),
-                "each failed forward must be counted, not swallowed silently");
+        // Every expired change event is safely BUFFERED (not silently dropped): the fix for the
+        // drop-on-forward-exception gap. The drain would deliver these once Kinesis recovers.
+        List<DestinationForwardingStats> stats = forwarder.forwardingStats();
+        assertEquals(1, stats.size());
+        assertEquals(expired, stats.get(0).queueDepth(), "each expired item's REMOVE must be enqueued");
+        assertEquals(0L, forwarder.getForwardFailureCount(), "buffered records are not (yet) dropped");
 
         // Removed in-memory AND persisted: a fresh service over the same stores must not see them.
         for (int i = 0; i < expired; i++) {

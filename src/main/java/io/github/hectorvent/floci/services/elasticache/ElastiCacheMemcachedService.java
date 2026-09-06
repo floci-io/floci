@@ -25,6 +25,8 @@ public class ElastiCacheMemcachedService {
     private static final Logger LOG = Logger.getLogger(ElastiCacheMemcachedService.class);
     private static final String ENGINE = "memcached";
     private static final String ENGINE_VERSION = "1.6.22";
+    /** Memcached's well-known port, used as the endpoint port when no backing container exists. */
+    private static final int BACKEND_PORT = 11211;
 
     private final StorageBackend<String, CacheCluster> clusters;
     private final ElastiCacheMemcachedContainerManager containerManager;
@@ -49,20 +51,30 @@ public class ElastiCacheMemcachedService {
         String image = config.services().elasticache().defaultMemcachedImage();
         LOG.infov("Creating Memcached cluster {0} with image {1}", clusterId, image);
 
-        ElastiCacheContainerHandle handle = containerManager.start(clusterId, image);
+        // A cache cluster record is metadata: its id and endpoint are derived from configuration,
+        // so the cluster is created and reaches 'available' even when no Docker daemon is
+        // reachable. Only connecting to the cache needs the container.
+        ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image);
 
         String endpointHost = resolveEndpointHost(handle);
-        Endpoint endpoint = new Endpoint(endpointHost, handle.getPort());
+        int endpointPort = handle != null ? handle.getPort() : BACKEND_PORT;
+        Endpoint endpoint = new Endpoint(endpointHost, endpointPort);
 
         CacheCluster cluster = new CacheCluster(
                 clusterId, CacheClusterStatus.AVAILABLE, ENGINE, ENGINE_VERSION,
                 endpoint, Instant.now());
-        cluster.setContainerId(handle.getContainerId());
-        cluster.setContainerHost(handle.getHost());
-        cluster.setContainerPort(handle.getPort());
+        if (handle != null) {
+            cluster.setContainerId(handle.getContainerId());
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
+        } else {
+            LOG.warnv("Memcached cluster {0} created without a backing container: no Docker daemon "
+                    + "is reachable. Metadata operations work; connections to the cache do not "
+                    + "until a daemon appears.", clusterId);
+        }
 
         clusters.put(clusterId, cluster);
-        LOG.infov("Memcached cluster {0} created, endpoint={1}:{2}", clusterId, endpointHost, handle.getPort());
+        LOG.infov("Memcached cluster {0} created, endpoint={1}:{2}", clusterId, endpointHost, endpointPort);
         return cluster;
     }
 
@@ -100,6 +112,6 @@ public class ElastiCacheMemcachedService {
     }
 
     private String resolveEndpointHost(ElastiCacheContainerHandle handle) {
-        return config.hostname().orElse(handle.getHost());
+        return config.hostname().orElse(handle != null ? handle.getHost() : "localhost");
     }
 }

@@ -106,6 +106,8 @@ public class Ec2ContainerManager {
     private final RegionResolver regionResolver;
     private final ContainerNetworkReachability containerNetworkReachability;
 
+    private volatile boolean dockerUnavailableLogged;
+
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ec2-container-launcher");
         t.setDaemon(true);
@@ -147,7 +149,8 @@ public class Ec2ContainerManager {
     /**
      * Launches a Docker container for the given EC2 instance.
      * The instance starts in pending state; an async thread transitions it to running
-     * and handles SSH key injection and UserData execution.
+     * and handles SSH key injection and UserData execution. With no Docker daemon
+     * reachable the instance goes straight to running as metadata only.
      *
      * @param instance    the EC2 instance model (mutated in-place as state transitions occur)
      * @param dockerImage Docker image URI resolved from the instance's AMI ID
@@ -168,6 +171,16 @@ public class Ec2ContainerManager {
      */
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region, Set<Integer> appPorts) {
         instance.setState(InstanceState.pending());
+
+        // An instance record is metadata: id, addresses, tags and lifecycle state are all
+        // served without a container runtime. Only the guest itself (SSH, UserData, SSM
+        // commands) needs Docker, so when no daemon is reachable the instance still runs
+        // instead of dying: Floci in Docker without a mounted socket, or a stopped daemon
+        // on the host, would otherwise terminate every instance the moment it launched.
+        if (!isDockerAvailable()) {
+            markContainerlessRunning(instance);
+            return;
+        }
 
         executor.submit(() -> {
             try {
@@ -274,7 +287,14 @@ public class Ec2ContainerManager {
                 failLaunch(instance);
             } catch (Exception e) {
                 LOG.warnv("Failed to launch EC2 instance {0}: {1}", instance.getInstanceId(), e.getMessage());
-                failLaunch(instance);
+                // The daemon can disappear between the probe above and any of the calls in
+                // this block. Losing Docker is not the instance's fault, so degrade to a
+                // metadata-only instance; a genuine container failure still fails the launch.
+                if (isDockerAvailable()) {
+                    failLaunch(instance);
+                } else {
+                    markContainerlessRunning(instance);
+                }
             }
         });
     }
@@ -298,7 +318,9 @@ public class Ec2ContainerManager {
             String containerId = null;
             boolean recorded = false;
             try {
-                containerId = lifecycleManager.create(spec);
+                containerId = image.dockerPlatform() == null
+                        ? lifecycleManager.create(spec)
+                        : lifecycleManager.create(spec, image.dockerPlatform());
                 if (!recordCreatedContainer(instance, containerId, sshHostPort)) {
                     lifecycleManager.removeIfExists(containerId);
                     portAllocator.release(sshHostPort);
@@ -482,6 +504,40 @@ public class Ec2ContainerManager {
     }
 
     private record StartedContainer(String containerId, int sshHostPort) {
+    }
+
+    /**
+     * Reports whether a Docker daemon is reachable, logging the transition in each
+     * direction once rather than on every launch.
+     */
+    public boolean isDockerAvailable() {
+        try {
+            dockerClient.pingCmd().exec();
+            if (dockerUnavailableLogged) {
+                dockerUnavailableLogged = false;
+                LOG.info("Docker daemon is reachable again; new EC2 instances get a backing container.");
+            }
+            return true;
+        } catch (Exception e) {
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). EC2 instances are emulated as "
+                        + "metadata only: they reach running and honour stop, start and terminate, but have "
+                        + "no backing container, so SSH, UserData and SSM command execution stay unavailable "
+                        + "until a daemon is reachable.", e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Brings an instance to running with no container behind it. Stop, start, terminate and
+     * reboot already handle a null container id, so the rest of the lifecycle keeps working.
+     */
+    private void markContainerlessRunning(Instance instance) {
+        LOG.infov("EC2 instance {0} is running without a backing container (no Docker daemon reachable)",
+                instance.getInstanceId());
+        instance.setState(InstanceState.running());
     }
 
     /**

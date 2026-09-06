@@ -124,7 +124,24 @@ public class StackSetService {
         // Re-apply the updated definition to every existing instance, refreshing each record.
         List<StackInstance> deployed = new ArrayList<>();
         for (StackInstance inst : listStackInstances(name, null, null)) {
-            StackInstance updated = deployInstance(ss, inst.getAccount(), inst.getRegion(), UPDATE_CHANGE_SET, "UPDATE");
+            // An instance whose stack is terminal - a failed create that rolled back, or a phase
+            // some earlier operation abandoned - is one the single-stack engine refuses to update.
+            // That is one instance failing, not a malformed request: AWS leaves such an instance
+            // INOPERABLE, updates the rest, and reports the operation FAILED. Deploying into it
+            // anyway would raise the refusal out of here and fail the whole UpdateStackSet call
+            // with a 400, updating no instance at all.
+            String stackStatus = cfnService.stackStatus(inst.getStackName(), inst.getRegion());
+            if (CloudFormationService.refusesUpdate(stackStatus)) {
+                inst.setStatus("INOPERABLE");
+                inst.setDetailedStatus("FAILED");
+                inst.setStatusReason("Stack instance is in " + stackStatus
+                        + " state and can not be updated");
+                instances.put(instanceKey(name, inst.getAccount(), inst.getRegion()), inst);
+                deployed.add(inst);
+                continue;
+            }
+            StackInstance updated =
+                    deployInstance(ss, inst.getAccount(), inst.getRegion(), UPDATE_CHANGE_SET, "UPDATE");
             instances.put(instanceKey(name, updated.getAccount(), updated.getRegion()), updated);
             deployed.add(updated);
         }

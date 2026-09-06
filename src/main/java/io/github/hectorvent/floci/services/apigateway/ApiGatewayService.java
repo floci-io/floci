@@ -17,6 +17,7 @@ import org.jboss.logging.Logger;
 import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -73,6 +74,7 @@ public class ApiGatewayService {
      * also keeps a mapping from being created under a domain that is being deleted at that moment.
      */
     private final Object domainNameLock = new Object();
+    private final TlsCertificateManager certificateManager;
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
@@ -80,7 +82,9 @@ public class ApiGatewayService {
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
 
     @Inject
-    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config) {
+    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
+                             TlsCertificateManager certificateManager) {
+        this.certificateManager = certificateManager;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -1327,6 +1331,8 @@ public class ApiGatewayService {
             }
             domainStore.put(domainKey(region, domainName), domain);
         }
+        // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
+        certificateManager.ensureHost(domainName);
         LOG.infov("Created custom domain {0} in {1}", domainName, region);
         return domain;
     }

@@ -835,7 +835,8 @@ class KinesisServiceTest {
      * append lock, the producer must fail cleanly (ResourceNotFoundException) rather than append to
      * and re-persist the stale instance. Deterministic via the pre-lock hook: the producer parks
      * WITHOUT holding the monitor, so the deleter wins the lock first. Fails on code lacking the
-     * in-lock re-resolve: the producer would resurrect the stream and throw nothing.
+     * in-lock resolve: a producer that resolved before the lock would append to and re-persist the
+     * stale pre-delete instance, resurrecting the stream and throwing nothing.
      */
     @Test
     void putRecord_failsCleanly_whenStreamDeletedBeforeLockAcquired() throws Exception {

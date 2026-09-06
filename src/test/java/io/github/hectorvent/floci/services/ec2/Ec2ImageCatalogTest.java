@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -11,6 +12,7 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.inject.Inject;
 
 @QuarkusTest
@@ -50,6 +52,8 @@ class Ec2ImageCatalogTest {
     @Test
     void resolverUsesCatalogDockerImagesForIdsAndAliases() {
         imageCatalog.images()
+                .stream()
+                .filter(image -> !"windows".equalsIgnoreCase(image.platform))
                 .forEach(image -> assertEquals(image.dockerImage, amiImageResolver.resolve(image.imageId)));
 
         List.of("ami-amazonlinux2", "ami-amazonlinux2023", "ami-ubuntu2004", "ami-ubuntu2404")
@@ -66,6 +70,20 @@ class Ec2ImageCatalogTest {
         assertEquals(ResolvedAmiImage.SYSTEMD_RUNTIME, image.guestRuntime());
         assertTrue(image.cloudInit());
         assertTrue(image.systemd());
+    }
+
+    @Test
+    void resolverMapsImageArchitectureToDockerPlatform() {
+        assertEquals("linux/arm64", amiImageResolver.resolveImage("ami-ubuntu2404-cloud-arm64").dockerPlatform());
+        assertEquals("linux/amd64", amiImageResolver.resolveImage("ami-0abcdef1234567891").dockerPlatform());
+    }
+
+    @Test
+    void resolverRejectsWindowsImagesForContainerExecution() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> amiImageResolver.resolveImage("ami-0abcdef1234567893"));
+
+        assertEquals("UnsupportedOperation", error.getErrorCode());
     }
 
     @Test

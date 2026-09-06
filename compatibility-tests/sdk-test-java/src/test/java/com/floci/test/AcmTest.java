@@ -12,8 +12,12 @@ import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.acm.model.*;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -118,8 +122,8 @@ class AcmTest {
 
     @Test
     @Order(3)
-    @DisplayName("Get a certificate")
-    void testGetCertificate() {
+    @DisplayName("Get a certificate whose chain validates it")
+    void testGetCertificate() throws Exception {
         Assumptions.assumeTrue(requestedCertArn != null, "RequestCertificate must succeed first");
 
         GetCertificateResponse response = acm.getCertificate(b -> b
@@ -127,6 +131,20 @@ class AcmTest {
 
         assertThat(response.certificate()).isNotNull();
         assertThat(response.certificate()).contains("BEGIN CERTIFICATE");
+        assertThat(response.certificateChain()).isNotNull();
+
+        // Certificate and CertificateChain form a chain of trust: the first chain entry is the
+        // issuing CA, so a client that pins the chain can validate the leaf.
+        CertificateFactory factory = CertificateFactory.getInstance("X.509");
+        X509Certificate leaf = (X509Certificate) factory.generateCertificate(
+                new ByteArrayInputStream(response.certificate().getBytes(StandardCharsets.US_ASCII)));
+        List<X509Certificate> chain = factory.generateCertificates(
+                        new ByteArrayInputStream(response.certificateChain().getBytes(StandardCharsets.US_ASCII)))
+                .stream().map(X509Certificate.class::cast).toList();
+        assertThat(chain).isNotEmpty();
+        assertThat(leaf.getIssuerX500Principal()).isEqualTo(chain.get(0).getSubjectX500Principal());
+        assertThat(leaf.getBasicConstraints()).isEqualTo(-1);
+        leaf.verify(chain.get(0).getPublicKey());
     }
 
     @Test

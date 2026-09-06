@@ -9,6 +9,7 @@ on:
       - 'docker/Dockerfile.compat'
       - 'docker/entrypoint.sh'
       - 'docker/localstack-parity.sh'
+      - 'docker/healthcheck.sh'
       - 'compatibility-tests/**'
       - '.github/ci/compat-timing-report.py'
       - '.github/ci/compat-opentofu-drift-check.py'
@@ -41,12 +42,26 @@ jobs:
           build-args: VERSION=latest
           load: true
           tags: floci-compat-shim-test
-          # Read-only; warm-compat-caches.yml produces this scope on main. Unlike
-          # floci-native above, these layers are worth caching: the image builds
-          # FROM a published floci/floci tag and its cost is a microdnf install
-          # that changes only when the Dockerfile does. Writing from here would
-          # put a per-PR copy no other PR can read back into the budget.
+          # Read-only; warm-compat-caches.yml produces this scope on main from the
+          # tools stage. Unlike floci-native above, those layers are worth caching:
+          # the tools stage depends only on ubi9-minimal and the Dockerfile, so it
+          # changes only when the Dockerfile does. The final stage copies the binary
+          # out of the published floci/floci:latest and is never cacheable. Writing
+          # from here would put a per-PR copy no other PR can read back into the
+          # budget.
           cache-from: type=gha,scope=compat-shim
+
+      - name: Compat image starts and reports healthy
+        run: |
+          docker run -d --name compat-smoke floci-compat-shim-test
+          for _ in $(seq 1 30); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' compat-smoke)
+            [ "$health" = healthy ] && break
+            sleep 1
+          done
+          docker logs compat-smoke 2>&1 | tail -20
+          docker rm -f compat-smoke >/dev/null
+          [ "$health" = healthy ] || { echo "::error::compat image did not become healthy: $health"; exit 1; }
 
       - name: Unflagged aws sqs call routes to AWS_ENDPOINT_URL
         run: |
@@ -280,8 +295,28 @@ jobs:
             -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
             floci:test-native
 
-      - name: Wait for floci to be ready
-        run: timeout 60 bash -c 'until curl -sf http://localhost:4566/ >/dev/null 2>&1; do sleep 1; done'
+      # Waits on Docker's health status rather than curling the port so the image's
+      # HEALTHCHECK runs under CI on every arch: the native image has no curl and probes
+      # over bash's /dev/tcp, and a malformed probe would otherwise leave the container
+      # "unhealthy" while the suites pass against the open port. Healthy takes one
+      # interval (5 s); unhealthy takes retries x interval (25 s) and fails fast here.
+      - name: Wait for floci to be healthy
+        run: |
+          health=starting
+          for _ in $(seq 1 60); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' floci)
+            if [ "$health" = healthy ]; then
+              exit 0
+            fi
+            if [ "$health" = unhealthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "::error::floci did not report healthy (last status: $health)"
+          docker inspect -f '{{json .State.Health}}' floci
+          docker logs --tail 50 floci
+          exit 1
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

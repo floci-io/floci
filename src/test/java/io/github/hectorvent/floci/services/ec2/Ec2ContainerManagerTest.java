@@ -65,6 +65,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
+import com.github.dockerjava.api.command.PingCmd;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 
 class Ec2ContainerManagerTest {
 
@@ -538,6 +542,8 @@ class Ec2ContainerManagerTest {
         Ec2ContainerManager.containerBridgeIpAttempts = 1;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;
         LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.create(any(ContainerSpec.class), eq("linux/arm64")))
+                .thenReturn(TEST_CONTAINER_ID);
         InspectContainerCmd inspect = mock(InspectContainerCmd.class);
         InspectContainerResponse withIp = inspectResponse("172.18.0.11");
         when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
@@ -546,7 +552,8 @@ class Ec2ContainerManagerTest {
         Instance instance = instance("i-systemd");
 
         harness.manager.launch(instance,
-                new ResolvedAmiImage("floci/ami-ubuntu:24.04-arm64", ResolvedAmiImage.SYSTEMD_RUNTIME, true),
+                new ResolvedAmiImage("floci/ami-ubuntu:24.04-arm64", ResolvedAmiImage.SYSTEMD_RUNTIME, true,
+                        "linux/arm64"),
                 null,
                 "us-west-2");
 
@@ -554,6 +561,7 @@ class Ec2ContainerManagerTest {
         verify(harness.builder).withCmd(List.of("/sbin/init"));
         verify(harness.builder).withCgroupnsMode("host");
         verify(harness.builder).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+        verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
     }
 
     @Test
@@ -937,6 +945,7 @@ class Ec2ContainerManagerTest {
         when(ec2.imdsPort()).thenReturn(9169);
 
         DockerClient dockerClient = mock(DockerClient.class);
+        stubDockerPing(dockerClient, true);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
@@ -997,6 +1006,65 @@ class Ec2ContainerManagerTest {
             Thread.sleep(10);
         }
         assertTrue(condition.getAsBoolean(), "condition was not met before timeout");
+    }
+
+    @Test
+    void launchRunsInstanceAsMetadataOnlyWhenNoDockerDaemonIsReachable() throws Exception {
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient(), false);
+
+        Instance instance = instance("i-nodocker");
+
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertEquals("running", instance.getState().getName());
+        assertNull(instance.getDockerContainerId());
+        verify(harness.lifecycleManager(), never()).create(any(ContainerSpec.class));
+        verify(harness.metadataServer(), never()).registerContainer(anyString(), anyString(), any());
+    }
+
+    @Test
+    void launchDegradesToRunningWhenDockerDisappearsMidLaunch() throws Exception {
+        LaunchHarness harness = launchHarness();
+        PingCmd ping = mock(PingCmd.class);
+        when(harness.dockerClient().pingCmd()).thenReturn(ping);
+        doNothing().doThrow(new RuntimeException("No such file or directory")).when(ping).exec();
+        when(harness.lifecycleManager().create(any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("No such file or directory"));
+
+        Instance instance = instance("i-dockergone");
+
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void metadataOnlyInstanceStopsStartsAndTerminatesWithoutAContainer() throws Exception {
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient(), false);
+        Instance instance = instance("i-lifecycle");
+
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+        assertEquals("running", instance.getState().getName());
+
+        harness.manager().stop(instance);
+        assertEquals("stopped", instance.getState().getName());
+
+        harness.manager().start(instance);
+        assertEquals("running", instance.getState().getName());
+
+        harness.manager().terminate(instance);
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    /** Stubs the daemon reachability probe every launch makes before touching Docker. */
+    private static void stubDockerPing(DockerClient dockerClient, boolean reachable) {
+        PingCmd ping = mock(PingCmd.class);
+        when(dockerClient.pingCmd()).thenReturn(ping);
+        if (!reachable) {
+            doThrow(new RuntimeException("No such file or directory")).when(ping).exec();
+        }
     }
 
     private record LaunchHarness(Ec2ContainerManager manager,

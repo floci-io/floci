@@ -172,6 +172,18 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstanceRejectsLegacyBareAuroraEngine() {
+        // "aurora" (bare) is the retired Aurora MySQL 5.6 identifier; real AWS no
+        // longer accepts it for new instances/clusters and rejects it outright
+        // rather than silently treating it as aurora-mysql.
+        AwsException invalidEngine = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("mydb", "aurora", "13",
+                        "admin", "password", "dbname", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+        assertEquals("InvalidParameterValue", invalidEngine.getErrorCode());
+    }
+
+    @Test
     void createAndModifyDbInstancePersistVpcSecurityGroups() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",

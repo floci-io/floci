@@ -1319,4 +1319,35 @@ class KinesisIntegrationTest {
         buf.get(payload);
         return new ObjectMapper().readTree(payload);
     }
+
+    @Test
+    @Order(67)
+    void createStreamRejectsANonStringTagValueWithSerializationException() {
+        // A non-string tag value is a wire deserialization error, not a value to coerce:
+        // it used to be stored as its text ("5"), and the stream was created before the
+        // tags were parsed. Now the whole request is rejected and nothing is created.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-bad-tags", "ShardCount": 1, "Tags": {"Foo": 5}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-bad-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
 }

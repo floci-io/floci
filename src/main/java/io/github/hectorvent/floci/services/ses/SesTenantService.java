@@ -15,6 +15,7 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.HashSet;
@@ -201,20 +202,46 @@ public class SesTenantService {
         }
     }
 
-    /** Resolves a tenant from a tag ARN's resource remainder, for the facade's tag listing. */
-    public Tenant tenantForTagArn(String resourceRemainder, String region) {
+    /** The ARN-dispatched tag operations; {@code resourceRemainder} is the ARN's {@code <name>/<tenantId>} part. */
+    public List<Tag> listTags(String resourceRemainder, String region) {
+        Tenant tenant = tenantForTagArn(resourceRemainder, region);
+        // AWS returns a tenant's tags ordered by key (probe-confirmed).
+        return (tenant.tags() == null ? List.<Tag>of() : tenant.tags()).stream()
+                .sorted(Comparator.comparing(Tag::key, Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    public void tag(String resourceRemainder, String region, List<Tag> newTags) {
+        mutateTags(resourceRemainder, region, tags -> SesTags.merge(tags, newTags));
+        LOG.infov("Tagged SES tenant <{0}> (region {1}, +{2} tags)",
+                resourceRemainder, region, newTags.size());
+    }
+
+    public void untag(String resourceRemainder, String region, List<String> tagKeys) {
+        Set<String> toRemove = new HashSet<>(tagKeys);
+        mutateTags(resourceRemainder, region, tags -> {
+            List<Tag> remaining = new ArrayList<>(tags);
+            remaining.removeIf(t -> toRemove.contains(t.key()));
+            return remaining;
+        });
+        LOG.infov("Untagged SES tenant <{0}> (region {1}, -{2} keys)",
+                resourceRemainder, region, tagKeys.size());
+    }
+
+    /** Resolves a tenant from a tag ARN's resource remainder; package-private for the unit tests. */
+    Tenant tenantForTagArn(String resourceRemainder, String region) {
         TenantTagArn arn = TenantTagArn.parse(resourceRemainder);
         return findByTenantId(arn.tenantId(), region)
                 .orElseThrow(() -> tagArnTenantNotFound(arn));
     }
 
     /**
-     * Applies a tag mutation for the facade's ARN-dispatched tagging. The tenant is re-resolved by
+     * Applies a tag mutation for the ARN-dispatched tagging above. The tenant is re-resolved by
      * TenantId and mutated INSIDE the shared lock, so concurrent tag calls can't lose each other's
      * merges, a concurrent suppression-attribute update isn't overwritten by a stale copy, and a
      * delete/recreate between the caller's lookup and this write can't resurrect the old record.
      */
-    public void mutateTags(String resourceRemainder, String region, UnaryOperator<List<Tag>> mutation) {
+    void mutateTags(String resourceRemainder, String region, UnaryOperator<List<Tag>> mutation) {
         TenantTagArn arn = TenantTagArn.parse(resourceRemainder);
         synchronized (tenantMutationLock) {
             Tenant current = findByTenantId(arn.tenantId(), region)

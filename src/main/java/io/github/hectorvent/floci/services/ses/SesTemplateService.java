@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -18,18 +19,20 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Email templates (the {@code templateStore}), extracted from {@link SesService} as part of the
  * store-based domain split. Reached through the {@code SesService} facade, which delegates the CRUD
- * here; the facade's templated-send path reads templates back through {@link #getTemplate}, and its
- * ARN-dispatched tagging reads/writes through {@link #find} / {@link #save}.
+ * here, along with the ARN-dispatched template tagging; the facade's templated-send path reads
+ * templates back through {@link #getTemplate}.
  *
  * <p>Template rendering is domain logic too: {@code TestRenderTemplate} (data parsing, variable
  * substitution, and the MIME assembly) lives here, and the facade's templated-send paths call the
@@ -124,16 +127,16 @@ public class SesTemplateService {
     }
 
     /**
-     * Reads a template without throwing, so the facade's ARN-dispatched tagging can look one up by
-     * name and reuse this service's key derivation.
+     * Reads a template without throwing, for the facade's orchestration lookups (the tenant
+     * association check and the send-path reads).
      */
     public Optional<EmailTemplate> find(String templateName, String region) {
         return templateStore.get(templateKey(region, templateName));
     }
 
     /**
-     * Persists a template under its canonical key, so the facade's tagging can write the merged tags
-     * back without owning the key derivation.
+     * Persists a template under its canonical key, so facade orchestration that mutates a found
+     * template can write it back without owning the key derivation.
      */
     public void save(EmailTemplate template, String region) {
         templateStore.put(templateKey(region, template.getTemplateName()), template);
@@ -167,6 +170,35 @@ public class SesTemplateService {
     private static String templateKey(String region, String templateName) {
         validateTemplateName(templateName);
         return "template::" + region + "::" + templateName;
+    }
+
+    /** The ARN-dispatched tag operations, sharing the store behind {@code CreateEmailTemplate.Tags}. */
+    public List<Tag> listTags(String name, String region) {
+        return new ArrayList<>(requireForTags(name, region).getTags());
+    }
+
+    public void tag(String name, String region, List<Tag> newTags) {
+        EmailTemplate template = requireForTags(name, region);
+        template.setTags(SesTags.merge(template.getTags(), newTags));
+        templateStore.put(templateKey(region, name), template);
+        LOG.infov("Tagged SES template: {0} (region {1}, +{2} tags)", name, region, newTags.size());
+    }
+
+    public void untag(String name, String region, List<String> tagKeys) {
+        EmailTemplate template = requireForTags(name, region);
+        Set<String> toRemove = new HashSet<>(tagKeys);
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(template.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        template.setTags(remaining);
+        templateStore.put(templateKey(region, name), template);
+        LOG.infov("Untagged SES template: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
+    }
+
+    private EmailTemplate requireForTags(String name, String region) {
+        return templateStore.get(templateKey(region, name))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "No Template present with name: " + name, 404));
     }
 
     // ──────────────────────── Rendering (TestRenderTemplate + send-path substitution) ────────────────────────

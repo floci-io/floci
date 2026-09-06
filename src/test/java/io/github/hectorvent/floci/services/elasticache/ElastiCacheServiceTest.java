@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -75,7 +76,7 @@ class ElastiCacheServiceTest {
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
 
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(containerManager.start(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
         Ec2Service ec2Service = org.mockito.Mockito.mock(Ec2Service.class);
@@ -174,7 +175,7 @@ class ElastiCacheServiceTest {
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         ElastiCacheContainerHandle handle =
                 new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
-        when(containerManager.start(anyString(), anyString())).thenReturn(handle);
+        when(containerManager.tryStart(anyString(), anyString())).thenReturn(handle);
 
         // Proxy startup blows up after the port is reserved and the container is started.
         doThrow(new RuntimeException("proxy boom"))
@@ -203,7 +204,7 @@ class ElastiCacheServiceTest {
     void failedContainerStartupCleansUpContainerByIdAndReleasesPort() {
         // Models a readiness timeout: start() throws without ever returning a handle.
         doThrow(new RuntimeException("readiness boom"))
-                .when(containerManager).start(eq("grp"), anyString());
+                .when(containerManager).tryStart(eq("grp"), anyString());
 
         assertThrows(RuntimeException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1"));
@@ -212,7 +213,7 @@ class ElastiCacheServiceTest {
         verify(containerManager).stopByGroupId("grp");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
-        when(containerManager.start(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp2", "localhost", 6379));
         ReplicationGroup recovered =
                 service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null, "us-east-1");
@@ -503,7 +504,7 @@ class ElastiCacheServiceTest {
     void concurrentCreateForSameGroupIdIsRejectedWhileFirstIsProvisioning() throws InterruptedException {
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
-        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv -> {
             startedLatch.countDown();
             assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
             return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
@@ -723,7 +724,7 @@ class ElastiCacheServiceTest {
         service.createCacheParameterGroup("custom-pg", "redis7", "in use", Map.of());
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
-        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv -> {
             startedLatch.countDown();
             assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
             return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
@@ -773,7 +774,7 @@ class ElastiCacheServiceTest {
 
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
-        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv -> {
             startedLatch.countDown();
             assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
             return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
@@ -808,7 +809,7 @@ class ElastiCacheServiceTest {
     @Test
     void aFailedCreateReleasesItsClaimOnTheParameterGroup() {
         service.createCacheParameterGroup("custom-pg", "redis7", "in use", Map.of());
-        when(containerManager.start(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenThrow(new RuntimeException("docker is down"));
 
         assertThrows(RuntimeException.class,
