@@ -102,14 +102,14 @@ public class RedshiftInterceptingBridge {
 
                 String sql = msg.getSql();
 
-                CopyStatementParser.S3CopyFrom copyFrom = null;
+                CopyStatementParser.S3Statement parsed = null;
                 try {
-                    copyFrom = CopyStatementParser.parse(sql);
+                    parsed = CopyStatementParser.parse(sql);
                 } catch (RuntimeException e) {
                     LOG.warnv("CopyStatementParser failed, forwarding original query: {0}", e.getMessage());
                 }
 
-                if (copyFrom != null) {
+                if (parsed instanceof CopyStatementParser.S3CopyFrom copyFrom) {
                     CopyStatementParser.S3CopyFrom spec = copyFrom;
                     boolean intercepted = runWithBackendOwned(
                             () -> S3CopySimulator.runCopyFrom(client, backend, spec, s3Service, lastBackendStatus,
