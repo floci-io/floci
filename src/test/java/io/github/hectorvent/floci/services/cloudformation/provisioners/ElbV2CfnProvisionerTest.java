@@ -439,7 +439,93 @@ class ElbV2CfnProvisionerTest {
         assertEquals(LB_ARN, r.getPhysicalId());
         assertEquals("web", r.getAttributes().get("LoadBalancerName"));
         assertEquals("web-123.us-east-1.elb.amazonaws.com", r.getAttributes().get("DNSName"));
-        assertFalse(provisioner.hasReplacementUpdate(r), "the record is spent so the prior is never put on a cleanup list");
+
+        // The replacement the failed update created stays owed a delete; the restored prior does not.
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(renamed.getLoadBalancerArn(), provisioner.updateCleanupPhysicalId(r));
+        org.mockito.Mockito.reset(elb);
+        // A second rollback has no replacement of this update to undo: it deletes nothing and keeps
+        // the orphan owed (the load balancer itself rolls back as complete, nothing being modified).
+        provisioner.rollbackUpdate(r);
+        verify(elb, never()).deleteLoadBalancer(anyString(), anyString());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(new UpdateCleanupResult(true, true, renamed.getLoadBalancerArn(), 0, null), provisioner.completeUpdate(r));
+        verify(elb).deleteLoadBalancer(REGION, renamed.getLoadBalancerArn());
+        verify(elb, never()).deleteLoadBalancer(REGION, LB_ARN);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void anOrphanFromAFailedRollbackSurvivesTheNextProvisionAndIsDeletedWithTheNextReplacement() {
+        String orphanArn = LB_ARN.replace("/web/", "/web-v2/");
+        LoadBalancer renamed = loadBalancer("web-v2");
+        renamed.setLoadBalancerArn(orphanArn);
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v2"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(renamed);
+        doThrow(new AwsException("ResourceInUse", "listeners attached", 400)).when(elb).deleteLoadBalancer(REGION, orphanArn);
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        r.getAttributes().put("LoadBalancerName", "web");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v2"), ctx(LB_ARN));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertEquals(LB_ARN, r.getPhysicalId());
+
+        // The next update keeps the name: nothing replaced, but the orphan is still owed.
+        when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenThrow(new AwsException("DuplicateLoadBalancerName", "exists", 400));
+        when(elb.describeLoadBalancers(REGION, null, List.of("web"), null, null)).thenReturn(List.of(loadBalancer("web")));
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web"), ctx(LB_ARN));
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(orphanArn, provisioner.updateCleanupPhysicalId(r));
+        provisioner.rollbackUpdate(r);
+        assertTrue(provisioner.hasReplacementUpdate(r), "a rollback with no replacement of its own does not forget the orphan");
+        assertEquals(LB_ARN, r.getPhysicalId());
+
+        // A later replacement adds the prior to the same list; the committed cleanup deletes both.
+        LoadBalancer third = loadBalancer("web-v3");
+        third.setLoadBalancerArn(LB_ARN.replace("/web/", "/web-v3/"));
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v3"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(third);
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v3"), ctx(LB_ARN));
+        org.mockito.Mockito.reset(elb);
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.complete(), cleanup.toString());
+        verify(elb).deleteLoadBalancer(REGION, orphanArn);
+        verify(elb).deleteLoadBalancer(REGION, LB_ARN);
+        verify(elb, never()).deleteLoadBalancer(REGION, third.getLoadBalancerArn());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void aFailingEntryDoesNotStopTheOtherEntriesFromBeingTried() {
+        String orphanArn = LB_ARN.replace("/web/", "/web-v2/");
+        LoadBalancer renamed = loadBalancer("web-v2");
+        renamed.setLoadBalancerArn(orphanArn);
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v2"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(renamed);
+        doThrow(new AwsException("ResourceInUse", "listeners attached", 400)).when(elb).deleteLoadBalancer(REGION, orphanArn);
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        r.getAttributes().put("LoadBalancerName", "web");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v2"), ctx(LB_ARN));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        LoadBalancer third = loadBalancer("web-v3");
+        third.setLoadBalancerArn(LB_ARN.replace("/web/", "/web-v3/"));
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v3"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(third);
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v3"), ctx(LB_ARN));
+
+        // The orphan keeps failing; the prior is deleted on the first pass all the same, and the
+        // failing entry is reported with its own attempt count until the engine gives up.
+        UpdateCleanupResult first = provisioner.completeUpdate(r);
+        assertFalse(first.complete());
+        assertEquals(orphanArn, first.previousPhysicalId());
+        assertEquals(1, first.attempts());
+        verify(elb).deleteLoadBalancer(REGION, LB_ARN);
+        provisioner.completeUpdate(r);
+        UpdateCleanupResult third3 = provisioner.completeUpdate(r);
+        assertEquals(3, third3.attempts());
+        assertEquals("listeners attached", third3.failureReason());
+        verify(elb, org.mockito.Mockito.times(1)).deleteLoadBalancer(REGION, LB_ARN);
+        verify(elb, org.mockito.Mockito.times(4)).deleteLoadBalancer(REGION, orphanArn);
     }
 
     @Test

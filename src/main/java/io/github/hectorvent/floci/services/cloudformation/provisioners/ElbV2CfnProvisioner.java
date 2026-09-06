@@ -104,10 +104,10 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * A replacement is undone through the cleanup record. Without one, a load balancer or target
-     * group has nothing to put back: every property of theirs is create-only, so an update that kept
-     * the name only described the existing entity and changed nothing. A listener or rule without a
-     * record was modified in place, and putting that back needs a snapshot this provisioner does not
-     * keep, so the engine reports it as not rolled back, as it did for the switch.
+     * group has nothing to put back: this provisioner never modifies an existing one (an update that
+     * kept the name only described it, the way the switch did), so nothing changed. A listener or
+     * rule without a record was modified in place, and putting that back needs a snapshot this
+     * provisioner does not keep, so the engine reports it as not rolled back, as it did for the switch.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {

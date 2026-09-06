@@ -108,6 +108,71 @@ class CloudFormationElbV2ReplacementIntegrationTest {
         deleteStack(stackName);
     }
 
+    /**
+     * The target group arrives in a later update than the listener, so it sits after the listener
+     * in the stack's resource map while the listener depends on it. Cleanup has to follow the
+     * template's dependency order, not the map's: reversing the map would delete the old target
+     * group first, while the old listener still forwards to it.
+     */
+    @Test
+    void aDependencyAddedByALaterUpdateIsStillCleanedUpAfterItsDependent() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "elb-appended-" + suffix;
+
+        createStack(stackName, fixedResponseTemplate(suffix));
+        updateStack(stackName, template(suffix, "AlbA", "tg-a-" + suffix, ""));
+        String describeBefore = describeStack(stackName);
+        assertStatus(describeBefore, "UPDATE_COMPLETE");
+        String oldListener = output(describeBefore, "ListenerRef");
+        String oldTg = output(describeBefore, "TgRef");
+
+        updateStack(stackName, template(suffix, "AlbB", "tg-b-" + suffix, ""));
+        String describeAfter = describeStack(stackName);
+        assertStatus(describeAfter, "UPDATE_COMPLETE");
+        assertNotEquals(oldListener, output(describeAfter, "ListenerRef"));
+        assertNotEquals(oldTg, output(describeAfter, "TgRef"));
+
+        assertListenerMissing(oldListener);
+        assertTargetGroupMissing(oldTg);
+        String events = describeEvents(stackName);
+        assertEvent(events, "DELETE_COMPLETE", oldListener);
+        assertEvent(events, "DELETE_COMPLETE", oldTg);
+
+        deleteStack(stackName);
+    }
+
+    /** The same two balancers with a listener that needs no target group. */
+    private static String fixedResponseTemplate(String suffix) {
+        return """
+            {
+              "Resources": {
+                "AlbA": {
+                  "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                  "Properties": {"Name": "alb-a-%1$s", "Type": "application", "Subnets": ["%2$s", "%3$s"]}
+                },
+                "AlbB": {
+                  "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                  "Properties": {"Name": "alb-b-%1$s", "Type": "application", "Subnets": ["%2$s", "%3$s"]}
+                },
+                "Listener": {
+                  "Type": "AWS::ElasticLoadBalancingV2::Listener",
+                  "Properties": {
+                    "LoadBalancerArn": {"Ref": "AlbA"},
+                    "Protocol": "HTTP",
+                    "Port": 80,
+                    "DefaultActions": [{"Type": "fixed-response", "FixedResponseConfig": {"StatusCode": "404"}}]
+                  }
+                }
+              },
+              "Outputs": {
+                "AlbARef": {"Value": {"Ref": "AlbA"}},
+                "AlbBRef": {"Value": {"Ref": "AlbB"}},
+                "ListenerRef": {"Value": {"Ref": "Listener"}}
+              }
+            }
+            """.formatted(suffix, Ec2Service.defaultSubnetId(REGION, "a"), Ec2Service.defaultSubnetId(REGION, "b"));
+    }
+
     private static String template(String suffix, String listenerLb, String tgName, String extraResources) {
         return """
             {

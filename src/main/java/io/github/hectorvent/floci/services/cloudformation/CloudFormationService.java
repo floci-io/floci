@@ -1243,7 +1243,7 @@ public class CloudFormationService implements ResourceProvider {
                 List<UpdateCleanupFailure> cleanupFailures =
                         new ArrayList<>(deleteRemovedOrConditionFalseResources(
                                 stack, resources, conditions, region));
-                cleanupFailures.addAll(finishCommittedResourceCleanup(stack));
+                cleanupFailures.addAll(finishCommittedResourceCleanup(stack, region));
                 finishCommittedStackUpdate(stack, cleanupFailures);
                 return;
             }
@@ -1334,12 +1334,14 @@ public class CloudFormationService implements ResourceProvider {
         persistStack(stack);
     }
 
-    private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack) {
+    private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack, String region) {
         List<UpdateCleanupFailure> failures = new ArrayList<>();
-        // Dependents go before what they depend on, as in every other teardown walk here: a
-        // displaced listener has to go before the displaced target group it still forwards to,
-        // or that delete fails ResourceInUse three times and leaves the group behind.
-        List<StackResource> resources = new ArrayList<>(stack.getResources().values());
+        // Dependents go before what they depend on, as when the stack is deleted: a displaced
+        // listener has to go before the displaced target group it still forwards to, or that
+        // delete fails ResourceInUse three times and leaves the group behind. The template's
+        // order, not the map's: a resource a later update added sits after the resources that
+        // depend on it, so reversing the map would delete it first.
+        List<StackResource> resources = resourcesInCreationOrder(stack, region);
         Collections.reverse(resources);
         for (StackResource resource : resources) {
             String cleanupPhysicalId = provisioner.updateCleanupPhysicalId(resource);
@@ -1827,7 +1829,7 @@ public class CloudFormationService implements ResourceProvider {
             // last update left in place. An entity displaced by a replacement whose cleanup phase
             // never ended is named only by the cleanup the resource still carries, so the stack
             // deletes that one too: nothing else ever will.
-            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack)) {
+            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack, region)) {
                 failedResources.add(displacedFailure.logicalId());
             }
             for (StackResource resource : resources) {
