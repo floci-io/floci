@@ -1,0 +1,112 @@
+[
+  {
+    "name": "java.lang.String"
+  },
+  {
+    "name": "java.lang.Class",
+    "methods": [
+      { "name": "toString", "parameterTypes": [] }
+    ]
+  },
+  {
+    "name": "java.lang.NullPointerException",
+    "methods": [
+      { "name": "<init>", "parameterTypes": ["java.lang.String"] }
+    ]
+  },
+  {
+    "name": "java.lang.ClassCastException",
+    "methods": [
+      { "name": "<init>", "parameterTypes": ["java.lang.String"] }
+    ]
+  },
+  {
+    "name": "java.util.ArrayList",
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "add", "parameterTypes": ["java.lang.Object"] },
+      { "name": "get", "parameterTypes": ["int"] },
+      { "name": "size", "parameterTypes": [] }
+    ]
+  },
+  {
+    "name": "java.util.HashSet",
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "add", "parameterTypes": ["java.lang.Object"] }
+    ]
+  },
+  {
+    "name": "java.util.HashMap",
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "get", "parameterTypes": ["java.lang.Object"] },
+      { "name": "put", "parameterTypes": ["java.lang.Object", "java.lang.Object"] }
+    ]
+  },
+  {
+    "name": "java.util.Optional",
+    "methods": [
+      { "name": "empty", "parameterTypes": [] },
+      { "name": "of", "parameterTypes": ["java.lang.Object"] }
+    ]
+  },
+  {
+    "name": "java.util.List"
+  },
+  {
+    "name": "java.util.Set"
+  },
+  {
+    "name": "com.cedarpolicy.value.EntityTypeName",
+    "methods": [
+      { "name": "<init>", "parameterTypes": ["java.util.List", "java.lang.String"] },
+      { "name": "getNamespace", "parameterTypes": [] },
+      { "name": "getBaseName", "parameterTypes": [] }
+    ]
+  },
+  {
+    "name": "com.cedarpolicy.value.EntityIdentifier",
+    "methods": [
+      { "name": "<init>", "parameterTypes": ["java.lang.String"] },
+      { "name": "getId", "parameterTypes": [] }
+    ]
+  },
+  {
+    "name": "com.cedarpolicy.value.EntityUID",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": [
+          "com.cedarpolicy.value.EntityTypeName",
+          "com.cedarpolicy.value.EntityIdentifier"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "com.cedarpolicy.model.policy.Policy",
+    "methods": [
+      { "name": "<init>", "parameterTypes": ["java.lang.String", "java.lang.String"] }
+    ]
+  },
+  {
+    "name": "com.cedarpolicy.model.policy.PolicySet",
+    "methods": [
+      { "name": "<init>", "parameterTypes": ["java.util.Set", "java.util.Set"] }
+    ]
+  },
+  {
+    "name": "com.cedarpolicy.model.formatter.Config",
+    "methods": [
+      { "name": "getLineWidth", "parameterTypes": [] },
+      { "name": "getIndentWidth", "parameterTypes": [] }
+    ]
+  },
+  {
+    "name": "com.cedarpolicy.model.exception.InternalException",
+    "methods": [
+      { "name": "<init>", "parameterTypes": ["java.lang.String"] }
+    ]
+  }
+]

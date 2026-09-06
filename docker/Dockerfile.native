@@ -30,8 +30,10 @@ HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthch
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+ENV CEDAR_JAVA_FFI_LIB=/app/libcedar_java_ffi.so
 
 COPY --chmod=755 --from=build /app/target/*-runner /app/application
+COPY --chmod=755 --from=build /app/target/libcedar_java_ffi.* /app/libcedar_java_ffi.so
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bin/
 

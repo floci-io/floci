@@ -19,6 +19,7 @@ COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bi
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+ENV CEDAR_JAVA_FFI_LIB=/app/libcedar_java_ffi.so
 
 COPY --chmod=755 --chown=1001:root native/${TARGETARCH}/ /app/
 

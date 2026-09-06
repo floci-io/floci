@@ -38,8 +38,6 @@ quarkus:
         - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
-        # cedar-java's uber JAR loads the platform FFI through JNE at runtime.
-        - jne/**
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
       # for the running platform loads, so 23 are dropped. Linux x86_64 and
       # aarch64 cover the published images, Mac covers a local native build.
