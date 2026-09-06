@@ -16,6 +16,7 @@ AWS::ApiGatewayV2::Stage	LEGACY_SWITCH
 AWS::AutoScaling::AutoScalingGroup	LEGACY_SWITCH
 AWS::AutoScaling::LaunchConfiguration	LEGACY_SWITCH
 AWS::AutoScaling::LifecycleHook	AutoScalingLifecycleHookCfnProvisioner
+AWS::AutoScaling::ScalingPolicy	AutoScalingScalingPolicyCfnProvisioner
 AWS::Batch::ComputeEnvironment	LEGACY_SWITCH
 AWS::Batch::JobDefinition	LEGACY_SWITCH
 AWS::Batch::JobQueue	LEGACY_SWITCH

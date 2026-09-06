@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.AcmCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayAccountCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayDomainCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
@@ -239,6 +240,7 @@ final class CfnProvisionerFixture {
             }
             if (autoScalingService != null) {
                 discovered.add(new AutoScalingLifecycleHookCfnProvisioner(autoScalingService));
+                discovered.add(new AutoScalingScalingPolicyCfnProvisioner(autoScalingService));
             }
             if (acmService != null) {
                 discovered.add(new AcmCfnProvisioner(acmService));
