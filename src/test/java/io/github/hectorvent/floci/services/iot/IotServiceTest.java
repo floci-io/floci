@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.iot.model.IotPolicy;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -23,9 +24,14 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -37,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -47,6 +54,7 @@ import static org.mockito.Mockito.when;
  * Rules engine behaviour of {@link IotService} with in-memory stores and mocked action targets:
  * one failing action never fails the publish or the other actions, the error action receives the
  * failure document, and the {@code firehose} and {@code cloudwatchLogs} actions deliver the payload.
+ * Also the five-version cap on a policy, including under racing creates.
  */
 class IotServiceTest {
 
@@ -67,8 +75,9 @@ class IotServiceTest {
 
     @BeforeEach
     void setUp() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultRegion()).thenReturn(REGION);
+        when(config.services().iot().ruleSqlStrict()).thenReturn(false);
         service = new IotService(
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
@@ -95,7 +104,8 @@ class IotServiceTest {
                 dynamoDb,
                 lambda,
                 firehose,
-                logs);
+                logs,
+                mock(io.github.hectorvent.floci.config.FlociCertificateAuthority.class));
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {
@@ -497,5 +507,162 @@ class IotServiceTest {
 
         verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
         verify(lambda, never()).invoke(eq(REGION), eq(ERROR_FUNCTION_ARN), any(), any());
+    }
+
+    @Test
+    void aPolicyHoldsAtMostFiveVersionsUntilOneIsDeleted() {
+        service.createPolicy("capped", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            assertEquals(Integer.toString(v),
+                    service.createPolicyVersion("capped", "{\"v\":" + v + "}", true, REGION).getVersionId());
+        }
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPolicyVersion("capped", "{\"v\":6}", true, REGION));
+
+        assertEquals("VersionsLimitExceededException", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+        assertEquals(5, service.listPolicyVersions("capped", REGION).size());
+        assertEquals("5", service.getPolicy("capped", REGION).getDefaultVersionId());
+        service.deletePolicyVersion("capped", "2", REGION);
+        assertEquals("6", service.createPolicyVersion("capped", "{\"v\":6}", true, REGION).getVersionId());
+        assertEquals("6", service.getPolicy("capped", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void racingVersionCreatesNeverPushAPolicyPastFiveVersions() throws Exception {
+        service.createPolicy("raced", "{\"v\":1}", REGION);
+        int writers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<Boolean>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        service.createPolicyVersion("raced", "{\"v\":true}", false, REGION);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("VersionsLimitExceededException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int created = 0;
+            for (Future<Boolean> outcome : outcomes) {
+                if (outcome.get()) {
+                    created++;
+                }
+            }
+            assertEquals(4, created, "exactly four of eight racing creates fit under the cap");
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(5, service.listPolicyVersions("raced", REGION).size());
+    }
+
+    @Test
+    void deletingTheOldestVersionRemovesTheNumericallySmallestIdAndKeepsTheDefault() {
+        service.createPolicy("pruned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 10; v++) {
+            if (service.listPolicyVersions("pruned", REGION).size() == IotService.MAX_POLICY_VERSIONS) {
+                service.makeRoomForPolicyVersion("pruned", REGION);
+            }
+            service.createPolicyVersion("pruned", "{\"v\":" + v + "}", true, REGION);
+        }
+        assertEquals(List.of(6, 7, 8, 9, 10), versionIds("pruned"));
+
+        // Sorted as text, "10" would come before "6"; the oldest version is the numerically smallest id.
+        service.makeRoomForPolicyVersion("pruned", REGION);
+
+        assertEquals(List.of(7, 8, 9, 10), versionIds("pruned"));
+        assertEquals("10", service.getPolicy("pruned", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void deletingTheOldestVersionMovesTheDefaultToTheNewestWhenTheOldestIsTheDefault() {
+        service.createPolicy("pinned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            service.createPolicyVersion("pinned", "{\"v\":" + v + "}", false, REGION);
+        }
+        assertEquals("1", service.getPolicy("pinned", REGION).getDefaultVersionId());
+
+        service.makeRoomForPolicyVersion("pinned", REGION);
+
+        assertEquals(List.of(2, 3, 4, 5), versionIds("pinned"));
+        assertEquals("5", service.getPolicy("pinned", REGION).getDefaultVersionId());
+        assertEquals("{\"v\":5}", service.getPolicy("pinned", REGION).getPolicyDocument());
+    }
+
+    @Test
+    void makingRoomOnAPolicyStoredWithMoreThanFiveVersionsDeletesDownToFourInOneStep() {
+        // A policy persisted before the cap existed can hold more than five versions; the stores
+        // hand out the live object, so adding to it is the same as having persisted it that way.
+        service.createPolicy("legacy", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            service.createPolicyVersion("legacy", "{\"v\":" + v + "}", true, REGION);
+        }
+        IotPolicy stored = service.getPolicy("legacy", REGION);
+        List<IotPolicy.PolicyVersion> versions = new ArrayList<>(stored.getVersions());
+        for (int v = 6; v <= 8; v++) {
+            IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
+            version.setVersionId(Integer.toString(v));
+            version.setDocument("{\"v\":" + v + "}");
+            versions.add(version);
+        }
+        stored.setVersions(versions);
+        assertEquals(List.of(1, 2, 3, 4, 5, 6, 7, 8), versionIds("legacy"));
+
+        service.makeRoomForPolicyVersion("legacy", REGION);
+
+        assertEquals(List.of(5, 6, 7, 8), versionIds("legacy"));
+        assertEquals("5", service.getPolicy("legacy", REGION).getDefaultVersionId());
+        assertEquals("9", service.createPolicyVersion("legacy", "{\"v\":9}", true, REGION).getVersionId());
+    }
+
+    @Test
+    void aPolicyDeletedWhileVersionsAreBeingCreatedStaysDeleted() throws Exception {
+        for (int round = 0; round < 20; round++) {
+            String name = "vanishing-" + round;
+            service.createPolicy(name, "{\"v\":1}", REGION);
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool = Executors.newFixedThreadPool(4);
+            List<Future<?>> outcomes = new ArrayList<>();
+            try {
+                for (int i = 0; i < 3; i++) {
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.createPolicyVersion(name, "{\"v\":2}", false, REGION);
+                        } catch (AwsException e) {
+                            assertEquals("ResourceNotFoundException", e.getErrorCode());
+                        }
+                        return null;
+                    }));
+                }
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    service.deletePolicy(name, REGION);
+                    return null;
+                }));
+                start.countDown();
+                for (Future<?> outcome : outcomes) {
+                    outcome.get();
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+            AwsException e = assertThrows(AwsException.class, () -> service.getPolicy(name, REGION));
+            assertEquals("ResourceNotFoundException", e.getErrorCode(), "round " + round + " brought the policy back");
+        }
+    }
+
+    private List<Integer> versionIds(String policyName) {
+        return service.listPolicyVersions(policyName, REGION).stream()
+                .map(version -> Integer.parseInt(version.getVersionId()))
+                .sorted()
+                .toList();
     }
 }

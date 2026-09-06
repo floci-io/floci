@@ -238,7 +238,7 @@ Floci supports local emulation for application services, data services, eventing
 | Data, analytics, and AI | Athena, Glue, Lake Formation, EMR, EMR Serverless, Redshift, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Comprehend, Rekognition, Translate, Bedrock Runtime, Bedrock AgentCore |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, IoT Core, Amazon Connect |
-| Security and governance | AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, GuardDuty, CloudTrail, CloudFront, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations, IAM Identity Center (SSO Admin), Amazon Macie, Control Tower, Service Catalog |
+| Security and governance | AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, GuardDuty, CloudTrail, CloudFront, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations, IAM Access Analyzer, IAM Identity Center (SSO Admin), Amazon Macie, Control Tower, Service Catalog |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Resilience, backup, and config | AWS FIS, AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation, Cloud Control API |
 

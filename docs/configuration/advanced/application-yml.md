@@ -138,6 +138,7 @@ floci:
       runtime-api-base-port: 12000            # Port range for Lambda Runtime API
       runtime-api-max-port: 12499             # One port per running container = concurrency ceiling
       code-path: ./data/lambda-code           # Where ZIP archives are stored
+      zip-max-entries: 100000                  # Maximum ZIP entries extracted per deployment package
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300     # Remove idle containers after this
       region-concurrency-limit: 1000          # Concurrent executions ceiling per region
@@ -315,6 +316,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_SES_SMTP_PASS`                     | *(unset)*        | SMTP authentication password                                  |
 | `FLOCI_SERVICES_SES_SMTP_STARTTLS`                 | `DISABLED`       | STARTTLS mode: `DISABLED`, `OPTIONAL`, or `REQUIRED`          |
 | `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES`       | `false`          | Select the declared Lambda architecture for Docker image pulls and containers |
+| `FLOCI_SERVICES_LAMBDA_ZIP_MAX_ENTRIES`            | `100000`         | Maximum number of entries accepted in a Lambda ZIP archive |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED`         | `false`          | Enable bind-mount hot-reload mode (`S3Bucket=hot-reload`)     |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS`   | *(unset)*        | Comma-separated list of host paths allowed as bind-mount roots; unset = any absolute path |
 

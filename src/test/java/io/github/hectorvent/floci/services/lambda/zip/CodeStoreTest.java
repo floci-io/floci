@@ -103,6 +103,60 @@ class CodeStoreTest {
         assertFalse(Files.exists(legacyPath));
     }
 
+    @Test
+    void aVersionDirectoryCannotCollideWithAnotherFunctionsOwnDirectory(@TempDir Path baseDir)
+            throws IOException {
+        // Floci does not restrict the character set of FunctionName today, only that it is
+        // non-blank, so "foo.v1" is a function a user can genuinely create. A "<name>.v<n>" sibling
+        // naming scheme handed it the exact directory version 1 of "foo" would claim, so deleting
+        // either function silently corrupted the other. The suffix used instead is outside the
+        // character set sanitizeName can emit, which makes the two namespaces disjoint by
+        // construction rather than by a prefix match that has to guess where the name ends.
+        CodeStore store = new CodeStore(baseDir);
+        writeHandler(store.getVersionCodePath(ACCOUNT_A, "foo", "1"), "foo-v1");
+        writeHandler(store.getCodePath(ACCOUNT_A, "foo.v1"), "other-function");
+        writeHandler(store.getVersionCodePath(ACCOUNT_A, "foo.v1", "1"), "other-function-v1");
+
+        store.delete(ACCOUNT_A, "foo");
+
+        assertTrue(store.exists(ACCOUNT_A, "foo.v1"),
+                "deleting foo must not remove a function literally named foo.v1");
+        assertEquals("other-function",
+                Files.readString(store.getCodePath(ACCOUNT_A, "foo.v1").resolve("index.js")));
+        assertEquals("other-function-v1",
+                Files.readString(store.getVersionCodePath(ACCOUNT_A, "foo.v1", "1").resolve("index.js")),
+                "another function's published version code must survive too");
+        assertFalse(Files.exists(store.getVersionCodePath(ACCOUNT_A, "foo", "1")),
+                "foo's own version code must still be reclaimed");
+    }
+
+    @Test
+    void deleteVersionRemovesOneVersionAndLeavesTheRestInPlace(@TempDir Path baseDir) throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        writeHandler(store.getCodePath(ACCOUNT_A, "fn"), "latest");
+        writeHandler(store.getVersionCodePath(ACCOUNT_A, "fn", "1"), "one");
+        writeHandler(store.getVersionCodePath(ACCOUNT_A, "fn", "2"), "two");
+
+        store.deleteVersion(ACCOUNT_A, "fn", "1");
+
+        assertFalse(Files.exists(store.getVersionCodePath(ACCOUNT_A, "fn", "1")));
+        assertEquals("two",
+                Files.readString(store.getVersionCodePath(ACCOUNT_A, "fn", "2").resolve("index.js")));
+        assertTrue(store.exists(ACCOUNT_A, "fn"), "$LATEST's code must be untouched");
+    }
+
+    @Test
+    void versionCodeLivesOutsideTheDirectoryExtractionReplaces(@TempDir Path baseDir) {
+        CodeStore store = new CodeStore(baseDir);
+
+        Path latest = store.getCodePath(ACCOUNT_A, "fn");
+        Path version = store.getVersionCodePath(ACCOUNT_A, "fn", "1");
+
+        assertFalse(version.normalize().startsWith(latest.normalize()),
+                "extraction replaces $LATEST's directory wholesale, taking any nested version with it");
+        assertTrue(version.normalize().startsWith(baseDir.normalize()));
+    }
+
     private void writeHandler(Path codePath, String content) throws IOException {
         Files.createDirectories(codePath);
         Files.writeString(codePath.resolve("index.js"), content);

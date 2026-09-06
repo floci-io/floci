@@ -675,6 +675,7 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
 | `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
+| `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, remove instance containers this Floci left on the daemon whose record did not survive the restart or came back terminated; stopped instances are never swept |
 
 ## Requirements
 

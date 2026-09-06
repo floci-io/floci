@@ -395,7 +395,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateUser(String userName, String newUserName, String newPath) {
+        updateUser(userName, newUserName, newPath, null);
+    }
+
+    /**
+     * Same as {@link #updateUser(String, String, String)}, but verifies {@code expectedUserId}
+     * against the resolved user's immutable ID before applying the update, atomically with the
+     * name-based lookup.
+     */
+    public void updateUser(String userName, String newUserName, String newPath, String expectedUserId) {
         IamUser user = getUser(userName);
+        if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
+            throw new AwsException("EntityAlreadyExists",
+                    "User " + userName + " was replaced by a different user of the same name; "
+                            + "refusing to apply an update meant for the original user.", 409);
+        }
         if (newUserName != null && !newUserName.equals(userName)) {
             if (users.get(newUserName).isPresent()) {
                 throw new AwsException("EntityAlreadyExists",

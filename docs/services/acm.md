@@ -28,7 +28,7 @@
 
 ## Emulation Behavior
 
-- **Auto-Issuance:** All requested certificates are immediately issued with status `ISSUED` (no DNS/email validation required)
+- **Auto-Issuance:** All requested certificates are immediately issued with status `ISSUED`, and every entry in `DomainValidationOptions` reports `ValidationStatus: SUCCESS` (no DNS/email validation required). With a validation wait configured, both stay pending until the wait has passed.
 - **Real Cryptography:** Certificates are generated with real RSA/EC keys and valid X.509 structure
 - **One Local CA:** Every issued certificate (`AMAZON_ISSUED` and `PRIVATE`) is signed by Floci's local root CA, and `GetCertificate` returns that CA as `CertificateChain`. Trust it once (`GET /_floci/ca.pem`, see [TLS](../configuration/tls.md)) and both Floci's HTTPS endpoint and every ACM certificate validate. `DescribeCertificate` reports `Issuer` as the CA's name, `CN=Floci Local CA`, where AWS reports `Amazon`. `ImportCertificate` keeps the chain you upload.
 - **CA on First Use:** The CA is created under `{persistent-path}/tls/` the first time a certificate is issued, also with TLS off and in `memory` storage mode, so that directory must be writable. A certificate keeps the chain it was issued with; after a CA regeneration, delete and re-request it.

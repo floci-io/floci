@@ -159,6 +159,39 @@ class CloudFrontControllerTest {
     }
 
     @Test
+    void defaultCacheBehaviorEchoesTrustedSignersSoTheAwsProviderDoesNotSegfault() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-ts");
+            d.setEtag("etag-ts");
+            return d;
+        });
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+
+        when(service.getDistribution("dist-ts")).thenReturn(captor.getValue());
+
+        // The Terraform AWS provider reads DefaultCacheBehavior.TrustedSigners.Items with no nil
+        // guard, so an omitted object segfaults it on read-back. AWS always echoes the disabled form.
+        try (Response dist = controller.getDistribution("dist-ts")) {
+            String xml = (String) dist.getEntity();
+            int ts = xml.indexOf("<TrustedSigners>");
+            assertTrue(ts >= 0, "DefaultCacheBehavior must echo a TrustedSigners object");
+            String block = xml.substring(ts, xml.indexOf("</TrustedSigners>", ts));
+            assertTrue(block.contains("<Enabled>false</Enabled>"), "TrustedSigners.Enabled=false");
+            assertTrue(block.contains("<Quantity>0</Quantity>"), "TrustedSigners.Quantity=0");
+        }
+    }
+
+    @Test
     void orderedCacheBehaviorRoundTripsLambdaFunctionAssociations() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);

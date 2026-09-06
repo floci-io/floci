@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.core.retry.backoff.FixedDelayBackoffStrategy;
+import software.amazon.awssdk.core.waiters.WaiterResponse;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.acm.model.*;
 
@@ -18,6 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -118,6 +121,26 @@ class AcmTest {
         CertificateDetail detail = response.certificate();
         assertThat(detail.domainName()).contains("example.com");
         assertThat(detail.statusAsString()).isNotNull();
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("CertificateValidated waiter completes for an issued certificate")
+    void testCertificateValidatedWaiterCompletes() {
+        Assumptions.assumeTrue(requestedCertArn != null, "RequestCertificate must succeed first");
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "real ACM waits for DNS validation");
+
+        // The waiter polls DomainValidationOptions[].ValidationStatus, as the CDK
+        // DnsValidatedCertificate handler does, and never returns while any domain is pending.
+        WaiterResponse<DescribeCertificateResponse> waited = acm.waiter().waitUntilCertificateValidated(
+                b -> b.certificateArn(requestedCertArn),
+                o -> o.maxAttempts(3).backoffStrategy(FixedDelayBackoffStrategy.create(Duration.ofSeconds(1))));
+
+        CertificateDetail detail = waited.matched().response().orElseThrow().certificate();
+        assertThat(detail.status()).isEqualTo(CertificateStatus.ISSUED);
+        assertThat(detail.domainValidationOptions()).isNotEmpty();
+        assertThat(detail.domainValidationOptions())
+                .allSatisfy(v -> assertThat(v.validationStatus()).isEqualTo(DomainStatus.SUCCESS));
     }
 
     @Test

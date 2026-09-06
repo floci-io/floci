@@ -7,6 +7,7 @@ public class VpcAssociation {
 
     private String vpcId;
     private String vpcRegion;
+    private String ownerAccountId;
 
     public VpcAssociation() {}
 
@@ -20,4 +21,7 @@ public class VpcAssociation {
 
     public String getVpcRegion() { return vpcRegion; }
     public void setVpcRegion(String vpcRegion) { this.vpcRegion = vpcRegion; }
+
+    public String getOwnerAccountId() { return ownerAccountId; }
+    public void setOwnerAccountId(String ownerAccountId) { this.ownerAccountId = ownerAccountId; }
 }

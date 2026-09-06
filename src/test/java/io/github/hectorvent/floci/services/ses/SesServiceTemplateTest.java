@@ -280,7 +280,7 @@ class SesServiceTemplateTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("stripXml10InvalidCharsCases")
     void stripXml10InvalidChars_returnsExpected(String label, String input, String expected) {
-        assertEquals(expected, SesService.stripXml10InvalidChars(input));
+        assertEquals(expected, SesQueryHandler.stripXml10InvalidChars(input));
     }
 
     static Stream<Arguments> stripXml10InvalidCharsCases() {

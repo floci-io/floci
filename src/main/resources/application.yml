@@ -269,6 +269,7 @@ floci:
       runtime-api-base-port: 12000
       runtime-api-max-port: 12499
       code-path: ./data/lambda-code
+      zip-max-entries: 100000
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300
       region-concurrency-limit: 1000
@@ -430,6 +431,10 @@ floci:
     ec2:
       enabled: true
       imds-port: 9169
+      # Sweep EC2 containers left on the daemon by a previous run that died mid-launch or
+      # mid-terminate (SIGKILL, OOM, docker kill), which no surviving record refers to.
+      # Scoped to this deployment's own containers; stopped instances are never swept.
+      reconcile-containers-on-startup: true
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
       publish-security-group-ports: true
@@ -534,6 +539,7 @@ floci:
       enabled: true
     route53:
       enabled: true
+      vpc-association-control-plane-delay-ms: 0
     transfer:
       enabled: true
     textract:
@@ -579,6 +585,7 @@ floci:
       enabled: true
     iot:
       enabled: true
+      rule-sql-strict: false
       mqtt:
         enabled: true
         auto-start: false
@@ -606,6 +613,8 @@ floci:
     ssoadmin:
       enabled: true
     macie2:
+      enabled: true
+    accessanalyzer:
       enabled: true
     controltower:
       enabled: true

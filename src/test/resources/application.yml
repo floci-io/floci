@@ -131,6 +131,7 @@ floci:
     lambda:
       enabled: true
       honour-architectures: false
+      zip-max-entries: 100000
       # aws-config-path:
       hot-reload:
         enabled: true
@@ -347,6 +348,7 @@ floci:
       enabled: true
     iot:
       enabled: true
+      rule-sql-strict: false
       mqtt:
         enabled: true
         auto-start: false
@@ -373,6 +375,8 @@ floci:
     ssoadmin:
       enabled: true
     macie2:
+      enabled: true
+    accessanalyzer:
       enabled: true
     controltower:
       enabled: true

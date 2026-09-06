@@ -457,6 +457,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_TEXTRACT_ENABLED` | `true` | Enable the Textract service |
 | `FLOCI_SERVICES_TRANSFER_ENABLED` | `true` | Enable the Transfer Family service |
 | `FLOCI_SERVICES_ROUTE53_ENABLED` | `true` | Enable the Route 53 service |
+| `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Simulated processing window for Route 53 VPC association/auth mutations; positive values make documented overlap errors (`PriorRequestNotComplete` / `ConcurrentModification`) reproducible for retry tests |
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable the ELBv2 (ALB/NLB) service |
 | `FLOCI_SERVICES_ELBV2_MOCK` | `false` | When `true`, load balancers are registered but no containers are spawned |
 | `FLOCI_SERVICES_AUTOSCALING_ENABLED` | `true` | Enable the Auto Scaling service |

@@ -244,6 +244,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>macie2</artifactId>
         </dependency>
+        <!-- IAM Access Analyzer client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>accessanalyzer</artifactId>
+        </dependency>
         <!-- Cloud Map (servicediscovery) client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -477,6 +482,13 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <!-- JBoss Logging for test diagnostics, matching the repository logging convention -->
+        <dependency>
+            <groupId>org.jboss.logging</groupId>
+            <artifactId>jboss-logging</artifactId>
+            <version>3.6.3.Final</version>
+            <scope>test</scope>
         </dependency>
         <!-- JUnit 5 -->
         <dependency>

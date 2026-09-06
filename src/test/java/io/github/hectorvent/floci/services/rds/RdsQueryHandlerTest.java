@@ -2385,4 +2385,27 @@ class RdsQueryHandlerTest {
                 isNull(), isNull(), captor.capture());
         assertEquals(new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true), captor.getValue());
     }
+
+    @Test
+    void unhandledExceptionRendersXmlInternalFailure() {
+        when(service.createDbInstance(any(), any(), any(), any(), any(), any(),
+                any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
+                anyBoolean(), any(), any(), any(), any(), any(), anyBoolean(), any()))
+                .thenThrow(new RuntimeException("Docker daemon connection failed"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("DBInstanceClass", "db.t3.micro");
+
+        Response response = handler.handle("CreateDBInstance", p);
+        assertEquals(500, response.getStatus());
+        assertEquals("application/xml", response.getMediaType().toString());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ErrorResponse xmlns=\"http://rds.amazonaws.com/doc/2014-10-31/\">"), body);
+        assertTrue(body.contains("<Type>Receiver</Type>"), body);
+        assertTrue(body.contains("<Code>InternalFailure</Code>"), body);
+        assertTrue(body.contains("<Message>Unexpected error: Docker daemon connection failed</Message>"), body);
+    }
 }

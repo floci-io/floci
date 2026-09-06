@@ -711,6 +711,7 @@ public interface EmulatorConfig {
         ServiceCatalogServiceConfig servicecatalog();
         SsoAdminServiceConfig ssoadmin();
         Macie2ServiceConfig macie2();
+        AccessAnalyzerServiceConfig accessanalyzer();
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
@@ -744,6 +745,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface AccessAnalyzerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface ApsServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -757,6 +763,14 @@ public interface EmulatorConfig {
     interface IotServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Reject a topic rule whose SQL falls outside the subset Floci evaluates, as AWS does.
+         * Off by default, so such a rule is stored and keeps firing on every matching topic
+         * with the whole payload.
+         */
+        @WithDefault("false")
+        boolean ruleSqlStrict();
 
         MqttConfig mqtt();
     }
@@ -890,6 +904,14 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
+
+        /**
+         * Optional control-plane processing window for VPC association mutations. A positive
+         * value makes documented Route 53 retryable overlap errors reproducible; zero preserves
+         * the default immediate-completion behavior.
+         */
+        @WithDefault("0")
+        long vpcAssociationControlPlaneDelayMs();
     }
 
     interface ConfigServiceConfig {
@@ -1877,6 +1899,14 @@ public interface EmulatorConfig {
         @WithDefault("./data/lambda-code")
         String codePath();
 
+        /**
+         * Maximum number of entries accepted in a Lambda ZIP archive.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_ZIP_MAX_ENTRIES
+         */
+        @WithDefault("100000")
+        int zipMaxEntries();
+
         @WithDefault("1000")
         long pollIntervalMs();
 
@@ -2072,6 +2102,18 @@ public interface EmulatorConfig {
          * Env var: FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE
          */
         Optional<Boolean> containerIpsRoutable();
+
+        /**
+         * When true, Floci removes on startup any EC2 instance container left on the Docker
+         * daemon by a previous run of <em>this same</em> Floci (matched by the
+         * {@code floci_owner_port} label) whose instance record did not survive the restart, or
+         * came back already terminated. Stopped instances are never swept — their containers are
+         * exactly what StartInstances revives.
+         *
+         * Env var: FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
 
         /** Port on the Floci host for the IMDS HTTP server (169.254.169.254 equivalent). */
         @WithDefault("9169")
