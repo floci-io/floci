@@ -188,10 +188,15 @@ the result to S3 as one or more objects under `<prefix>`.
 - `PARALLEL ON` (default) names objects `<prefix>0000_part_00`,
   `<prefix>0001_part_00`, and so on; `PARALLEL OFF` names them `<prefix>000`,
   `<prefix>001`, and so on. The emulator has a single backend node, so more than one
-  object appears only when the result exceeds the per-file size.
-- `MAXFILESIZE [AS] <n> [MB|GB]` sets the per-file size. Each file is buffered in
-  memory, so the default is 6 MiB (real Redshift defaults to 6.2 GB) and a whole
-  UNLOAD result is capped at 256 MiB; a larger result fails with a SQL error (54000).
+  object appears only when the result exceeds the per-file size. When `HEADER` is
+  set, the header row is repeated at the top of every object.
+- `MAXFILESIZE [AS] <n> [MB|GB]` sets the per-file size; a bare number is bytes.
+  Each file is buffered in memory, so the default is 6 MiB (real Redshift defaults
+  to 6.2 GB) and a whole UNLOAD result is capped at 256 MiB; a larger result fails
+  with a SQL error (54000). A `MAXFILESIZE` above that 256 MiB cap is not
+  intercepted at all: the statement is forwarded and PostgreSQL reports its own error.
+- A zero-row result still writes one object (empty, or the header row alone when
+  `HEADER` is set).
 - `GZIP` compresses each object and appends `.gz` to its key.
 - `MANIFEST` writes `<prefix>manifest` listing every object with its
   `content_length`.

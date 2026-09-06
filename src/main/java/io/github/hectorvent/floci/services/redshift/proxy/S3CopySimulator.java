@@ -38,6 +38,9 @@ public final class S3CopySimulator {
     private static final int LIST_PAGE_SIZE = 1000;
     private static final int CHUNK = 8192;
 
+    // The two limits below are package-private and non-final only so unit tests can shrink them to
+    // force multi-slice and over-limit paths on small inputs. Surefire runs a test class serially, and
+    // each test restores the previous value in a finally block, so there is no cross-test interference.
     /** Default per-object size when the statement gives no MAXFILESIZE. Small because each slice is buffered in heap. */
     static long UNLOAD_TARGET_FILE_BYTES = 6L * 1024 * 1024;
     /** Whole-result ceiling; a larger UNLOAD is aborted rather than filling the in-memory S3 store. */
