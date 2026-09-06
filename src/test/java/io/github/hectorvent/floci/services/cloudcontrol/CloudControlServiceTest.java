@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudcontrol;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -15,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -49,5 +51,42 @@ class CloudControlServiceTest {
         assertFalse(properties.contains("ignored-null"));
         assertFalse(properties.contains("ignored-empty"));
         assertFalse(properties.contains("ignored-blank"));
+    }
+
+    @Test
+    void listResourcesRejectsARealButUnbackedTypeInsteadOfReturningEmpty() {
+        CloudControlService service = new CloudControlService(
+                mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class),
+                mock(CloudFormationResourceProvisioner.class), new ObjectMapper());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listResources("us-east-1", "AWS::SQS::Queue"));
+
+        assertEquals("UnsupportedActionException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void listResourcesRejectsATypeThatDoesNotExistInAwsAtAll() {
+        CloudControlService service = new CloudControlService(
+                mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class),
+                mock(CloudFormationResourceProvisioner.class), new ObjectMapper());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listResources("us-east-1", "AWS::NoSuch::Type"));
+
+        assertEquals("UnsupportedActionException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void listResourcesStillReturnsASupportedType() {
+        S3Service s3Service = mock(S3Service.class);
+        when(s3Service.listBuckets()).thenReturn(List.of());
+        CloudControlService service = new CloudControlService(
+                s3Service, mock(Ec2Service.class), mock(IamService.class),
+                mock(CloudFormationResourceProvisioner.class), new ObjectMapper());
+
+        assertTrue(service.listResources("us-east-1", "AWS::S3::Bucket").isEmpty());
     }
 }

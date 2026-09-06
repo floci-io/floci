@@ -170,6 +170,33 @@ class CloudControlIntegrationTest {
                 "{\"TypeName\":\"AWS::EC2::VPC\",\"DesiredState\":\"not json\"}");
     }
 
+    @Test
+    void listResourcesRejectsUnsupportedTypesInsteadOfReturningEmpty() {
+        // AWS::SQS::Queue and AWS::Logs::LogGroup are real Cloud Control types that Floci backs
+        // through their own service APIs but does not enumerate on this read side. Returning an
+        // empty ResourceDescriptions for them was indistinguishable from "no queues exist".
+        String ct = "application/x-amz-json-1.0";
+        assertErrorCode(ct, "CloudApiService.ListResources",
+                "{\"TypeName\":\"AWS::SQS::Queue\"}", 400, "UnsupportedActionException");
+        assertErrorCode(ct, "CloudApiService.ListResources",
+                "{\"TypeName\":\"AWS::Logs::LogGroup\"}", 400, "UnsupportedActionException");
+
+        // A type name that does not exist in AWS at all reports the same error: Floci has no
+        // CloudFormation type registry to tell a real-but-unbacked type from an invented one.
+        assertErrorCode(ct, "CloudApiService.ListResources",
+                "{\"TypeName\":\"AWS::NoSuch::Type\"}", 400, "UnsupportedActionException");
+
+        // A supported type is unaffected.
+        given()
+                .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService.ListResources")
+                .body("{\"TypeName\":\"AWS::S3::Bucket\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("TypeName", org.hamcrest.Matchers.equalTo("AWS::S3::Bucket"));
+    }
+
     private void assertErrorCode(String contentType, String target, String body) {
         assertErrorCode(contentType, target, body, 400, "InvalidRequestException");
     }
