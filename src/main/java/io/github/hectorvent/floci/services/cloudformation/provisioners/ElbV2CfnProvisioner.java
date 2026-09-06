@@ -50,6 +50,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case LOAD_BALANCER -> provisionLoadBalancer(r, props, ctx);
             case TARGET_GROUP -> provisionTargetGroup(r, props, ctx);
@@ -57,6 +58,9 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             case LISTENER_RULE -> provisionListenerRule(r, props, ctx);
             default -> throw new IllegalStateException("ElbV2CfnProvisioner cannot handle " + r.getResourceType());
         }
+        // A provision that left the resource with a new physical id replaced the entity: the
+        // displaced one is deleted once the update commits, or restored if the update rolls back.
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     /**
@@ -99,6 +103,21 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * A replacement is undone through the cleanup record. Without one, a load balancer or target
+     * group has nothing to put back: every property of theirs is create-only, so an update that kept
+     * the name only described the existing entity and changed nothing. A listener or rule without a
+     * record was modified in place, and putting that back needs a snapshot this provisioner does not
+     * keep, so the engine reports it as not rolled back, as it did for the switch.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        return LOAD_BALANCER.equals(resource.getResourceType()) || TARGET_GROUP.equals(resource.getResourceType());
+    }
+
+    /**
      * The physical id is the ARN, so the name an unnamed load balancer got at create time is read
      * back from the {@code LoadBalancerName} attribute before a new one is generated; the switch
      * generated afresh on every pass and left the previous balancer behind. A name that already
@@ -132,7 +151,6 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("CanonicalHostedZoneID", lb.getCanonicalHostedZoneId());
         r.getAttributes().put("LoadBalancerName", lb.getLoadBalancerName());
         r.getAttributes().put("LoadBalancerFullName", loadBalancerFullName(lb.getLoadBalancerArn()));
-        ReplacementCleanup.record(r, ctx);
     }
 
     private void provisionTargetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -174,7 +192,6 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         // A list-valued attribute, joined the way Route53's NameServers is. Empty until a listener
         // forwards to the group, as on AWS.
         r.getAttributes().put("LoadBalancerArns", String.join(",", tg.getLoadBalancerArns()));
-        ReplacementCleanup.record(r, ctx);
     }
 
     /**
@@ -202,7 +219,6 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(listener.getListenerArn());
         r.getAttributes().put("ListenerArn", listener.getListenerArn());
-        ReplacementCleanup.record(r, ctx);
     }
 
     /**
@@ -227,7 +243,6 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(rule.getRuleArn());
         r.getAttributes().put("RuleArn", rule.getRuleArn());
         r.getAttributes().put("IsDefault", String.valueOf(rule.isDefault()));
-        ReplacementCleanup.record(r, ctx);
     }
 
     /** The listener the stack points at, or null when it was removed out of band (then create). */

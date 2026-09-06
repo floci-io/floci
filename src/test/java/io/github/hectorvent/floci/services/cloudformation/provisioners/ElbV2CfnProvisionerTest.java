@@ -374,6 +374,75 @@ class ElbV2CfnProvisionerTest {
     }
 
     @Test
+    void aFailedStackUpdateRollsAListenerMoveBackAndDeletesTheReplacement() {
+        String otherLb = LB_ARN.replace("/web/", "/other/");
+        when(elb.describeListeners(REGION, null, List.of(LISTENER_ARN))).thenReturn(List.of(listener(LB_ARN)));
+        when(elb.createListener(eq(REGION), eq(otherLb), eq("HTTP"), eq(80), isNull(), anyList(), anyList(), isNull(),
+                eq(Map.of()))).thenReturn(listener(otherLb));
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::Listener", "Listener");
+        r.getAttributes().put("ListenerArn", LISTENER_ARN);
+        provisioner.provision(r, mapper.createObjectNode().put("LoadBalancerArn", otherLb), ctx(LISTENER_ARN));
+        String replacementArn = r.getPhysicalId();
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(LISTENER_ARN, r.getPhysicalId());
+        assertEquals(LISTENER_ARN, r.getAttributes().get("ListenerArn"));
+        verify(elb).deleteListener(REGION, replacementArn);
+        verify(elb, never()).deleteListener(REGION, LISTENER_ARN);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void anUnchangedLoadBalancerOrTargetGroupHasNothingToRollBack() {
+        when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenThrow(new AwsException("DuplicateLoadBalancerName", "exists", 400));
+        when(elb.describeLoadBalancers(REGION, null, List.of("web"), null, null)).thenReturn(List.of(loadBalancer("web")));
+        StackResource lb = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        lb.getAttributes().put("LoadBalancerName", "web");
+        provisioner.provision(lb, mapper.createObjectNode().put("Name", "web"), ctx(LB_ARN));
+
+        // Every property is create-only and the update only described the existing balancer, so a
+        // rollback is complete with nothing to do; the engine must not report it as unimplemented.
+        assertTrue(provisioner.rollbackUpdate(lb));
+        assertEquals(LB_ARN, lb.getPhysicalId());
+        verify(elb, never()).deleteLoadBalancer(anyString(), anyString());
+    }
+
+    @Test
+    void anInPlaceListenerUpdateIsNotRolledBackHere() {
+        when(elb.describeListeners(REGION, null, List.of(LISTENER_ARN))).thenReturn(List.of(listener(LB_ARN)));
+        when(elb.modifyListener(eq(REGION), eq(LISTENER_ARN), eq("HTTP"), eq(8080), isNull(), anyList(), anyList(), isNull()))
+                .thenReturn(listener(LB_ARN));
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::Listener", "Listener");
+        provisioner.provision(r, mapper.createObjectNode().put("LoadBalancerArn", LB_ARN).put("Port", "8080"), ctx(LISTENER_ARN));
+
+        assertFalse(provisioner.rollbackUpdate(r), "no replacement means nothing this helper can undo");
+        verify(elb, never()).deleteListener(anyString(), anyString());
+    }
+
+    @Test
+    void aRollbackWhoseDeleteFailsStillPointsTheResourceAtThePriorAndPropagates() {
+        LoadBalancer renamed = loadBalancer("web-v2");
+        renamed.setLoadBalancerArn(LB_ARN.replace("/web/", "/web-v2/"));
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v2"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(renamed);
+        doThrow(new AwsException("ResourceInUse", "listeners attached", 400))
+                .when(elb).deleteLoadBalancer(REGION, renamed.getLoadBalancerArn());
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        r.getAttributes().put("LoadBalancerName", "web");
+        r.getAttributes().put("DNSName", "web-123.us-east-1.elb.amazonaws.com");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v2"), ctx(LB_ARN));
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertEquals("ResourceInUse", e.getErrorCode());
+        assertEquals(LB_ARN, r.getPhysicalId());
+        assertEquals("web", r.getAttributes().get("LoadBalancerName"));
+        assertEquals("web-123.us-east-1.elb.amazonaws.com", r.getAttributes().get("DNSName"));
+        assertFalse(provisioner.hasReplacementUpdate(r), "the record is spent so the prior is never put on a cleanup list");
+    }
+
+    @Test
     void aNonIntegerPortOrPriorityIsAValidationError() {
         StackResource listener = resource("AWS::ElasticLoadBalancingV2::Listener", "Listener");
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(listener,
