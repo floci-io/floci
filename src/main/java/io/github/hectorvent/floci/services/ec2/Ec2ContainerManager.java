@@ -29,8 +29,10 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -39,11 +41,16 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
@@ -72,7 +79,7 @@ public class Ec2ContainerManager {
      *  to in the shared emulator JVM. */
     private static final int MAX_DECOMPRESSED_USER_DATA_BYTES = 10 * 1024 * 1024;
     /** Caps concurrent UserData gzip decompressions across ALL instance launches, not just one.
-     *  Launches run independently on {@link #executor}, an unbounded cached thread pool, so the
+     *  Launches run independently on {@link #executor}, so the
      *  per-payload cap above only bounds a single launch's allocation: without this, N concurrent
      *  RunInstances/CreateLaunchConfiguration calls, each smuggling a near-cap gzip payload, could
      *  together decompress N * 10 MB at once in the shared emulator JVM with no aggregate ceiling.
@@ -85,6 +92,18 @@ public class Ec2ContainerManager {
     /** Gates entry to {@link #gunzip}; see {@link #MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS}. */
     private static final Semaphore USER_DATA_DECOMPRESSION_BUDGET =
             new Semaphore(MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS);
+    private static final int LAUNCH_CORE_THREADS = 4;
+    private static final int LAUNCH_MAX_THREADS = 8;
+    private static final int LAUNCH_QUEUE_CAPACITY = 64;
+    private static final long USER_DATA_EXECUTION_TIMEOUT_MINUTES = 30;
+    // Keep Docker-backed launches finite. Saturation applies caller-runs backpressure instead of dropping work.
+    private static final RejectedExecutionHandler CALLER_RUNS_UNLESS_STOPPED =
+            (runnable, executor) -> {
+                if (executor.isShutdown()) {
+                    throw new RejectedExecutionException("EC2 container manager is stopped");
+                }
+                runnable.run();
+            };
     /** Test seam: when non-null, invoked by {@link #gunzip} right after it acquires a
      *  decompression-budget permit and before it starts decompressing, so tests can observe and
      *  serialize concurrent decompressions deterministically. Always null in production. */
@@ -105,14 +124,11 @@ public class Ec2ContainerManager {
     private final Ec2PortForwardManager portForwardManager;
     private final RegionResolver regionResolver;
     private final ContainerNetworkReachability containerNetworkReachability;
+    private final ExecutorService executor;
+    private final Duration userDataExecutionTimeout;
+    private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
 
     private volatile boolean dockerUnavailableLogged;
-
-    private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "ec2-container-launcher");
-        t.setDaemon(true);
-        return t;
-    });
 
     @Inject
     public Ec2ContainerManager(ContainerBuilder containerBuilder,
@@ -127,6 +143,26 @@ public class Ec2ContainerManager {
                                Ec2PortForwardManager portForwardManager,
                                RegionResolver regionResolver,
                                ContainerNetworkReachability containerNetworkReachability) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
+                portAllocator, config, metadataServer, portForwardManager, regionResolver,
+                containerNetworkReachability, createLaunchExecutor(),
+                Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
+    }
+
+    Ec2ContainerManager(ContainerBuilder containerBuilder,
+                        ContainerLifecycleManager lifecycleManager,
+                        ContainerLogStreamer logStreamer,
+                        ContainerDetector containerDetector,
+                        DockerHostResolver dockerHostResolver,
+                        DockerClient dockerClient,
+                        PortAllocator portAllocator,
+                        EmulatorConfig config,
+                        Ec2MetadataServer metadataServer,
+                        Ec2PortForwardManager portForwardManager,
+                        RegionResolver regionResolver,
+                        ContainerNetworkReachability containerNetworkReachability,
+                        ExecutorService executor,
+                        Duration userDataExecutionTimeout) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -139,11 +175,30 @@ public class Ec2ContainerManager {
         this.metadataServer = metadataServer;
         this.portForwardManager = portForwardManager;
         this.containerNetworkReachability = containerNetworkReachability;
+        this.executor = executor;
+        this.userDataExecutionTimeout = userDataExecutionTimeout;
+    }
+
+    private static ExecutorService createLaunchExecutor() {
+        return new ThreadPoolExecutor(
+                LAUNCH_CORE_THREADS,
+                LAUNCH_MAX_THREADS,
+                60L,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(LAUNCH_QUEUE_CAPACITY),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "ec2-container-launcher");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                CALLER_RUNS_UNLESS_STOPPED);
     }
 
     @PreDestroy
     void stop() {
+        closeActiveUserDataCallbacks();
         executor.shutdownNow();
+        closeActiveUserDataCallbacks();
     }
 
     /**
@@ -182,9 +237,10 @@ public class Ec2ContainerManager {
             return;
         }
 
-        executor.submit(() -> {
-            try {
-                String instanceId = instance.getInstanceId();
+        try {
+            executor.execute(() -> {
+                try {
+                    String instanceId = instance.getInstanceId();
                 // IMDS endpoint that this container should use
                 String flociHost = dockerHostResolver.resolve();
                 int imdsPort = config.services().ec2().imdsPort();
@@ -282,21 +338,26 @@ public class Ec2ContainerManager {
                     executeUserData(containerId, instanceId, userData, region);
                 }
 
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                failLaunch(instance);
-            } catch (Exception e) {
-                LOG.warnv("Failed to launch EC2 instance {0}: {1}", instance.getInstanceId(), e.getMessage());
-                // The daemon can disappear between the probe above and any of the calls in
-                // this block. Losing Docker is not the instance's fault, so degrade to a
-                // metadata-only instance; a genuine container failure still fails the launch.
-                if (isDockerAvailable()) {
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     failLaunch(instance);
-                } else {
-                    markContainerlessRunning(instance);
+                } catch (Exception e) {
+                    LOG.warnv("Failed to launch EC2 instance {0}: {1}", instance.getInstanceId(), e.getMessage());
+                    // The daemon can disappear between the probe above and any of the calls in
+                    // this block. Losing Docker is not the instance's fault, so degrade to a
+                    // metadata-only instance; a genuine container failure still fails the launch.
+                    if (isDockerAvailable()) {
+                        failLaunch(instance);
+                    } else {
+                        markContainerlessRunning(instance);
+                    }
                 }
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            LOG.warnv("Could not schedule EC2 instance {0} launch because the manager is stopping",
+                    instance.getInstanceId());
+            failLaunch(instance);
+        }
     }
 
     private StartedContainer createAndStartContainer(Instance instance, ResolvedAmiImage image, String region,
@@ -884,6 +945,9 @@ public class Ec2ContainerManager {
                         logGroup, logStream, region
                 );
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warnv("UserData execution interrupted for EC2 instance {0}", instanceId);
         } catch (Exception e) {
             LOG.warnv("UserData execution failed for EC2 instance {0}: {1}", instanceId, e.getMessage());
         }
@@ -911,9 +975,25 @@ public class Ec2ContainerManager {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         CountDownLatch latch = new CountDownLatch(1);
 
-        dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+        AtomicBoolean cancelled = new AtomicBoolean();
+        ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
+            @Override
+            public void onStart(Closeable stream) {
+                if (cancelled.get()) {
+                    closeUserDataStream(stream, instanceId);
+                    return;
+                }
+                super.onStart(stream);
+                if (cancelled.get()) {
+                    closeUserDataStream(stream, instanceId);
+                }
+            }
+
             @Override
             public void onNext(Frame frame) {
+                if (cancelled.get()) {
+                    return;
+                }
                 byte[] payload = frame.getPayload();
                 if (payload == null) return;
                 try { output.write(payload); } catch (IOException ignored) {}
@@ -926,23 +1006,58 @@ public class Ec2ContainerManager {
             public void onComplete() { latch.countDown(); }
             @Override
             public void onError(Throwable t) { latch.countDown(); }
-        });
+            @Override
+            public void close() throws IOException {
+                cancelled.set(true);
+                super.close();
+            }
+        };
+        activeUserDataCallbacks.add(callback);
 
-        boolean completed = latch.await(30, TimeUnit.MINUTES);
-        if (!completed) {
-            LOG.warnv("UserData shellscript part {0}/{1} timed out for EC2 instance {2}", partNumber, partCount, instanceId);
-            return;
+        try {
+            dockerClient.execStartCmd(execId).exec(callback);
+
+            boolean completed = latch.await(userDataExecutionTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            if (!completed) {
+                LOG.warnv("UserData shellscript part {0}/{1} timed out for EC2 instance {2}",
+                        partNumber, partCount, instanceId);
+                return;
+            }
+
+            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
+            if (exitCode != null && exitCode != 0) {
+                LOG.warnv("UserData shellscript part {0}/{1} failed for EC2 instance {2} with exit code {3}: {4}",
+                        partNumber, partCount, instanceId, exitCode, summarizeUserDataOutput(output));
+                return;
+            }
+
+            LOG.infov("UserData shellscript part {0}/{1} completed for EC2 instance {2}: {3}",
+                    partNumber, partCount, instanceId, summarizeUserDataOutput(output));
+        } finally {
+            activeUserDataCallbacks.remove(callback);
+            closeUserDataCallback(callback, instanceId);
         }
+    }
 
-        Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-        if (exitCode != null && exitCode != 0) {
-            LOG.warnv("UserData shellscript part {0}/{1} failed for EC2 instance {2} with exit code {3}: {4}",
-                    partNumber, partCount, instanceId, exitCode, summarizeUserDataOutput(output));
-            return;
+    private void closeActiveUserDataCallbacks() {
+        activeUserDataCallbacks.forEach(callback -> closeUserDataCallback(callback, "active UserData"));
+    }
+
+    private void closeUserDataCallback(ResultCallback<Frame> callback, String context) {
+        try {
+            callback.close();
+        } catch (IOException e) {
+            LOG.warnv("Could not close Docker UserData callback for {0}: {1}", context, e.getMessage());
         }
+    }
 
-        LOG.infov("UserData shellscript part {0}/{1} completed for EC2 instance {2}: {3}",
-                partNumber, partCount, instanceId, summarizeUserDataOutput(output));
+    private void closeUserDataStream(Closeable stream, String instanceId) {
+        try {
+            stream.close();
+        } catch (IOException e) {
+            LOG.warnv("Could not close Docker UserData stream for EC2 instance {0}: {1}",
+                    instanceId, e.getMessage());
+        }
     }
 
     static List<String> userDataShellScripts(String userData) {
