@@ -43,20 +43,17 @@ class TestSTSAssumeRole:
         )
         assert "assumed-role/my-role/my-session" in response["AssumedRoleUser"]["Arn"]
 
-    def test_assume_role_with_web_identity(self, sts_client):
-        """Test AssumeRoleWithWebIdentity returns credentials."""
-        response = sts_client.assume_role_with_web_identity(
-            RoleArn="arn:aws:iam::000000000000:role/web-identity-role",
-            RoleSessionName="web-session",
-            WebIdentityToken="dummy-token",
-            DurationSeconds=3600,
-        )
-        creds = response["Credentials"]
-        assert creds["AccessKeyId"].startswith("ASIA")
-        assert (
-            "assumed-role/web-identity-role/web-session"
-            in response["AssumedRoleUser"]["Arn"]
-        )
+    def test_assume_role_with_web_identity_rejects_unverifiable_token(self, sts_client):
+        """Test AssumeRoleWithWebIdentity rejects an unverifiable token."""
+        with pytest.raises(ClientError) as exc_info:
+            sts_client.assume_role_with_web_identity(
+                RoleArn="arn:aws:iam::000000000000:role/web-identity-role",
+                RoleSessionName="web-session",
+                WebIdentityToken="dummy-token",
+                DurationSeconds=3600,
+            )
+
+        assert exc_info.value.response["Error"]["Code"] == "InvalidIdentityToken"
 
     def test_assume_role_missing_role_arn(self, sts_client):
         """Test AssumeRole validates required RoleArn parameter."""
