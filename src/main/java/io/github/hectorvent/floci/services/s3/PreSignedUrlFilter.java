@@ -13,6 +13,7 @@ import org.jboss.logging.Logger;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -163,9 +164,10 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
             // Build canonical headers from signed headers
-            String host = requestContext.getUriInfo().getRequestUri().getHost();
-            int port = requestContext.getUriInfo().getRequestUri().getPort();
-            String authority = (port > 0 && port != 80 && port != 443) ? host + ":" + port : host;
+            URI requestUri = requestContext.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
+                    ? uri
+                    : requestContext.getUriInfo().getRequestUri();
+            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"), requestUri);
 
             StringBuilder canonicalHeaders = new StringBuilder();
             for (String header : signedHeaders.split(";")) {
@@ -178,7 +180,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             }
 
             // Canonical request
-            String path = requestContext.getUriInfo().getRequestUri().getRawPath();
+            String path = requestUri.getRawPath();
             String canonicalQueryString = buildCanonicalQueryString(queryParams);
             String payloadHash = requestContext.getHeaderString("x-amz-content-sha256");
             if (payloadHash == null) {

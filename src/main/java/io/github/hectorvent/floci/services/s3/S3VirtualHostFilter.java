@@ -26,6 +26,8 @@ import java.util.Set;
 @ApplicationScoped
 public class S3VirtualHostFilter implements ContainerRequestFilter {
 
+    static final String ORIGINAL_REQUEST_URI_PROPERTY = S3VirtualHostFilter.class.getName() + ".originalRequestUri";
+
     private final String baseHostname;
 
     /**
@@ -144,6 +146,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 .replacePath(newPath)
                 .build();
 
+        requestContext.setProperty(ORIGINAL_REQUEST_URI_PROPERTY, uri);
         requestContext.setRequestUri(newUri);
     }
 

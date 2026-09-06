@@ -579,6 +579,29 @@ class S3AuthEnforcementIntegrationTest {
 
     @Test
     @Order(23)
+    void virtualHostedPresignedRequestUsesOriginalHostAndPath() throws Exception {
+        String path = "/" + PRIVATE_KEY;
+        String authority = PRIVATE_BUCKET + ".localhost:" + io.restassured.RestAssured.port;
+        String signature = presignedSignature(
+                "GET", path, "test", "test", "3600", "UNSIGNED-PAYLOAD", authority);
+
+        given()
+            .header("Host", authority)
+            .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+            .queryParam("X-Amz-Credential", credential("test"))
+            .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+            .queryParam("X-Amz-Expires", "3600")
+            .queryParam("X-Amz-SignedHeaders", "host")
+            .queryParam("X-Amz-Signature", signature)
+        .when()
+            .get(path)
+        .then()
+            .statusCode(200)
+            .body(equalTo("private body"));
+    }
+
+    @Test
+    @Order(23)
     void presignedRequestWithMismatchedContentSha256IsRejected() throws Exception {
         String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
         String contentHash = sha256Hex("private body");
@@ -1355,6 +1378,13 @@ class S3AuthEnforcementIntegrationTest {
     private static String presignedSignature(String method, String path,
                                               String accessKeyId, String secretKey,
                                               String expires, String payloadHash) {
+        return presignedSignature(method, path, accessKeyId, secretKey, expires, payloadHash,
+                "localhost:" + io.restassured.RestAssured.port);
+    }
+
+    private static String presignedSignature(String method, String path,
+                                              String accessKeyId, String secretKey,
+                                              String expires, String payloadHash, String authority) {
         try {
             String credentialScope = SIGNING_DATE + "/us-east-1/s3/aws4_request";
             String encodedCredential = URLEncoder.encode(
@@ -1373,7 +1403,7 @@ class S3AuthEnforcementIntegrationTest {
             String canonicalRequest = method + "\n"
                     + path + "\n"
                     + canonicalQueryString + "\n"
-                    + "host:localhost:" + io.restassured.RestAssured.port + "\n\n"
+                    + "host:" + authority + "\n\n"
                     + "host\n"
                     + payloadHash;
 
