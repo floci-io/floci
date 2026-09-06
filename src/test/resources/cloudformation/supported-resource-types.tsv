@@ -8,6 +8,8 @@ AWS::ApiGateway::Method	LEGACY_SWITCH
 AWS::ApiGateway::Resource	LEGACY_SWITCH
 AWS::ApiGateway::RestApi	LEGACY_SWITCH
 AWS::ApiGateway::Stage	LEGACY_SWITCH
+AWS::ApiGateway::UsagePlan	ApiGatewayUsagePlanCfnProvisioner
+AWS::ApiGateway::UsagePlanKey	ApiGatewayUsagePlanCfnProvisioner
 AWS::ApiGatewayV2::Api	LEGACY_SWITCH
 AWS::ApiGatewayV2::Authorizer	LEGACY_SWITCH
 AWS::ApiGatewayV2::Deployment	LEGACY_SWITCH
