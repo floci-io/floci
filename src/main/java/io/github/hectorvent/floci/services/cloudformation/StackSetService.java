@@ -392,36 +392,40 @@ public class StackSetService {
             validateOuOrRoot(ou);
         }
 
-        List<String> targetAccounts = !directAccounts.isEmpty()
-                ? directAccounts
-                : resolveOrganizationTargets(targetOus, regions, name, false).stream()
-                        .map(TargetAccount::accountId)
-                        .toList();
+        Set<String> requestedRegions = Set.copyOf(regions);
+        Set<String> requestedAccounts = Set.copyOf(directAccounts);
+        Set<String> requestedDeploymentTargets = Set.copyOf(targetOus);
+        List<StackInstance> targetInstances = listStackInstances(name, null, null).stream()
+                .filter(inst -> requestedRegions.contains(inst.getRegion()))
+                .filter(inst -> !requestedAccounts.isEmpty()
+                        ? requestedAccounts.contains(inst.getAccount())
+                        : requestedDeploymentTargets.contains(inst.getOrganizationalUnitId()))
+                .toList();
+
         List<StackInstance> results = new ArrayList<>();
-        for (String account : targetAccounts) {
-            for (String region : regions) {
-                String key = instanceKey(name, account, region);
-                StackInstance inst = instances.get(key).orElse(null);
-                if (inst == null) {
-                    continue;
-                }
-                // RetainStacks=true detaches the instance from the StackSet but leaves the
-                // underlying CloudFormation stack and its resources in the target account.
-                if (!retainStacks && !await(cfnService.deleteStack(inst.getStackName(), region, account))) {
-                    // The underlying stack delete failed. Match AWS: retain the instance record
-                    // (now INOPERABLE) and report the operation as FAILED, rather than silently
-                    // dropping the instance and claiming success.
-                    inst.setStatus("INOPERABLE");
-                    inst.setDetailedStatus("FAILED");
-                    inst.setStatusReason("Stack instance deletion failed");
-                    instances.put(key, inst);
-                    results.add(inst);
-                    continue;
-                }
-                inst.setDetailedStatus("SUCCEEDED");
-                instances.delete(key);
+        for (StackInstance inst : targetInstances) {
+            String account = inst.getAccount();
+            String region = inst.getRegion();
+            String key = instanceKey(name, account, region);
+            // For service-managed StackSets the persisted OrganizationalUnitId is the
+            // DeploymentTargets association that created this instance. Do not resolve the OU's
+            // current membership here: accounts can move after deployment while the instance
+            // remains associated with its original target until an auto-deployment or explicit
+            // StackSets operation changes it.
+            if (!retainStacks && !await(cfnService.deleteStack(inst.getStackName(), region, account))) {
+                // The underlying stack delete failed. Match AWS: retain the instance record
+                // (now INOPERABLE) and report the operation as FAILED, rather than silently
+                // dropping the instance and claiming success.
+                inst.setStatus("INOPERABLE");
+                inst.setDetailedStatus("FAILED");
+                inst.setStatusReason("Stack instance deletion failed");
+                instances.put(key, inst);
                 results.add(inst);
+                continue;
             }
+            inst.setDetailedStatus("SUCCEEDED");
+            instances.delete(key);
+            results.add(inst);
         }
         return recordOperation(name, "DELETE", deriveOperationStatus(results));
     }

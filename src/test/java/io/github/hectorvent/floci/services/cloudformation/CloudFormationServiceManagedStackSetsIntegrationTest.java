@@ -211,6 +211,89 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     @Test
+    void serviceManagedDeleteUsesPersistedOuAssociationAfterAccountMoves() {
+        String management = "919191919191";
+        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .post("/").then().statusCode(200);
+        String rootId = organizations(management, "ListRoots", "{}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("Roots[0].Id");
+        String firstOu = organizations(management, "CreateOrganizationalUnit",
+                "{\"ParentId\":\"" + rootId + "\",\"Name\":\"PersistedTargetA\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("OrganizationalUnit.Id");
+        String secondOu = organizations(management, "CreateOrganizationalUnit",
+                "{\"ParentId\":\"" + rootId + "\",\"Name\":\"PersistedTargetB\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("OrganizationalUnit.Id");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String firstAccount = organizations(management, "CreateAccount",
+                "{\"Email\":\"persisted-a-" + suffix + "@example.com\",\"AccountName\":\"PersistedA\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("CreateAccountStatus.AccountId");
+        String secondAccount = organizations(management, "CreateAccount",
+                "{\"Email\":\"persisted-b-" + suffix + "@example.com\",\"AccountName\":\"PersistedB\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("CreateAccountStatus.AccountId");
+        organizations(management, "MoveAccount",
+                "{\"AccountId\":\"" + firstAccount + "\",\"SourceParentId\":\"" + rootId
+                        + "\",\"DestinationParentId\":\"" + firstOu + "\"}")
+                .post("/").then().statusCode(200);
+        organizations(management, "MoveAccount",
+                "{\"AccountId\":\"" + secondAccount + "\",\"SourceParentId\":\"" + rootId
+                        + "\",\"DestinationParentId\":\"" + secondOu + "\"}")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "ActivateOrganizationsAccess")
+                .post("/").then().statusCode(200);
+
+        String stackSet = "persisted-ou-" + suffix;
+        String queue = "persisted-ou-q-" + suffix;
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate(queue))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", firstOu)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", secondOu)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(200);
+        assertQueueVisible(firstAccount, queue);
+        assertQueueVisible(secondAccount, queue);
+
+        organizations(management, "MoveAccount",
+                "{\"AccountId\":\"" + firstAccount + "\",\"SourceParentId\":\"" + firstOu
+                        + "\",\"DestinationParentId\":\"" + secondOu + "\"}")
+                .post("/").then().statusCode(200);
+        organizations(management, "MoveAccount",
+                "{\"AccountId\":\"" + secondAccount + "\",\"SourceParentId\":\"" + secondOu
+                        + "\",\"DestinationParentId\":\"" + firstOu + "\"}")
+                .post("/").then().statusCode(200);
+
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", firstOu)
+                .formParam("Regions.member.1", REGION)
+                .formParam("RetainStacks", "false")
+                .post("/").then().statusCode(200);
+        assertQueueAbsent(firstAccount, queue);
+        assertQueueVisible(secondAccount, queue);
+
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", secondOu)
+                .formParam("Regions.member.1", REGION)
+                .formParam("RetainStacks", "false")
+                .post("/").then().statusCode(200);
+        assertQueueAbsent(secondAccount, queue);
+    }
+
+    @Test
     void activateOrganizationsAccessRequiresAllFeatures() {
         String management = "666666666666";
         organizations(management, "CreateOrganization", "{\"FeatureSet\":\"CONSOLIDATED_BILLING\"}")
