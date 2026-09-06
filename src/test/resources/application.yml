@@ -375,6 +375,8 @@ floci:
       enabled: true
     macie2:
       enabled: true
+    account:
+      enabled: true
     accessanalyzer:
       enabled: true
     controltower:

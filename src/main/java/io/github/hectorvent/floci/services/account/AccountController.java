@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.account;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -48,7 +49,9 @@ public class AccountController {
 
     private JsonNode readTree(String body) {
         try {
-            return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            return objectMapper.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(body == null || body.isBlank() ? "{}" : body);
         } catch (Exception e) {
             throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse());
         }

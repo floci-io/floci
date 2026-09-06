@@ -23,9 +23,9 @@ class UnknownServiceScopeGuardIntegrationTest {
     }
 
     @Test
-    void accountScopedRestRequestGetsUnknownOperation() {
+    void unsupportedRestServiceScopeGetsUnknownOperation() {
         given()
-            .header("Authorization", authorization("account"))
+            .header("Authorization", authorization("support"))
             .contentType("application/json")
             .body("{}")
         .when()

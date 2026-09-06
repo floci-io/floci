@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.account;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.account.model.AlternateContact;
@@ -17,7 +18,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class AccountService {
+public class AccountService implements Resettable {
     private static final String ACCOUNT_MANAGEMENT_SERVICE_PRINCIPAL = "account.amazonaws.com";
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final Pattern EMAIL = Pattern.compile("\\s*[\\w+=.#|!&-]+@[\\w.-]+\\.[\\w]+\\s*");
@@ -55,10 +56,15 @@ public class AccountService {
     }
 
     private String resolveTargetAccount(String callerAccountId, JsonNode request) {
-        String requestedAccountId = text(request, "AccountId");
-        if (requestedAccountId == null) {
+        JsonNode accountIdNode = request == null ? null : request.get("AccountId");
+        if (accountIdNode == null || accountIdNode.isNull()) {
             return callerAccountId;
         }
+        if (!accountIdNode.isTextual()) {
+            throw new AwsException("SerializationException",
+                    "AccountId must be a string.", 400);
+        }
+        String requestedAccountId = accountIdNode.textValue();
         if (!ACCOUNT_ID.matcher(requestedAccountId).matches()) {
             throw validation("AccountId must be a 12 digit account ID.");
         }
@@ -94,6 +100,11 @@ public class AccountService {
             throw validation("The management account cannot specify its own AccountId.");
         }
         return requestedAccountId;
+    }
+
+    @Override
+    public void clear() {
+        contacts.clear();
     }
 
     private static String requireContactType(JsonNode request) {

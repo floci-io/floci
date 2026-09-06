@@ -30,6 +30,20 @@ class AccountAlternateContactIntegrationTest {
                 .post("/getAlternateContact").then().statusCode(400).body("__type", equalTo("ValidationException"));
     }
 
+    @Test
+    void rejectsNonStringAccountIdInsteadOfFallingBackToCaller() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"AccountId\":123456789012,\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\",\"Title\":\"Owner\",\"EmailAddress\":\"security@example.com\",\"PhoneNumber\":\"+12025550123\"}")
+                .post("/putAlternateContact").then().statusCode(400).body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void trailingJsonReturnsSerializationException() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"AlternateContactType\":\"SECURITY\"} {}")
+                .post("/getAlternateContact").then().statusCode(400).body("__type", equalTo("SerializationException"));
+    }
+
     private static io.restassured.response.ValidatableResponse put(String email) {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\",\"Title\":\"Owner\",\"EmailAddress\":\"" + email + "\",\"PhoneNumber\":\"+12025550123\"}")

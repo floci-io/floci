@@ -244,6 +244,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>macie2</artifactId>
         </dependency>
+        <!-- AWS Account Management client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>account</artifactId>
+        </dependency>
         <!-- IAM Access Analyzer client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
