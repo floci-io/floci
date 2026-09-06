@@ -23,6 +23,7 @@ AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	LEGACY_SWITCH
 AWS::CloudFront::Distribution	LEGACY_SWITCH
+AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner

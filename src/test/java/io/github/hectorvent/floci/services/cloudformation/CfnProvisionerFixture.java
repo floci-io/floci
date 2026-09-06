@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayDomainCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
@@ -55,6 +56,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
@@ -147,6 +149,7 @@ final class CfnProvisionerFixture {
         private DocDbService docDbService;
         private CloudFrontService cloudFrontService;
         private Route53Service route53Service;
+        private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
@@ -286,6 +289,9 @@ final class CfnProvisionerFixture {
             if (route53Service != null) {
                 discovered.add(new Route53CfnProvisioner(route53Service));
             }
+            if (cloudTrailService != null) {
+                discovered.add(new CloudTrailCfnProvisioner(cloudTrailService));
+            }
             if (schedulerService != null) {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
             }
@@ -414,6 +420,11 @@ final class CfnProvisionerFixture {
 
         public Builder route53(Route53Service v) {
             this.route53Service = v;
+            return this;
+        }
+
+        public Builder cloudTrail(CloudTrailService v) {
+            this.cloudTrailService = v;
             return this;
         }
 
