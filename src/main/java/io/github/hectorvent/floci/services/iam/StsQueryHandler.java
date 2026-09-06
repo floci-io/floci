@@ -199,9 +199,6 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        // Only tokens naming an issuer Floci itself hosts (an EKS cluster's IRSA OIDC provider) are
-        // verifiable, so only those are enforced. An opaque or third-party token keeps the historical
-        // permissive behaviour rather than failing a workflow Floci cannot adjudicate.
         WebIdentityOutcome outcome = verifyWebIdentityToken(webIdentityToken, roleName, accountId, roleArn);
         if (outcome.denial() != null) {
             return outcome.denial();
@@ -242,16 +239,7 @@ public class StsQueryHandler {
     /** The claims of a token Floci issued and verified, used to fill the response accurately. */
     private record VerifiedWebIdentity(String issuer, String subject, String audience) {}
 
-    /**
-     * The result of inspecting a web identity token: at most one field is non-null. Both null means
-     * the issuer is unknown to Floci, so the token is treated as opaque and accepted.
-     */
     private record WebIdentityOutcome(VerifiedWebIdentity verified, Response denial) {
-
-        static WebIdentityOutcome unverifiable() {
-            return new WebIdentityOutcome(null, null);
-        }
-
         static WebIdentityOutcome allow(VerifiedWebIdentity verified) {
             return new WebIdentityOutcome(verified, null);
         }
@@ -261,20 +249,18 @@ public class StsQueryHandler {
         }
     }
 
-    /**
-     * Inspects {@code token} and decides whether it may assume {@code roleArn}. Returns an outcome
-     * carrying the verified claims, a denial response, or neither when the token's issuer is not one
-     * Floci hosts (preserving the historical permissive behaviour for third-party providers).
-     */
+    /** Inspects {@code token} and decides whether it may assume {@code roleArn}. */
     private WebIdentityOutcome verifyWebIdentityToken(String token, String roleName, String roleAccountId,
                                                       String roleArn) {
         Optional<String> issuer = tokenVerifier.peekIssuer(token);
         if (issuer.isEmpty()) {
-            return WebIdentityOutcome.unverifiable();
+            return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                    "The web identity token does not identify a trusted issuer.", AwsNamespaces.STS, 400));
         }
         Optional<RSAPublicKey> key = oidcIssuerKeys.findVerificationKey(issuer.get());
         if (key.isEmpty()) {
-            return WebIdentityOutcome.unverifiable();
+            return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                    "The web identity token issuer is not trusted.", AwsNamespaces.STS, 400));
         }
 
         WebIdentityToken claims;

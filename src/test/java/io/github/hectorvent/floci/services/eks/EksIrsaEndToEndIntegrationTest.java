@@ -7,6 +7,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -18,7 +21,7 @@ import static org.hamcrest.Matchers.notNullValue;
  * it via {@code sts:AssumeRoleWithWebIdentity}.
  *
  * <p>Also covers the negative cases that matter — wrong service account, tampered signature, wrong
- * audience — and the compatibility guarantee that an opaque third-party token is still accepted.
+ * audience, and unknown issuers.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -184,14 +187,26 @@ class EksIrsaEndToEndIntegrationTest {
 
     @Test
     @Order(8)
-    void opaqueThirdPartyTokenRemainsAccepted() {
-        // Compatibility guarantee: Floci cannot adjudicate an issuer it does not host, so the
-        // historical permissive behaviour is preserved rather than failing the call.
+    void rejectsTokenFromUnknownIssuer() {
+        String header = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                "{\"alg\":\"none\"}".getBytes(StandardCharsets.UTF_8));
+        String payload = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                "{\"iss\":\"https://untrusted.example\",\"aud\":\"sts.amazonaws.com\"}"
+                        .getBytes(StandardCharsets.UTF_8));
+
+        assumeRole(header + "." + payload + ".")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidIdentityToken"));
+    }
+
+    @Test
+    @Order(9)
+    void rejectsOpaqueThirdPartyToken() {
         assumeRole("dummy-token")
         .then()
-            .statusCode(200)
-            .body(containsString("<AccessKeyId>ASIA"))
-            .body(containsString("<SubjectFromWebIdentityToken>web-identity-subject"));
+            .statusCode(400)
+            .body(containsString("InvalidIdentityToken"));
     }
 
     @Test
