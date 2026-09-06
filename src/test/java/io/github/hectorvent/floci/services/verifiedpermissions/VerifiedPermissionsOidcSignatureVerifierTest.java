@@ -93,4 +93,37 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
             assertEquals(2, verifier.fetches);
         }
     }
+
+    @Test
+    void failedUnknownKidRefreshDoesNotStartCooldown() throws Exception {
+        RSAPublicKey oldKey = org.mockito.Mockito.mock(RSAPublicKey.class);
+        RSAPublicKey newKey = org.mockito.Mockito.mock(RSAPublicKey.class);
+        class RecoveringVerifier extends VerifiedPermissionsOidcSignatureVerifier {
+            int fetches;
+
+            RecoveringVerifier() {
+                super(new ObjectMapper(), SystemDefaultDnsResolver.INSTANCE);
+            }
+
+            @Override
+            Map<String, RSAPublicKey> fetchJwks(String issuer) {
+                fetches++;
+                if (fetches == 1) {
+                    return Map.of("old", oldKey);
+                }
+                if (fetches == 2) {
+                    throw new VerificationException("temporary JWKS failure");
+                }
+                return Map.of("old", oldKey, "new", newKey);
+            }
+        }
+
+        try (RecoveringVerifier verifier = new RecoveringVerifier()) {
+            assertSame(oldKey, verifier.resolveKey("https://issuer.example.com", "old"));
+            assertThrows(VerifiedPermissionsOidcSignatureVerifier.VerificationException.class,
+                    () -> verifier.resolveKey("https://issuer.example.com", "new"));
+            assertSame(newKey, verifier.resolveKey("https://issuer.example.com", "new"));
+            assertEquals(3, verifier.fetches);
+        }
+    }
 }

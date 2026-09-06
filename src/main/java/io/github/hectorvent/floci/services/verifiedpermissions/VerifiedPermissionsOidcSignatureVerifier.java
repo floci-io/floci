@@ -126,8 +126,8 @@ public class VerifiedPermissionsOidcSignatureVerifier implements AutoCloseable {
                 return null;
             }
 
-            unknownKidRefreshes.put(issuer, now);
             Map<String, RSAPublicKey> refreshed = fetchJwks(issuer);
+            unknownKidRefreshes.put(issuer, now);
             jwksCache.put(issuer, new CachedJwks(refreshed, now));
             return refreshed.get(kid);
         }
