@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
@@ -14,6 +15,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Security Hub organization configuration")
 class SecurityHubOrganizationConfigurationTest {
+    private static final Logger LOG = Logger.getLogger(SecurityHubOrganizationConfigurationTest.class);
     private static final String MANAGEMENT_ACCOUNT = "test";
 
     @Test
@@ -98,8 +100,8 @@ class SecurityHubOrganizationConfigurationTest {
     private static void ensureOrganization(OrganizationsClient organizations) {
         try {
             organizations.createOrganization(request -> request.featureSet("ALL"));
-        } catch (AlreadyInOrganizationException ignored) {
-            // The compatibility suite may already have created the default-account organization.
+        } catch (AlreadyInOrganizationException e) {
+            LOG.debugf(e, "Default compatibility account already belongs to an AWS organization");
         }
     }
 
