@@ -225,13 +225,33 @@ public class LambdaService implements ResourceProvider {
     // content mounted, which is correct AWS-parity behavior for a layer deleted *after* being
     // attached (AWS doesn't re-validate on every invoke either), but was previously the only
     // signal at all for a bad ARN, even a typo caught at attach time on real AWS.
+    //
+    // A layer ARN outside the aws partition is rejected before any of that, matching
+    // GetLayerVersionByArn: partitions are isolated, so no resource policy can ever make such a
+    // layer readable, and accepting one here would persist an ARN Floci's own lookup calls invalid.
+    //
+    // Only an ARN in the caller's own account is validated that way. A layer in another account
+    // resolves on the live service through its resource policy, which is how every AWS-managed
+    // public layer is consumed; Floci implements no layer permissions and cannot fetch AWS
+    // content, so it can neither confirm nor deny such an ARN and records it unresolved instead
+    // of rejecting the configuration outright.
     private void validateLayersResolvable(List<String> layerArns) {
         if (layerArns == null || layerService == null) return;
         for (String arn : layerArns) {
-            if (layerService.resolveLayerByArn(arn) == null) {
-                throw new AwsException("InvalidParameterValueException",
-                        "Layer version " + arn + " does not exist.", 400);
+            if (layerService.resolveLayerByArn(arn) != null) {
+                continue;
             }
+            if (layerService.isForeignPartitionLayerArn(arn)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Invalid layer version " + arn, 400);
+            }
+            if (layerService.isForeignLayerArn(arn)) {
+                LOG.warnv("Layer {0} belongs to another account; recorded on the function but its"
+                        + " content will not be mounted at /opt", arn);
+                continue;
+            }
+            throw new AwsException("InvalidParameterValueException",
+                    "Layer version " + arn + " does not exist.", 400);
         }
     }
 
