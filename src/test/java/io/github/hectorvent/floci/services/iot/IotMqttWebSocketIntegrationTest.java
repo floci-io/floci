@@ -302,7 +302,7 @@ class IotMqttWebSocketIntegrationTest {
         return handshake.getResponse().statusCode();
     }
 
-    private static SSLContext trustOnlyFlociCa() throws Exception {
+    static SSLContext trustOnlyFlociCa() throws Exception {
         KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
         trust.load(null, null);
         trust.setCertificateEntry("floci", FlociCertificateAuthority.loadOrCreate(TLS_DIR).certificate());
