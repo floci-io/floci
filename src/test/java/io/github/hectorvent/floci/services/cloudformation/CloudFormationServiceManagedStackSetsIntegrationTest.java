@@ -189,6 +189,7 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 .formParam("StackSetName", stackSet)
                 .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", targetOu)
                 .formParam("Regions.member.1", REGION)
+                .formParam("Regions.member.2", "us-west-2")
                 .post("/").then().statusCode(200);
         assertQueueVisible(targetAccount, queue);
 
@@ -208,6 +209,23 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 .formParam("RetainStacks", "false")
                 .post("/").then().statusCode(200);
         assertQueueAbsent(targetAccount, queue);
+        cloudFormation(management, "ListStackSetAutoDeploymentTargets")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .body(containsString("<OrganizationalUnitId>" + targetOu + "</OrganizationalUnitId>"))
+                .body(not(containsString("<member>" + REGION + "</member>")))
+                .body(containsString("<member>us-west-2</member>"));
+
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", targetOu)
+                .formParam("Regions.member.1", "us-west-2")
+                .formParam("RetainStacks", "false")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "ListStackSetAutoDeploymentTargets")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .body(not(containsString("<OrganizationalUnitId>" + targetOu + "</OrganizationalUnitId>")));
     }
 
     @Test

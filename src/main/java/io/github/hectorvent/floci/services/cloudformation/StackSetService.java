@@ -447,7 +447,11 @@ public class StackSetService {
             instances.delete(key);
             results.add(inst);
         }
-        return recordOperation(name, "DELETE", deriveOperationStatus(results));
+        String operationStatus = deriveOperationStatus(results);
+        if ("SUCCEEDED".equals(operationStatus) && !requestedDeploymentTargets.isEmpty()) {
+            removeDeploymentTargetRegions(name, requestedDeploymentTargets, requestedRegions);
+        }
+        return recordOperation(name, "DELETE", operationStatus);
     }
 
     public List<StackSetOperation> listStackSetOperations(String name) {
@@ -469,6 +473,26 @@ public class StackSetService {
     }
 
     // ── Internal helpers ────────────────────────────────────────────────────────
+
+    private void removeDeploymentTargetRegions(String stackSetName, Set<String> organizationalUnits,
+                                               Set<String> regions) {
+        for (String organizationalUnit : organizationalUnits) {
+            String key = stackSetName + "::" + organizationalUnit;
+            StackSetAutoDeploymentTarget target = autoDeploymentTargets.get(key).orElse(null);
+            if (target == null) {
+                continue;
+            }
+            List<String> remainingRegions = target.getRegions().stream()
+                    .filter(region -> !regions.contains(region))
+                    .toList();
+            if (remainingRegions.isEmpty()) {
+                autoDeploymentTargets.delete(key);
+            } else {
+                target.setRegions(remainingRegions);
+                autoDeploymentTargets.put(key, target);
+            }
+        }
+    }
 
     private List<TargetAccount> resolveOrganizationTargets(List<String> organizationalUnits,
                                                            List<String> regions, String stackSetName) {
