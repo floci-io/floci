@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.List;
 import java.util.Set;
 
 /**
@@ -49,16 +48,15 @@ public class AutoScalingScalingPolicyCfnProvisioner implements CfnResourceProvis
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         String asgName = ctx.resolveOptional(props, "AutoScalingGroupName");
-        String policyName = priorPolicyName(r, ctx);
+        String policyName = priorAttribute(r, ctx, "PolicyName");
         if (policyName != null) {
-            // Policy names are unique only within a group, so the lookup is scoped to the group the
-            // template names. Only when the policy is not there does a same-named policy elsewhere
-            // in the region mean the template moved it, which AWS treats as a replacement.
-            boolean onThisGroup = !autoScalingService.describePolicies(ctx.region(), asgName, List.of(policyName))
-                    .isEmpty();
-            boolean onAnotherGroup = !onThisGroup
-                    && !autoScalingService.describePolicies(ctx.region(), null, List.of(policyName)).isEmpty();
-            if (onAnotherGroup) {
+            // Identity comes from the group recorded at create time, not from finding the name on
+            // the group the template now asks for. A same-named policy already on the destination
+            // group is somebody else's: reading it as this resource would overwrite it and orphan
+            // the original. A resource provisioned before this attribute existed has no prior group
+            // and keeps the old behaviour of trusting the template.
+            String priorAsgName = priorAttribute(r, ctx, "AutoScalingGroupName");
+            if (priorAsgName != null && !priorAsgName.equals(asgName)) {
                 throw new AwsException("ValidationError",
                         "Updating AutoScalingGroupName requires resource replacement, which is not supported.", 400);
             }
@@ -77,19 +75,22 @@ public class AutoScalingScalingPolicyCfnProvisioner implements CfnResourceProvis
         r.setPhysicalId(policy.getPolicyArn());
         r.getAttributes().put("Arn", policy.getPolicyArn());
         r.getAttributes().put("PolicyName", policyName);
+        // Not a Fn::GetAtt attribute of the type. It is the record of which group owns this policy,
+        // which the next update needs to tell a rewrite from a move.
+        r.getAttributes().put("AutoScalingGroupName", asgName);
     }
 
     /**
-     * The name this resource's policy already carries, or null on a first create. Read from the
-     * attribute recorded at create time rather than parsed out of the ARN, so the ARN's shape stays
-     * the service's business. Generating a fresh name on every UpdateStack would put a second policy
-     * on the group and orphan the first, which then outlives the stack.
+     * An attribute this resource recorded on an earlier provision, or null on a first create. The
+     * name and the group are read from here rather than parsed out of the ARN, so the ARN's shape
+     * stays the service's business. Generating a fresh name on every UpdateStack would put a second
+     * policy on the group and orphan the first, which then outlives the stack.
      */
-    private static String priorPolicyName(StackResource r, ProvisionContext ctx) {
+    private static String priorAttribute(StackResource r, ProvisionContext ctx, String name) {
         if (!ctx.isUpdate() || r.getAttributes() == null) {
             return null;
         }
-        String prior = r.getAttributes().get("PolicyName");
+        String prior = r.getAttributes().get(name);
         return prior == null || prior.isBlank() ? null : prior;
     }
 

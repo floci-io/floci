@@ -56,6 +56,10 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
     }
 
     private static StackResource resource(String priorPhysicalId, String priorPolicyName) {
+        return resource(priorPhysicalId, priorPolicyName, priorPolicyName == null ? null : "my-asg");
+    }
+
+    private static StackResource resource(String priorPhysicalId, String priorPolicyName, String priorAsgName) {
         StackResource r = new StackResource();
         r.setLogicalId("MyPolicy");
         r.setResourceType(TYPE);
@@ -63,6 +67,9 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
         r.setAttributes(new HashMap<>());
         if (priorPolicyName != null) {
             r.getAttributes().put("PolicyName", priorPolicyName);
+        }
+        if (priorAsgName != null) {
+            r.getAttributes().put("AutoScalingGroupName", priorAsgName);
         }
         return r;
     }
@@ -98,6 +105,7 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
         assertEquals(ARN, r.getPhysicalId());
         assertEquals(ARN, r.getAttributes().get("Arn"));
         assertEquals(name.getValue(), r.getAttributes().get("PolicyName"));
+        assertEquals("my-asg", r.getAttributes().get("AutoScalingGroupName"));
     }
 
     @Test
@@ -134,8 +142,6 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
 
     @Test
     void updateReusesTheRecordedNameOnTheSameGroup() {
-        when(autoScaling.describePolicies(REGION, "my-asg", List.of("my-stack-MyPolicy-abc")))
-                .thenReturn(List.of(policy("my-asg", "my-stack-MyPolicy-abc")));
         when(autoScaling.putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(), any()))
                 .thenReturn(policy("my-asg", "my-stack-MyPolicy-abc"));
         StackResource r = resource(ARN, "my-stack-MyPolicy-abc");
@@ -145,22 +151,30 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
 
         verify(autoScaling).putScalingPolicy(eq(REGION), eq("my-asg"), eq("my-stack-MyPolicy-abc"), isNull(),
                 isNull(), eq(0), eq(120), isNull(), isNull());
-        // The region-wide lookup is only for a policy that is not on the template's group.
-        verify(autoScaling, never()).describePolicies(eq(REGION), isNull(), anyList());
+        // Identity comes from the recorded group, so no lookup is needed at all.
+        verify(autoScaling, never()).describePolicies(any(), any(), anyList());
         assertEquals(ARN, r.getPhysicalId());
         assertEquals("my-stack-MyPolicy-abc", r.getAttributes().get("PolicyName"));
     }
 
     @Test
-    void aSameNamedPolicyOnAnotherGroupDoesNotBlockAnUpdateOnThisOne() {
-        when(autoScaling.describePolicies(REGION, "my-asg", List.of("my-stack-MyPolicy-abc")))
-                .thenReturn(List.of(policy("my-asg", "my-stack-MyPolicy-abc")));
-        when(autoScaling.describePolicies(REGION, null, List.of("my-stack-MyPolicy-abc")))
-                .thenReturn(List.of(policy("other-asg", "my-stack-MyPolicy-abc"), policy("my-asg", "my-stack-MyPolicy-abc")));
+    void aMoveOntoAGroupThatAlreadyHasThatNameDoesNotOverwriteIt() {
+        // The destination group's own policy shares the name. Reading it as this resource would
+        // rewrite somebody else's policy and orphan the original.
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource(ARN, "my-stack-MyPolicy-abc", "my-asg"),
+                mapper.createObjectNode().put("AutoScalingGroupName", "other-asg"), ctx(ARN)));
+
+        assertTrue(e.getMessage().contains("AutoScalingGroupName"), e.getMessage());
+        verify(autoScaling, never()).putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(), any());
+    }
+
+    @Test
+    void anUpdateOfAResourceProvisionedBeforeTheGroupWasRecordedStillWorks() {
         when(autoScaling.putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(), any()))
                 .thenReturn(policy("my-asg", "my-stack-MyPolicy-abc"));
 
-        provisioner.provision(resource(ARN, "my-stack-MyPolicy-abc"),
+        provisioner.provision(resource(ARN, "my-stack-MyPolicy-abc", null),
                 mapper.createObjectNode().put("AutoScalingGroupName", "my-asg"), ctx(ARN));
 
         verify(autoScaling).putScalingPolicy(eq(REGION), eq("my-asg"), eq("my-stack-MyPolicy-abc"), isNull(),
@@ -169,7 +183,6 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
 
     @Test
     void updateOfAPolicyGoneFromTheGroupRecreatesItUnderTheSameName() {
-        when(autoScaling.describePolicies(eq(REGION), isNull(), anyList())).thenReturn(List.of());
         when(autoScaling.putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(), any()))
                 .thenReturn(policy("my-asg", "my-stack-MyPolicy-abc"));
 
@@ -182,12 +195,8 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
 
     @Test
     void movingThePolicyToAnotherGroupIsRefusedAsReplacementWorthy() {
-        when(autoScaling.describePolicies(REGION, "new-asg", List.of("my-stack-MyPolicy-abc"))).thenReturn(List.of());
-        when(autoScaling.describePolicies(REGION, null, List.of("my-stack-MyPolicy-abc")))
-                .thenReturn(List.of(policy("old-asg", "my-stack-MyPolicy-abc")));
-
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
-                resource(ARN, "my-stack-MyPolicy-abc"),
+                resource(ARN, "my-stack-MyPolicy-abc", "old-asg"),
                 mapper.createObjectNode().put("AutoScalingGroupName", "new-asg"), ctx(ARN)));
 
         assertEquals("ValidationError", e.getErrorCode());
