@@ -296,6 +296,18 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
     }
 
     @Test
+    void aChangedKeyIsRefusedEvenWhileRecoveringADeletedPlan() {
+        when(apiGateway.getUsagePlan(REGION, "plan-old")).thenThrow(NOT_FOUND);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource(PLAN_KEY, "PlanKey", "key-1:plan-old"), keyProps("plan-new", "key-2", "API_KEY"),
+                ctx("key-1:plan-old")));
+
+        assertTrue(e.getMessage().contains("KeyId"), e.getMessage());
+        verify(apiGateway, never()).createUsagePlanKey(any(), any(), anyMap());
+    }
+
+    @Test
     void aKeyTypeOtherThanApiKeyIsRejected() {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
                 resource(PLAN_KEY, "PlanKey", null), keyProps("plan-1", "key-1", "BEARER"), ctx()));

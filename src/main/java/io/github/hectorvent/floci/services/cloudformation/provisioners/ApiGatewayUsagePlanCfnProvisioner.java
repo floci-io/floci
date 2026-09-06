@@ -199,16 +199,17 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
                     "KeyType of a usage plan key must be " + API_KEY_TYPE + ".", 400);
         }
 
-        if (ctx.isUpdate()) {
-            String[] prior = splitKeyId(ctx.priorPhysicalId());
-            // The association only still exists while its plan does. deleteUsagePlan leaves
-            // associations behind, and a plan recreated after an out-of-band delete has a new id, so
-            // an association whose plan is gone is stale and the key is attached to the new plan.
-            UsagePlanKey existing = prior == null || findUsagePlan(ctx.region(), prior[1]) == null
+        String[] prior = ctx.isUpdate() ? splitKeyId(ctx.priorPhysicalId()) : null;
+        if (prior != null) {
+            // KeyId is createOnly and nothing legitimate changes it, so it is checked whether or not
+            // the plan is still there. UsagePlanId is different: deleteUsagePlan leaves associations
+            // behind and a plan recreated after an out-of-band delete has a new id, so a changed
+            // plan id is a move only while the plan it moved off still exists.
+            rejectIfChanged("KeyId", prior[0], keyId);
+            UsagePlanKey existing = findUsagePlan(ctx.region(), prior[1]) == null
                     ? null
                     : findUsagePlanKey(ctx.region(), prior[1], prior[0]);
             if (existing != null) {
-                rejectIfChanged("KeyId", prior[0], keyId);
                 rejectIfChanged("UsagePlanId", prior[1], usagePlanId);
                 rejectIfChanged("KeyType", existing.getType(), keyType);
                 recordKey(r, prior[0], prior[1]);
