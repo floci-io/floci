@@ -377,7 +377,7 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
 
     @Test
     void activateOrganizationsAccessRequiresAllFeatures() {
-        String management = "666666666666";
+        String management = "939393939393";
         organizations(management, "CreateOrganization", "{\"FeatureSet\":\"CONSOLIDATED_BILLING\"}")
                 .post("/").then().statusCode(200);
 
