@@ -239,6 +239,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ssoadmin</artifactId>
         </dependency>
+        <!-- Identity Store client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>identitystore</artifactId>
+        </dependency>
         <!-- Amazon Macie client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

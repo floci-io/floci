@@ -381,6 +381,8 @@ floci:
       enabled: true
     accessanalyzer:
       enabled: true
+    identitystore:
+      enabled: true
     controltower:
       enabled: true
       seed-landing-zone: true

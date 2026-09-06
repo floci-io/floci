@@ -742,7 +742,6 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
-<<<<<<< HEAD
     interface Macie2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -754,9 +753,11 @@ public interface EmulatorConfig {
     }
 
     interface AccessAnalyzerServiceConfig {
-=======
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface IdentityStoreServiceConfig {
->>>>>>> bea80853 (feat(identitystore): add groups users and memberships)
         @WithDefault("true")
         boolean enabled();
     }

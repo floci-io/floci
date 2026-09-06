@@ -14,6 +14,8 @@ import jakarta.ws.rs.core.Response;
 
 @ApplicationScoped
 public class IdentityStoreJsonHandler {
+    private static final String ENTERPRISE_EXTENSION = "aws:identitystore:enterprise";
+
     private final IdentityStoreService service;
     private final ObjectMapper mapper;
 
@@ -25,29 +27,28 @@ public class IdentityStoreJsonHandler {
 
     public Response handle(String action, JsonNode request) {
         return switch (action) {
-            case "ListGroups" -> listGroups(request);
             case "CreateGroup" -> createGroup(request);
-            case "ListUsers" -> listUsers(request);
+            case "DeleteGroup" -> emptyAfter(() -> service.deleteGroup(request));
+            case "DescribeGroup" -> Response.ok(groupDetails(service.describeGroup(request))).build();
+            case "GetGroupId" -> getGroupId(request);
+            case "ListGroups" -> listGroups(request);
+            case "UpdateGroup" -> emptyAfter(() -> service.updateGroup(request));
             case "CreateUser" -> createUser(request);
-            case "IsMemberInGroups" -> isMemberInGroups(request);
+            case "DeleteUser" -> emptyAfter(() -> service.deleteUser(request));
+            case "DescribeUser" -> describeUser(request);
+            case "GetUserId" -> getUserId(request);
+            case "ListUsers" -> listUsers(request);
+            case "UpdateUser" -> emptyAfter(() -> service.updateUser(request));
             case "CreateGroupMembership" -> createGroupMembership(request);
-            default -> throw new AwsException("UnknownOperationException", "Operation " + action + " is not supported.", 400);
+            case "DeleteGroupMembership" -> emptyAfter(() -> service.deleteMembership(request));
+            case "DescribeGroupMembership" -> Response.ok(membershipDetails(service.describeMembership(request))).build();
+            case "GetGroupMembershipId" -> getGroupMembershipId(request);
+            case "IsMemberInGroups" -> isMemberInGroups(request);
+            case "ListGroupMemberships" -> listGroupMemberships(request);
+            case "ListGroupMembershipsForMember" -> listGroupMembershipsForMember(request);
+            default -> throw new AwsException("UnknownOperationException",
+                    "Operation " + action + " is not supported.", 400);
         };
-    }
-
-    private Response listGroups(JsonNode request) {
-        var page = service.listGroups(request);
-        ObjectNode out = mapper.createObjectNode();
-        ArrayNode array = out.putArray("Groups");
-        for (Group group : page.items()) {
-            ObjectNode node = array.addObject();
-            node.put("GroupId", group.groupId());
-            node.put("IdentityStoreId", group.identityStoreId());
-            node.put("DisplayName", group.displayName());
-            if (group.description() != null) node.put("Description", group.description());
-        }
-        if (page.nextToken() != null) out.put("NextToken", page.nextToken());
-        return Response.ok(out).build();
     }
 
     private Response createGroup(JsonNode request) {
@@ -58,18 +59,24 @@ public class IdentityStoreJsonHandler {
         return Response.ok(out).build();
     }
 
-    private Response listUsers(JsonNode request) {
-        var page = service.listUsers(request);
+    private Response listGroups(JsonNode request) {
+        var page = service.listGroups(request);
         ObjectNode out = mapper.createObjectNode();
-        ArrayNode array = out.putArray("Users");
-        for (User user : page.items()) {
-            ObjectNode node = array.addObject();
-            node.put("UserId", user.userId());
-            node.put("IdentityStoreId", user.identityStoreId());
-            node.put("UserName", user.userName());
-            if (user.displayName() != null) node.put("DisplayName", user.displayName());
+        ArrayNode array = out.putArray("Groups");
+        for (Group group : page.items()) {
+            array.add(groupDetails(group));
         }
-        if (page.nextToken() != null) out.put("NextToken", page.nextToken());
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
+        return Response.ok(out).build();
+    }
+
+    private Response getGroupId(JsonNode request) {
+        Group group = service.getGroupId(request);
+        ObjectNode out = mapper.createObjectNode();
+        out.put("GroupId", group.groupId());
+        out.put("IdentityStoreId", group.identityStoreId());
         return Response.ok(out).build();
     }
 
@@ -81,18 +88,30 @@ public class IdentityStoreJsonHandler {
         return Response.ok(out).build();
     }
 
-    private Response isMemberInGroups(JsonNode request) {
-        String store = IdentityStoreService.required(request, "IdentityStoreId");
-        String user = IdentityStoreService.memberUserId(request.get("MemberId"));
-        var groupIds = service.validateGroupIds(request.get("GroupIds"));
+    private Response describeUser(JsonNode request) {
+        boolean includeExtensions = includeExtensions(request);
+        return Response.ok(userDetails(service.describeUser(request), includeExtensions)).build();
+    }
+
+    private Response listUsers(JsonNode request) {
+        boolean includeExtensions = includeExtensions(request);
+        var page = service.listUsers(request);
         ObjectNode out = mapper.createObjectNode();
-        ArrayNode results = out.putArray("Results");
-        for (String group : groupIds) {
-            ObjectNode result = results.addObject();
-            result.put("GroupId", group);
-            result.putObject("MemberId").put("UserId", user);
-            result.put("MembershipExists", service.isMember(store, user, group));
+        ArrayNode array = out.putArray("Users");
+        for (User user : page.items()) {
+            array.add(userDetails(user, includeExtensions));
         }
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
+        return Response.ok(out).build();
+    }
+
+    private Response getUserId(JsonNode request) {
+        User user = service.getUserId(request);
+        ObjectNode out = mapper.createObjectNode();
+        out.put("UserId", user.userId());
+        out.put("IdentityStoreId", user.identityStoreId());
         return Response.ok(out).build();
     }
 
@@ -102,5 +121,135 @@ public class IdentityStoreJsonHandler {
         out.put("MembershipId", membership.membershipId());
         out.put("IdentityStoreId", membership.identityStoreId());
         return Response.ok(out).build();
+    }
+
+    private Response getGroupMembershipId(JsonNode request) {
+        Membership membership = service.getMembershipId(request);
+        ObjectNode out = mapper.createObjectNode();
+        out.put("MembershipId", membership.membershipId());
+        out.put("IdentityStoreId", membership.identityStoreId());
+        return Response.ok(out).build();
+    }
+
+    private Response listGroupMemberships(JsonNode request) {
+        var page = service.listGroupMemberships(request);
+        ObjectNode out = mapper.createObjectNode();
+        ArrayNode result = out.putArray("GroupMemberships");
+        for (Membership membership : page.items()) {
+            result.add(membershipDetails(membership));
+        }
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
+        return Response.ok(out).build();
+    }
+
+    private Response listGroupMembershipsForMember(JsonNode request) {
+        var page = service.listGroupMembershipsForMember(request);
+        ObjectNode out = mapper.createObjectNode();
+        ArrayNode result = out.putArray("GroupMemberships");
+        for (Membership membership : page.items()) {
+            result.add(membershipDetails(membership));
+        }
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
+        return Response.ok(out).build();
+    }
+
+    private Response isMemberInGroups(JsonNode request) {
+        String storeId = IdentityStoreService.required(request, "IdentityStoreId");
+        String userId = IdentityStoreService.memberUserId(request.get("MemberId"));
+        var groupIds = service.validateGroupIds(request.get("GroupIds"));
+        ObjectNode out = mapper.createObjectNode();
+        ArrayNode results = out.putArray("Results");
+        for (String groupId : groupIds) {
+            ObjectNode result = results.addObject();
+            result.put("GroupId", groupId);
+            result.putObject("MemberId").put("UserId", userId);
+            result.put("MembershipExists", service.isMember(storeId, userId, groupId));
+        }
+        return Response.ok(out).build();
+    }
+
+    private ObjectNode groupSummary(Group group) {
+        ObjectNode out = mapper.createObjectNode();
+        out.put("GroupId", group.groupId());
+        out.put("IdentityStoreId", group.identityStoreId());
+        copyIfPresent(group.attributes(), out, "DisplayName");
+        copyIfPresent(group.attributes(), out, "Description");
+        copyIfPresent(group.attributes(), out, "ExternalIds");
+        return out;
+    }
+
+    private ObjectNode groupDetails(Group group) {
+        ObjectNode out = groupSummary(group);
+        putTimestamp(out, "CreatedAt", group.createdAt());
+        putTimestamp(out, "UpdatedAt", group.updatedAt());
+        return out;
+    }
+
+    private ObjectNode userDetails(User user, boolean includeExtensions) {
+        ObjectNode out = mapper.createObjectNode();
+        out.put("UserId", user.userId());
+        out.put("IdentityStoreId", user.identityStoreId());
+        user.attributes().fields().forEachRemaining(entry -> {
+            if (!"Extensions".equals(entry.getKey()) || includeExtensions) {
+                out.set(entry.getKey(), entry.getValue().deepCopy());
+            }
+        });
+        putTimestamp(out, "CreatedAt", user.createdAt());
+        putTimestamp(out, "UpdatedAt", user.updatedAt());
+        return out;
+    }
+
+    private ObjectNode membershipDetails(Membership membership) {
+        ObjectNode out = mapper.createObjectNode();
+        out.put("IdentityStoreId", membership.identityStoreId());
+        out.put("MembershipId", membership.membershipId());
+        out.put("GroupId", membership.groupId());
+        out.putObject("MemberId").put("UserId", membership.userId());
+        putTimestamp(out, "CreatedAt", membership.createdAt());
+        putTimestamp(out, "UpdatedAt", membership.updatedAt());
+        return out;
+    }
+
+    private static boolean includeExtensions(JsonNode request) {
+        JsonNode extensions = request == null ? null : request.get("Extensions");
+        if (extensions == null || extensions.isNull()) {
+            return false;
+        }
+        if (!extensions.isArray() || extensions.size() < 1 || extensions.size() > 10) {
+            throw validation("Extensions must contain between 1 and 10 extension names.");
+        }
+        for (JsonNode extension : extensions) {
+            if (!extension.isTextual() || !ENTERPRISE_EXTENSION.equals(extension.textValue())) {
+                throw validation("Only aws:identitystore:enterprise is supported in Extensions.");
+            }
+        }
+        return true;
+    }
+
+    private static void copyIfPresent(ObjectNode source, ObjectNode target, String field) {
+        if (source != null && source.has(field) && !source.get(field).isNull()) {
+            target.set(field, source.get(field).deepCopy());
+        }
+    }
+
+    private static void putTimestamp(ObjectNode target, String field, String timestamp) {
+        if (timestamp != null) {
+            var instant = java.time.Instant.parse(timestamp);
+            double unixTimestamp = instant.getEpochSecond() + instant.getNano() / 1_000_000_000.0;
+            target.put(field, unixTimestamp);
+        }
+    }
+
+    private Response emptyAfter(Runnable action) {
+        action.run();
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    private static AwsException validation(String message) {
+        return new AwsException("ValidationException", message, 400);
     }
 }
