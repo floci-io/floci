@@ -5,9 +5,16 @@ import io.github.hectorvent.floci.services.iot.model.IotRetainedMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import io.quarkus.tls.CertificateUpdatedEvent;
+import io.quarkus.tls.TlsConfiguration;
+import io.quarkus.tls.TlsConfigurationRegistry;
+import io.quarkus.tls.runtime.config.TlsConfig;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.ClientAuth;
+import io.vertx.core.net.KeyCertOptions;
 import io.vertx.core.net.SocketAddress;
+import io.vertx.core.net.TrustOptions;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
 import io.vertx.mqtt.MqttServerOptions;
@@ -20,6 +27,11 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.X509ExtendedTrustManager;
+import java.net.Socket;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
@@ -34,18 +46,63 @@ public class IotMqttBrokerService {
 
     private static final Logger LOG = Logger.getLogger(IotMqttBrokerService.class);
 
+    /**
+     * The TLS listener asks for a client certificate and accepts whichever one is presented: AWS
+     * IoT trusts a device certificate because it is registered, not because of its issuer, and
+     * that lookup belongs to the broker, not to the handshake. Until it exists, 8883 admits every
+     * client exactly as 1883 does.
+     */
+    static final X509ExtendedTrustManager ACCEPT_ANY_CLIENT_CERTIFICATE = new X509ExtendedTrustManager() {
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) {
+        }
+
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType, Socket socket) {
+        }
+
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType, SSLEngine engine) {
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+            throw new CertificateException("server-side trust manager");
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType, Socket socket) throws CertificateException {
+            throw new CertificateException("server-side trust manager");
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType, SSLEngine engine) throws CertificateException {
+            throw new CertificateException("server-side trust manager");
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
+        }
+    };
+
     private final EmulatorConfig config;
     private final Vertx vertx;
     private final Instance<IotService> iotService;
+    private final TlsConfigurationRegistry tlsRegistry;
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Subscription>> subscriptionsByClient = new ConcurrentHashMap<>();
     private MqttServer server;
+    private MqttServer tlsServer;
+    private ReloadingKeyManager keyManager;
 
     @Inject
-    public IotMqttBrokerService(EmulatorConfig config, Vertx vertx, Instance<IotService> iotService) {
+    public IotMqttBrokerService(EmulatorConfig config, Vertx vertx, Instance<IotService> iotService,
+                                TlsConfigurationRegistry tlsRegistry) {
         this.config = config;
         this.vertx = vertx;
         this.iotService = iotService;
+        this.tlsRegistry = tlsRegistry;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -72,33 +129,100 @@ public class IotMqttBrokerService {
             return;
         }
 
-        MqttServer mqttServer = MqttServer.create(vertx, new MqttServerOptions()
+        MqttServer mqttServer = listen(new MqttServerOptions()
                 .setHost(config.services().iot().mqtt().host())
-                .setPort(config.services().iot().mqtt().port()));
-        mqttServer.endpointHandler(this::handleEndpoint);
-        mqttServer.exceptionHandler(error -> LOG.warnv("IoT MQTT broker error: {0}", error.getMessage()));
+                .setPort(config.services().iot().mqtt().port()), "IoT MQTT broker");
+        try {
+            startTlsListener();
+        } catch (RuntimeException e) {
+            mqttServer.close().toCompletionStage().toCompletableFuture().join();
+            throw e;
+        }
+        server = mqttServer;
+    }
 
+    /**
+     * The MQTT over TLS listener, AWS IoT's 8883, sharing every handler with the plaintext one.
+     * Its key material is the TLS registry's default configuration, the same certificate the HTTPS
+     * endpoint presents. Not opened when the port is 0 or TLS is off.
+     */
+    private void startTlsListener() {
+        int tlsPort = config.services().iot().mqtt().tlsPort();
+        if (tlsPort <= 0) {
+            return;
+        }
+        if (!config.tls().enabled()) {
+            LOG.infov("IoT MQTT TLS listener not started on port {0}: floci.tls.enabled is false", Integer.toString(tlsPort));
+            return;
+        }
+        TlsConfiguration tls = tlsRegistry.getDefault().orElse(null);
+        if (tls == null) {
+            LOG.warnv("IoT MQTT TLS listener not started on port {0}: no default TLS configuration is registered",
+                    Integer.toString(tlsPort));
+            return;
+        }
+        ReloadingKeyManager manager = new ReloadingKeyManager(ReloadingKeyManager.keyManagerOf(vertx, tls.getKeyStoreOptions()));
+        tlsServer = listen(new MqttServerOptions()
+                .setHost(config.services().iot().mqtt().host())
+                .setPort(tlsPort)
+                .setSsl(true)
+                .setKeyCertOptions(KeyCertOptions.wrap(manager))
+                .setTrustOptions(TrustOptions.wrap(ACCEPT_ANY_CLIENT_CERTIFICATE))
+                .setClientAuth(ClientAuth.REQUEST), "IoT MQTT TLS broker");
+        keyManager = manager;
+    }
+
+    private MqttServer listen(MqttServerOptions options, String name) {
+        MqttServer mqttServer = MqttServer.create(vertx, options);
+        mqttServer.endpointHandler(this::handleEndpoint);
+        mqttServer.exceptionHandler(error -> LOG.warnv("{0} error: {1}", name, error.getMessage()));
         try {
             mqttServer.listen().toCompletionStage().toCompletableFuture().join();
-            server = mqttServer;
-            LOG.infov("IoT MQTT broker started on {0}:{1}",
-                    config.services().iot().mqtt().host(), config.services().iot().mqtt().port());
         } catch (Exception e) {
-            mqttServer.close();
-            throw new IllegalStateException("Failed to start IoT MQTT broker", e);
+            mqttServer.close().toCompletionStage().toCompletableFuture().join();
+            throw new IllegalStateException("Failed to start " + name + " on port " + options.getPort(), e);
+        }
+        LOG.infov("{0} started on {1}:{2}", name, options.getHost(), Integer.toString(options.getPort()));
+        return mqttServer;
+    }
+
+    /**
+     * The HTTPS server switches to a reissued server certificate through this event (a hostname
+     * learned by {@code TlsCertificateManager.ensureHost}, or a reload). The TLS listener follows
+     * by handing its key manager the reloaded key store: the next handshake presents the new
+     * certificate, established sessions keep theirs, and a failed reload keeps the previous one.
+     */
+    synchronized void onCertificateUpdated(@Observes CertificateUpdatedEvent event) {
+        ReloadingKeyManager manager = keyManager;
+        if (manager == null || !TlsConfig.DEFAULT_NAME.equalsIgnoreCase(event.name())) {
+            return;
+        }
+        try {
+            manager.reload(ReloadingKeyManager.keyManagerOf(vertx, event.tlsConfiguration().getKeyStoreOptions()));
+            LOG.debug("IoT MQTT TLS broker serves the reloaded server certificate");
+        } catch (Exception e) {
+            LOG.warnv(e, "IoT MQTT TLS broker keeps its previous server certificate: {0}", e.getMessage());
         }
     }
 
     synchronized void stop() {
         MqttServer mqttServer = server;
-        if (mqttServer == null) {
+        MqttServer mqttTlsServer = tlsServer;
+        if (mqttServer == null && mqttTlsServer == null) {
             return;
         }
         server = null;
+        tlsServer = null;
+        keyManager = null;
         sessionsByClient.values().forEach(session -> session.endpoint().close());
         sessionsByClient.clear();
         subscriptionsByClient.clear();
-        mqttServer.close().toCompletionStage().toCompletableFuture().join();
+        if (mqttServer != null) {
+            mqttServer.close().toCompletionStage().toCompletableFuture().join();
+        }
+        if (mqttTlsServer != null) {
+            mqttTlsServer.close().toCompletionStage().toCompletableFuture().join();
+        }
         LOG.info("IoT MQTT broker stopped");
     }
 

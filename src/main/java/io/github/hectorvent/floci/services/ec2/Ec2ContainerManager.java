@@ -31,6 +31,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -73,6 +74,7 @@ public class Ec2ContainerManager {
      *  10 MB decompressed, and it bounds how much a caller-controlled gzip stream can expand
      *  to in the shared emulator JVM. */
     private static final int MAX_DECOMPRESSED_USER_DATA_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_EXEC_OUTPUT_BYTES = 2048;
     /** Caps concurrent UserData gzip decompressions across ALL instance launches, not just one.
      *  Launches run independently on {@link #executor}, an unbounded cached thread pool, so the
      *  per-payload cap above only bounds a single launch's allocation: without this, N concurrent
@@ -998,7 +1000,7 @@ public class Ec2ContainerManager {
                 .exec()
                 .getId();
 
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        BoundedOutput output = new BoundedOutput(MAX_EXEC_OUTPUT_BYTES);
         CountDownLatch latch = new CountDownLatch(1);
 
         dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
@@ -1302,13 +1304,110 @@ public class Ec2ContainerManager {
                 "AWS_SESSION_TOKEN=test-session-token");
     }
 
-    private static String summarizeUserDataOutput(ByteArrayOutputStream output) {
-        String text = output.toString(StandardCharsets.UTF_8).stripTrailing();
+    static String summarizeUserDataOutput(BoundedOutput output) {
+        String text = output.utf8Tail().stripTrailing();
         if (text.isBlank()) {
-            return "(no output)";
+            text = "(no output)";
         }
-        int start = Math.max(0, text.length() - 2048);
-        return text.substring(start);
+        if (output.truncated()) {
+            return "(output truncated; showing last " + output.capacity() + " bytes)\n" + text;
+        }
+        return text;
+    }
+
+    static final class BoundedOutput extends OutputStream {
+        private final byte[] buffer;
+        private int size;
+        private long totalBytes;
+
+        BoundedOutput(int capacity) {
+            if (capacity <= 0) {
+                throw new IllegalArgumentException("capacity must be positive");
+            }
+            buffer = new byte[capacity];
+        }
+
+        @Override
+        public void write(int value) {
+            write(new byte[]{(byte) value}, 0, 1);
+        }
+
+        @Override
+        public void write(byte[] source, int offset, int length) {
+            Objects.checkFromIndexSize(offset, length, source.length);
+            if (length == 0) {
+                return;
+            }
+            totalBytes += length;
+            if (length >= buffer.length) {
+                System.arraycopy(source, offset + length - buffer.length, buffer, 0, buffer.length);
+                size = buffer.length;
+                return;
+            }
+            int overflow = Math.max(0, size + length - buffer.length);
+            if (overflow > 0) {
+                System.arraycopy(buffer, overflow, buffer, 0, size - overflow);
+                size -= overflow;
+            }
+            System.arraycopy(source, offset, buffer, size, length);
+            size += length;
+        }
+
+        String utf8Tail() {
+            int start = 0;
+            while (start < size) {
+                int sequenceLength = utf8SequenceLength(buffer[start]);
+                if (sequenceLength == 0) {
+                    start++;
+                    continue;
+                }
+                if (sequenceLength == 1) {
+                    break;
+                }
+                if (sequenceLength <= size - start && hasContinuationBytes(start, sequenceLength)) {
+                    break;
+                }
+                start++;
+            }
+            return new String(buffer, start, size - start, StandardCharsets.UTF_8);
+        }
+
+        boolean truncated() {
+            return totalBytes > buffer.length;
+        }
+
+        int capacity() {
+            return buffer.length;
+        }
+
+        private boolean hasContinuationBytes(int start, int sequenceLength) {
+            for (int i = 1; i < sequenceLength; i++) {
+                if ((buffer[start + i] & 0xC0) != 0x80) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static int utf8SequenceLength(byte value) {
+            int unsigned = value & 0xFF;
+            if (unsigned < 0x80) {
+                return 1;
+            }
+            if ((unsigned & 0xC0) == 0x80) {
+                return 0;
+            }
+            if ((unsigned & 0xE0) == 0xC0) {
+                return 2;
+            }
+            if ((unsigned & 0xF0) == 0xE0) {
+                return 3;
+            }
+            if ((unsigned & 0xF8) == 0xF0) {
+                return 4;
+            }
+            return 1;
+        }
     }
 
     private void configureLinkLocalMetadataEndpoint(String containerId, String instanceId, String flociHost, int imdsPort) {
@@ -1346,7 +1445,7 @@ public class Ec2ContainerManager {
                 .getId();
 
         CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        BoundedOutput output = new BoundedOutput(MAX_EXEC_OUTPUT_BYTES);
         dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {

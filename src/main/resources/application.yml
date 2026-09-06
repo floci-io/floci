@@ -591,6 +591,7 @@ floci:
         auto-start: false
         host: 0.0.0.0
         port: 1883
+        tls-port: 8883
     iotdata:
       enabled: true
     cloudhsmv2:
@@ -613,6 +614,8 @@ floci:
     ssoadmin:
       enabled: true
     macie2:
+      enabled: true
+    account:
       enabled: true
     accessanalyzer:
       enabled: true

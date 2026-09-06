@@ -406,7 +406,7 @@ public class RedshiftContainerManager {
                 lastOutput = e.getMessage();
             }
             try {
-                java.util.concurrent.TimeUnit.SECONDS.sleep(1);
+                TimeUnit.SECONDS.sleep(1);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted initializing " + description + " in " + containerName, e);

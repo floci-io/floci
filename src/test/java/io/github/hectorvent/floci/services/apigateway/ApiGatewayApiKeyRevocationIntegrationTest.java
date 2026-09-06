@@ -58,6 +58,9 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
                   body: JSON.stringify({
                     apiKey: event.requestContext && event.requestContext.identity
                       ? event.requestContext.identity.apiKey
+                      : null,
+                    apiKeyId: event.requestContext && event.requestContext.identity
+                      ? event.requestContext.identity.apiKeyId
                       : null
                   })
                 });
@@ -168,8 +171,11 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
 
     @Test @Order(4)
     void enabledKeyIsResolvedOnTheDataPlane() throws Exception {
-        assertEquals(keyValue, invokeAndReadApiKey(keyValue),
+        IdentityApiKey identity = invokeAndReadIdentity(keyValue);
+        assertEquals(keyValue, identity.apiKey(),
                 "an enabled key attached to a plan covering the stage must populate identity.apiKey");
+        assertEquals(keyId, identity.apiKeyId(),
+                "an enabled key attached to a plan covering the stage must populate identity.apiKeyId with the key's id");
     }
 
     @Test @Order(5)
@@ -181,8 +187,11 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
                 .then().statusCode(200)
                 .body("enabled", org.hamcrest.Matchers.is(false));
 
-        assertNull(invokeAndReadApiKey(keyValue),
+        IdentityApiKey identity = invokeAndReadIdentity(keyValue);
+        assertNull(identity.apiKey(),
                 "a key disabled through UpdateApiKey must no longer populate identity.apiKey");
+        assertNull(identity.apiKeyId(),
+                "a key disabled through UpdateApiKey must no longer populate identity.apiKeyId");
     }
 
     @Test @Order(6)
@@ -194,8 +203,11 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
                 .then().statusCode(200)
                 .body("enabled", org.hamcrest.Matchers.is(true));
 
-        assertEquals(keyValue, invokeAndReadApiKey(keyValue),
+        IdentityApiKey identity = invokeAndReadIdentity(keyValue);
+        assertEquals(keyValue, identity.apiKey(),
                 "re-enabling the key must restore data-plane resolution");
+        assertEquals(keyId, identity.apiKeyId(),
+                "re-enabling the key must restore identity.apiKeyId resolution");
     }
 
     @Test @Order(7)
@@ -221,13 +233,18 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
 
     @Test @Order(8)
     void deletedKeyIsNotResolvedOnTheDataPlane() throws Exception {
-        assertNull(invokeAndReadApiKey(keyValue),
+        IdentityApiKey identity = invokeAndReadIdentity(keyValue);
+        assertNull(identity.apiKey(),
                 "a deleted key must no longer populate identity.apiKey");
+        assertNull(identity.apiKeyId(),
+                "a deleted key must no longer populate identity.apiKeyId");
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private static String invokeAndReadApiKey(String apiKeyHeader) throws Exception {
+    private record IdentityApiKey(String apiKey, String apiKeyId) {}
+
+    private static IdentityApiKey invokeAndReadIdentity(String apiKeyHeader) throws Exception {
         String response = given()
                 .header("x-api-key", apiKeyHeader)
                 .when().get("/execute-api/" + apiId + "/prod/echo")
@@ -235,8 +252,12 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
                 .extract().asString();
 
         JsonNode body = OBJECT_MAPPER.readTree(response);
-        JsonNode apiKey = body.path("apiKey");
-        return apiKey.isNull() || apiKey.isMissingNode() ? null : apiKey.asText();
+        return new IdentityApiKey(textOrNull(body, "apiKey"), textOrNull(body, "apiKeyId"));
+    }
+
+    private static String textOrNull(JsonNode body, String field) {
+        JsonNode value = body.path(field);
+        return value.isNull() || value.isMissingNode() ? null : value.asText();
     }
 
     private static byte[] zipEntries(Map<String, String> entries) throws Exception {

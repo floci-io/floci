@@ -269,6 +269,8 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
                 "requestContext.identity.userAgent must be present");
         assertTrue(ctx.path("identity").path("apiKey").isNull(),
                 "requestContext.identity.apiKey must be null when no matching usage plan key exists");
+        assertTrue(ctx.path("identity").path("apiKeyId").isNull(),
+                "requestContext.identity.apiKeyId must be null when no matching usage plan key exists");
         assertTrue(ctx.path("identity").path("clientCert").isNull(),
                 "requestContext.identity.clientCert must be null (mTLS not supported)");
         assertEquals("/items/{id}", ctx.path("resourcePath").asText(null));
@@ -750,6 +752,8 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
     // ──────────────────────────── API Key Resolution ────────────────────────────
 
     private static String apiKeyApiId;
+    private static String apiKeyKeyId;
+    private static String apiKeyDistinctKeyId;
 
     @Test
     @Order(60)
@@ -839,10 +843,26 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
                 .when().post("/apikeys")
                 .then().statusCode(201);
 
-        String keyId = given()
+        apiKeyKeyId = given()
                 .when().get("/apikeys")
                 .then().statusCode(200)
                 .extract().path("item.find { it.name == 'test-key' }.id");
+
+        // A second key with a distinct id (generateDistinctId=true), so its value cannot be
+        // mistaken for its id: this guards against an implementation that assumes id == value.
+        given().contentType(ContentType.JSON)
+                .body("""
+                        {"name":"test-key-distinct","value":"my-distinct-api-key","enabled":true,"generateDistinctId":true}
+                        """)
+                .when().post("/apikeys")
+                .then().statusCode(201);
+
+        apiKeyDistinctKeyId = given()
+                .when().get("/apikeys")
+                .then().statusCode(200)
+                .extract().path("item.find { it.name == 'test-key-distinct' }.id");
+        assertNotEquals("my-distinct-api-key", apiKeyDistinctKeyId,
+                "generateDistinctId must produce an id different from the key value");
 
         String planId = given().contentType(ContentType.JSON)
                 .body("""
@@ -855,7 +875,14 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
         given().contentType(ContentType.JSON)
                 .body("""
                         {"keyId":"%s","keyType":"API_KEY"}
-                        """.formatted(keyId))
+                        """.formatted(apiKeyKeyId))
+                .when().post("/usageplans/" + planId + "/keys")
+                .then().statusCode(201);
+
+        given().contentType(ContentType.JSON)
+                .body("""
+                        {"keyId":"%s","keyType":"API_KEY"}
+                        """.formatted(apiKeyDistinctKeyId))
                 .when().post("/usageplans/" + planId + "/keys")
                 .then().statusCode(201);
     }
@@ -878,10 +905,37 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
         assertEquals("my-secret-api-key",
                 event.path("requestContext").path("identity").path("apiKey").asText(null),
                 "identity.apiKey must equal the matched usage plan key value");
+        assertEquals(apiKeyKeyId,
+                event.path("requestContext").path("identity").path("apiKeyId").asText(null),
+                "identity.apiKeyId must equal the matched key's id, as GetApiKey expects");
     }
 
     @Test
     @Order(62)
+    void apiKey_identityApiKeyIdDiffersFromValueWhenGenerateDistinctId() throws Exception {
+        String response = given()
+                .header("Authorization", "Bearer test")
+                .header("x-api-key", "my-distinct-api-key")
+                .when().get("/execute-api/" + apiKeyApiId + "/prod/secure")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode payload = OBJECT_MAPPER.readTree(response);
+        String receivedEventStr = payload.path("authorizer").path("receivedEvent").asText(null);
+        assertNotNull(receivedEventStr);
+        JsonNode event = OBJECT_MAPPER.readTree(receivedEventStr);
+        JsonNode identity = event.path("requestContext").path("identity");
+
+        assertEquals("my-distinct-api-key", identity.path("apiKey").asText(null),
+                "identity.apiKey must equal the matched usage plan key value");
+        assertEquals(apiKeyDistinctKeyId, identity.path("apiKeyId").asText(null),
+                "identity.apiKeyId must equal the key's id even when it differs from its value");
+        assertNotEquals(identity.path("apiKey").asText(null), identity.path("apiKeyId").asText(null),
+                "apiKey and apiKeyId must not be conflated when generateDistinctId produced different values");
+    }
+
+    @Test
+    @Order(63)
     void apiKey_identityApiKeyNullWhenNoHeaderPresent() throws Exception {
         String response = given()
                 .header("Authorization", "Bearer test")
@@ -896,10 +950,12 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
 
         assertTrue(event.path("requestContext").path("identity").path("apiKey").isNull(),
                 "identity.apiKey must be null when no x-api-key header is present");
+        assertTrue(event.path("requestContext").path("identity").path("apiKeyId").isNull(),
+                "identity.apiKeyId must be null when no x-api-key header is present");
     }
 
     @Test
-    @Order(63)
+    @Order(64)
     void apiKey_identityApiKeyNullWhenHeaderDoesNotMatchAnyPlanKey() throws Exception {
         String response = given()
                 .header("Authorization", "Bearer test")
@@ -915,6 +971,8 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
 
         assertTrue(event.path("requestContext").path("identity").path("apiKey").isNull(),
                 "identity.apiKey must be null when x-api-key header does not match any plan key");
+        assertTrue(event.path("requestContext").path("identity").path("apiKeyId").isNull(),
+                "identity.apiKeyId must be null when x-api-key header does not match any plan key");
     }
 
     // ──────────────────────────── Cleanup ────────────────────────────

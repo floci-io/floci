@@ -171,6 +171,42 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void userDataOutputSummaryRetainsBoundedTailAndReportsTruncation() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(8);
+        output.write("0123456789".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("(output truncated; showing last 8 bytes)\n23456789",
+                Ec2ContainerManager.summarizeUserDataOutput(output));
+    }
+
+    @Test
+    void userDataOutputSummaryRetainsTailAcrossFrames() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(8);
+        output.write("1234".getBytes(StandardCharsets.UTF_8));
+        output.write("567890".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("(output truncated; showing last 8 bytes)\n34567890",
+                Ec2ContainerManager.summarizeUserDataOutput(output));
+    }
+
+    @Test
+    void userDataOutputSummaryPreservesOutputWithinLimit() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(8);
+        output.write("🙂".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("🙂", Ec2ContainerManager.summarizeUserDataOutput(output));
+    }
+
+    @Test
+    void userDataOutputSummaryStartsAtUtf8CharacterBoundary() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(4);
+        output.write("🙂YZ".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("(output truncated; showing last 4 bytes)\nYZ",
+                Ec2ContainerManager.summarizeUserDataOutput(output));
+    }
+
+    @Test
     void userDataShellScriptsPreservesRawShellScript() {
         String script = "#!/bin/bash\nset -euo pipefail\necho ready\n";
 

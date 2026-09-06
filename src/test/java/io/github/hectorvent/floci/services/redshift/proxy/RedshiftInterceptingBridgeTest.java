@@ -12,6 +12,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -211,5 +212,53 @@ class RedshiftInterceptingBridgeTest {
         PostgresWireDecoder.FrontendMessage forwarded = backendIn.nextMessage();
         assertEquals('Q', forwarded.type());
         assertTrue(forwarded.getSql().contains("s3://wh/k"), forwarded.getSql());
+    }
+
+    @Test
+    void unloadQueryIsDispatchedToTheSimulator() throws Exception {
+        startBridge();
+        Mockito.when(s3Stub.listObjectsWithPrefixes(Mockito.eq("b"), Mockito.eq("out/"),
+                        Mockito.isNull(), Mockito.anyInt(), Mockito.any(), Mockito.any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+        AtomicReference<byte[]> put = new AtomicReference<>();
+        Mockito.when(s3Stub.putObject(Mockito.eq("b"), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any()))
+                .thenAnswer(inv -> {
+                    put.compareAndSet(null, inv.getArgument(2));
+                    return null;
+                });
+
+        // Fake backend: expect the fabricated COPY (...) TO STDOUT and play one row.
+        Thread be = Thread.ofVirtual().start(() -> {
+            try {
+                PostgresWireDecoder in = new PostgresWireDecoder(testBackendEnd.getInputStream());
+                PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+                assertTrue(q.getSql().contains("TO STDOUT"), q.getSql());
+                OutputStream out = testBackendEnd.getOutputStream();
+                out.write(new byte[]{'H', 0, 0, 0, 7, 0, 0, 0});
+                byte[] row = "1|a\n".getBytes(StandardCharsets.US_ASCII);
+                out.write('d');
+                out.write(new byte[]{(byte) (0), 0, 0, (byte) (4 + row.length)});
+                out.write(row);
+                out.write(new byte[]{'c', 0, 0, 0, 4});
+                byte[] tag = "COPY 1\0".getBytes(StandardCharsets.US_ASCII);
+                out.write('C');
+                out.write(new byte[]{0, 0, 0, (byte) (4 + tag.length)});
+                out.write(tag);
+                out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+                out.flush();
+            } catch (IOException e) {
+                LOG.debugv(e, "fake backend ended");
+            }
+        });
+
+        OutputStream clientOut = testClientEnd.getOutputStream();
+        clientOut.write(PostgresWireDecoder.encodeQuery("UNLOAD ('select a,b from t') TO 's3://b/out/'"));
+        clientOut.flush();
+
+        PostgresWireDecoder fromPump = new PostgresWireDecoder(testClientEnd.getInputStream());
+        assertEquals('C', fromPump.nextMessage().type());
+        assertEquals('Z', fromPump.nextMessage().type());
+        be.join();
+        assertNotNull(put.get(), "the simulator should have written one S3 object");
     }
 }

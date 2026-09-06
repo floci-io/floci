@@ -79,10 +79,22 @@ Broker scope:
 - Target real AWS IoT/device SDK style MQTT clients, not only handcrafted packet tests.
 - Support MQTT v3 and MQTT 5 CONNECT handling used by local compatibility tests.
 - Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice.
-- Keep MQTT plaintext-only for this phase; TLS and mTLS are out of scope.
+- Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled; verifying device certificates (mutual TLS) is follow-up scope.
 - Keep MQTT authorization permissive for now, but leave room for a later pluggable IoT certificate and policy authorizer.
 - Keep MQTT broker logging minimal.
 - Validate the relevant IoT compatibility tests against the native binary before considering the phase complete.
+
+### MQTT over TLS
+
+With `FLOCI_TLS_ENABLED=true` the broker also listens on `FLOCI_SERVICES_IOT_MQTT_TLS_PORT` (default `8883`, the port AWS IoT uses for X.509 device connections; `0` disables it). It presents the same certificate as the HTTPS endpoint, issued by the Floci CA, over TLS 1.2 or 1.3. A device connects with `ssl://localhost:8883` trusting `GET /_floci/ca.pem`, as it would trust Amazon Root CA 1 against AWS IoT. A custom domain added to the server certificate at runtime (see [TLS](../configuration/tls.md#custom-domains-learned-at-runtime)) is served on 8883 from the next connection on, without a restart.
+
+The listener asks for a client certificate and accepts the connection whether or not one is presented and whoever signed it: 8883 is as permissive as 1883 until certificate verification lands. Sessions, subscriptions and reserved topics are shared with the plaintext listener, so a client id connecting on one port replaces its session on the other, as on AWS. Both listeners start together: with the first IoT API call, or at boot with `FLOCI_SERVICES_IOT_MQTT_AUTO_START=true`.
+
+```bash
+docker run -e FLOCI_TLS_ENABLED=true -e FLOCI_SERVICES_IOT_MQTT_AUTO_START=true -p 4566:4566 -p 8883:8883 floci/floci:latest
+curl http://localhost:4566/_floci/ca.pem -o ca.pem
+mosquitto_sub -h localhost -p 8883 --cafile ca.pem -t 'devices/#'
+```
 
 ## Reserved Topics
 
@@ -106,7 +118,7 @@ Implementation notes:
 
 Current accepted limitation:
 
-- Certificate and policy authorization are not enforced at the broker layer yet.
+- Certificate and policy authorization are not enforced at the broker layer yet, on either port.
 - Persistent offline sessions are not modeled yet.
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
 

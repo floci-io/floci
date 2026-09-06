@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
@@ -10,15 +12,25 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -28,7 +40,7 @@ class RedshiftInterceptorIntegrationTest {
     RedshiftService service;
 
     @Inject
-    io.github.hectorvent.floci.services.s3.S3Service s3;
+    S3Service s3;
 
     private String clusterId;
 
@@ -118,7 +130,7 @@ class RedshiftInterceptorIntegrationTest {
         String bucket = "redshift-copy-it";
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "people/p1.txt",
-                "1|alice\n2|bob\n".getBytes(java.nio.charset.StandardCharsets.UTF_8), "text/plain", java.util.Map.of());
+                "1|alice\n2|bob\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
 
         try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE people (id int, name text)");
@@ -137,8 +149,8 @@ class RedshiftInterceptorIntegrationTest {
 
         String bucket = "redshift-copy-it-prefix";
         s3.createBucket(bucket, "us-east-1");
-        s3.putObject(bucket, "d/a", "1|a\n".getBytes(java.nio.charset.StandardCharsets.UTF_8), "text/plain", java.util.Map.of());
-        s3.putObject(bucket, "d/b", "2|b\n".getBytes(java.nio.charset.StandardCharsets.UTF_8), "text/plain", java.util.Map.of());
+        s3.putObject(bucket, "d/a", "1|a\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        s3.putObject(bucket, "d/b", "2|b\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
 
         try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE t (id int, v text)");
@@ -157,11 +169,11 @@ class RedshiftInterceptorIntegrationTest {
 
         String bucket = "redshift-copy-it-gzip";
         s3.createBucket(bucket, "us-east-1");
-        java.io.ByteArrayOutputStream raw = new java.io.ByteArrayOutputStream();
-        try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(raw)) {
-            gz.write("10|x\n11|y\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        try (GZIPOutputStream gz = new GZIPOutputStream(raw)) {
+            gz.write("10|x\n11|y\n".getBytes(StandardCharsets.UTF_8));
         }
-        s3.putObject(bucket, "g/data.gz", raw.toByteArray(), "application/gzip", java.util.Map.of());
+        s3.putObject(bucket, "g/data.gz", raw.toByteArray(), "application/gzip", Map.of());
 
         try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE g (id int, v text)");
@@ -183,7 +195,7 @@ class RedshiftInterceptorIntegrationTest {
 
         try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE t2 (id int)");
-            SQLException ex = org.junit.jupiter.api.Assertions.assertThrows(
+            SQLException ex = assertThrows(
                     SQLException.class,
                     () -> c.createStatement().execute("COPY t2 FROM 's3://redshift-copy-it-missing/does/not/exist'"));
             assertTrue(
@@ -204,12 +216,12 @@ class RedshiftInterceptorIntegrationTest {
             c.setAutoCommit(false);
             Statement st = c.createStatement();
             st.execute("INSERT INTO tx_test VALUES (1)");
-            org.junit.jupiter.api.Assertions.assertThrows(
+            assertThrows(
                     SQLException.class,
                     () -> st.execute("COPY tx_test FROM 's3://redshift-copy-it-tx/does/not/exist'"));
             // The backend must now be in the aborted transaction state ('E').
             // Subsequent statements in this transaction block must fail.
-            org.junit.jupiter.api.Assertions.assertThrows(
+            assertThrows(
                     SQLException.class,
                     () -> st.execute("INSERT INTO tx_test VALUES (2)"));
             c.rollback();
@@ -218,6 +230,101 @@ class RedshiftInterceptorIntegrationTest {
                 assertTrue(rs.next());
                 assertEquals(0, rs.getInt(1));
             }
+        }
+    }
+
+    @Test
+    void unloadToS3PrefixWritesRowsAsObjects() throws Exception {
+        clusterId = "it-unload-basic";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-unload-it";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE u_src (id int, name text)");
+            c.createStatement().execute("INSERT INTO u_src VALUES (1, 'alice'), (2, 'bob')");
+            c.createStatement().execute(
+                    "UNLOAD ('select id, name from u_src order by id') TO 's3://redshift-unload-it/out/'");
+        }
+
+        List<S3Object> objs =
+                s3.listObjects(bucket, "out/", null, 100);
+        assertTrue(objs.size() >= 1, "UNLOAD must write at least one object");
+        StringBuilder all = new StringBuilder();
+        objs.stream()
+                .sorted(Comparator.comparing(S3Object::getKey))
+                // listObjects returns metadata-only entries; fetch each body with getObject.
+                .forEach(o -> all.append(new String(
+                        s3.getObject(bucket, o.getKey()).getData(), StandardCharsets.UTF_8)));
+        assertEquals("1|alice\n2|bob\n", all.toString());
+    }
+
+    @Test
+    void unloadGzipWritesCompressedObject() throws Exception {
+        clusterId = "it-unload-gzip";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-unload-it-gzip";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE g_src (id int)");
+            c.createStatement().execute("INSERT INTO g_src VALUES (7), (8)");
+            c.createStatement().execute("UNLOAD ('select id from g_src order by id') TO 's3://redshift-unload-it-gzip/g/' GZIP");
+        }
+
+        var objs = s3.listObjects(bucket, "g/", null, 100);
+        assertEquals(1, objs.size());
+        assertTrue(objs.get(0).getKey().endsWith(".gz"), objs.get(0).getKey());
+        byte[] data = s3.getObject(bucket, objs.get(0).getKey()).getData();
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        try (var in = new GZIPInputStream(new ByteArrayInputStream(data))) {
+            in.transferTo(raw);
+        }
+        assertEquals("7\n8\n", raw.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void unloadWithManifestWritesAManifestObject() throws Exception {
+        clusterId = "it-unload-manifest";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-unload-it-manifest";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE m_src (id int)");
+            c.createStatement().execute("INSERT INTO m_src VALUES (1)");
+            c.createStatement().execute("UNLOAD ('select id from m_src') TO 's3://redshift-unload-it-manifest/m/' MANIFEST");
+        }
+
+        var manifest = s3.getObject(bucket, "m/manifest");
+        assertNotNull(manifest);
+        String json = new String(manifest.getData(), StandardCharsets.UTF_8);
+        assertTrue(json.contains("\"entries\""), json);
+        assertTrue(json.contains("s3://redshift-unload-it-manifest/m/"), json);
+    }
+
+    @Test
+    void unloadIntoNonEmptyPrefixWithoutAllowOverwriteRaisesSqlError() throws Exception {
+        clusterId = "it-unload-overwrite";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-unload-it-ow";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "o/existing", "x".getBytes(StandardCharsets.UTF_8),
+                "text/plain", Map.of());
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE o_src (id int)");
+            c.createStatement().execute("INSERT INTO o_src VALUES (1)");
+            SQLException ex = assertThrows(SQLException.class,
+                    () -> c.createStatement().execute("UNLOAD ('select id from o_src') TO 's3://redshift-unload-it-ow/o/'"));
+            assertTrue(ex.getMessage().toLowerCase().contains("allowoverwrite"), ex.getMessage());
+        }
+
+        // With ALLOWOVERWRITE the same statement succeeds.
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute(
+                    "UNLOAD ('select id from o_src') TO 's3://redshift-unload-it-ow/o/' ALLOWOVERWRITE");
         }
     }
 }

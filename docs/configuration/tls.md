@@ -123,6 +123,10 @@ wss://localhost:4566/ws/{apiId}/{stage}
 
 No additional configuration is needed: Vert.x handles TLS at the transport layer transparently.
 
+## MQTT over TLS (8883)
+
+When TLS is enabled, the IoT MQTT broker also listens on port 8883 with the same certificate as the HTTPS endpoint, hostnames learned at runtime included. Devices connect with `ssl://` trusting `ca.pem`; see [IoT Core](../services/iot.md#mqtt-over-tls).
+
 ## SDK Configuration Examples
 
 With `AWS_CA_BUNDLE` set as in Quick Start, no SDK needs code changes. The examples below trust the CA in code instead, for processes whose environment you do not control.

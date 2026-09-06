@@ -453,6 +453,8 @@ public class RdsQueryHandler {
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String availabilityZone = params.getFirst("AvailabilityZone");
         boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
+        boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
+        String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
 
         if (engineVersion == null) {
             engineVersion = defaultEngineVersion(engine);
@@ -466,7 +468,8 @@ public class RdsQueryHandler {
             DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, paramGroupName,
                     dbSubnetGroupName, availabilityZone, multiAz, region,
-                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause);
+                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -568,13 +571,17 @@ public class RdsQueryHandler {
         String newPassword = params.getFirst("MasterUserPassword");
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
+        String manageStr = params.getFirst("ManageMasterUserPassword");
+        Boolean manageMasterUserPassword = manageStr != null ? Boolean.parseBoolean(manageStr) : null;
+        String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
         try {
             Double serverlessV2Min = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MinCapacity");
             Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
-                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause, region);
+                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1466,6 +1473,15 @@ public class RdsQueryHandler {
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
            .elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn());
+        if (c.getMasterUserSecretArn() != null && !c.getMasterUserSecretArn().isBlank()) {
+            xml.start("MasterUserSecret")
+                    .elem("SecretArn", c.getMasterUserSecretArn())
+                    .elem("SecretStatus", c.getMasterUserSecretStatus() == null ? "active" : c.getMasterUserSecretStatus());
+            if (c.getMasterUserSecretKmsKeyId() != null && !c.getMasterUserSecretKmsKeyId().isBlank()) {
+                xml.elem("KmsKeyId", c.getMasterUserSecretKmsKeyId());
+            }
+            xml.end("MasterUserSecret");
+        }
         if (c.getServerlessV2MinCapacity() != null || c.getServerlessV2MaxCapacity() != null) {
             xml.start("ServerlessV2ScalingConfiguration");
             if (c.getServerlessV2MinCapacity() != null) {

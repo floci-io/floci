@@ -173,6 +173,19 @@ public class SesService {
         return identityService.verifyEmailIdentity(emailAddress, region);
     }
 
+    /**
+     * v2 CreateEmailIdentity. The identity domain builds and persists the complete record in one
+     * write; only the configuration-set existence check is cross-domain, so it is passed in as the
+     * in-lock callback (a missing set fails the whole call and nothing is created, matching AWS).
+     */
+    public Identity createEmailIdentity(String emailIdentity, String configurationSetName,
+                                        List<Tag> tags, String region) {
+        Runnable configurationSetExistsCheck = configurationSetName == null ? null
+                : () -> getConfigurationSet(configurationSetName, region);
+        return identityService.createEmailIdentity(emailIdentity, configurationSetName, tags, region,
+                configurationSetExistsCheck);
+    }
+
     public Identity verifyDomainIdentity(String domain, String region) {
         return identityService.verifyDomainIdentity(domain, region);
     }
@@ -1551,10 +1564,6 @@ public class SesService {
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
-    }
-
-    public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
-        identityService.setTags(identityValue, region, tags);
     }
 
     // name is everything after the type's first slash and may itself contain one: a tenant ARN's

@@ -2027,6 +2027,9 @@ public class AslExecutor {
             // Run each branch on its own worker thread under the execution's account: the request
             // scope is thread-bound, so without this a branch's Task integrations would resolve to
             // the default account rather than the execution's.
+            // A branch state that declares no QueryLanguage defaults to the state machine's, not to
+            // this Parallel's: the ASL specification calls the two independent, so what travels
+            // into the branch is topLevelQueryLanguage. https://states-language.net/spec.html
             futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
                     () -> executeBranch(startAt, branchStates, capturedInput, producedEventCount, sm,
                             topLevelQueryLanguage, branchContext, branchVariables))));
@@ -2179,6 +2182,8 @@ public class AslExecutor {
             // history of its own: the item's events count against its own limit, not the parent's.
             // An inline Map's iterations are part of this execution and count here.
             AtomicLong childExecutionEventCount = distributed ? new AtomicLong() : producedEventCount;
+            // Same rule as the Parallel branches above: an ItemProcessor state declaring no
+            // QueryLanguage runs as the state machine's, never as this Map's.
             JsonNode branchOutput = executeBranch(startAt, iteratorStates, iterInput,
                     childExecutionEventCount, sm, topLevelQueryLanguage, iterContext,
                     variables.deepCopy());

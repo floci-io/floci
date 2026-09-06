@@ -91,6 +91,7 @@ class EmulatorLifecycleTest {
     @Mock private PersistentPathValidator persistentPathValidator;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
     @Mock private io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker schemaCreationWorker;
+    @Mock private io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService stepFunctionsService;
     @Mock private jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.core.common.ContainerTeardown> containerTeardowns;
 
     private EmulatorLifecycle emulatorLifecycle;
@@ -120,7 +121,7 @@ class EmulatorLifecycleTest {
                 rabbitMqManager, flinkContainerManager, rdsService, elbV2Service, elbClassicService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
-                schemaCreationWorker, containerTeardowns, persistentPathValidator);
+                schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(java.util.Collections.emptyIterator());
     }
@@ -221,6 +222,20 @@ class EmulatorLifecycleTest {
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(schemaCreationWorker).recoverOrphans();
         inOrder.verify(schemaCreationWorker).rehydrateSchemas();
+    }
+
+    @Test
+    @DisplayName("Should abort abandoned Step Functions executions after loading storage")
+    void shouldAbortAbandonedStepFunctionsExecutionsAfterStorageLoad() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, stepFunctionsService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(stepFunctionsService).abortAbandonedExecutions();
     }
 
     @Test

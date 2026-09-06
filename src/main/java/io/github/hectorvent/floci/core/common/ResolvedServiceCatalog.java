@@ -33,6 +33,7 @@ import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
 import io.github.hectorvent.floci.services.macie2.MacieController;
+import io.github.hectorvent.floci.services.account.AccountController;
 import io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController;
 import io.github.hectorvent.floci.services.aps.ApsController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerControlController;
@@ -413,6 +414,9 @@ public class ResolvedServiceCatalog {
                 descriptor("macie2", "macie2", config.services().macie2().enabled(), true,
                         "macie2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("macie2"), Set.of(), Set.of(MacieController.class)),
+                descriptor("account", "account", config.services().account().enabled(), true,
+                        "account", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("account"), Set.of(), Set.of(AccountController.class)),
                 descriptor("access-analyzer", "accessanalyzer", config.services().accessanalyzer().enabled(), true,
                         "accessanalyzer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("access-analyzer"), Set.of(), Set.of(AccessAnalyzerController.class)),

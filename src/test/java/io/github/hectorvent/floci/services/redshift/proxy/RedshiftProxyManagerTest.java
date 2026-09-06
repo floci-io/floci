@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -28,7 +29,7 @@ class RedshiftProxyManagerTest {
     private RedshiftProxyManager newManager() {
         return new RedshiftProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class),
-                mock(io.github.hectorvent.floci.services.s3.S3Service.class));
+                mock(S3Service.class));
     }
 
     private static void start(RedshiftProxyManager manager, String key, int proxyPort) {

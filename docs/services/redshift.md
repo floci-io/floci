@@ -175,11 +175,45 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 - The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
 - A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
 - Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
-- `UNLOAD (...) TO 's3://...'` is **not** yet emulated (planned).
+
+### UNLOAD to S3
+
+`UNLOAD ('<select-statement>') TO 's3://<bucket>/<prefix>' [options]` sent over the
+Simple Query protocol runs the select on the backing PostgreSQL container and writes
+the result to S3 as one or more objects under `<prefix>`.
+
+- Framing defaults to pipe-delimited text; `FORMAT CSV` (or `CSV`) switches to CSV
+  with a `,` default. `DELIMITER`, `HEADER`, `NULL AS`, and `ADDQUOTES` are honoured
+  (`ADDQUOTES` and `HEADER` force CSV framing on PostgreSQL 15).
+- `PARALLEL ON` (default) names objects `<prefix>0000_part_00`,
+  `<prefix>0001_part_00`, and so on; `PARALLEL OFF` names them `<prefix>000`,
+  `<prefix>001`, and so on. The emulator has a single backend node, so more than one
+  object appears only when the result exceeds the per-file size. When `HEADER` is
+  set, the header row is repeated at the top of every object.
+- `MAXFILESIZE [AS] <n> [MB|GB]` sets the per-file size; a bare number is bytes.
+  Each file is buffered in memory, so the default is 6 MiB (real Redshift defaults
+  to 6.2 GB) and a whole UNLOAD result is capped at 256 MiB; a larger result fails
+  with a SQL error (54000). A `MAXFILESIZE` above that 256 MiB cap is not
+  intercepted at all: the statement is forwarded and PostgreSQL reports its own error.
+- A zero-row result still writes one object (empty, or the header row alone when
+  `HEADER` is set).
+- `GZIP` compresses each object and appends `.gz` to its key.
+- `MANIFEST` writes `<prefix>manifest` listing every object with its
+  `content_length`.
+- Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select
+  does not run. A failed UNLOAD then removes any objects it had already written. With
+  `ALLOWOVERWRITE` a failed UNLOAD leaves its objects in place (they may have replaced prior data,
+  so they are not deleted); a `MANIFEST` request that fails this way can leave data objects without
+  a manifest, and rerunning the same statement overwrites them.
+- S3 access is authorized as an unsigned request, like COPY from S3.
+- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `IAM_ROLE` / `CREDENTIALS`,
+  `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
+  statement is forwarded and PostgreSQL reports its own error.
+- Extended Query protocol UNLOAD (a JDBC `PreparedStatement`) is not intercepted.
 
 ## Out of Scope
 
-- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; UNLOAD to S3 and SUPER/SPECTRUM are not emulated.
+- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER/SPECTRUM are not emulated.
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.

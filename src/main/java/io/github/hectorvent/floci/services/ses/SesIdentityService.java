@@ -51,6 +51,10 @@ public class SesIdentityService {
     private final Route53Service route53Service;
     private final Clock clock;
     private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
+    // Serializes every identity check-then-put (v2 CreateEmailIdentity, the v1 verify family, the
+    // CVET pending registration) so concurrent creators can't lose each other's writes
+    // (InMemoryStorage only makes each individual operation thread-safe).
+    private final Object identityCreationLock = new Object();
 
     @Inject
     public SesIdentityService(StorageFactory storageFactory, Route53Service route53Service, Clock clock) {
@@ -71,13 +75,15 @@ public class SesIdentityService {
             throw new AwsException("InvalidParameterValue", "Email address is required.", 400);
         }
         String key = identityKey(region, emailAddress);
-        Identity existing = identityStore.get(key).orElse(null);
-        if (existing != null) {
-            return existing;
+        Identity identity;
+        synchronized (identityCreationLock) {
+            Identity existing = identityStore.get(key).orElse(null);
+            if (existing != null) {
+                return existing;
+            }
+            identity = new Identity(emailAddress, "EmailAddress");
+            identityStore.put(key, identity);
         }
-
-        Identity identity = new Identity(emailAddress, "EmailAddress");
-        identityStore.put(key, identity);
         LOG.infov("Verified email identity: {0} in region {1}", emailAddress, region);
         return identity;
     }
@@ -88,11 +94,20 @@ public class SesIdentityService {
             throw new AwsException("InvalidParameterValue", "Domain is required.", 400);
         }
         String key = identityKey(region, domain);
-        Identity existing = identityStore.get(key).orElse(null);
-        if (existing != null) {
-            return existing;
+        Identity identity;
+        synchronized (identityCreationLock) {
+            Identity existing = identityStore.get(key).orElse(null);
+            if (existing != null) {
+                return existing;
+            }
+            identity = newDomainIdentity(domain);
+            identityStore.put(key, identity);
         }
+        LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
+        return identity;
+    }
 
+    private Identity newDomainIdentity(String domain) {
         Identity identity = new Identity(domain, "Domain");
         regenerateDkimTokens(identity);
         identity.setVerificationStatus("Pending");
@@ -101,8 +116,49 @@ public class SesIdentityService {
         // CNAMEs yet); the first Get/List refresh transitions it to Pending. Matches AWS, where
         // CreateEmailIdentity returns NOT_STARTED but a subsequent GetEmailIdentity returns PENDING.
         identity.setDkimVerificationStatus("NotStarted");
-        identityStore.put(key, identity);
-        LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
+        return identity;
+    }
+
+    /**
+     * v2 CreateEmailIdentity: builds the complete identity (default configuration set and tags
+     * included) and persists it with a single write, so a failing validation leaves nothing behind,
+     * matching real SESv2 where the whole call fails and no resource is created (probe-confirmed
+     * 2026-09-06: a failed create leaves a 404 behind, not a half-created identity). The validation
+     * order is probe-confirmed too: AlreadyExists, then tag validation, then the caller-supplied
+     * configuration-set existence check (cross-domain, so the facade passes it in), then the write.
+     * The lock closes the check-then-put race where two concurrent creates for the same identity
+     * would both return 200; the loser now gets the AlreadyExists error, as on AWS.
+     */
+    public Identity createEmailIdentity(String emailIdentity, String configurationSetName,
+                                        List<Tag> tags, String region,
+                                        Runnable configurationSetExistsCheck) {
+        // Validate with the wording the pre-atomic path produced (the verify methods' field names),
+        // so the key derivation's generic "Identity" message never surfaces on this API.
+        validateIdentityWhitespace(emailIdentity,
+                emailIdentity != null && emailIdentity.contains("@") ? "Email address" : "Domain");
+        String key = identityKey(region, emailIdentity);
+        Identity identity;
+        synchronized (identityCreationLock) {
+            if (identityStore.get(key).isPresent()) {
+                throw new AwsException("AlreadyExistsException",
+                        "Email identity " + emailIdentity + " already exist.", 400);
+            }
+            SesTags.validate(tags);
+            if (configurationSetExistsCheck != null) {
+                configurationSetExistsCheck.run();
+            }
+            identity = emailIdentity.contains("@")
+                    ? new Identity(emailIdentity, "EmailAddress")
+                    : newDomainIdentity(emailIdentity);
+            if (configurationSetName != null) {
+                identity.setConfigurationSetName(configurationSetName);
+            }
+            if (tags != null) {
+                identity.setTags(tags);
+            }
+            identityStore.put(key, identity);
+        }
+        LOG.infov("Created email identity: {0} in region {1}", emailIdentity, region);
         return identity;
     }
 
@@ -211,13 +267,16 @@ public class SesIdentityService {
     /** Registers the CVET recipient as a pending email identity when it is not already known. */
     public void markPendingEmailIdentity(String emailAddress, String region) {
         String key = identityKey(region, emailAddress);
-        if (identityStore.get(key).isEmpty()) {
+        synchronized (identityCreationLock) {
+            if (identityStore.get(key).isPresent()) {
+                return;
+            }
             Identity identity = new Identity(emailAddress, "EmailAddress");
             identity.setVerificationStatus("Pending");
             identityStore.put(key, identity);
-            LOG.infov("SES custom verification email registered pending identity {0} in region {1}",
-                    emailAddress, region);
         }
+        LOG.infov("SES custom verification email registered pending identity {0} in region {1}",
+                emailAddress, region);
     }
 
     static final List<String> NOTIFICATION_TYPES = List.of("Bounce", "Complaint", "Delivery");
@@ -291,13 +350,6 @@ public class SesIdentityService {
         identity.setTags(remaining);
         identityStore.put(identityKey(region, identityValue), identity);
         LOG.infov("Untagged SES identity: {0} (region {1}, -{2} keys)", identityValue, region, tagKeys.size());
-    }
-
-    public void setTags(String identityValue, String region, List<Tag> tags) {
-        SesTags.validate(tags);
-        Identity identity = requireForTags(identityValue, region);
-        identity.setTags(tags);
-        identityStore.put(identityKey(region, identityValue), identity);
     }
 
     private Identity requireForTags(String identityValue, String region) {
@@ -382,17 +434,20 @@ public class SesIdentityService {
             // Domain-only action: an email-shaped value must not create an email-valued "Domain".
             throw new AwsException("InvalidParameterValue", "Domain " + domain + " is invalid.", 400);
         }
-        Identity identity = identityStore.get(identityKey(region, domain)).orElse(null);
-        if (identity == null) {
-            identity = new Identity(domain, "Domain");
-            identity.setVerificationStatus("Pending");
-            identity.setDkimEnabled(true);
-            identity.setDkimVerificationStatus("Pending");
+        Identity identity;
+        synchronized (identityCreationLock) {
+            identity = identityStore.get(identityKey(region, domain)).orElse(null);
+            if (identity == null) {
+                identity = new Identity(domain, "Domain");
+                identity.setVerificationStatus("Pending");
+                identity.setDkimEnabled(true);
+                identity.setDkimVerificationStatus("Pending");
+            }
+            if (!hasDkimTokens(identity)) {
+                regenerateDkimTokens(identity);
+            }
+            identityStore.put(identityKey(region, domain), identity);
         }
-        if (!hasDkimTokens(identity)) {
-            regenerateDkimTokens(identity);
-        }
-        identityStore.put(identityKey(region, domain), identity);
         LOG.infov("VerifyDomainDkim: {0} (region {1})", domain, region);
         return identity.getDkimTokens();
     }

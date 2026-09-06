@@ -6,11 +6,15 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Recognises a Simple Query statement that is an S3 {@code COPY <table> FROM 's3://...'}.
- * Any other statement, or a COPY that uses an option this simulator cannot honour, returns
- * {@code null} so the bridge falls back to DDL rewriting and PostgreSQL reports its own error.
+ * Recognises a Simple Query statement that is an S3 {@code COPY <table> FROM 's3://...'}
+ * or {@code UNLOAD ('<select>') TO 's3://...'}. Any other statement, or a statement that uses
+ * an option this simulator cannot honour, returns {@code null} so the bridge falls back to DDL
+ * rewriting and PostgreSQL reports its own error.
  */
 public final class CopyStatementParser {
+
+    public sealed interface S3Statement permits S3CopyFrom, S3Unload {
+    }
 
     public record S3CopyFrom(
             String targetTable,
@@ -21,12 +25,51 @@ public final class CopyStatementParser {
             int headerLines,
             boolean gzip,
             boolean csv,
-            String nullAs) {
+            String nullAs) implements S3Statement {
+    }
+
+    public record S3Unload(
+            String selectQuery,
+            String bucket,
+            String prefix,
+            String delimiter,
+            boolean header,
+            boolean gzip,
+            boolean csv,
+            boolean addQuotes,
+            String nullAs,
+            boolean manifest,
+            boolean allowOverwrite,
+            boolean parallel,
+            long maxFileSizeBytes) implements S3Statement {
     }
 
     private static final Pattern COPY_PATTERN = Pattern.compile(
             "(?is)^\\s*COPY\\s+((?:\"[^\"]*\"|[^\\s(])+)\\s*(?:\\(([^)]*)\\))?\\s+FROM\\s*"
                     + "['\"]s3://([^/'\"\\s]+)(?:/([^'\"\\s]*))?['\"]\\s*(.*)$");
+
+    private static final Pattern UNLOAD_PATTERN = Pattern.compile(
+            "(?is)^\\s*UNLOAD\\s*\\(\\s*'(.*)'\\s*\\)\\s*TO\\s*"
+                    + "['\"]s3://([^/'\"\\s]+)(?:/([^'\"\\s]*))?['\"]\\s*(.*)$");
+
+    private static final Pattern PARALLEL_PATTERN = Pattern.compile(
+            "(?i)\\bPARALLEL\\b(?:\\s+(ON|OFF|TRUE|FALSE))?");
+    private static final Pattern MAXFILESIZE_PATTERN = Pattern.compile(
+            "(?i)\\bMAXFILESIZE\\s+(?:AS\\s+)?(\\d+(?:\\.\\d+)?)\\s*(MB|GB)?\\b");
+    private static final Pattern ADDQUOTES_PATTERN = Pattern.compile("(?i)\\bADDQUOTES\\b");
+    private static final Pattern MANIFEST_PATTERN = Pattern.compile("(?i)\\bMANIFEST\\b");
+    private static final Pattern ALLOWOVERWRITE_PATTERN = Pattern.compile("(?i)\\bALLOWOVERWRITE\\b");
+
+    /**
+     * UNLOAD options this simulator cannot honour. Distinct from the COPY set:
+     * MANIFEST / ALLOWOVERWRITE / PARALLEL / MAXFILESIZE are UNLOAD-supported here,
+     * while EXTENSION / CLEANPATH / PARTITION are UNLOAD-only and unsupported.
+     */
+    private static final Pattern UNLOAD_UNSUPPORTED_CLAUSE = Pattern.compile(
+            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|JSON|SHAPEFILE|BZIP2|LZOP|ZSTD"
+                    + "|ENCRYPTED|ENCODING|REGION|CREDENTIALS|IAM_ROLE|ACCESS_KEY_ID"
+                    + "|SECRET_ACCESS_KEY|SESSION_TOKEN|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
+                    + "|EXTENSION|CLEANPATH|PARTITION|MAXFILESIZE\\s+\\d+\\s*(?:TB|PB))\\b");
 
     private static final Pattern QUALIFIED_NAME = Pattern.compile(
             "(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\")(?:\\.(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\"))?");
@@ -61,11 +104,174 @@ public final class CopyStatementParser {
     private CopyStatementParser() {
     }
 
-    public static S3CopyFrom parse(String sql) {
+    public static S3Statement parse(String sql) {
         if (sql == null || sql.isBlank()) {
             return null;
         }
         String cleaned = stripLeadingComments(sql.trim());
+        if (cleaned.isEmpty()) {
+            return null;
+        }
+        Matcher unload = UNLOAD_PATTERN.matcher(cleaned);
+        if (unload.matches()) {
+            return parseUnload(unload);
+        }
+        return parseCopy(cleaned);
+    }
+
+    private static S3Unload parseUnload(Matcher matcher) {
+        String select = unescapeSingleQuotes(matcher.group(1).trim());
+        if (!isSafeUnloadSubquery(select)) {
+            return null;
+        }
+        String bucket = matcher.group(2);
+        String prefix = matcher.group(3) != null ? matcher.group(3) : "";
+        String options = matcher.group(4) != null ? matcher.group(4) : "";
+
+        String flagScan = blankQuoted(options);
+        if (UNLOAD_UNSUPPORTED_CLAUSE.matcher(flagScan).find()
+                || TRAILING_STATEMENT.matcher(flagScan).find()) {
+            return null;
+        }
+        int semi = flagScan.indexOf(';');
+        if (semi >= 0) {
+            if (!flagScan.substring(semi + 1).isBlank()) {
+                return null;
+            }
+            options = options.substring(0, semi);
+        }
+
+        boolean csv = false;
+        boolean gzip = false;
+        boolean header = false;
+        boolean addQuotes = false;
+        boolean manifest = false;
+        boolean allowOverwrite = false;
+        boolean parallel = true;
+        String nullAs = null;
+        String delimiter = null;
+        long maxFileSizeBytes = 0L;
+
+        boolean seenCsv = false;
+        boolean seenGzip = false;
+        boolean seenHeader = false;
+        boolean seenAddQuotes = false;
+        boolean seenManifest = false;
+        boolean seenAllowOverwrite = false;
+        boolean seenParallel = false;
+        boolean seenNull = false;
+        boolean seenDelimiter = false;
+        boolean seenMaxFileSize = false;
+
+        Matcher csvM = CSV_PATTERN.matcher(options);
+        Matcher gzipM = GZIP_PATTERN.matcher(options);
+        Matcher headerM = HEADER_PATTERN.matcher(options);
+        Matcher addQuotesM = ADDQUOTES_PATTERN.matcher(options);
+        Matcher manifestM = MANIFEST_PATTERN.matcher(options);
+        Matcher allowOverwriteM = ALLOWOVERWRITE_PATTERN.matcher(options);
+        Matcher parallelM = PARALLEL_PATTERN.matcher(options);
+        Matcher delimiterM = DELIMITER_PATTERN.matcher(options);
+        Matcher nullM = NULL_AS_PATTERN.matcher(options);
+        Matcher maxFileSizeM = MAXFILESIZE_PATTERN.matcher(options);
+
+        int offset = 0;
+        int len = options.length();
+        while (offset < len) {
+            while (offset < len && Character.isWhitespace(options.charAt(offset))) {
+                offset++;
+            }
+            if (offset >= len) {
+                break;
+            }
+            if (matchClause(maxFileSizeM, offset, len)) {
+                if (seenMaxFileSize) {
+                    return null;
+                }
+                seenMaxFileSize = true;
+                maxFileSizeBytes = maxFileSizeToBytes(maxFileSizeM.group(1), maxFileSizeM.group(2));
+                if (maxFileSizeBytes > S3CopySimulator.UNLOAD_MAX_TOTAL_BYTES) {
+                    // A per-file size the simulator cannot buffer: fail open so PostgreSQL,
+                    // rather than an unrelated late "result too large" error, reports it.
+                    return null;
+                }
+                offset = maxFileSizeM.end();
+            } else if (matchClause(csvM, offset, len)) {
+                if (seenCsv) {
+                    return null;
+                }
+                seenCsv = true;
+                csv = true;
+                offset = csvM.end();
+            } else if (matchClause(gzipM, offset, len)) {
+                if (seenGzip) {
+                    return null;
+                }
+                seenGzip = true;
+                gzip = true;
+                offset = gzipM.end();
+            } else if (matchClause(headerM, offset, len)) {
+                if (seenHeader) {
+                    return null;
+                }
+                seenHeader = true;
+                header = true;
+                offset = headerM.end();
+            } else if (matchClause(addQuotesM, offset, len)) {
+                if (seenAddQuotes) {
+                    return null;
+                }
+                seenAddQuotes = true;
+                addQuotes = true;
+                offset = addQuotesM.end();
+            } else if (matchClause(manifestM, offset, len)) {
+                if (seenManifest) {
+                    return null;
+                }
+                seenManifest = true;
+                manifest = true;
+                offset = manifestM.end();
+            } else if (matchClause(allowOverwriteM, offset, len)) {
+                if (seenAllowOverwrite) {
+                    return null;
+                }
+                seenAllowOverwrite = true;
+                allowOverwrite = true;
+                offset = allowOverwriteM.end();
+            } else if (matchClause(parallelM, offset, len)) {
+                if (seenParallel) {
+                    return null;
+                }
+                seenParallel = true;
+                String v = parallelM.group(1);
+                parallel = v == null || v.equalsIgnoreCase("ON") || v.equalsIgnoreCase("TRUE");
+                offset = parallelM.end();
+            } else if (matchClause(delimiterM, offset, len)) {
+                if (seenDelimiter) {
+                    return null;
+                }
+                seenDelimiter = true;
+                delimiter = extractDelimiterValue(delimiterM);
+                offset = delimiterM.end();
+            } else if (matchClause(nullM, offset, len)) {
+                if (seenNull) {
+                    return null;
+                }
+                seenNull = true;
+                nullAs = extractNullValue(nullM);
+                offset = nullM.end();
+            } else {
+                return null;
+            }
+        }
+
+        if (delimiter == null) {
+            delimiter = csv ? "," : "|";
+        }
+        return new S3Unload(select, bucket, prefix, delimiter, header, gzip, csv,
+                addQuotes, nullAs, manifest, allowOverwrite, parallel, maxFileSizeBytes);
+    }
+
+    private static S3CopyFrom parseCopy(String cleaned) {
         Matcher matcher = COPY_PATTERN.matcher(cleaned);
         if (!matcher.matches()) {
             return null;
@@ -271,5 +477,118 @@ public final class CopyStatementParser {
                 return current;
             }
         }
+    }
+
+    private static long maxFileSizeToBytes(String number, String unit) {
+        double value = Double.parseDouble(number);
+        long scale = 1L;
+        if (unit != null && unit.equalsIgnoreCase("MB")) {
+            scale = 1024L * 1024;
+        } else if (unit != null && unit.equalsIgnoreCase("GB")) {
+            scale = 1024L * 1024 * 1024;
+        }
+        long bytes = (long) (value * scale);
+        return bytes > 0 ? bytes : 0L;
+    }
+
+    private static String unescapeSingleQuotes(String s) {
+        return s.replace("''", "'");
+    }
+
+    /**
+     * True only if the UNLOAD subquery cannot escape the {@code COPY (<q>) TO STDOUT}
+     * wrapper it is spliced into: it must start with {@code SELECT} or {@code WITH},
+     * keep parentheses balanced (never dipping below zero), and contain no {@code ;},
+     * {@code $}, {@code --}, or {@code /*} outside a single- or double-quoted run.
+     */
+    private static boolean isSafeUnloadSubquery(String q) {
+        if (!(startsWithKeyword(q, "SELECT") || startsWithKeyword(q, "WITH"))) {
+            return false;
+        }
+        int depth = 0;
+        boolean inSingle = false;
+        boolean inDouble = false;
+        for (int i = 0; i < q.length(); i++) {
+            char c = q.charAt(i);
+            if (inSingle) {
+                if (c == '\'') {
+                    if (i + 1 < q.length() && q.charAt(i + 1) == '\'') {
+                        i++;
+                    } else {
+                        inSingle = false;
+                    }
+                }
+                continue;
+            }
+            if (inDouble) {
+                if (c == '"') {
+                    inDouble = false;
+                }
+                continue;
+            }
+            switch (c) {
+                case '\'' -> {
+                    if (i > 0) {
+                        char prev = q.charAt(i - 1);
+                        if (prev == 'E' || prev == 'e') {
+                            return false; // C-style escape string literal
+                        }
+                        if (prev == '&' && i > 1) {
+                            char prev2 = q.charAt(i - 2);
+                            if (prev2 == 'U' || prev2 == 'u') {
+                                return false; // Unicode escape string literal
+                            }
+                        }
+                    }
+                    inSingle = true;
+                }
+                case '"' -> {
+                    if (i > 1 && q.charAt(i - 1) == '&') {
+                        char prev2 = q.charAt(i - 2);
+                        if (prev2 == 'U' || prev2 == 'u') {
+                            return false; // Unicode escape identifier
+                        }
+                    }
+                    inDouble = true;
+                }
+                case '\\' -> {
+                    return false; // backslash outside quotes
+                }
+                case '(' -> depth++;
+                case ')' -> {
+                    if (--depth < 0) {
+                        return false;
+                    }
+                }
+                case ';', '$' -> {
+                    return false;
+                }
+                case '-' -> {
+                    if (i + 1 < q.length() && q.charAt(i + 1) == '-') {
+                        return false;
+                    }
+                }
+                case '/' -> {
+                    if (i + 1 < q.length() && q.charAt(i + 1) == '*') {
+                        return false;
+                    }
+                }
+                default -> {
+                }
+            }
+        }
+        return depth == 0 && !inSingle && !inDouble;
+    }
+
+    private static boolean startsWithKeyword(String s, String keyword) {
+        String t = s.stripLeading();
+        if (!t.regionMatches(true, 0, keyword, 0, keyword.length())) {
+            return false;
+        }
+        if (t.length() == keyword.length()) {
+            return true;
+        }
+        char next = t.charAt(keyword.length());
+        return !(Character.isLetterOrDigit(next) || next == '_' || next == '$');
     }
 }

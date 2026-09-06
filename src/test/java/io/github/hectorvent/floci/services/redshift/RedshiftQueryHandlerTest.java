@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
@@ -17,6 +18,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
@@ -334,8 +336,8 @@ class RedshiftQueryHandlerTest {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("Description", "desc");
 
-        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex = assertThrows(
+                AwsException.class,
                 () -> handler.handle("CreateClusterSubnetGroup", params));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
     }
@@ -345,8 +347,8 @@ class RedshiftQueryHandlerTest {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("NodeType", "dc2.large");
 
-        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex = assertThrows(
+                AwsException.class,
                 () -> handler.handle("ModifyCluster", params));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
     }
