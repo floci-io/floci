@@ -958,7 +958,9 @@ public class RdsService implements Resettable, ResourceProvider {
             return JSON.writeValueAsString(Map.of(
                     "username", instance.getMasterUsername(),
                     "password", instance.getMasterPassword(),
-                    "engine", instance.getEngine().name().toLowerCase(),
+                    "engine", instance.getEngineIdentifier() != null && !instance.getEngineIdentifier().isBlank()
+                            ? instance.getEngineIdentifier().toLowerCase()
+                            : instance.getEngine().name().toLowerCase(),
                     "host", instance.getEndpoint().address(),
                     "port", instance.getEndpoint().port(),
                     "dbname", instance.getDbName() == null ? "" : instance.getDbName(),
@@ -3226,7 +3228,11 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         return switch (engineParam.toLowerCase()) {
             case "postgres", "aurora-postgresql" -> DatabaseEngine.POSTGRES;
-            case "mysql", "aurora-mysql", "aurora" -> DatabaseEngine.MYSQL;
+            // "aurora" (bare) is the legacy Aurora MySQL 5.6 identifier, which reached
+            // end of life in February 2023; real AWS no longer accepts it for new
+            // clusters and rejects it with InvalidParameterValue, so it falls through
+            // to the default case below instead of silently becoming aurora-mysql.
+            case "mysql", "aurora-mysql" -> DatabaseEngine.MYSQL;
             case "mariadb" -> DatabaseEngine.MARIADB;
             default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
