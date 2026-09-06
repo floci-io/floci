@@ -576,6 +576,69 @@ class S3CopySimulatorTest {
         assertEquals('Z', in.nextMessage().type());
     }
 
+    @Test
+    void unloadWithoutAllowOverwriteFailsIfListBucketDenied() throws Exception {
+        doThrow(new AwsException("AccessDenied", "Access Denied", 403))
+                .when(s3).authorizeAnonymousListBucket(eq("wh"));
+
+        CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        assertTrue(handled);
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage err = in.nextMessage();
+        assertEquals('E', err.type());
+        String body = new String(err.body(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("42501"), body);
+        assertTrue(body.contains("access denied"), body);
+        assertEquals('Z', in.nextMessage().type());
+    }
+
+    @Test
+    void unloadBackendEofMidStreamWithManifestCleansUpWrittenDataObjects() throws Exception {
+        long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 6;
+        try {
+            List<String> deleted = new ArrayList<>();
+            when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+            when(s3.deleteObject(eq("wh"), any())).thenAnswer(inv -> {
+                deleted.add(inv.getArgument(1));
+                return null;
+            });
+
+            CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, true, false, true, 0);
+
+            Thread backend = backendThread(() -> {
+                OutputStream out = testBackend.getOutputStream();
+                PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+                assertEquals('Q', in.nextMessage().type());
+                out.write(new byte[]{'H', 0, 0, 0, 7, 0, 0, 0});
+                byte[] row = "1|alice\n".getBytes(StandardCharsets.US_ASCII);
+                out.write('d');
+                out.write(intBytes(4 + row.length));
+                out.write(row);
+                out.flush();
+                testBackend.close();
+            });
+
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            joinBackend(backend);
+
+            assertEquals(1, deleted.size());
+            assertEquals("out/0000_part_00", deleted.get(0));
+
+            PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+            PostgresWireDecoder.FrontendMessage err = in.nextMessage();
+            assertEquals('E', err.type());
+            String body = new String(err.body(), StandardCharsets.UTF_8);
+            assertTrue(body.contains("backend closed mid-stream"), body);
+            assertEquals('Z', in.nextMessage().type());
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = saved;
+        }
+    }
+
     /** Play a minimal happy-path PostgreSQL backend: 'G' then, after CopyDone, 'C' and 'Z'. */
     private void playHappyBackend(ByteArrayOutputStream capturedCopyData) throws IOException {
         OutputStream out = testBackend.getOutputStream();

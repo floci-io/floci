@@ -441,11 +441,14 @@ public final class S3CopySimulator {
         }
 
         try {
-            if (!spec.allowOverwrite() && targetPrefixHasObjects(spec, s3)) {
-                sendError(client, backend, SQLSTATE_INTERNAL,
-                        "S3 prefix s3://" + spec.bucket() + "/" + spec.prefix()
-                                + " is not empty; specify ALLOWOVERWRITE to overwrite", txStatus, onStatusChange);
-                return true;
+            if (!spec.allowOverwrite()) {
+                s3.authorizeAnonymousListBucket(spec.bucket());
+                if (targetPrefixHasObjects(spec, s3)) {
+                    sendError(client, backend, SQLSTATE_INTERNAL,
+                            "S3 prefix s3://" + spec.bucket() + "/" + spec.prefix()
+                                    + " is not empty; specify ALLOWOVERWRITE to overwrite", txStatus, onStatusChange);
+                    return true;
+                }
             }
         } catch (AwsException e) {
             LOG.debugv(e, "bucket check failed for UNLOAD to s3://{0}/{1}", spec.bucket(), spec.prefix());
@@ -522,6 +525,9 @@ public final class S3CopySimulator {
                 if (m == null) {
                     closeAcc(acc, sink);
                     closeQuietly(backend);
+                    if (spec.manifest()) {
+                        deleteWritten(s3, spec.bucket(), writtenKeys);
+                    }
                     sendError(client, null, SQLSTATE_INTERNAL,
                             "UNLOAD failed: backend closed mid-stream", txStatus, onStatusChange);
                     closeQuietly(client);
