@@ -38,6 +38,7 @@ order:
   - AWS::CertificateManager
   - AWS::Events
   - AWS::Scheduler
+  - AWS::Backup
   - AWS::Pipes
   - AWS::Kinesis
   - AWS::KinesisFirehose
@@ -99,6 +100,7 @@ service_labels:
   AWS::ApiGatewayV2: API Gateway v2
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
+  AWS::Backup: Backup
   AWS::CDK: CDK
   AWS::CertificateManager: ACM
   AWS::CloudFormation: CloudFormation

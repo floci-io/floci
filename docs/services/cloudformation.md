@@ -94,6 +94,7 @@ cross-resource references.
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
+| Backup | `BackupVault` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
