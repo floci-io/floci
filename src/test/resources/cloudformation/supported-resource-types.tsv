@@ -30,8 +30,8 @@ AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
 AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner
 AWS::CodePipeline::Webhook	CodePipelineCfnProvisioner
-AWS::Cognito::UserPool	LEGACY_SWITCH
-AWS::Cognito::UserPoolClient	LEGACY_SWITCH
+AWS::Cognito::UserPool	CognitoCfnProvisioner
+AWS::Cognito::UserPoolClient	CognitoCfnProvisioner
 AWS::Cognito::UserPoolDomain	CognitoCfnProvisioner
 AWS::Config::ConfigRule	ConfigCfnProvisioner
 AWS::DynamoDB::GlobalTable	LEGACY_SWITCH

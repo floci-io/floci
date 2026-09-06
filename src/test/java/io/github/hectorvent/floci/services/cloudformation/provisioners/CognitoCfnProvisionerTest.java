@@ -7,16 +7,23 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
+import io.github.hectorvent.floci.services.cognito.model.UserPool;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -33,6 +40,11 @@ import static org.mockito.Mockito.when;
 class CognitoCfnProvisionerTest {
 
     private static final String TYPE = "AWS::Cognito::UserPoolDomain";
+    private static final String USER_POOL = "AWS::Cognito::UserPool";
+    private static final String USER_POOL_CLIENT = "AWS::Cognito::UserPoolClient";
+    private static final String CLIENT_ID = "1h57kf5cpq17m0eml12EXAMPLE";
+    private static final String POOL_ARN = "arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_AbCdEfGhI";
+    private static final String ISSUER = "http://localhost:4566/us-east-1_AbCdEfGhI";
     private static final String REGION = "us-east-1";
     private static final String POOL_ID = "us-east-1_AbCdEfGhI";
     private static final String DOMAIN = "auth.example.com";
@@ -57,6 +69,9 @@ class CognitoCfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        // resolveStringList delegates to the real engine method; for the literal arrays these
+        // tests use it just walks the array and calls resolve(...) per element, stubbed above.
+        when(engine.resolveStringList(any())).thenCallRealMethod();
         return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
@@ -68,11 +83,47 @@ class CognitoCfnProvisionerTest {
         return r;
     }
 
+    private static StackResource resource(String type, String logicalId) {
+        StackResource r = resource();
+        r.setLogicalId(logicalId);
+        r.setResourceType(type);
+        return r;
+    }
+
     private static StackResource resource(String physicalId, Map<String, String> attributes) {
         StackResource r = resource();
         r.setPhysicalId(physicalId);
         r.setAttributes(new HashMap<>(attributes));
         return r;
+    }
+
+    private static UserPool pool(String id, String name) {
+        UserPool p = new UserPool();
+        p.setId(id);
+        p.setName(name);
+        p.setArn(POOL_ARN);
+        return p;
+    }
+
+    private static UserPoolClient client(String name, String secret) {
+        UserPoolClient c = new UserPoolClient();
+        c.setClientId(CLIENT_ID);
+        c.setUserPoolId(POOL_ID);
+        c.setClientName(name);
+        c.setClientSecret(secret);
+        return c;
+    }
+
+    private void stubClientCreate(UserPoolClient created) {
+        when(cognito.createUserPoolClient(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(created);
+    }
+
+    private void stubClientUpdate(UserPoolClient updated) {
+        when(cognito.updateUserPoolClient(any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(updated);
     }
 
     private static UserPoolDomain domain(String domain, String userPoolId, String cloudFront) {
@@ -293,5 +344,176 @@ class CognitoCfnProvisionerTest {
         provisioner.delete(TYPE, DOMAIN, REGION);
 
         verify(cognito).deleteUserPoolDomain(DOMAIN, POOL_ID);
+    }
+
+    @Test
+    void userPoolCreateHandsTheResolvedPropertiesToTheServiceAndSetsTheSchemaAttributes() {
+        when(cognito.createUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "my-pool"));
+        when(cognito.getIssuer(POOL_ID)).thenReturn(ISSUER);
+        ObjectNode props = mapper.createObjectNode().put("UserPoolName", "my-pool").put("MfaConfiguration", "OFF");
+        props.putObject("Policies").putObject("PasswordPolicy").put("MinimumLength", 12);
+        StackResource r = resource(USER_POOL, "Pool");
+
+        provisioner.provision(r, props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).createUserPool(request.capture(), eq(REGION));
+        assertEquals("my-pool", request.getValue().get("PoolName"));
+        assertEquals("OFF", request.getValue().get("MfaConfiguration"));
+        assertEquals(Map.of("PasswordPolicy", Map.of("MinimumLength", 12L)), request.getValue().get("Policies"));
+        assertEquals(POOL_ID, r.getPhysicalId());
+        assertEquals(Set.of("Arn", "UserPoolId", "ProviderName", "ProviderURL"), r.getAttributes().keySet());
+        assertEquals(POOL_ARN, r.getAttributes().get("Arn"));
+        assertEquals(POOL_ID, r.getAttributes().get("UserPoolId"));
+        assertEquals("my-pool", r.getAttributes().get("ProviderName"));
+        assertEquals(ISSUER, r.getAttributes().get("ProviderURL"));
+    }
+
+    @Test
+    void userPoolWithoutANameGetsAGeneratedOne() {
+        when(cognito.createUserPool(any(), eq(REGION))).thenAnswer(inv ->
+                pool(POOL_ID, (String) inv.<Map<String, Object>>getArgument(0).get("PoolName")));
+        StackResource r = resource(USER_POOL, "Pool");
+
+        provisioner.provision(r, mapper.createObjectNode(), ctx());
+
+        assertTrue(r.getAttributes().get("ProviderName").startsWith("my-stack-Pool-"),
+                r.getAttributes().get("ProviderName"));
+    }
+
+    @Test
+    void userPoolUpdateCarriesThePriorPoolId() {
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "my-pool"));
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolName", "my-pool"), ctx(POOL_ID));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).updateUserPool(request.capture(), eq(REGION));
+        assertEquals(POOL_ID, request.getValue().get("UserPoolId"));
+        verify(cognito, never()).createUserPool(any(), any());
+        assertEquals(POOL_ID, r.getPhysicalId());
+    }
+
+    @Test
+    void userPoolClientCreatePassesEveryPropertyPositionally() {
+        stubClientCreate(client("web", "s3cr3t"));
+        ObjectNode props = mapper.createObjectNode()
+                .put("UserPoolId", POOL_ID)
+                .put("ClientName", "web")
+                .put("GenerateSecret", true)
+                .put("AccessTokenValidity", 60)
+                .put("PreventUserExistenceErrors", "ENABLED");
+        props.putArray("ExplicitAuthFlows").add("ALLOW_USER_SRP_AUTH").add("ALLOW_REFRESH_TOKEN_AUTH");
+        props.putArray("CallbackURLs").add("https://app.example.com/cb");
+        props.putObject("TokenValidityUnits").put("AccessToken", "minutes");
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(cognito).createUserPoolClient(eq(POOL_ID), eq("web"), eq(true), eq(false),
+                eq(List.of()), eq(List.of()), isNull(), eq(List.of("https://app.example.com/cb")),
+                isNull(), eq(List.of("ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH")), eq(60), isNull(),
+                eq(List.of()), eq("ENABLED"), eq(List.of()), isNull(),
+                eq(List.of()), eq(Map.of("AccessToken", "minutes")), eq(List.of()),
+                isNull(), isNull());
+        assertEquals(CLIENT_ID, r.getPhysicalId());
+        assertEquals(Set.of("ClientId", "ClientName", "Name", "ClientSecret"), r.getAttributes().keySet());
+        assertEquals(CLIENT_ID, r.getAttributes().get("ClientId"));
+        assertEquals("web", r.getAttributes().get("Name"));
+        assertEquals("s3cr3t", r.getAttributes().get("ClientSecret"));
+    }
+
+    @Test
+    void userPoolClientWithoutASecretHasNoClientSecretAttribute() {
+        stubClientCreate(client("web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web"), ctx());
+
+        assertEquals(Set.of("ClientId", "ClientName", "Name"), r.getAttributes().keySet());
+    }
+
+    @Test
+    void userPoolClientWithoutANameGetsAGeneratedOne() {
+        stubClientCreate(client("generated", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID), ctx());
+
+        ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
+        verify(cognito).createUserPoolClient(eq(POOL_ID), name.capture(), anyBoolean(), anyBoolean(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertTrue(name.getValue().startsWith("my-stack-Client-"), name.getValue());
+    }
+
+    @Test
+    void userPoolClientUpdateUpdatesThePriorClientInPlace() {
+        stubClientUpdate(client("web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+        ObjectNode props = mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web")
+                .put("EnableTokenRevocation", true);
+
+        provisioner.provision(r, props, ctx(CLIENT_ID));
+
+        verify(cognito).updateUserPoolClient(eq(POOL_ID), eq(CLIENT_ID), eq("web"), eq(false),
+                eq(List.of()), eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), isNull(),
+                eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()),
+                isNull(), eq(Boolean.TRUE));
+        verify(cognito, never()).createUserPoolClient(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertEquals(CLIENT_ID, r.getPhysicalId());
+    }
+
+    @Test
+    void unknownTypeIsRejected() {
+        StackResource r = resource("AWS::Cognito::IdentityPool", "Identity");
+
+        assertThrows(IllegalStateException.class, () -> provisioner.provision(r, mapper.createObjectNode(), ctx()));
+    }
+
+    @Test
+    void deleteUserPoolToleratesAMissingPoolAndPropagatesADomainRefusal() {
+        doThrow(new AwsException("ResourceNotFoundException", "User pool does not exist", 400))
+                .when(cognito).deleteUserPool("us-east-1_gone");
+        doThrow(new AwsException("InvalidParameterException", "User pool cannot be deleted.", 400))
+                .when(cognito).deleteUserPool(POOL_ID);
+
+        assertDoesNotThrow(() -> provisioner.delete(USER_POOL, "us-east-1_gone", REGION));
+        AwsException refused = assertThrows(AwsException.class, () -> provisioner.delete(USER_POOL, POOL_ID, REGION));
+        assertEquals("InvalidParameterException", refused.getErrorCode());
+    }
+
+    @Test
+    void deleteUserPoolClientToleratesAnAlreadyDeletedClient() {
+        doThrow(new AwsException("ResourceNotFoundException", "User pool client not found", 400))
+                .when(cognito).deleteUserPoolClient(CLIENT_ID);
+
+        assertDoesNotThrow(() -> provisioner.delete(USER_POOL_CLIENT, CLIENT_ID, REGION));
+        verify(cognito).deleteUserPoolClient(CLIENT_ID);
+    }
+
+    @Test
+    void deletingAUserPoolThroughTheResourceOverloadDeletesThePoolNotADomain() {
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+        r.getAttributes().put("UserPoolId", POOL_ID);
+
+        provisioner.delete(r, REGION);
+
+        verify(cognito).deleteUserPool(POOL_ID);
+        verify(cognito, never()).deleteUserPoolDomain(any(), any());
+    }
+
+    @Test
+    void deleteWithoutAPhysicalIdIsANoOp() {
+        assertDoesNotThrow(() -> provisioner.delete(USER_POOL, null, REGION));
+        assertDoesNotThrow(() -> provisioner.delete(USER_POOL_CLIENT, "", REGION));
+        verify(cognito, never()).deleteUserPool(any());
+        verify(cognito, never()).deleteUserPoolClient(any());
     }
 }
