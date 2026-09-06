@@ -51,9 +51,14 @@ public class AutoScalingScalingPolicyCfnProvisioner implements CfnResourceProvis
         String asgName = ctx.resolveOptional(props, "AutoScalingGroupName");
         String policyName = priorPolicyName(r, ctx);
         if (policyName != null) {
-            ScalingPolicy existing = autoScalingService.describePolicies(ctx.region(), null, List.of(policyName))
-                    .stream().findFirst().orElse(null);
-            if (existing != null && !existing.getAutoScalingGroupName().equals(asgName)) {
+            // Policy names are unique only within a group, so the lookup is scoped to the group the
+            // template names. Only when the policy is not there does a same-named policy elsewhere
+            // in the region mean the template moved it, which AWS treats as a replacement.
+            boolean onThisGroup = !autoScalingService.describePolicies(ctx.region(), asgName, List.of(policyName))
+                    .isEmpty();
+            boolean onAnotherGroup = !onThisGroup
+                    && !autoScalingService.describePolicies(ctx.region(), null, List.of(policyName)).isEmpty();
+            if (onAnotherGroup) {
                 throw new AwsException("ValidationError",
                         "Updating AutoScalingGroupName requires resource replacement, which is not supported.", 400);
             }

@@ -134,7 +134,7 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
 
     @Test
     void updateReusesTheRecordedNameOnTheSameGroup() {
-        when(autoScaling.describePolicies(REGION, null, List.of("my-stack-MyPolicy-abc")))
+        when(autoScaling.describePolicies(REGION, "my-asg", List.of("my-stack-MyPolicy-abc")))
                 .thenReturn(List.of(policy("my-asg", "my-stack-MyPolicy-abc")));
         when(autoScaling.putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(), any()))
                 .thenReturn(policy("my-asg", "my-stack-MyPolicy-abc"));
@@ -145,8 +145,26 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
 
         verify(autoScaling).putScalingPolicy(eq(REGION), eq("my-asg"), eq("my-stack-MyPolicy-abc"), isNull(),
                 isNull(), eq(0), eq(120), isNull(), isNull());
+        // The region-wide lookup is only for a policy that is not on the template's group.
+        verify(autoScaling, never()).describePolicies(eq(REGION), isNull(), anyList());
         assertEquals(ARN, r.getPhysicalId());
         assertEquals("my-stack-MyPolicy-abc", r.getAttributes().get("PolicyName"));
+    }
+
+    @Test
+    void aSameNamedPolicyOnAnotherGroupDoesNotBlockAnUpdateOnThisOne() {
+        when(autoScaling.describePolicies(REGION, "my-asg", List.of("my-stack-MyPolicy-abc")))
+                .thenReturn(List.of(policy("my-asg", "my-stack-MyPolicy-abc")));
+        when(autoScaling.describePolicies(REGION, null, List.of("my-stack-MyPolicy-abc")))
+                .thenReturn(List.of(policy("other-asg", "my-stack-MyPolicy-abc"), policy("my-asg", "my-stack-MyPolicy-abc")));
+        when(autoScaling.putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(), any()))
+                .thenReturn(policy("my-asg", "my-stack-MyPolicy-abc"));
+
+        provisioner.provision(resource(ARN, "my-stack-MyPolicy-abc"),
+                mapper.createObjectNode().put("AutoScalingGroupName", "my-asg"), ctx(ARN));
+
+        verify(autoScaling).putScalingPolicy(eq(REGION), eq("my-asg"), eq("my-stack-MyPolicy-abc"), isNull(),
+                isNull(), eq(0), eq(300), isNull(), isNull());
     }
 
     @Test
@@ -164,6 +182,7 @@ class AutoScalingScalingPolicyCfnProvisionerTest {
 
     @Test
     void movingThePolicyToAnotherGroupIsRefusedAsReplacementWorthy() {
+        when(autoScaling.describePolicies(REGION, "new-asg", List.of("my-stack-MyPolicy-abc"))).thenReturn(List.of());
         when(autoScaling.describePolicies(REGION, null, List.of("my-stack-MyPolicy-abc")))
                 .thenReturn(List.of(policy("old-asg", "my-stack-MyPolicy-abc")));
 
