@@ -117,7 +117,9 @@ public class ControlCatalogService {
                 .distinct()
                 .sorted(java.util.Comparator.comparing(ControlDefinition::globalIdentifier))
                 .toList();
-        if (offset > definitions.size()) throw validation("nextToken is invalid.");
+        if (offset > definitions.size()) {
+            throw validation("nextToken is invalid.");
+        }
         int end = Math.min(definitions.size(), offset + maxResults);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode controls = response.putArray("Controls");

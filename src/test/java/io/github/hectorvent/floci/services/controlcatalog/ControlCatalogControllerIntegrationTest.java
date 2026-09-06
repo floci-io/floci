@@ -5,10 +5,16 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class ControlCatalogControllerIntegrationTest {
@@ -104,17 +110,48 @@ class ControlCatalogControllerIntegrationTest {
 
     @Test
     void listControlsSupportsImplementationFilterAndPagination() {
-        given()
+        String filter = "{\"Filter\":{\"Implementations\":{\"Types\":[\"AWS::Organizations::Policy::RESOURCE_CONTROL_POLICY\"]}}}";
+        var firstPage = given()
                 .contentType("application/json")
                 .header("Authorization", auth("us-east-1"))
-                .body("{\"Filter\":{\"Implementations\":{\"Types\":[\"AWS::Organizations::Policy::RESOURCE_CONTROL_POLICY\"]}}}")
+                .body(filter)
                 .when()
                 .post("/list-controls?maxResults=2")
                 .then()
                 .statusCode(200)
                 .body("Controls.size()", equalTo(2))
                 .body("Controls[0].Implementation.Type", equalTo("AWS::Organizations::Policy::RESOURCE_CONTROL_POLICY"))
-                .body("NextToken", equalTo("2"));
+                .body("NextToken", equalTo("2"))
+                .extract().response();
+
+        List<String> allArns = new ArrayList<>(firstPage.path("Controls.Arn"));
+        var secondPage = given()
+                .contentType("application/json")
+                .header("Authorization", auth("us-east-1"))
+                .body(filter)
+                .when()
+                .post("/list-controls?maxResults=2&nextToken=" + firstPage.path("NextToken"))
+                .then()
+                .statusCode(200)
+                .body("Controls.size()", equalTo(2))
+                .body("NextToken", equalTo("4"))
+                .extract().response();
+        allArns.addAll(secondPage.path("Controls.Arn"));
+
+        var finalPage = given()
+                .contentType("application/json")
+                .header("Authorization", auth("us-east-1"))
+                .body(filter)
+                .when()
+                .post("/list-controls?maxResults=2&nextToken=" + secondPage.path("NextToken"))
+                .then()
+                .statusCode(200)
+                .body("Controls.size()", equalTo(1))
+                .body("NextToken", nullValue())
+                .extract().response();
+        allArns.addAll(finalPage.path("Controls.Arn"));
+        assertEquals(5, allArns.size());
+        assertEquals(5, new HashSet<>(allArns).size());
 
         given()
                 .contentType("application/json")
