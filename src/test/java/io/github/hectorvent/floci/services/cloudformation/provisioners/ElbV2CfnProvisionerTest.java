@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
@@ -22,6 +23,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -32,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -99,14 +102,15 @@ class ElbV2CfnProvisionerTest {
 
     private Listener listener(String lbArn) {
         Listener l = new Listener();
-        l.setListenerArn(LISTENER_ARN);
+        // A listener under another balancer is a different listener with its own ARN.
+        l.setListenerArn(lbArn.equals(LB_ARN) ? LISTENER_ARN : LISTENER_ARN.replace("/web/", "/other/"));
         l.setLoadBalancerArn(lbArn);
         return l;
     }
 
     private Rule rule(String listenerArn) {
         Rule rule = new Rule();
-        rule.setRuleArn(RULE_ARN);
+        rule.setRuleArn(listenerArn.equals(LISTENER_ARN) ? RULE_ARN : RULE_ARN.replace("/web/", "/other/"));
         rule.setListenerArn(listenerArn);
         rule.setDefault(false);
         return rule;
@@ -248,6 +252,20 @@ class ElbV2CfnProvisionerTest {
 
         verify(elb, never()).modifyListener(anyString(), anyString(), anyString(), anyInt(), any(), anyList(), anyList(),
                 any());
+        // The displaced listener outlives provision and is deleted by the committed-update cleanup.
+        verify(elb, never()).deleteListener(anyString(), anyString());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(LISTENER_ARN, provisioner.updateCleanupPhysicalId(r));
+
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+
+        InOrder order = inOrder(elb);
+        order.verify(elb).createListener(eq(REGION), eq(otherLb), eq("HTTP"), eq(80), isNull(), anyList(), anyList(),
+                isNull(), eq(Map.of()));
+        order.verify(elb).deleteListener(REGION, LISTENER_ARN);
+        assertEquals(new UpdateCleanupResult(true, true, LISTENER_ARN, 0, null), cleanup);
+        provisioner.clearUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
     @Test
@@ -304,6 +322,55 @@ class ElbV2CfnProvisionerTest {
         StackResource moved = resource("AWS::ElasticLoadBalancingV2::ListenerRule", "Rule");
         provisioner.provision(moved, mapper.createObjectNode().put("ListenerArn", otherListener), ctx(RULE_ARN));
         verify(elb).createRule(eq(REGION), eq(otherListener), anyList(), eq(1), anyList(), eq(Map.of()));
+        assertFalse(provisioner.hasReplacementUpdate(same), "an in-place update owes no cleanup");
+        assertEquals(RULE_ARN, provisioner.updateCleanupPhysicalId(moved));
+        assertEquals(new UpdateCleanupResult(true, true, RULE_ARN, 0, null), provisioner.completeUpdate(moved));
+        verify(elb).deleteRule(REGION, RULE_ARN);
+    }
+
+    @Test
+    void aRenamedLoadBalancerIsReplacedAndTheOldOneCleanedUpUnlessRetained() {
+        LoadBalancer renamed = loadBalancer("web-v2");
+        renamed.setLoadBalancerArn(LB_ARN.replace("/web/", "/web-v2/"));
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v2"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(renamed);
+
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        r.getAttributes().put("LoadBalancerName", "web");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v2"), ctx(LB_ARN));
+        assertEquals(renamed.getLoadBalancerArn(), r.getPhysicalId());
+        assertEquals(LB_ARN, provisioner.updateCleanupPhysicalId(r));
+        assertEquals(new UpdateCleanupResult(true, true, LB_ARN, 0, null), provisioner.completeUpdate(r));
+        verify(elb).deleteLoadBalancer(REGION, LB_ARN);
+
+        StackResource retained = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        retained.setUpdateReplacePolicy("Retain");
+        retained.getAttributes().put("LoadBalancerName", "web");
+        provisioner.provision(retained, mapper.createObjectNode().put("Name", "web-v2"), ctx(LB_ARN));
+        assertNull(provisioner.updateCleanupPhysicalId(retained));
+        assertEquals(new UpdateCleanupResult(true, true, LB_ARN, 0, null), provisioner.completeUpdate(retained));
+        verify(elb, org.mockito.Mockito.times(1)).deleteLoadBalancer(REGION, LB_ARN);
+    }
+
+    @Test
+    void aFailingCleanupDeleteIsRetriedThreeTimesThenReported() {
+        String otherLb = LB_ARN.replace("/web/", "/other/");
+        when(elb.describeListeners(REGION, null, List.of(LISTENER_ARN))).thenReturn(List.of(listener(LB_ARN)));
+        when(elb.createListener(eq(REGION), eq(otherLb), eq("HTTP"), eq(80), isNull(), anyList(), anyList(), isNull(),
+                eq(Map.of()))).thenReturn(listener(otherLb));
+        doThrow(new AwsException("ResourceInUse", "still forwarding", 400)).when(elb).deleteListener(REGION, LISTENER_ARN);
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::Listener", "Listener");
+        provisioner.provision(r, mapper.createObjectNode().put("LoadBalancerArn", otherLb), ctx(LISTENER_ARN));
+
+        UpdateCleanupResult first = provisioner.completeUpdate(r);
+        assertFalse(first.complete());
+        assertEquals(1, first.attempts());
+        assertEquals("still forwarding", first.failureReason());
+        provisioner.completeUpdate(r);
+        UpdateCleanupResult third = provisioner.completeUpdate(r);
+        assertEquals(3, third.attempts());
+        assertEquals(3, provisioner.completeUpdate(r).attempts(), "no fourth attempt");
+        verify(elb, org.mockito.Mockito.times(3)).deleteListener(REGION, LISTENER_ARN);
     }
 
     @Test

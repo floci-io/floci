@@ -78,11 +78,32 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
     /**
      * The physical id is the ARN, so the name an unnamed load balancer got at create time is read
      * back from the {@code LoadBalancerName} attribute before a new one is generated; the switch
      * generated afresh on every pass and left the previous balancer behind. A name that already
-     * exists is reused, which is what makes an unchanged update a no-op.
+     * exists is reused, which is what makes an unchanged update a no-op. A changed name (create-only)
+     * creates the replacement and hands the displaced balancer to the replacement cleanup.
      */
     private void provisionLoadBalancer(StackResource r, JsonNode props, ProvisionContext ctx) {
         String name = nameOrPrior(ctx.resolveOptional(props, "Name"), r.getAttributes().get("LoadBalancerName"),
@@ -111,6 +132,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("CanonicalHostedZoneID", lb.getCanonicalHostedZoneId());
         r.getAttributes().put("LoadBalancerName", lb.getLoadBalancerName());
         r.getAttributes().put("LoadBalancerFullName", loadBalancerFullName(lb.getLoadBalancerArn()));
+        ReplacementCleanup.record(r, ctx);
     }
 
     private void provisionTargetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -152,11 +174,13 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         // A list-valued attribute, joined the way Route53's NameServers is. Empty until a listener
         // forwards to the group, as on AWS.
         r.getAttributes().put("LoadBalancerArns", String.join(",", tg.getLoadBalancerArns()));
+        ReplacementCleanup.record(r, ctx);
     }
 
     /**
      * LoadBalancerArn is create-only: an update that keeps it modifies the listener the stack
-     * already owns, one that moves the listener to another balancer creates a replacement.
+     * already owns, one that moves the listener to another balancer creates a replacement and the
+     * displaced listener is deleted once the stack update commits.
      */
     private void provisionListener(StackResource r, JsonNode props, ProvisionContext ctx) {
         String lbArn = ctx.resolveOptional(props, "LoadBalancerArn");
@@ -178,11 +202,13 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(listener.getListenerArn());
         r.getAttributes().put("ListenerArn", listener.getListenerArn());
+        ReplacementCleanup.record(r, ctx);
     }
 
     /**
      * ListenerArn is create-only: an update that keeps it modifies the rule the stack already owns,
-     * one that moves the rule to another listener creates a replacement.
+     * one that moves the rule to another listener creates a replacement and the displaced rule is
+     * deleted once the stack update commits.
      */
     private void provisionListenerRule(StackResource r, JsonNode props, ProvisionContext ctx) {
         String listenerArn = ctx.resolveOptional(props, "ListenerArn");
@@ -201,6 +227,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(rule.getRuleArn());
         r.getAttributes().put("RuleArn", rule.getRuleArn());
         r.getAttributes().put("IsDefault", String.valueOf(rule.isDefault()));
+        ReplacementCleanup.record(r, ctx);
     }
 
     /** The listener the stack points at, or null when it was removed out of band (then create). */
