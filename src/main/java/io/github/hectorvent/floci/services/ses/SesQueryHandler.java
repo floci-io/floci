@@ -555,7 +555,7 @@ public class SesQueryHandler {
             throw new AwsException("InvalidParameterValue",
                     "Template or TemplateArn is required.", 400);
         }
-        String resolvedName = hasName ? templateName : SesService.templateNameFromArn(templateArn);
+        String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
 
         JsonNode templateData = parseTemplateData(templateDataRaw);
         String configurationSetName = getParam(params, "ConfigurationSetName");
@@ -577,7 +577,7 @@ public class SesQueryHandler {
         String rendered = sesService.renderTestTemplate(templateName, templateDataRaw, region);
         // XML 1.0 character data forbids C0 controls except \t \n \r; strip them
         // so SDK clients can parse the response when template data injects \x01 etc.
-        String xmlSafe = SesService.stripXml10InvalidChars(rendered);
+        String xmlSafe = stripXml10InvalidChars(rendered);
         String result = new XmlBuilder().elem("RenderedTemplate", xmlSafe).build();
         return Response.ok(AwsQueryResponse.envelope("TestRenderTemplate", AwsNamespaces.SES, result)).build();
     }
@@ -676,7 +676,7 @@ public class SesQueryHandler {
             throw new AwsException("InvalidParameterValue",
                     "Template or TemplateArn is required.", 400);
         }
-        String resolvedName = hasName ? templateName : SesService.templateNameFromArn(templateArn);
+        String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
         EmailTemplate template = sesService.getTemplate(resolvedName, region);
         JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
@@ -1189,5 +1189,32 @@ public class SesQueryHandler {
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
         return params.getFirst(name);
+    }
+
+    /** Package-private for the unit test; the sole caller is the TestRenderTemplate XML response above. */
+    static String stripXml10InvalidChars(String s) {
+        if (s == null || s.isEmpty()) {
+            return s;
+        }
+        // XML 1.0 char production: \t \n \r, U+0020-U+D7FF, U+E000-U+FFFD,
+        // U+10000-U+10FFFF. Anything else (C0 controls, U+FFFE/U+FFFF, lone
+        // surrogates) makes the response unparseable by SDK XML parsers.
+        StringBuilder out = new StringBuilder(s.length());
+        int i = 0;
+        while (i < s.length()) {
+            int cp = s.codePointAt(i);
+            if (isXml10Char(cp)) {
+                out.appendCodePoint(cp);
+            }
+            i += Character.charCount(cp);
+        }
+        return out.toString();
+    }
+
+    private static boolean isXml10Char(int cp) {
+        return cp == 0x09 || cp == 0x0A || cp == 0x0D
+                || (cp >= 0x20 && cp <= 0xD7FF)
+                || (cp >= 0xE000 && cp <= 0xFFFD)
+                || (cp >= 0x10000 && cp <= 0x10FFFF);
     }
 }
