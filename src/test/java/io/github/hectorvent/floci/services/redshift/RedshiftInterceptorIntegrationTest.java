@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -218,6 +219,98 @@ class RedshiftInterceptorIntegrationTest {
                 assertTrue(rs.next());
                 assertEquals(0, rs.getInt(1));
             }
+        }
+    }
+
+    @Test
+    void unloadToS3PrefixWritesRowsAsObjects() throws Exception {
+        clusterId = "it-unload-basic";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-unload-it";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE u_src (id int, name text)");
+            c.createStatement().execute("INSERT INTO u_src VALUES (1, 'alice'), (2, 'bob')");
+            c.createStatement().execute(
+                    "UNLOAD ('select id, name from u_src order by id') TO 's3://redshift-unload-it/out/'");
+        }
+
+        java.util.List<io.github.hectorvent.floci.services.s3.model.S3Object> objs =
+                s3.listObjects(bucket, "out/", null, 100);
+        assertTrue(objs.size() >= 1, "UNLOAD must write at least one object");
+        StringBuilder all = new StringBuilder();
+        objs.stream()
+                .sorted(java.util.Comparator.comparing(io.github.hectorvent.floci.services.s3.model.S3Object::getKey))
+                .forEach(o -> all.append(new String(o.getData(), java.nio.charset.StandardCharsets.UTF_8)));
+        assertEquals("1|alice\n2|bob\n", all.toString());
+    }
+
+    @Test
+    void unloadGzipWritesCompressedObject() throws Exception {
+        clusterId = "it-unload-gzip";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-unload-it-gzip";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE g_src (id int)");
+            c.createStatement().execute("INSERT INTO g_src VALUES (7), (8)");
+            c.createStatement().execute("UNLOAD ('select id from g_src order by id') TO 's3://redshift-unload-it-gzip/g/' GZIP");
+        }
+
+        var objs = s3.listObjects(bucket, "g/", null, 100);
+        assertEquals(1, objs.size());
+        assertTrue(objs.get(0).getKey().endsWith(".gz"), objs.get(0).getKey());
+        java.io.ByteArrayOutputStream raw = new java.io.ByteArrayOutputStream();
+        try (var in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(objs.get(0).getData()))) {
+            in.transferTo(raw);
+        }
+        assertEquals("7\n8\n", raw.toString(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void unloadWithManifestWritesAManifestObject() throws Exception {
+        clusterId = "it-unload-manifest";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-unload-it-manifest";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE m_src (id int)");
+            c.createStatement().execute("INSERT INTO m_src VALUES (1)");
+            c.createStatement().execute("UNLOAD ('select id from m_src') TO 's3://redshift-unload-it-manifest/m/' MANIFEST");
+        }
+
+        var manifest = s3.getObject(bucket, "m/manifest");
+        assertNotNull(manifest);
+        String json = new String(manifest.getData(), java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(json.contains("\"entries\""), json);
+        assertTrue(json.contains("s3://redshift-unload-it-manifest/m/"), json);
+    }
+
+    @Test
+    void unloadIntoNonEmptyPrefixWithoutAllowOverwriteRaisesSqlError() throws Exception {
+        clusterId = "it-unload-overwrite";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-unload-it-ow";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "o/existing", "x".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "text/plain", java.util.Map.of());
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE o_src (id int)");
+            c.createStatement().execute("INSERT INTO o_src VALUES (1)");
+            SQLException ex = org.junit.jupiter.api.Assertions.assertThrows(SQLException.class,
+                    () -> c.createStatement().execute("UNLOAD ('select id from o_src') TO 's3://redshift-unload-it-ow/o/'"));
+            assertTrue(ex.getMessage().toLowerCase().contains("allowoverwrite"), ex.getMessage());
+        }
+
+        // With ALLOWOVERWRITE the same statement succeeds.
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute(
+                    "UNLOAD ('select id from o_src') TO 's3://redshift-unload-it-ow/o/' ALLOWOVERWRITE");
         }
     }
 }
