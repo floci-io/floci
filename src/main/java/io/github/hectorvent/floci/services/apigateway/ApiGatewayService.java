@@ -1122,6 +1122,21 @@ public class ApiGatewayService {
         usagePlanStore.delete(usagePlanKey(region, usagePlanId));
     }
 
+    /**
+     * Replaces a usage plan's tags wholesale. CloudFormation drives a resource's tags to the
+     * template's desired state on update, so a dropped key has to disappear, which the additive
+     * TagResource shape cannot express.
+     */
+    public UsagePlan replaceUsagePlanTags(String region, String usagePlanId, Map<String, String> tags) {
+        UsagePlan plan = getUsagePlan(region, usagePlanId);
+        // createUsagePlan consumes the reserved id-override tags and strips them, so a template that
+        // pinned the id still carries them on every update. They are stripped here the same way
+        // rather than refused, or a pinned plan could never change an ordinary tag again.
+        plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
+        usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+        return plan;
+    }
+
     // ──────────────────────────── Usage Plan Keys ────────────────────────────
 
     public UsagePlanKey createUsagePlanKey(String region, String usagePlanId, Map<String, Object> request) {
