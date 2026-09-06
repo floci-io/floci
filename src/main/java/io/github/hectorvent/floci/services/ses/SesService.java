@@ -218,7 +218,7 @@ public class SesService {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
         String effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName, source, region);
-        validateConfigurationSet(effectiveConfigSet, region);
+        configSetService.validateForSending(effectiveConfigSet, region);
 
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
         // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
@@ -281,7 +281,7 @@ public class SesService {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
         String effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName, source, region);
-        validateConfigurationSet(effectiveConfigSet, region);
+        configSetService.validateForSending(effectiveConfigSet, region);
         boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
         boolean sourceOmitted = source == null || source.isBlank();
         boolean willPublishEvents = (effectiveConfigSet != null && !effectiveConfigSet.isBlank())
@@ -305,7 +305,7 @@ public class SesService {
         // explicit FromEmailAddress.
         if (sourceOmitted && (configurationSetName == null || configurationSetName.isBlank())) {
             effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName, effectiveSource, region);
-            validateConfigurationSet(effectiveConfigSet, region);
+            configSetService.validateForSending(effectiveConfigSet, region);
         }
         List<String> effectiveDestinations = hasExplicitDestinations
                 ? destinations
@@ -358,32 +358,6 @@ public class SesService {
             all.addAll(bcc);
         }
         return all;
-    }
-
-    /**
-     * Validate that a non-blank {@code ConfigurationSetName} is usable for a send. Performs
-     * two gates:
-     *   1. Existence — raises {@code ConfigurationSetDoesNotExist} (400) when the set is
-     *      missing in the given region. The V2 REST controller's {@code remapV1Exception}
-     *      translates that into {@code NotFoundException 404}; V1 Query keeps the original.
-     *   2. Sending-enabled — raises {@code ConfigurationSetSendingPausedException} (400)
-     *      when the set's {@code SendingEnabled} flag has been turned off via
-     *      {@code UpdateConfigurationSetSendingEnabled} (v1) /
-     *      {@code PutConfigurationSetSendingOptions} (v2). The V2 controller narrows that
-     *      code to {@code SendingPausedException}; V1 keeps the longer form, matching the
-     *      exact wire shape AWS returns on each surface.
-     * Mirrors AWS SES behaviour: invalid or paused set fails fast instead of silently
-     * storing/relaying the message and skipping event publishing later.
-     */
-    private void validateConfigurationSet(String configurationSetName, String region) {
-        if (configurationSetName == null || configurationSetName.isBlank()) {
-            return;
-        }
-        ConfigurationSet cs = configSetService.get(configurationSetName, region);
-        if (cs.getSendingEnabled() != null && !cs.getSendingEnabled()) {
-            throw new AwsException("ConfigurationSetSendingPausedException",
-                    "Sending is paused for configuration set " + configurationSetName, 400);
-        }
     }
 
     private void publishSendEvents(String configurationSetName, String messageId, String source,
@@ -1483,13 +1457,13 @@ public class SesService {
         ResourceRef ref = parseSesArn(arn);
         requireCallerAccount(ref);
         List<Tag> tags = switch (ref.type()) {
-            case "configuration-set" -> listConfigurationSetTags(ref.name(), region);
-            case "template" -> listEmailTemplateTags(ref.name(), region);
+            case "configuration-set" -> configSetService.listTags(ref.name(), region);
+            case "template" -> templateService.listTags(ref.name(), region);
             case "identity" -> identityService.listTags(ref.name(), region);
             case "contact-list" -> contactService.listTags(ref.name(), region);
             case "custom-verification-email-template" -> cvetService.listTags(ref.name(), region);
             case "dedicated-ip-pool" -> dedicatedIpService.listTags(ref.name(), region);
-            case "tenant" -> listTenantTags(ref.name(), region);
+            case "tenant" -> tenantService.listTags(ref.name(), region);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         };
@@ -1514,13 +1488,13 @@ public class SesService {
         List<Tag> tags = newTags == null ? List.of() : newTags;
         SesTags.validate(tags);
         switch (ref.type()) {
-            case "configuration-set" -> tagConfigurationSet(ref.name(), region, tags);
-            case "template" -> tagEmailTemplate(ref.name(), region, tags);
+            case "configuration-set" -> configSetService.tag(ref.name(), region, tags);
+            case "template" -> templateService.tag(ref.name(), region, tags);
             case "identity" -> identityService.tag(ref.name(), region, tags);
             case "contact-list" -> contactService.tag(ref.name(), region, tags);
             case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
             case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
-            case "tenant" -> tagTenant(ref.name(), region, tags);
+            case "tenant" -> tenantService.tag(ref.name(), region, tags);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -1541,109 +1515,24 @@ public class SesService {
             throw new AwsException("BadRequestException", "Failed to untag resource", 400);
         }
         switch (ref.type()) {
-            case "configuration-set" -> untagConfigurationSet(ref.name(), region, tagKeys);
-            case "template" -> untagEmailTemplate(ref.name(), region, tagKeys);
+            case "configuration-set" -> configSetService.untag(ref.name(), region, tagKeys);
+            case "template" -> templateService.untag(ref.name(), region, tagKeys);
             case "identity" -> identityService.untag(ref.name(), region, tagKeys);
             case "contact-list" -> contactService.untag(ref.name(), region, tagKeys);
             case "custom-verification-email-template" -> cvetService.untag(ref.name(), region, tagKeys);
             case "dedicated-ip-pool" -> dedicatedIpService.untag(ref.name(), region, tagKeys);
-            case "tenant" -> untagTenant(ref.name(), region, tagKeys);
+            case "tenant" -> tenantService.untag(ref.name(), region, tagKeys);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
-    }
-
-    // A tenant tag ARN carries two path segments (tenant/<name>/<tenantId>), so parseSesArn's
-    // first-slash split leaves "<name>/<tenantId>" as the resource name; the tenant domain owns
-    // that remainder's decomposition and the id-only resolution (see SesTenantService.TenantTagArn).
-
-    private List<Tag> listTenantTags(String resourceName, String region) {
-        Tenant tenant = tenantService.tenantForTagArn(resourceName, region);
-        // AWS returns a tenant's tags ordered by key (probe-confirmed).
-        return (tenant.tags() == null ? List.<Tag>of() : tenant.tags()).stream()
-                .sorted(Comparator.comparing(Tag::key, Comparator.nullsLast(Comparator.naturalOrder())))
-                .toList();
-    }
-
-    private void tagTenant(String resourceName, String region, List<Tag> newTags) {
-        tenantService.mutateTags(resourceName, region, tags -> SesTags.merge(tags, newTags));
-        LOG.infov("Tagged SES tenant <{0}> (region {1}, +{2} tags)",
-                resourceName, region, newTags.size());
-    }
-
-    private void untagTenant(String resourceName, String region, List<String> tagKeys) {
-        Set<String> toRemove = new HashSet<>(tagKeys);
-        tenantService.mutateTags(resourceName, region, tags -> {
-            List<Tag> remaining = new ArrayList<>(tags);
-            remaining.removeIf(t -> toRemove.contains(t.key()));
-            return remaining;
-        });
-        LOG.infov("Untagged SES tenant <{0}> (region {1}, -{2} keys)",
-                resourceName, region, tagKeys.size());
-    }
-
-    private List<Tag> listConfigurationSetTags(String name, String region) {
-        ConfigurationSet cs = configSetService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No ConfigurationSet present with name: " + name, 404));
-        return new ArrayList<>(cs.getTags());
-    }
-
-    private void tagConfigurationSet(String name, String region, List<Tag> newTags) {
-        ConfigurationSet cs = configSetService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No ConfigurationSet present with name: " + name, 404));
-        cs.setTags(SesTags.merge(cs.getTags(), newTags));
-        configSetService.save(cs, region);
-        LOG.infov("Tagged SES configuration set: {0} (region {1}, +{2} tags)", name, region, newTags.size());
-    }
-
-    private void untagConfigurationSet(String name, String region, List<String> tagKeys) {
-        ConfigurationSet cs = configSetService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No ConfigurationSet present with name: " + name, 404));
-        Set<String> toRemove = new HashSet<>(tagKeys);
-        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
-        List<Tag> remaining = new ArrayList<>(cs.getTags());
-        remaining.removeIf(t -> toRemove.contains(t.key()));
-        cs.setTags(remaining);
-        configSetService.save(cs, region);
-        LOG.infov("Untagged SES configuration set: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
-    }
-
-    private List<Tag> listEmailTemplateTags(String name, String region) {
-        EmailTemplate template = templateService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No Template present with name: " + name, 404));
-        return new ArrayList<>(template.getTags());
-    }
-
-    private void tagEmailTemplate(String name, String region, List<Tag> newTags) {
-        EmailTemplate template = templateService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No Template present with name: " + name, 404));
-        template.setTags(SesTags.merge(template.getTags(), newTags));
-        templateService.save(template, region);
-        LOG.infov("Tagged SES template: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
 
     public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
         identityService.setTags(identityValue, region, tags);
     }
 
-    private void untagEmailTemplate(String name, String region, List<String> tagKeys) {
-        EmailTemplate template = templateService.find(name, region)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "No Template present with name: " + name, 404));
-        Set<String> toRemove = new HashSet<>(tagKeys);
-        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
-        List<Tag> remaining = new ArrayList<>(template.getTags());
-        remaining.removeIf(t -> toRemove.contains(t.key()));
-        template.setTags(remaining);
-        templateService.save(template, region);
-        LOG.infov("Untagged SES template: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
-    }
-
+    // name is everything after the type's first slash and may itself contain one: a tenant ARN's
+    // <name>/<tenantId> remainder passes through whole, decomposed by the tenant domain.
     private record ResourceRef(String account, String region, String type, String name) {}
 
     /**
@@ -1995,32 +1884,6 @@ public class SesService {
         return templateService.renderTestTemplate(templateName, templateDataRaw, region);
     }
 
-    static String stripXml10InvalidChars(String s) {
-        if (s == null || s.isEmpty()) {
-            return s;
-        }
-        // XML 1.0 char production: \t \n \r, U+0020-U+D7FF, U+E000-U+FFFD,
-        // U+10000-U+10FFFF. Anything else (C0 controls, U+FFFE/U+FFFF, lone
-        // surrogates) makes the response unparseable by SDK XML parsers.
-        StringBuilder out = new StringBuilder(s.length());
-        int i = 0;
-        while (i < s.length()) {
-            int cp = s.codePointAt(i);
-            if (isXml10Char(cp)) {
-                out.appendCodePoint(cp);
-            }
-            i += Character.charCount(cp);
-        }
-        return out.toString();
-    }
-
-    private static boolean isXml10Char(int cp) {
-        return cp == 0x09 || cp == 0x0A || cp == 0x0D
-                || (cp >= 0x20 && cp <= 0xD7FF)
-                || (cp >= 0xE000 && cp <= 0xFFFD)
-                || (cp >= 0x10000 && cp <= 0x10FFFF);
-    }
-
     /**
      * Also called by the controller ahead of the tenant send gate: AWS reports an empty inline
      * template before it looks the tenant up (probe-confirmed), so the check must not stay behind
@@ -2068,7 +1931,7 @@ public class SesService {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination entry is required.", 400);
         }
-        validateConfigurationSet(configurationSetName, region);
+        configSetService.validateForSending(configurationSetName, region);
         if (entries.size() > MAX_BULK_DESTINATIONS) {
             throw new AwsException("MessageRejected",
                     "Number of destinations (" + entries.size() + ") exceeds the maximum of "
@@ -2197,28 +2060,4 @@ public class SesService {
         replacement.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
         return merged;
     }
-
-    /**
-     * Extracts the template name from an SES template ARN of the form
-     * {@code arn:aws:ses:<region>:<account>:template/<name>}. Region and
-     * account segments are not validated; only the {@code template/<name>}
-     * suffix is required.
-     */
-    public static String templateNameFromArn(String arn) {
-        if (arn == null || arn.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TemplateArn is required.", 400);
-        }
-        int marker = arn.indexOf(":template/");
-        if (!arn.startsWith("arn:") || marker < 0) {
-            throw new AwsException("InvalidParameterValue",
-                    "TemplateArn is not a valid SES template ARN: " + arn, 400);
-        }
-        String name = arn.substring(marker + ":template/".length());
-        if (name.isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "TemplateArn is missing a template name: " + arn, 400);
-        }
-        return name;
-    }
-
 }

@@ -945,7 +945,13 @@ public class IotController {
         description.put("certificateId", certificate.getCertificateId());
         description.put("certificatePem", certificate.getCertificatePem());
         description.put("status", certificate.getStatus());
+        description.put("certificateMode", "DEFAULT");
         putEpoch(description, "creationDate", certificate.getCreationDate());
+        if (certificate.getNotBefore() != null && certificate.getNotAfter() != null) {
+            ObjectNode validity = description.putObject("validity");
+            putEpoch(validity, "notBefore", certificate.getNotBefore());
+            putEpoch(validity, "notAfter", certificate.getNotAfter());
+        }
         return description;
     }
 

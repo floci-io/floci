@@ -67,7 +67,8 @@ class RedshiftAuthProxyTest {
         int proxyPort = freePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
-                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true);
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                mock(io.github.hectorvent.floci.services.s3.S3Service.class));
         proxy.start(proxyPort);
 
         try (Socket client = new Socket("localhost", proxyPort)) {
@@ -120,7 +121,8 @@ class RedshiftAuthProxyTest {
         int proxyPort = freePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
-                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true);
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                mock(io.github.hectorvent.floci.services.s3.S3Service.class));
         proxy.start(proxyPort);
 
         // Connect, then drop without ever sending a startup packet.
@@ -150,7 +152,8 @@ class RedshiftAuthProxyTest {
 
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
-                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true);
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                mock(io.github.hectorvent.floci.services.s3.S3Service.class));
         proxy.start(proxyPort); // must not throw despite the port being busy at first
 
         assertTrue(portAccepts(proxyPort), "proxy never bound the port after the squatter released it");
@@ -162,7 +165,8 @@ class RedshiftAuthProxyTest {
         int proxyPort = freePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "old", "dev",
-                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true);
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                mock(io.github.hectorvent.floci.services.s3.S3Service.class));
         proxy.start(proxyPort);
 
         proxy.updateMasterPassword("rotated");

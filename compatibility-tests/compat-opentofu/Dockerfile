@@ -1,6 +1,8 @@
 FROM ghcr.io/opentofu/opentofu:1.8 AS opentofu
 
-FROM amazon/aws-cli:2.15.52
+# Same CLI as compat-terraform: 2.15 predates the S3 checksum type (x-amz-checksum-type, December 2024)
+# and cannot show ChecksumType in head-object / get-object-attributes output.
+FROM amazon/aws-cli:2.34.32
 
 # Copy tofu binary from official OpenTofu image
 COPY --from=opentofu /usr/local/bin/tofu /usr/local/bin/tofu

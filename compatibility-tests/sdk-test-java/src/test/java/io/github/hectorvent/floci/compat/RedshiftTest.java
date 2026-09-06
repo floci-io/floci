@@ -44,6 +44,9 @@ public class RedshiftTest {
                 
         Cluster cluster = describeRes.clusters().get(0);
         assertEquals("test-cluster", cluster.clusterIdentifier());
+        // Terraform's AWS provider polls these two on create and validates them on read (issue #3098).
+        assertEquals("Available", cluster.clusterAvailabilityStatus());
+        assertEquals("disabled", cluster.availabilityZoneRelocationStatus());
         assertNotNull(cluster.endpoint());
         String address = cluster.endpoint().address();
         int port = cluster.endpoint().port();

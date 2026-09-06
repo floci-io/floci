@@ -181,7 +181,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
-    private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
+    private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
     // subnetId → counter for IP assignment (runtime-only, not persisted)
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
 
@@ -414,6 +414,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (restored > 0) {
             LOG.infov("Restored IMDS metadata registration for {0} EC2 container(s)", restored);
         }
+
+        // Runs after the restore loop, so anything legitimately revived above is already
+        // accounted for and only genuine leftovers are left to collect.
+        containerManager.reconcileOrphanedContainers(this::instanceContainerStillWanted);
+    }
+
+    /**
+     * Whether a container labelled for (region, instanceId) still backs a live instance record.
+     * False means the record is gone or already terminated, so the container is an orphan.
+     */
+    private boolean instanceContainerStillWanted(String region, String instanceId) {
+        Instance instance = findAnyInstance(key(region, instanceId)).orElse(null);
+        if (instance == null) {
+            return false;
+        }
+        String state = instance.getState() == null ? null : instance.getState().getName();
+        return !"terminated".equals(state) && !"shutting-down".equals(state);
     }
 
     private static boolean needsMetadataRegistration(Instance instance) {
@@ -428,7 +445,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // ─── Default resource seeding ──────────────────────────────────────────────
 
     public void ensureDefaultResources(String region) {
-        if (!seededRegions.add(region)) {
+        String ownerAccountId = callerAccountId();
+        String seedScope = ownerAccountId + "::" + region;
+        if (!seededAccountRegions.add(seedScope)) {
             return;
         }
         // Already provisioned in a previous run and reloaded from persistent storage: the default
@@ -445,7 +464,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         defaultVpc.setCidrBlock("172.31.0.0/16");
         defaultVpc.setState("available");
         defaultVpc.setDefault(true);
-        defaultVpc.setOwnerId(accountId);
+        defaultVpc.setOwnerId(ownerAccountId);
         defaultVpc.setRegion(region);
         defaultVpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-default", "172.31.0.0/16"));
@@ -469,9 +488,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             subnet.setAvailableIpAddressCount(4091);
             subnet.setDefaultForAz(true);
             subnet.setMapPublicIpOnLaunch(true);
-            subnet.setOwnerId(accountId);
+            subnet.setOwnerId(ownerAccountId);
             subnet.setRegion(region);
-            subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetIds[i]).toString());
+            subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "subnet/" + subnetIds[i]).toString());
             subnets.put(key(region, subnetIds[i]), subnet);
         }
 
@@ -495,7 +514,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String igwId = "igw-default";
         InternetGateway igw = new InternetGateway();
         igw.setInternetGatewayId(igwId);
-        igw.setOwnerId(accountId);
+        igw.setOwnerId(ownerAccountId);
         igw.setRegion(region);
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
@@ -514,7 +533,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         defaultSg.setGroupName("default");
         defaultSg.setDescription("default VPC security group");
         defaultSg.setVpcId(vpcId);
-        defaultSg.setOwnerId(accountId);
+        defaultSg.setOwnerId(callerAccountId());
         defaultSg.setRegion(region);
 
         // Default egress: all traffic
@@ -532,7 +551,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         RouteTable mainRt = new RouteTable();
         mainRt.setRouteTableId(routeTableId);
         mainRt.setVpcId(vpc.getVpcId());
-        mainRt.setOwnerId(accountId);
+        mainRt.setOwnerId(callerAccountId());
         mainRt.setRegion(region);
         mainRt.getRoutes().add(new Route(vpc.getCidrBlock(), "local", "CreateRouteTable"));
 
@@ -563,7 +582,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         NetworkAcl acl = new NetworkAcl();
         acl.setNetworkAclId(networkAclId);
         acl.setVpcId(vpcId);
-        acl.setOwnerId(accountId);
+        acl.setOwnerId(callerAccountId());
         acl.setRegion(region);
         acl.setDefault(true);
         acl.getEntries().add(naclEntry(100, "-1", "allow", false, "0.0.0.0/0"));
@@ -594,7 +613,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         NetworkAcl acl = new NetworkAcl();
         acl.setNetworkAclId(networkAclId);
         acl.setVpcId(vpcId);
-        acl.setOwnerId(accountId);
+        acl.setOwnerId(callerAccountId());
         acl.setRegion(region);
         acl.setDefault(false);
         acl.getEntries().add(naclEntry(32767, "-1", "deny", false, "0.0.0.0/0"));
@@ -2318,9 +2337,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         reservation.setOwnerId(accountId);
 
         String effectiveInstanceType = instanceType != null ? instanceType : "t2.micro";
-        validateArchitectureCompatibility(imageId, effectiveInstanceType);
+        validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
-        String architecture = architectureFor(imageId, effectiveInstanceType);
+        String architecture = architectureFor(region, imageId, effectiveInstanceType);
+        ResolvedAmiImage dockerImage = null;
+        if (!config.services().ec2().mock()) {
+            // A CreateImage AMI is not in the catalog, so resolve through its source.
+            dockerImage = amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
+        }
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
             String privateIp = suppliedEni != null
@@ -2420,9 +2444,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                // A CreateImage AMI is not in the catalog, so resolve through its source.
-                ResolvedAmiImage dockerImage =
-                        amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -2531,9 +2552,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
-    private void validateArchitectureCompatibility(String imageId, String instanceType) {
-        Optional<String> imageArchitecture = imageCatalog.findByIdOrAlias(imageId)
-                .map(image -> image.architecture)
+    private void validateArchitectureCompatibility(String region, String imageId, String instanceType) {
+        Optional<String> imageArchitecture = registeredImages.get(key(region, imageId))
+                .map(Image::getArchitecture)
+                .or(() -> imageCatalog.findByIdOrAlias(imageId).map(image -> image.architecture))
                 .filter(value -> !value.isBlank());
         if (imageArchitecture.isEmpty()) {
             return;
@@ -2550,9 +2572,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 });
     }
 
-    private String architectureFor(String imageId, String instanceType) {
-        Optional<Ec2ImageCatalog.CatalogImage> image = imageCatalog.findByIdOrAlias(imageId);
-        return image.map(catalogImage -> catalogImage.architecture)
+    private String architectureFor(String region, String imageId, String instanceType) {
+        Optional<String> registeredArchitecture = registeredImages.get(key(region, imageId))
+                .map(Image::getArchitecture);
+        return registeredArchitecture
+                .filter(value -> !value.isBlank())
+                .or(() -> imageCatalog.findByIdOrAlias(imageId).map(image -> image.architecture))
                 .filter(value -> !value.isBlank())
                 .or(() -> instanceTypeCatalog.find(instanceType)
                         .flatMap(type -> type.supportedArchitectures.stream()
@@ -2868,7 +2893,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vpc.setCidrBlock(cidrBlock);
         vpc.setState("available");
         vpc.setDefault(isDefault);
-        vpc.setOwnerId(accountId);
+        vpc.setOwnerId(callerAccountId());
         vpc.setRegion(region);
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
@@ -3888,7 +3913,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (instance == null) {
             return false;
         }
-        if (config.services().ec2().mock()) {
+        // Mock mode and instances launched with no Docker daemon reachable have nothing to
+        // inspect, so the recorded lifecycle state is the answer. Reporting those as not
+        // running would make AutoScaling replace healthy instances in a loop.
+        if (config.services().ec2().mock() || instance.getDockerContainerId() == null) {
             String state = instance.getState() != null ? instance.getState().getName() : null;
             return state == null
                     || (!"shutting-down".equals(state) && !"terminated".equals(state) && !"stopping".equals(state));
@@ -5393,6 +5421,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return vpcs.keys().stream().anyMatch(k -> k.endsWith(suffix));
     }
 
+    /**
+     * An instance record from whichever account owns it. The startup sweep runs from
+     * {@code @PostConstruct}, outside any request, where an account-aware backend resolves to the
+     * default account: a record owned by another account would read as absent and its live
+     * container would be destroyed. Read-only, so a cross-account hit stays in its own partition.
+     */
+    private Optional<Instance> findAnyInstance(String storageKey) {
+        if (instances instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Instance> accountAware = (AccountAwareStorageBackend<Instance>) rawAccountAware;
+            return accountAware.findAnyAccount(storageKey);
+        }
+        return instances.get(storageKey);
+    }
+
     private Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> findAnyVpcEntry(String region, String vpcId) {
         if (vpcs instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")
@@ -5400,6 +5443,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return accountAware.findAnyAccountEntry(key(region, vpcId));
         }
         return vpcs.get(key(region, vpcId)).map(v -> new AccountAwareStorageBackend.OwnedEntry<>(null, v));
+    }
+
+    /**
+     * Resolves the owning account of a VPC across account partitions when the VPC exists in Floci.
+     * Cross-service consumers such as Route 53 use this to enforce AWS ownership rules without
+     * changing the public EC2 API surface. An empty result means the VPC is not modelled locally.
+     */
+    public Optional<String> findVpcOwnerAccount(String region, String vpcId) {
+        return findAnyVpcEntry(region, vpcId).map(AccountAwareStorageBackend.OwnedEntry::account);
     }
 
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,

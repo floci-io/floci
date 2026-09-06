@@ -18,7 +18,7 @@ The Bedrock management plane (`aws bedrock ...`: `ListFoundationModels`, `GetFou
 |-----------|----------|-------|
 | `Converse` | `POST /model/{modelId}/converse` | `stub`: returns a static assistant message. `proxy`: forwards to the configured OpenAI-compatible backend and translates the reply. |
 | `InvokeModel` | `POST /model/{modelId}/invoke` | Returns Anthropic-shaped body for `anthropic.*` and `*.anthropic.*` model ids; generic `{"outputs": [...]}` shape otherwise. Not proxied yet — always the stub response, regardless of backend. |
-| `ConverseStream` | `POST /model/{modelId}/converse-stream` | `stub`: emits a static assistant turn as `messageStart`/`contentBlockDelta`/`contentBlockStop`/`messageStop`/`metadata` events. `proxy`: forwards a streaming request to the configured OpenAI-compatible backend and translates the SSE response into the same event sequence. Response body is `application/vnd.amazon.eventstream`-framed, built in one shot rather than incrementally chunked. |
+| `ConverseStream` | `POST /model/{modelId}/converse-stream` | `stub`: emits a static assistant turn as `messageStart`/`contentBlockDelta`/`contentBlockStop`/`messageStop`/`metadata` events. `proxy`: forwards a streaming request to the configured OpenAI-compatible backend and translates each SSE chunk into a Bedrock event as it arrives. Text deltas reach the client incrementally, not all at once. Response body is `application/vnd.amazon.eventstream`-framed. If the upstream stream ends without a `finish_reason` or `"[DONE]"` (e.g. a dropped connection), the failure is reported as an in-band `modelStreamErrorException` event, since the HTTP 200 is already committed by the time streaming starts, matching real Bedrock's own behavior for a mid-stream failure. |
 | `InvokeModelWithResponseStream` | `POST /model/{modelId}/invoke-with-response-stream` | Returns 501 `UnsupportedOperationException` |
 
 `modelId` is URL-decoded by JAX-RS and echoed verbatim. Plain model ids (e.g. `anthropic.claude-3-haiku-20240307-v1:0`), inference-profile ids (e.g. `us.anthropic.claude-3-5-sonnet-20241022-v2:0`), and full ARNs containing slashes (e.g. `arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0`) are all accepted.
@@ -89,6 +89,6 @@ print(resp["output"]["message"]["content"][0]["text"])
 - Real model inference with the `stub` backend (always returns a fixed string).
 - `InvokeModel` against the `proxy` backend (still returns the stub response).
 - `InvokeModelWithResponseStream` returns 501, regardless of backend.
-- `ConverseStream` responses are built in one shot and returned as a complete event-stream body, not incrementally chunked over the wire.
+- `ConverseStream` tool calls are still accumulated across chunks and emitted as a single complete `contentBlockDelta` once the stream ends, rather than as incremental argument fragments — SDKs consume both the same way, since they concatenate `delta.toolUse.input` across events for a given `contentBlockIndex` before parsing it as JSON.
 - Bedrock management plane (`ListFoundationModels`, `GetFoundationModel`, model customisation).
 - Bedrock Agents, Knowledge Bases, Guardrails, provisioned throughput.

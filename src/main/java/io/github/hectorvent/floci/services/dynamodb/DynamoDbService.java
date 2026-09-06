@@ -106,6 +106,7 @@ public class DynamoDbService implements ResourceProvider {
     private DynamoDbStreamService streamService;
     private KinesisStreamingForwarder kinesisForwarder;
     private S3Service s3Service;
+    private static final long MAX_DYNAMODB_LIST_INDEX = 4_294_967_294L;
 
     @Inject
     public DynamoDbService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -480,7 +481,22 @@ public class DynamoDbService implements ResourceProvider {
         if (streamService != null) {
             streamService.deleteStream(canonicalTableName, region);
         }
+        if (kinesisForwarder != null) {
+            // Discard any buffered CDC records and stop draining: the destination stream is gone.
+            kinesisForwarder.onTableDeleted(regionResolver.getAccountId(), region, canonicalTableName);
+        }
         LOG.infov("Deleted table: {0}", canonicalTableName);
+    }
+
+    /**
+     * Notify the CDC forwarder that a Kinesis streaming destination was disabled so it discards any
+     * buffered records for it and stops draining. {@code tableName} must be the resolved (canonical)
+     * table name, the same value the forward path keys destination state on. No-op without a forwarder.
+     */
+    public void onKinesisStreamingDestinationDisabled(String tableName, String streamArn, String region) {
+        if (kinesisForwarder != null) {
+            kinesisForwarder.onDestinationDisabled(regionResolver.getAccountId(), region, tableName, streamArn);
+        }
     }
 
     public List<String> listTables(String region) {
@@ -571,12 +587,16 @@ public class DynamoDbService implements ResourceProvider {
             LOG.tracev("Put item in {0}: key={1} item={2}", canonicalTableName, itemKey, item);
 
             String eventName = existing == null ? "INSERT" : "MODIFY";
+            // Captured in request scope on purpose: this event may be deferred to the batch drain,
+            // and resolving the account inside the lambda would fall back to the default account,
+            // which is the ambient-account bug this commit exists to remove.
+            String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
                     streamService.captureEvent(canonicalTableName, eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
-                    kinesisForwarder.forward(eventName, existing, item, table, region);
+                    kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
                 }
             };
             if (deferredStreamEvents != null) {
@@ -660,12 +680,16 @@ public class DynamoDbService implements ResourceProvider {
             LOG.tracev("Deleted item from {0}: key={1} removed={2}", canonicalTableName, itemKey, removed);
 
             if (removed != null) {
+                // Captured in request scope on purpose: this event may be deferred to the batch drain,
+                // and resolving the account inside the lambda would fall back to the default account,
+                // which is the ambient-account bug this commit exists to remove.
+                String ownerAccountId = regionResolver.getAccountId();
                 Runnable streamEvent = () -> {
                     if (streamService != null) {
                         streamService.captureEvent(canonicalTableName, "REMOVE", removed, null, table, region);
                     }
                     if (kinesisForwarder != null) {
-                        kinesisForwarder.forward("REMOVE", removed, null, table, region);
+                        kinesisForwarder.forward("REMOVE", removed, null, table, region, ownerAccountId);
                     }
                 };
                 if (deferredStreamEvents != null) {
@@ -828,12 +852,16 @@ public class DynamoDbService implements ResourceProvider {
             LOG.tracev("Updated item in {0}: key={1} updateExpression={2} item={3}",
                     canonicalTableName, itemKey, updateExpression, item);
 
+            // Captured in request scope on purpose: this event may be deferred to the batch drain,
+            // and resolving the account inside the lambda would fall back to the default account,
+            // which is the ambient-account bug this commit exists to remove.
+            String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
                     streamService.captureEvent(canonicalTableName, "MODIFY", existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
-                    kinesisForwarder.forward("MODIFY", existing, item, table, region);
+                    kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
                 }
             };
             if (deferredStreamEvents != null) {
@@ -1840,7 +1868,9 @@ public class DynamoDbService implements ResourceProvider {
                         streamService.captureEvent(table.getTableName(), "REMOVE", removed, null, table, region);
                     }
                     if (kinesisForwarder != null) {
-                        kinesisForwarder.forward("REMOVE", removed, null, table, region);
+                        // Out of request scope here: pass the table owner's account explicitly so the CDC
+                        // record lands in the owner's stream, not the default account's same-named stream.
+                        kinesisForwarder.forward("REMOVE", removed, null, table, region, accountId);
                     }
                 }
             }
@@ -2470,51 +2500,84 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     // Tokenizes a DynamoDB path like "a.b[0].c" or "#l[5]" into a list of
-    // String (attr name) and Integer (list index) tokens.
+    // String (attr name) and Long (list index) tokens.
     private List<Object> parsePath(String path, JsonNode exprAttrNames) {
         List<Object> tokens = new ArrayList<>();
         for (String dotSeg : path.split("\\.")) {
             dotSeg = dotSeg.trim();
             if (dotSeg.isEmpty()) continue;
+
             int brk = dotSeg.indexOf('[');
             if (brk < 0) {
                 tokens.add(resolveAttributeName(dotSeg, exprAttrNames));
             } else {
                 String namePart = dotSeg.substring(0, brk);
-                if (!namePart.isEmpty()) tokens.add(resolveAttributeName(namePart, exprAttrNames));
+                if (!namePart.isEmpty()) {
+                    tokens.add(resolveAttributeName(namePart, exprAttrNames));
+                }
+
                 String rest = dotSeg.substring(brk);
                 int p = 0;
+
                 while (p < rest.length() && rest.charAt(p) == '[') {
                     int close = rest.indexOf(']', p);
                     if (close < 0) break;
-                    tokens.add(Integer.parseInt(rest.substring(p + 1, close)));
+
+                    String indexText = rest.substring(p + 1, close);
+
+                    final long index;
+                    try {
+                        index = Long.parseLong(indexText);
+                    } catch (NumberFormatException e) {
+                        throw new AwsException(
+                                "ValidationException",
+                                "Invalid list index: " + indexText,
+                                400);
+                    }
+
+                    if (index < 0 || index > MAX_DYNAMODB_LIST_INDEX) {
+                        throw new AwsException(
+                                "ValidationException",
+                                "1 validation error detected: Invalid UpdateExpression: "
+                                        + "List index is not within the allowable range; index: ["
+                                        + indexText
+                                        + "]. The maximum allowed index is 4294967294",
+                                400);
+                    }
+
+                    tokens.add(index);
                     p = close + 1;
                 }
             }
         }
         return tokens;
     }
+    /**
+     * Replaces the element at idx when the index is within the list bounds;
+     * otherwise appends the value to the end of the list.
+    */
 
-    // Pads arr with NULL elements up to idx-1, then sets/appends value at idx.
-    private void padAndSet(ArrayNode arr, int idx, JsonNode value) {
-        ObjectNode nullNode =
-                JsonNodeFactory.instance.objectNode();
-        nullNode.put("NULL", true);
-        while (arr.size() < idx) arr.add(nullNode.deepCopy());
-        if (idx < arr.size()) arr.set(idx, value);
-        else arr.add(value);
+    private void setOrAppend(ArrayNode arr, long idx, JsonNode value) {
+        if (idx < arr.size()) {
+            arr.set((int) idx, value);
+        } else {
+            arr.add(value);
+        }
     }
-
+    
     private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
         List<Object> tokens = parsePath(path, exprAttrNames);
         if (tokens.isEmpty()) return;
 
         if (tokens.size() == 1) {
-            if (tokens.get(0) instanceof String attrName) item.set(attrName, value);
+            if (tokens.get(0) instanceof String attrName) {
+                item.set(attrName, value);
+            }
             return;
         }
 
         JsonNode container = item;
+
         for (int i = 0; i < tokens.size() - 1; i++) {
             Object tok = tokens.get(i);
             Object nextTok = tokens.get(i + 1);
@@ -2522,70 +2585,124 @@ public class DynamoDbService implements ResourceProvider {
 
             if (tok instanceof String attrName) {
                 if (!(container instanceof ObjectNode obj)) return;
+
                 JsonNode child = obj.get(attrName);
+
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
                         if (child == null) {
                             ObjectNode newMap = objectMapper.createObjectNode();
                             newMap.set(finalAttr, value);
+
                             ObjectNode wrapper = objectMapper.createObjectNode();
                             wrapper.set("M", newMap);
+
                             obj.set(attrName, wrapper);
                         } else if (!child.has("M")) {
-                            throw new AwsException("ValidationException",
-                                    "The document path provided in the update expression is invalid for update", 400);
+                            throw new AwsException(
+                                    "ValidationException",
+                                    "The document path provided in the update expression is invalid for update",
+                                    400);
                         } else {
                             ((ObjectNode) child.get("M")).set(finalAttr, value);
                         }
-                    } else if (nextTok instanceof Integer finalIdx) {
-                        if (child == null || !child.has("L")) throw new AwsException("ValidationException",
-                                "The document path provided in the update expression is invalid for update", 400);
-                        padAndSet((ArrayNode) child.get("L"), finalIdx, value);
+                    } else if (nextTok instanceof Long finalIdx) {
+                        if (child == null || !child.has("L")) {
+                            throw new AwsException(
+                                    "ValidationException",
+                                    "The document path provided in the update expression is invalid for update",
+                                    400);
+                        }
+
+                        setOrAppend((ArrayNode) child.get("L"), finalIdx, value);
                     }
+
                     return;
                 }
+
                 if (nextTok instanceof String) {
                     if (child == null) {
                         ObjectNode newMap = objectMapper.createObjectNode();
                         ObjectNode wrapper = objectMapper.createObjectNode();
                         wrapper.set("M", newMap);
                         obj.set(attrName, wrapper);
+
                         container = newMap;
                     } else if (!child.has("M")) {
-                        throw new AwsException("ValidationException",
-                                "The document path provided in the update expression is invalid for update", 400);
+                        throw new AwsException(
+                                "ValidationException",
+                                "The document path provided in the update expression is invalid for update",
+                                400);
                     } else {
                         container = child.get("M");
                     }
-                } else if (nextTok instanceof Integer) {
-                    if (child == null || !child.has("L")) throw new AwsException("ValidationException",
-                            "The document path provided in the update expression is invalid for update", 400);
+
+                } else if (nextTok instanceof Long) {
+                    if (child == null || !child.has("L")) {
+                        throw new AwsException(
+                                "ValidationException",
+                                "The document path provided in the update expression is invalid for update",
+                                400);
+                    }
+
                     container = child.get("L");
                 }
-            } else if (tok instanceof Integer listIdx) {
+
+            } else if (tok instanceof Long listIdx) {
                 if (!(container instanceof ArrayNode arr)) return;
-                if (listIdx >= arr.size()) throw new AwsException("ValidationException",
-                        "The document path provided in the update expression is invalid for update", 400);
-                JsonNode element = arr.get(listIdx);
+
+                if (listIdx >= arr.size()) {
+                    throw new AwsException(
+                            "ValidationException",
+                            "The document path provided in the update expression is invalid for update",
+                            400);
+                }
+
+                JsonNode element = arr.get(listIdx.intValue());
+
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
-                        if (!element.has("M")) throw new AwsException("ValidationException",
-                                "The document path provided in the update expression is invalid for update", 400);
+                        if (!element.has("M")) {
+                            throw new AwsException(
+                                    "ValidationException",
+                                    "The document path provided in the update expression is invalid for update",
+                                    400);
+                        }
+
                         ((ObjectNode) element.get("M")).set(finalAttr, value);
-                    } else if (nextTok instanceof Integer finalIdx) {
-                        if (!element.has("L")) throw new AwsException("ValidationException",
-                                "The document path provided in the update expression is invalid for update", 400);
-                        padAndSet((ArrayNode) element.get("L"), finalIdx, value);
+
+                    } else if (nextTok instanceof Long finalIdx) {
+                        if (!element.has("L")) {
+                            throw new AwsException(
+                                    "ValidationException",
+                                    "The document path provided in the update expression is invalid for update",
+                                    400);
+                        }
+
+                        setOrAppend((ArrayNode) element.get("L"), finalIdx, value);
                     }
+
                     return;
                 }
+
                 if (nextTok instanceof String) {
-                    if (!element.has("M")) throw new AwsException("ValidationException",
-                            "The document path provided in the update expression is invalid for update", 400);
+                    if (!element.has("M")) {
+                        throw new AwsException(
+                                "ValidationException",
+                                "The document path provided in the update expression is invalid for update",
+                                400);
+                    }
+
                     container = element.get("M");
-                } else if (nextTok instanceof Integer) {
-                    if (!element.has("L")) throw new AwsException("ValidationException",
-                            "The document path provided in the update expression is invalid for update", 400);
+
+                } else if (nextTok instanceof Long) {
+                    if (!element.has("L")) {
+                        throw new AwsException(
+                                "ValidationException",
+                                "The document path provided in the update expression is invalid for update",
+                                400);
+                    }
+
                     container = element.get("L");
                 }
             }
@@ -2608,20 +2725,20 @@ public class DynamoDbService implements ResourceProvider {
                 if (nextTok instanceof String) {
                     if (!child.has("M")) return null;
                     current = child.get("M");
-                } else if (nextTok instanceof Integer) {
+                } else if (nextTok instanceof Long) {
                     if (!child.has("L")) return null;
                     current = child.get("L");
                 } else return null;
-            } else if (tok instanceof Integer listIdx) {
+            } else if (tok instanceof Long listIdx) {
                 if (!current.isArray() || listIdx >= current.size()) return null;
-                JsonNode element = current.get(listIdx);
+                JsonNode element = current.get(listIdx.intValue());
                 if (element == null) return null;
                 if (isLast) return element;
                 Object nextTok = tokens.get(i + 1);
                 if (nextTok instanceof String) {
                     if (!element.has("M")) return null;
                     current = element.get("M");
-                } else if (nextTok instanceof Integer) {
+                } else if (nextTok instanceof Long) {
                     if (!element.has("L")) return null;
                     current = element.get("L");
                 } else return null;
@@ -2639,11 +2756,14 @@ public class DynamoDbService implements ResourceProvider {
         if (tokens.isEmpty()) return;
 
         if (tokens.size() == 1) {
-            if (tokens.get(0) instanceof String attrName) item.remove(attrName);
+            if (tokens.get(0) instanceof String attrName) {
+                item.remove(attrName);
+            }
             return;
         }
 
         JsonNode container = item;
+
         for (int i = 0; i < tokens.size() - 1; i++) {
             Object tok = tokens.get(i);
             Object nextTok = tokens.get(i + 1);
@@ -2651,46 +2771,57 @@ public class DynamoDbService implements ResourceProvider {
 
             if (tok instanceof String attrName) {
                 if (!(container instanceof ObjectNode obj)) return;
+
                 JsonNode child = obj.get(attrName);
+
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
                         if (child == null || !child.has("M")) return;
                         ((ObjectNode) child.get("M")).remove(finalAttr);
-                    } else if (nextTok instanceof Integer finalIdx) {
+                    } else if (nextTok instanceof Long finalIdx) {
                         if (child == null || !child.has("L")) return;
-                        ArrayNode lArr =
-                                (ArrayNode) child.get("L");
-                        if (finalIdx < lArr.size()) lArr.remove(finalIdx);
+
+                        ArrayNode lArr = (ArrayNode) child.get("L");
+                        if (finalIdx < lArr.size()) {
+                            lArr.remove(finalIdx.intValue());
+                        }
                     }
                     return;
                 }
+
                 if (nextTok instanceof String) {
                     if (child == null || !child.has("M")) return;
                     container = child.get("M");
-                } else if (nextTok instanceof Integer) {
+                } else if (nextTok instanceof Long) {
                     if (child == null || !child.has("L")) return;
                     container = child.get("L");
                 }
-            } else if (tok instanceof Integer listIdx) {
+
+            } else if (tok instanceof Long listIdx) {
                 if (!(container instanceof ArrayNode arr)) return;
                 if (listIdx >= arr.size()) return;
-                JsonNode element = arr.get(listIdx);
+
+                JsonNode element = arr.get(listIdx.intValue());
+
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
                         if (!element.has("M")) return;
                         ((ObjectNode) element.get("M")).remove(finalAttr);
-                    } else if (nextTok instanceof Integer finalIdx) {
+                    } else if (nextTok instanceof Long finalIdx) {
                         if (!element.has("L")) return;
-                        ArrayNode lArr =
-                                (ArrayNode) element.get("L");
-                        if (finalIdx < lArr.size()) lArr.remove(finalIdx);
+
+                        ArrayNode lArr = (ArrayNode) element.get("L");
+                        if (finalIdx < lArr.size()) {
+                            lArr.remove(finalIdx.intValue());
+                        }
                     }
                     return;
                 }
+
                 if (nextTok instanceof String) {
                     if (!element.has("M")) return;
                     container = element.get("M");
-                } else if (nextTok instanceof Integer) {
+                } else if (nextTok instanceof Long) {
                     if (!element.has("L")) return;
                     container = element.get("L");
                 }

@@ -341,11 +341,13 @@ public class LambdaController {
         return Response.status(202).entity(buildEsmResponse(esm)).build();
     }
 
-    private Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
+    Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("UUID", esm.getUuid());
         node.put("FunctionArn", esm.getFunctionArn());
-        node.put("EventSourceArn", esm.getEventSourceArn());
+        if (esm.getEventSourceArn() != null) {
+            node.put("EventSourceArn", esm.getEventSourceArn());
+        }
         node.put("BatchSize", esm.getBatchSize());
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
@@ -368,6 +370,19 @@ public class LambdaController {
             ObjectNode destinationConfig = node.putObject("DestinationConfig");
             ObjectNode onFailure = destinationConfig.putObject("OnFailure");
             onFailure.put("Destination", esm.getDestinationConfig().getOnFailure().getDestination());
+        }
+
+        if (esm.getSelfManagedEventSource() != null) {
+            node.set("SelfManagedEventSource", objectMapper.valueToTree(esm.getSelfManagedEventSource()));
+        }
+
+        if (esm.getTopics() != null && !esm.getTopics().isEmpty()) {
+            ArrayNode topicsNode = node.putArray("Topics");
+            esm.getTopics().forEach(topicsNode::add);
+        }
+
+        if (esm.getSourceAccessConfigurations() != null && !esm.getSourceAccessConfigurations().isEmpty()) {
+            node.set("SourceAccessConfigurations", objectMapper.valueToTree(esm.getSourceAccessConfigurations()));
         }
 
         if (esm.getFunctionResponseTypes() != null) {

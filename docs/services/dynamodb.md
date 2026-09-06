@@ -165,3 +165,37 @@ aws dynamodb list-exports \
 ```
 
 The export writes to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/data/` as one or more `.json.gz` files, along with `manifest-summary.json` and `manifest-files.json`, the same layout as real AWS DynamoDB exports.
+
+## Kinesis change data capture (CDC)
+
+When a table has an **ACTIVE** Kinesis streaming destination (see
+`EnableKinesisStreamingDestination`), every item change, `INSERT`, `MODIFY`, and `REMOVE`,
+including TTL expirations, is forwarded to the destination stream as a Kinesis record in the
+AWS CDC envelope (`eventName`, `dynamodb.Keys`, `NewImage`/`OldImage`, `ApproximateCreationDateTime`).
+
+### Delivery contract
+
+Forwarding is **bounded best-effort with in-process retry**. A write is never blocked or failed by
+the destination stream: the change event is enqueued and delivered on a background drain, so a slow or
+unavailable Kinesis stream cannot stall a `PutItem`/`UpdateItem`/`DeleteItem` or the TTL sweep.
+
+The drain gives these guarantees per destination:
+
+- **Retries** transient/unknown send failures with capped exponential backoff (250 ms doubling to an
+  8 s cap, up to 10 attempts) rather than dropping the record on the first exception.
+- **Preserves FIFO** across retries: the head record is not skipped past (stronger than AWS, which may
+  reorder or duplicate).
+- **Drops a poison record** immediately on a deterministic terminal failure
+  (`ValidationException`/`InvalidArgumentException`) so it cannot wedge the queue behind it.
+- **Gives up an episode** after the retry budget is exhausted, dropping the buffered records and marking
+  the destination `GAVE_UP`; a later change event starts a fresh episode and self-heals once the stream
+  recovers.
+- **Bounds memory** at 1000 buffered records per destination, evicting the oldest on overflow.
+
+Disabling a destination or deleting the table discards that destination's buffered records and stops all
+future sends for it; a send already in flight at that instant may still complete (teardown cannot recall
+an in-flight request, an inherent and harmless race). Buffered records are held **in memory only**: they
+are not durable and are lost on restart (this is an emulator, not an at-least-once pipeline). Records that are permanently dropped (terminal, give-up,
+or overflow) are counted and logged, and per-destination delivery health (forwarded/retried/dropped
+counts, queue depth, last error, and current health) is tracked for inspection.
+```

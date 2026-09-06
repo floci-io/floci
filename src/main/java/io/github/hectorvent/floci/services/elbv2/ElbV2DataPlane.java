@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
@@ -62,6 +63,9 @@ public class ElbV2DataPlane {
     EmulatorConfig config;
 
     @Inject
+    TlsProxyServer tlsProxyServer;
+
+    @Inject
     LambdaService lambdaService;
 
     @Inject
@@ -71,6 +75,8 @@ public class ElbV2DataPlane {
     ObjectMapper objectMapper;
 
     private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicBoolean releaseHandlerRegistered =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Integer, Map<String, String>> listenersByHostAndPort = new ConcurrentHashMap<>();
     private final Map<String, ListenerBinding> listenerBindings = new ConcurrentHashMap<>();
     private final Map<String, AtomicReference<List<CompiledRule>>> ruleChains = new ConcurrentHashMap<>();
@@ -114,6 +120,7 @@ public class ElbV2DataPlane {
         listenerBindings.put(listenerArn, binding);
         listenersByHostAndPort.computeIfAbsent(binding.port(), ignored -> new ConcurrentHashMap<>())
                 .put(binding.host(), listenerArn);
+        ensureReleaseHandlerRegistered();
         servers.computeIfAbsent(binding.port(), this::startPortServer);
     }
 
@@ -129,6 +136,7 @@ public class ElbV2DataPlane {
             listenerRegions.put(listenerArn, region);
             listenersByHostAndPort.computeIfAbsent(newBinding.port(), ignored -> new ConcurrentHashMap<>())
                     .put(newBinding.host(), listenerArn);
+            ensureReleaseHandlerRegistered();
             servers.computeIfAbsent(newBinding.port(), this::startPortServer);
             return;
         }
@@ -163,7 +171,71 @@ public class ElbV2DataPlane {
         }
     }
 
+    /**
+     * Ports Floci reserves for itself, which a load balancer listener must not take.
+     *
+     * <p>The emulator's own port is always reserved. With TLS enabled the TLS proxy also binds
+     * {@code floci.tls.aws-https-port} (443 by default), because CDK's custom-resource
+     * {@code cfn-response} callback hardcodes {@code https://} and ignores the port in the
+     * ResponseURL, so it always lands on 443.
+     *
+     * <p>Without this the two raced: whichever started first won. A stack restored from
+     * persistence could hand 443 to an ALB listener, which then answered CDK's callback in plain
+     * HTTP and hung every {@code Custom::} resource - and the reverse on a fresh start. Yielding
+     * here makes the outcome deterministic and keeps the emulator's own control path working. To
+     * give 443 to load balancers instead, set {@code floci.tls.aws-https-port=0} or disable TLS.
+     */
+    // Package-private for ElbV2ReservedPortTest.
+    boolean isReservedByFloci(int port) {
+        if (port == config.port()) {
+            return true;
+        }
+        // Ask the proxy whether it actually holds the port rather than inferring it from config.
+        // Binding the AWS-HTTPS port is privileged and its failure is non-fatal, so a port the
+        // proxy never acquired must stay available to listeners instead of going unserved.
+        return tlsProxyServer.reservesPort(port);
+    }
+
+    /**
+     * Binds any registered listener whose port the proxy has just released. Yielding a port whose
+     * bind had not resolved yet is the safe default, but if that bind then fails nothing else
+     * would ever retry the listener, leaving it registered with no data plane and the port free.
+     */
+    private void bindListenersWaitingOn(int port) {
+        if (listenersByHostAndPort.containsKey(port)) {
+            servers.computeIfAbsent(port, this::startPortServer);
+        }
+    }
+
+    /**
+     * Subscribes to the proxy's released ports, once, on the first listener to need it: the data
+     * plane is only live once a listener exists, and this keeps the proxy out of the mock-mode
+     * path entirely.
+     *
+     * <p>Placement is load-bearing on both sides. It runs after the listener is in
+     * {@code listenersByHostAndPort}, so the replay of ports already given up finds it, and before
+     * {@code servers.computeIfAbsent}, because {@code onPortReleased} replays synchronously: doing
+     * this from inside the mapping function re-entered {@code computeIfAbsent} for the very key it
+     * was still computing, which a {@link ConcurrentHashMap} rejects outright.
+     */
+    private void ensureReleaseHandlerRegistered() {
+        if (releaseHandlerRegistered.compareAndSet(false, true)) {
+            tlsProxyServer.onPortReleased(this::bindListenersWaitingOn);
+        }
+    }
+
     private HttpServer startPortServer(int port) {
+        if (isReservedByFloci(port)) {
+            // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
+            // The emulator's own port cannot be handed over, so the two cases need different
+            // advice: freeing floci.tls.aws-https-port is only meaningful for the TLS proxy.
+            String remedy = port == config.port()
+                    ? "This is the emulator's own port, so it cannot be freed; give the listener a different port."
+                    : "Set floci.tls.aws-https-port=0 (or disable TLS) to free it.";
+            LOG.warnv("ELBv2 listener port {0} is reserved by Floci itself; the listener is "
+                    + "registered but serves no traffic. {1}", String.valueOf(port), remedy);
+            return null;
+        }
         HttpServer server = vertx.createHttpServer(new HttpServerOptions()
                 .setHost("0.0.0.0")
                 .setPort(port));

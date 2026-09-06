@@ -899,6 +899,62 @@ class EsmIntegrationTest {
             .body("message", containsString("only supported for Amazon Kinesis"));
     }
 
+    // ──────────────────────────── Self-Managed Kafka ESM ────────────────────────────
+
+    @Test
+    @Order(80)
+    void createSelfManagedKafkaEventSourceMapping() {
+        // Create Self-Managed Apache Kafka ESM with SelfManagedEventSource, Topics, and StartingPosition
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "SelfManagedEventSource": {
+                        "Endpoints": {
+                            "KAFKA_BOOTSTRAP_SERVERS": ["b-1.example.com:9092", "b-2.example.com:9092"]
+                        }
+                    },
+                    "Topics": ["orders", "payments"],
+                    "StartingPosition": "TRIM_HORIZON"
+                }
+                """.formatted(FUNCTION_NAME))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("UUID", notNullValue())
+            .body("State", equalTo("Enabled"))
+            .body("$", not(hasKey("EventSourceArn")))
+            .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
+                    hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
+            .body("Topics", hasItems("orders", "payments"))
+            .body("StartingPosition", equalTo("TRIM_HORIZON"))
+        .extract()
+            .path("UUID");
+
+        // Verify GET by UUID
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("UUID", equalTo(uuid))
+            .body("$", not(hasKey("EventSourceArn")))
+            .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
+                    hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
+            .body("Topics", hasItems("orders", "payments"))
+            .body("StartingPosition", equalTo("TRIM_HORIZON"));
+
+        // Verify DELETE by UUID
+        given()
+        .when()
+            .delete(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(202)
+            .body("UUID", equalTo(uuid));
+    }
+
     // ──────────────────────────── Multi-account ESM ────────────────────────────
 
     /**

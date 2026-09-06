@@ -32,7 +32,10 @@ import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
+import io.github.hectorvent.floci.services.macie2.MacieController;
+import io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController;
 import io.github.hectorvent.floci.services.aps.ApsController;
+import io.github.hectorvent.floci.services.controltower.ControlTowerControlController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
 import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
@@ -407,6 +410,12 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("SWBExternalService."), Set.of("sso"), Set.of(), Set.of()),
+                descriptor("macie2", "macie2", config.services().macie2().enabled(), true,
+                        "macie2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("macie2"), Set.of(), Set.of(MacieController.class)),
+                descriptor("access-analyzer", "accessanalyzer", config.services().accessanalyzer().enabled(), true,
+                        "accessanalyzer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("access-analyzer"), Set.of(), Set.of(AccessAnalyzerController.class)),
                 descriptor("autoscaling", "autoscaling", config.services().autoscaling().enabled(), true,
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -572,7 +581,7 @@ public class ResolvedServiceCatalog {
                         "controltower", storageMode(config.storage().services().controltower().mode(), config.storage().mode()),
                         config.storage().services().controltower().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("controltower"), Set.of(), Set.of(ControlTowerController.class)),
+                        Set.of(), Set.of("controltower"), Set.of(), Set.of(ControlTowerController.class, ControlTowerControlController.class)),
                 descriptor("aps", "aps", config.services().aps().enabled(), true,
                         "aps", storageMode(config.storage().services().aps().mode(), config.storage().mode()),
                         config.storage().services().aps().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

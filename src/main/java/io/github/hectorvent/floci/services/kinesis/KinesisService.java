@@ -557,28 +557,62 @@ public class KinesisService implements ResourceProvider {
 
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey,
                                                 String explicitHashKey, String region) {
+        return putRecordInternal(null, streamName, data, partitionKey, explicitHashKey, region);
+    }
+
+    /**
+     * Append a record on behalf of a specific account. Used by producers that run outside request scope
+     * (the DynamoDB TTL sweep and DynamoDB→Kinesis CDC forwarding) so the record lands in the table
+     * owner's stream rather than the ambient/default account's same-named stream. A {@code null}
+     * accountId behaves exactly like {@link #putRecord}.
+     */
+    public String putRecordForAccount(String accountId, String streamName, byte[] data, String partitionKey,
+                                      String region) {
+        return putRecordInternal(accountId, streamName, data, partitionKey, null, region).sequenceNumber();
+    }
+
+    private PutRecordResult putRecordInternal(String accountId, String streamName, byte[] data,
+                                              String partitionKey, String explicitHashKey, String region) {
         String key = regionKey(region, streamName);
-        KinesisStream stream = resolveStream(streamName, region);
-        validateExplicitHashKey(explicitHashKey);
-        validateRecordSize(stream, data, partitionKey);
         putRecordBeforeLockHook.run();
 
         // Serialize shard selection, sequence allocation, append and persistence per stream so
         // concurrent producers can neither lose an append (plain ArrayList) nor store records
         // out of sequence order (which would break AT_/AFTER_SEQUENCE_NUMBER scans and WAL replay).
+        // The lock is keyed on region+streamName (NOT the account): an account-qualified key would stop
+        // explicit-account appends from serializing against request-path producers on the same stream,
+        // reintroducing the append race. Cross-account same-named streams therefore share one monitor
+        // (over-coarse but safe).
         synchronized (lockFor(key)) {
-            // Re-resolve under the lock. deleteStream holds this same monitor, so a stream deleted
-            // between the resolve above and here is now absent from the store. Appending to and
-            // persisting the stale pre-delete instance would resurrect a deleted stream, so bind to
-            // the instance currently in the store and fail like any missing stream if it is gone.
-            KinesisStream current = resolveStream(streamName, region);
+            // Resolve under the lock, not before it. Resolving a legacy unprefixed stream MIGRATES it,
+            // which is a write: the explicit-account path moves it into the account partition behind an
+            // ownership predicate, while AccountAwareStorageBackend.get adopts it into the request
+            // account with no ownership check and no synchronization. Resolved outside this monitor,
+            // an ambient producer and the owner's producer could migrate the same stream concurrently
+            // and fork it across partitions. deleteStream holds this same monitor too, so a stream
+            // deleted before we get here is absent and this fails like any other missing stream rather
+            // than appending to a stale instance and resurrecting it.
+            KinesisStream current = resolveStreamForAccountMigrating(accountId, streamName, region);
+            // Ordered exactly as before this moved under the monitor: a missing stream still reports
+            // ResourceNotFoundException ahead of an invalid ExplicitHashKey, and the size check runs
+            // against the same lock-protected instance that shard selection and the append use.
+            validateExplicitHashKey(explicitHashKey);
+            validateRecordSize(current, data, partitionKey);
             KinesisShard shard = selectShard(current, partitionKey, explicitHashKey);
             String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());
             putRecordAppendHook.run();
             KinesisRecord record = new KinesisRecord(data, partitionKey, sequenceNumber, Instant.now());
             shard.addRecord(record);
-            store.put(key, current);
+            persistStream(accountId, key, current);
             return new PutRecordResult(sequenceNumber, shard.getShardId());
+        }
+    }
+
+    private void persistStream(String accountId, String key, KinesisStream stream) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<KinesisStream> aware) {
+            aware.putForAccount(accountId, key, stream);
+        } else {
+            store.put(key, stream);
         }
     }
 
@@ -800,6 +834,24 @@ public class KinesisService implements ResourceProvider {
     private KinesisStream resolveStreamForAccount(String accountId, String streamName, String region) {
         if (accountId != null && store instanceof AccountAwareStorageBackend<KinesisStream> aware) {
             return aware.getForAccount(accountId, regionKey(region, streamName))
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Stream " + streamName + " not found", 400));
+        }
+        return resolveStream(streamName, region);
+    }
+
+    /**
+     * Resolve for an out-of-request-scope PRODUCER (CDC forwarding, TTL sweep), migrating a legacy
+     * unprefixed stream into the account partition on write, mirroring the ambient {@code store.get()}
+     * fallback the producer used before account-scoping, so an installation with an existing CDC
+     * destination and an unmigrated stream keeps forwarding after upgrade. Ownership is validated by the
+     * stream's own accountId/ARN so one tenant cannot adopt another's unprefixed stream.
+     */
+    private KinesisStream resolveStreamForAccountMigrating(String accountId, String streamName, String region) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<KinesisStream> aware) {
+            return aware.getForAccountMigratingLegacy(accountId, regionKey(region, streamName),
+                            s -> accountId.equals(s.getAccountId())
+                                    || (s.getStreamArn() != null && s.getStreamArn().contains(":" + accountId + ":")))
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "Stream " + streamName + " not found", 400));
         }

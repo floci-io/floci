@@ -36,12 +36,16 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2VpcEnd
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2VpcGatewayAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcrCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.FirehoseCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.IamUserCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.IotCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IotDomainConfigurationCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KinesisCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaAddressingCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEventSourceMappingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
@@ -67,6 +71,7 @@ import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iot.IotDomainConfigurationService;
+import io.github.hectorvent.floci.services.iot.IotService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -149,6 +154,7 @@ final class CfnProvisionerFixture {
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
         private IotDomainConfigurationService iotDomainConfigurationService;
+        private IotService iotService;
         private LambdaMicrovmsService lambdaMicrovmsService;
         private AwsConfigService awsConfigService;
         private OrganizationsService organizationsService;
@@ -228,9 +234,11 @@ final class CfnProvisionerFixture {
             }
             if (iamService != null) {
                 discovered.add(new IamRoleCfnProvisioner(iamService));
+                discovered.add(new IamUserCfnProvisioner(iamService));
             }
             if (ecsService != null) {
                 discovered.add(new EcsCapacityCfnProvisioner(ecsService));
+                discovered.add(new EcsCfnProvisioner(ecsService));
             }
             if (apiGatewayService != null) {
                 discovered.add(new ApiGatewayAccountCfnProvisioner(apiGatewayService));
@@ -245,12 +253,16 @@ final class CfnProvisionerFixture {
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
                 discovered.add(new LambdaVersionAliasCfnProvisioner(lambdaService));
+                discovered.add(new LambdaEventSourceMappingCfnProvisioner(lambdaService));
             }
             if (flowLogService != null) {
                 discovered.add(new Ec2FlowLogCfnProvisioner(flowLogService));
             }
             if (iotDomainConfigurationService != null) {
                 discovered.add(new IotDomainConfigurationCfnProvisioner(iotDomainConfigurationService));
+            }
+            if (iotService != null) {
+                discovered.add(new IotCfnProvisioner(iotService));
             }
             if (lambdaMicrovmsService != null) {
                 discovered.add(new LambdaMicrovmsCfnProvisioner(lambdaMicrovmsService));
@@ -469,6 +481,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder iot(IotService v) {
+            this.iotService = v;
+            return this;
+        }
+
         public Builder lambdaMicrovms(LambdaMicrovmsService v) {
             this.lambdaMicrovmsService = v;
             return this;
@@ -547,7 +564,6 @@ final class CfnProvisionerFixture {
                     objectMapper,
                     customResourceResponseStore,
                     reachableEndpoint,
-                    ecsService,
                     elbV2Service,
                     stepFunctionsService,
                     batchService,

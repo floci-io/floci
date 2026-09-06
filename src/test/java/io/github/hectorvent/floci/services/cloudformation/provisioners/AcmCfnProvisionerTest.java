@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
+import io.github.hectorvent.floci.services.acm.model.CertificateOptions;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.acm.model.ValidationMethod;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -27,6 +29,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -38,6 +41,7 @@ class AcmCfnProvisionerTest {
 
     private static final String REGION = "us-east-1";
     private static final String ARN = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+    private static final String NEW_ARN = "arn:aws:acm:us-east-1:000000000000:certificate/99999999-2222-3333-4444-555555555555";
 
     private final AcmService acm = mock(AcmService.class);
     private final AcmCfnProvisioner provisioner = new AcmCfnProvisioner(acm);
@@ -75,10 +79,23 @@ class AcmCfnProvisionerTest {
         return cert;
     }
 
+    /** What the store holds for {@code api.example.com} after a plain create, options included. */
+    private static Certificate storedCertificate(String transparencyLogging, String export) {
+        Certificate stored = certificate(ARN, "api.example.com");
+        stored.setSubjectAlternativeNames(List.of("api.example.com"));
+        stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
+        stored.setCertOptions(new CertificateOptions(transparencyLogging, export));
+        return stored;
+    }
+
+    private void stubRequestCertificate(String domainName, Certificate result) {
+        when(acm.requestCertificate(eq(domainName), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
+                .thenReturn(result);
+    }
+
     @Test
     void certificateSetsArnAsPhysicalIdAndCertificateArnAttribute() {
-        when(acm.requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
-                .thenReturn(certificate(ARN, "api.example.com"));
+        stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode().put("DomainName", "api.example.com");
 
@@ -90,8 +107,7 @@ class AcmCfnProvisionerTest {
 
     @Test
     void certificatePassesTemplatePropertiesToRequestCertificate() {
-        when(acm.requestCertificate(any(), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
-                .thenReturn(certificate(ARN, "api.example.com"));
+        stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode()
                 .put("DomainName", "api.example.com")
@@ -102,19 +118,78 @@ class AcmCfnProvisionerTest {
 
         provisioner.provision(r, props, ctx());
 
+        // No CertificateExport or CertificateTransparencyLoggingPreference: the CloudFormation defaults apply.
         verify(acm).requestCertificate("api.example.com", List.of("www.example.com"), ValidationMethod.EMAIL,
-                null, KeyAlgorithm.EC_prime256v1, null, null, Map.of("env", "test"), REGION);
+                null, KeyAlgorithm.EC_prime256v1, null, new CertificateOptions("ENABLED", "DISABLED"),
+                Map.of("env", "test"), REGION);
     }
 
     @Test
     void validationMethodDefaultsToDns() {
-        when(acm.requestCertificate(any(), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
-                .thenReturn(certificate(ARN, "api.example.com"));
+        stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
 
         provisioner.provision(resource(), mapper.createObjectNode().put("DomainName", "api.example.com"), ctx());
 
         verify(acm).requestCertificate(eq("api.example.com"), eq(List.of()), eq(ValidationMethod.DNS), isNull(),
-                eq(KeyAlgorithm.RSA_2048), isNull(), isNull(), eq(Map.of()), eq(REGION));
+                eq(KeyAlgorithm.RSA_2048), isNull(), any(), eq(Map.of()), eq(REGION));
+    }
+
+    @Test
+    void certificateOptionsFromTheTemplateReachRequestCertificate() {
+        stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateExport", "ENABLED")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+
+        provisioner.provision(resource(), props, ctx());
+
+        verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
+                eq(new CertificateOptions("DISABLED", "ENABLED")), any(), eq(REGION));
+    }
+
+    @Test
+    void blankCertificateOptionValuesFallBackToTheDefaults() {
+        // The engine resolves {"Ref": "AWS::NoValue"} to "", so an Fn::If that omits a property
+        // arrives blank and must mean "absent", as it does on AWS.
+        stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateExport", "")
+                .put("CertificateTransparencyLoggingPreference", "");
+
+        provisioner.provision(resource(), props, ctx());
+
+        verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
+                eq(new CertificateOptions("ENABLED", "DISABLED")), any(), eq(REGION));
+    }
+
+    @Test
+    void invalidCertificateExportIsRejectedBeforeAnyServiceCall() {
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateExport", "yes");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), props, ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("CertificateExport"), failure.getMessage());
+        verifyNoInteractions(acm);
+    }
+
+    @Test
+    void invalidTransparencyLoggingPreferenceIsRejectedBeforeThePriorCertificateIsLookedUp() {
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateTransparencyLoggingPreference", "enabled");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), props, ctx(ARN)));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("CertificateTransparencyLoggingPreference"), failure.getMessage());
+        verifyNoInteractions(acm);
     }
 
     @Test
@@ -133,6 +208,7 @@ class AcmCfnProvisionerTest {
 
         verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(acm, never()).deleteCertificate(any(), any());
+        verify(acm, never()).updateCertificateOptions(any(), any(), any());
         verify(acm).removeTagsFromCertificate(ARN, List.of(Map.of("Key", "stale")), REGION);
         verify(acm).addTagsToCertificate(ARN, Map.of("env", "test"), REGION);
         assertEquals(ARN, r.getPhysicalId());
@@ -140,34 +216,212 @@ class AcmCfnProvisionerTest {
     }
 
     @Test
+    void updateWithUnchangedOptionsLeavesTheCertificateOptionsAlone() {
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        StackResource r = resource();
+
+        provisioner.provision(r, mapper.createObjectNode().put("DomainName", "api.example.com"), ctx(ARN));
+
+        verify(acm, never()).updateCertificateOptions(any(), any(), any());
+        verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(acm, never()).deleteCertificate(any(), any());
+        assertEquals(ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void updateChangingTransparencyLoggingPreferenceUpdatesTheCertificateInPlace() {
+        // Mutable in the registry schema; CloudFormation calls UpdateCertificateOptions on the
+        // existing certificate rather than replacing it.
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+
+        provisioner.provision(r, props, ctx(ARN));
+
+        verify(acm).updateCertificateOptions(ARN, new CertificateOptions("DISABLED", null), REGION);
+        verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(acm, never()).deleteCertificate(any(), any());
+        assertEquals(ARN, r.getPhysicalId());
+        assertEquals(Map.of("CertificateArn", ARN), r.getAttributes());
+    }
+
+    @Test
+    void updateAppliesTagsAndLoggingPreferenceTogether() {
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        when(acm.listTagsForCertificate(ARN, REGION)).thenReturn(Map.of());
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+        props.putArray("Tags").addObject().put("Key", "env").put("Value", "test");
+
+        provisioner.provision(resource(), props, ctx(ARN));
+
+        verify(acm).updateCertificateOptions(ARN, new CertificateOptions("DISABLED", null), REGION);
+        verify(acm).addTagsToCertificate(ARN, Map.of("env", "test"), REGION);
+        verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void updateReconcilesTagsBeforeTheLoggingPreferenceSoATagFailureLeavesTheOptionUntouched() {
+        // The tag calls carry the validation (reserved prefixes, limits); UpdateCertificateOptions can
+        // only fail when the certificate is gone. Running it last keeps a failed update from leaving
+        // the certificate with an option the rolled-back template does not have.
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        when(acm.listTagsForCertificate(ARN, REGION)).thenReturn(Map.of());
+        doThrow(new AwsException("ValidationException", "reserved prefix", 400))
+                .when(acm).addTagsToCertificate(any(), any(), any());
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+        props.putArray("Tags").addObject().put("Key", "aws:reserved").put("Value", "x");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, ctx(ARN)));
+
+        verify(acm, never()).updateCertificateOptions(any(), any(), any());
+    }
+
+    @Test
+    void updateWhoseOptionsChangeFailsPropagatesWithoutReplacingTheCertificate() {
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(acm).updateCertificateOptions(any(), any(), any());
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx(ARN)));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+        verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(acm, never()).deleteCertificate(any(), any());
+        assertNull(r.getPhysicalId());
+    }
+
+    @Test
+    void updateRemovingTransparencyLoggingPreferenceRestoresTheDefault() {
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("DISABLED", "DISABLED"));
+
+        provisioner.provision(resource(), mapper.createObjectNode().put("DomainName", "api.example.com"), ctx(ARN));
+
+        verify(acm).updateCertificateOptions(ARN, new CertificateOptions("ENABLED", null), REGION);
+        verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void updateEnablingCertificateExportReplacesTheCertificate() {
+        // CertificateExport is createOnly in the registry schema, and ACM refuses to change
+        // Export after issuance, so the change is a replacement carrying the new options.
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        stubRequestCertificate("api.example.com", certificate(NEW_ARN, "api.example.com"));
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateExport", "ENABLED");
+
+        provisioner.provision(r, props, ctx(ARN));
+
+        verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
+                eq(new CertificateOptions("ENABLED", "ENABLED")), any(), eq(REGION));
+        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).updateCertificateOptions(any(), any(), any());
+        assertEquals(NEW_ARN, r.getPhysicalId());
+        assertEquals(Map.of("CertificateArn", NEW_ARN), r.getAttributes());
+    }
+
+    @Test
+    void updateRemovingCertificateExportReplacesTheCertificate() {
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "ENABLED"));
+        stubRequestCertificate("api.example.com", certificate(NEW_ARN, "api.example.com"));
+        StackResource r = resource();
+
+        provisioner.provision(r, mapper.createObjectNode().put("DomainName", "api.example.com"), ctx(ARN));
+
+        verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
+                eq(new CertificateOptions("ENABLED", "DISABLED")), any(), eq(REGION));
+        verify(acm).deleteCertificate(ARN, REGION);
+        assertEquals(NEW_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void updateChangingBothOptionsReplacesWithTheNewTransparencyLoggingPreference() {
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        stubRequestCertificate("api.example.com", certificate(NEW_ARN, "api.example.com"));
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateExport", "ENABLED")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+
+        provisioner.provision(resource(), props, ctx(ARN));
+
+        verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
+                eq(new CertificateOptions("DISABLED", "ENABLED")), any(), eq(REGION));
+        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).updateCertificateOptions(any(), any(), any());
+    }
+
+    @Test
+    void updateChangingDomainNameAndLoggingPreferenceReplacesWithTheNewOptions() {
+        Certificate stored = certificate(ARN, "old.example.com");
+        stored.setSubjectAlternativeNames(List.of("old.example.com"));
+        stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
+        stored.setCertOptions(new CertificateOptions("ENABLED", "DISABLED"));
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
+        stubRequestCertificate("new.example.com", certificate(NEW_ARN, "new.example.com"));
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "new.example.com")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+
+        provisioner.provision(resource(), props, ctx(ARN));
+
+        verify(acm).requestCertificate(eq("new.example.com"), any(), any(), isNull(), any(), isNull(),
+                eq(new CertificateOptions("DISABLED", "DISABLED")), any(), eq(REGION));
+        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).updateCertificateOptions(any(), any(), any());
+    }
+
+    @Test
+    void updateOfACertificateStoredWithoutOptionsUpdatesAChangedLoggingPreference() {
+        Certificate stored = storedCertificate("ENABLED", "DISABLED");
+        stored.setCertOptions(null);
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateTransparencyLoggingPreference", "DISABLED");
+
+        provisioner.provision(resource(), props, ctx(ARN));
+
+        verify(acm).updateCertificateOptions(ARN, new CertificateOptions("DISABLED", null), REGION);
+        verify(acm, never()).requestCertificate(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void updateWithChangedDomainNameReplacesTheCertificate() {
-        String newArn = "arn:aws:acm:us-east-1:000000000000:certificate/99999999-2222-3333-4444-555555555555";
         Certificate stored = certificate(ARN, "old.example.com");
         stored.setSubjectAlternativeNames(List.of("old.example.com"));
         stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
         when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
-        when(acm.requestCertificate(eq("new.example.com"), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
-                .thenReturn(certificate(newArn, "new.example.com"));
+        stubRequestCertificate("new.example.com", certificate(NEW_ARN, "new.example.com"));
         StackResource r = resource();
 
         provisioner.provision(r, mapper.createObjectNode().put("DomainName", "new.example.com"), ctx(ARN));
 
         verify(acm).deleteCertificate(ARN, REGION);
-        assertEquals(newArn, r.getPhysicalId());
-        assertEquals(Map.of("CertificateArn", newArn), r.getAttributes());
+        assertEquals(NEW_ARN, r.getPhysicalId());
+        assertEquals(Map.of("CertificateArn", NEW_ARN), r.getAttributes());
     }
 
     @Test
     void replacementThatCannotDeleteThePriorCertificateRemovesTheNewOneAndFails() {
         // CloudFormationService restores the previous StackResource when an update fails and never
         // learns the new ARN, so the certificate this attempt created must not be left behind.
-        String newArn = "arn:aws:acm:us-east-1:000000000000:certificate/99999999-2222-3333-4444-555555555555";
         Certificate stored = certificate(ARN, "old.example.com");
         stored.setSubjectAlternativeNames(List.of("old.example.com"));
         stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
         when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
-        when(acm.requestCertificate(eq("new.example.com"), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
-                .thenReturn(certificate(newArn, "new.example.com"));
+        stubRequestCertificate("new.example.com", certificate(NEW_ARN, "new.example.com"));
         doThrow(new AwsException("ResourceInUseException", "in use", 409))
                 .when(acm).deleteCertificate(ARN, REGION);
         StackResource r = resource();
@@ -176,7 +430,7 @@ class AcmCfnProvisionerTest {
                 r, mapper.createObjectNode().put("DomainName", "new.example.com"), ctx(ARN)));
 
         assertEquals("ResourceInUseException", failure.getErrorCode());
-        verify(acm).deleteCertificate(newArn, REGION);
+        verify(acm).deleteCertificate(NEW_ARN, REGION);
         assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
         assertNull(r.getPhysicalId());
     }
@@ -207,12 +461,16 @@ class AcmCfnProvisionerTest {
     void updateWhosePriorCertificateIsGoneRequestsANewOne() {
         when(acm.describeCertificate(ARN, REGION))
                 .thenThrow(new AwsException("ResourceNotFoundException", "gone", 404));
-        when(acm.requestCertificate(any(), any(), any(), isNull(), any(), isNull(), any(), any(), eq(REGION)))
-                .thenReturn(certificate(ARN, "api.example.com"));
+        stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
         StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("DomainName", "api.example.com")
+                .put("CertificateExport", "ENABLED");
 
-        provisioner.provision(r, mapper.createObjectNode().put("DomainName", "api.example.com"), ctx(ARN));
+        provisioner.provision(r, props, ctx(ARN));
 
+        verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
+                eq(new CertificateOptions("ENABLED", "ENABLED")), any(), eq(REGION));
         verify(acm, never()).deleteCertificate(any(), any());
         assertEquals(ARN, r.getPhysicalId());
     }

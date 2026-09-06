@@ -162,8 +162,8 @@ public class LambdaService implements ResourceProvider {
         this.zipExtractor = zipExtractor;
         this.config = config;
         this.regionResolver = regionResolver;
-        this.esmStore = null;
-        this.aliasStore = null;
+        this.esmStore = storageFactory != null ? new EsmStore(storageFactory) : null;
+        this.aliasStore = storageFactory != null ? new LambdaAliasStore(storageFactory) : null;
         this.s3Service = null;
         this.sqsService = null;
         this.poller = null;
@@ -555,6 +555,28 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
+    private record ResolvedFunctionTarget(String functionArn, String functionName) {}
+
+    private ResolvedFunctionTarget resolveFunctionTarget(String region, LambdaArnUtils.ResolvedFunctionRef fnRef) {
+        String name = fnRef.name();
+        LambdaFunction fn = getFunction(region, name);
+        String qualifier = fnRef.qualifier();
+        if (qualifier == null) {
+            return new ResolvedFunctionTarget(fn.getFunctionArn(), name);
+        }
+        if ("$LATEST".equals(qualifier)) {
+            return new ResolvedFunctionTarget(fn.getFunctionArn() + ":$LATEST", name);
+        }
+        if (qualifier.chars().allMatch(Character::isDigit)) {
+            LambdaFunction versionFn = functionStore.get(region, name, qualifier)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Function version not found: " + name + ":" + qualifier, 404));
+            return new ResolvedFunctionTarget(versionFn.getFunctionArn(), name);
+        }
+        LambdaAlias alias = getAlias(region, name, qualifier);
+        return new ResolvedFunctionTarget(alias.getAliasArn(), name);
+    }
+
     public List<LambdaFunction> listFunctions(String region) {
         return functionStore.list(region);
     }
@@ -828,7 +850,8 @@ public class LambdaService implements ResourceProvider {
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.drainEnvironment(version.get());
             functionStore.deleteVersion(region, name, qualifier);
-            // The snapshot shares $LATEST's code directory, so this only reclaims once no
+            reclaimVersionCodeDirectory(fn, qualifier, version.get());
+            // The snapshot may still share $LATEST's code directory, so this only reclaims once no
             // remaining version references it.
             reclaimLegacyCodeDirectoryIfUnused(name);
         }
@@ -872,6 +895,28 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+    }
+
+    /**
+     * Drops the code directory a deleted version owned. Without this the only thing that ever
+     * reclaimed version code was deleting the whole function, so a repeated publish/delete cycle
+     * left one package on disk per version ever published.
+     *
+     * <p>Guarded on the version actually owning that directory rather than deleting it outright.
+     * A version whose copy could not be made fell back to {@code $LATEST}'s path, and image-backed
+     * and hot-reload versions never had a copy at all: for those the recorded path is the live
+     * function's own directory, and removing it would delete the code {@code $LATEST} still runs.
+     */
+    private void reclaimVersionCodeDirectory(LambdaFunction fn, String version, LambdaFunction snapshot) {
+        String recorded = snapshot.getCodeLocalPath();
+        if (recorded == null) {
+            return;
+        }
+        String owned = codeStore.getVersionCodePath(ownerAccount(fn), fn.getFunctionName(), version)
+                .toAbsolutePath().normalize().toString();
+        if (owned.equals(Path.of(recorded).toAbsolutePath().normalize().toString())) {
+            codeStore.deleteVersion(ownerAccount(fn), fn.getFunctionName(), version);
+        }
     }
 
     /**
@@ -1047,42 +1092,132 @@ public class LambdaService implements ResourceProvider {
         validateEventSourceMappingStructures(request);
 
         String functionName = (String) request.get("FunctionName");
-        String eventSourceArn = (String) request.get("EventSourceArn");
-
         if (functionName == null || functionName.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "FunctionName is required", 400);
-        }
-        if (eventSourceArn == null || eventSourceArn.isBlank()) {
-            throw new AwsException("InvalidParameterValueException", "EventSourceArn is required", 400);
-        }
-        if (!eventSourceArn.contains(":sqs:") && !eventSourceArn.contains(":kinesis:")
-                && !eventSourceArn.contains(":dynamodb:")) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Only SQS, Kinesis, and DynamoDB Streams event sources are supported.", 400);
         }
 
         // Resolve function — supports bare name, partial ARN, or full ARN
         LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(functionName);
         String resolvedName = fnRef.name();
 
-        // Extract region from the event source ARN (parts[3] for all supported ARN formats)
+        boolean hasKafkaSource = request.containsKey("SelfManagedEventSource") && request.get("SelfManagedEventSource") != null;
+        boolean hasTopics = request.containsKey("Topics") && request.get("Topics") != null;
+        boolean hasEventSourceArn = request.containsKey("EventSourceArn") && request.get("EventSourceArn") != null;
+        boolean isSelfManagedKafka = hasKafkaSource || hasTopics;
+
+        String eventSourceArn;
         String resolvedRegion;
-        if (eventSourceArn.contains(":sqs:")) {
-            resolvedRegion = SqsEventSourcePoller.regionFromArn(eventSourceArn);
+        Map<String, Object> selfManagedEventSource = null;
+        List<String> topics = null;
+        List<Map<String, Object>> sourceAccessConfigurations = null;
+
+        if (isSelfManagedKafka) {
+            if (hasEventSourceArn) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Cannot specify both EventSourceArn and SelfManagedEventSource/Topics", 400);
+            }
+            if (!hasKafkaSource) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource is required for self-managed Apache Kafka event sources", 400);
+            }
+            if (!hasTopics) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics is required for self-managed Apache Kafka event sources", 400);
+            }
+            eventSourceArn = null;
+
+            enforceRegion(region, fnRef);
+            resolvedRegion = region;
+
+            Object rawSource = request.get("SelfManagedEventSource");
+            if (!(rawSource instanceof Map<?, ?> sourceMap)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource must be a JSON object", 400);
+            }
+            Object rawEndpoints = sourceMap.get("Endpoints");
+            if (!(rawEndpoints instanceof Map<?, ?> endpointsMap)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource must contain Endpoints", 400);
+            }
+            Object rawServers = endpointsMap.get("KAFKA_BOOTSTRAP_SERVERS");
+            if (!(rawServers instanceof List<?> serverList) || serverList.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "SelfManagedEventSource must contain KAFKA_BOOTSTRAP_SERVERS", 400);
+            }
+            for (Object server : serverList) {
+                if (!(server instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "KAFKA_BOOTSTRAP_SERVERS elements must be non-blank strings", 400);
+                }
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> typedSource = (Map<String, Object>) rawSource;
+            selfManagedEventSource = typedSource;
+
+            Object rawTopics = request.get("Topics");
+            if (!(rawTopics instanceof List<?> topicList) || topicList.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics must be a non-empty list of strings", 400);
+            }
+            List<String> validatedTopics = new ArrayList<>();
+            for (Object item : topicList) {
+                if (!(item instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Topics elements must be non-blank strings", 400);
+                }
+                validatedTopics.add(s);
+            }
+            topics = validatedTopics;
+
+            if (request.containsKey("SourceAccessConfigurations")) {
+                Object rawAccess = request.get("SourceAccessConfigurations");
+                if (rawAccess != null) {
+                    if (!(rawAccess instanceof List<?> accessList)) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "SourceAccessConfigurations must be a list", 400);
+                    }
+                    List<Map<String, Object>> typedAccess = new ArrayList<>();
+                    for (Object item : accessList) {
+                        if (!(item instanceof Map<?, ?> m)) {
+                            throw new AwsException("InvalidParameterValueException",
+                                    "SourceAccessConfiguration entries must be JSON objects", 400);
+                        }
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> typedMap = (Map<String, Object>) m;
+                        typedAccess.add(typedMap);
+                    }
+                    sourceAccessConfigurations = typedAccess;
+                }
+            }
         } else {
-            // arn:aws:kinesis:region:... or arn:aws:dynamodb:region:...
-            resolvedRegion = AwsArnUtils.regionOrDefault(eventSourceArn, region);
+            eventSourceArn = (String) request.get("EventSourceArn");
+            if (eventSourceArn == null || eventSourceArn.isBlank()) {
+                throw new AwsException("InvalidParameterValueException", "EventSourceArn is required", 400);
+            }
+            if (!eventSourceArn.contains(":sqs:") && !eventSourceArn.contains(":kinesis:")
+                    && !eventSourceArn.contains(":dynamodb:")) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Only SQS, Kinesis, and DynamoDB Streams event sources are supported.", 400);
+            }
+
+            // Extract region from the event source ARN (parts[3] for all supported ARN formats)
+            if (eventSourceArn.contains(":sqs:")) {
+                resolvedRegion = SqsEventSourcePoller.regionFromArn(eventSourceArn);
+            } else {
+                // arn:aws:kinesis:region:... or arn:aws:dynamodb:region:...
+                resolvedRegion = AwsArnUtils.regionOrDefault(eventSourceArn, region);
+            }
+
+            // If the caller supplied a full function ARN, its region must agree
+            // with the region derived from the event source ARN. Otherwise we'd
+            // silently bind a different-region function of the same name.
+            if (fnRef.region() != null && !fnRef.region().equals(resolvedRegion)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Function ARN region '" + fnRef.region() + "' does not match event source region '" + resolvedRegion + "'", 400);
+            }
         }
 
-        // If the caller supplied a full function ARN, its region must agree
-        // with the region derived from the event source ARN. Otherwise we'd
-        // silently bind a different-region function of the same name.
-        if (fnRef.region() != null && !fnRef.region().equals(resolvedRegion)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Function ARN region '" + fnRef.region() + "' does not match event source region '" + resolvedRegion + "'", 400);
-        }
-
-        LambdaFunction fn = getFunction(resolvedRegion, resolvedName);
+        ResolvedFunctionTarget target = resolveFunctionTarget(resolvedRegion, fnRef);
 
         int batchSize = toInt(request.get("BatchSize"), 10);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
@@ -1102,15 +1237,17 @@ public class LambdaService implements ResourceProvider {
 
         EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
 
-        StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn);
+        StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn, isSelfManagedKafka);
 
-        String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
+        String queueUrl = (eventSourceArn != null && eventSourceArn.contains(":sqs:"))
+                ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config != null ? config.effectiveBaseUrl() : null)
+                : null;
 
         EventSourceMapping esm = new EventSourceMapping();
         esm.setUuid(UUID.randomUUID().toString());
         esm.setAccountId(regionResolver.getAccountId());
-        esm.setFunctionArn(fn.getFunctionArn());
-        esm.setFunctionName(resolvedName);
+        esm.setFunctionArn(target.functionArn());
+        esm.setFunctionName(target.functionName());
         esm.setEventSourceArn(eventSourceArn);
         esm.setQueueUrl(queueUrl);
         esm.setRegion(resolvedRegion);
@@ -1124,6 +1261,9 @@ public class LambdaService implements ResourceProvider {
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
         esm.setStartingPositionTimestamp(startingPosition.timestampMillis());
+        esm.setSelfManagedEventSource(selfManagedEventSource);
+        esm.setTopics(topics);
+        esm.setSourceAccessConfigurations(sourceAccessConfigurations);
         esm.setLastModified(System.currentTimeMillis());
 
         esmStore.save(esm);
@@ -1393,7 +1533,7 @@ public class LambdaService implements ResourceProvider {
      * requests that used to succeed. There is no update counterpart because AWS's
      * UpdateEventSourceMapping does not accept the field at all - it is replace-only.
      */
-    private StartingPositionSpec parseStartingPosition(Map<String, Object> request, String eventSourceArn) {
+    private StartingPositionSpec parseStartingPosition(Map<String, Object> request, String eventSourceArn, boolean isSelfManagedKafka) {
         Object raw = request.get("StartingPosition");
         if (raw == null) {
             return new StartingPositionSpec(null, null);
@@ -1409,12 +1549,13 @@ public class LambdaService implements ResourceProvider {
         if (!"AT_TIMESTAMP".equals(position)) {
             return new StartingPositionSpec(position, null);
         }
-        // AT_TIMESTAMP is Kinesis-only among the event sources Floci supports - DynamoDB Streams
-        // shard iterators have no timestamp form at all, so silently accepting it there would
-        // promise a starting point that can never be honoured.
-        if (eventSourceArn != null && !eventSourceArn.contains(":kinesis:")) {
+        // AT_TIMESTAMP is supported for Amazon Kinesis and self-managed Apache Kafka event sources -
+        // DynamoDB Streams shard iterators have no timestamp form at all, so silently accepting it there
+        // would promise a starting point that can never be honoured.
+        boolean isKinesis = eventSourceArn != null && eventSourceArn.contains(":kinesis:");
+        if (!isKinesis && !isSelfManagedKafka) {
             throw new AwsException("InvalidParameterValueException",
-                    "AT_TIMESTAMP is only supported for Amazon Kinesis event sources", 400);
+                    "AT_TIMESTAMP is only supported for Amazon Kinesis and self-managed Apache Kafka event sources", 400);
         }
         Object rawTimestamp = request.get("StartingPositionTimestamp");
         if (rawTimestamp == null) {
@@ -1473,6 +1614,9 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void startPollingHelper(EventSourceMapping esm) {
+        if (esm.getEventSourceArn() == null) {
+            return;
+        }
         if (esm.getEventSourceArn().contains(":sqs:")) {
             poller.startPolling(esm);
         } else if (esm.getEventSourceArn().contains(":kinesis:")) {
@@ -1483,6 +1627,9 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void stopPollingHelper(EventSourceMapping esm) {
+        if (esm.getEventSourceArn() == null) {
+            return;
+        }
         if (esm.getEventSourceArn().contains(":sqs:")) {
             poller.stopPolling(esm.getUuid());
         } else if (esm.getEventSourceArn().contains(":kinesis:")) {
@@ -1542,6 +1689,60 @@ public class LambdaService implements ResourceProvider {
             // AWS: passing FilterCriteria replaces the whole set; an empty object or an empty
             // Filters array clears all filters.
             esm.setFilterCriteria(parseFilterCriteria(request, objectMapper));
+        }
+
+        if (request.containsKey("FunctionName")) {
+            String fnName = (String) request.get("FunctionName");
+            if (fnName != null && !fnName.isBlank()) {
+                LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(fnName);
+                if (fnRef.region() != null && !fnRef.region().equals(esm.getRegion())) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Function ARN region '" + fnRef.region() + "' does not match event source region '" + esm.getRegion() + "'", 400);
+                }
+                ResolvedFunctionTarget target = resolveFunctionTarget(esm.getRegion(), fnRef);
+                esm.setFunctionArn(target.functionArn());
+                esm.setFunctionName(target.functionName());
+            }
+        }
+
+        if (request.containsKey("Topics")) {
+            Object rawTopics = request.get("Topics");
+            if (!(rawTopics instanceof List<?> topicList) || topicList.isEmpty()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Topics must be a non-empty list of strings", 400);
+            }
+            List<String> validatedTopics = new ArrayList<>();
+            for (Object item : topicList) {
+                if (!(item instanceof String s) || s.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Topics elements must be non-blank strings", 400);
+                }
+                validatedTopics.add(s);
+            }
+            esm.setTopics(validatedTopics);
+        }
+
+        if (request.containsKey("SourceAccessConfigurations")) {
+            Object rawAccess = request.get("SourceAccessConfigurations");
+            if (rawAccess != null) {
+                if (!(rawAccess instanceof List<?> accessList)) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "SourceAccessConfigurations must be a list", 400);
+                }
+                List<Map<String, Object>> typedAccess = new ArrayList<>();
+                for (Object item : accessList) {
+                    if (!(item instanceof Map<?, ?> m)) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "SourceAccessConfiguration entries must be JSON objects", 400);
+                    }
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> typedMap = (Map<String, Object>) m;
+                    typedAccess.add(typedMap);
+                }
+                esm.setSourceAccessConfigurations(typedAccess);
+            } else {
+                esm.setSourceAccessConfigurations(null);
+            }
         }
 
         esm.setLastModified(System.currentTimeMillis());
@@ -1612,6 +1813,31 @@ public class LambdaService implements ResourceProvider {
                 .filter(v -> v.getVersion() != null && !"$LATEST".equals(v.getVersion()))
                 .filter(v -> v.getVersion().chars().allMatch(Character::isDigit))
                 .max(java.util.Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
+    }
+
+    /**
+     * Copies the function's current code into a directory belonging to this version, falling back
+     * to {@code $LATEST}'s path if there is nothing to copy or the copy fails.
+     *
+     * <p>A copy failure must not fail the publish: the version is still a correct snapshot of the
+     * configuration, and falling back leaves it exactly as good as every version published before
+     * this existed, rather than turning a working call into an error.
+     */
+    private String versionCodePath(LambdaFunction fn, String version) {
+        String current = fn.getCodeLocalPath();
+        if (current == null || fn.getHotReloadHostPath() != null) {
+            return current;
+        }
+        try {
+            Path copied = codeStore.copyForVersion(
+                    ownerAccount(fn), fn.getFunctionName(), version, Path.of(current));
+            return copied == null ? current : copied.toAbsolutePath().normalize().toString();
+        } catch (IOException e) {
+            LOG.warnv("Could not give version {0} of {1} its own code directory, "
+                            + "falling back to the shared one: {2}",
+                    version, fn.getFunctionName(), e.getMessage());
+            return current;
+        }
     }
 
     private int nextVersionNumber(String counterKey, String legacyCounterKey) {
@@ -1730,7 +1956,13 @@ public class LambdaService implements ResourceProvider {
             // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
             // published version is an immutable snapshot of code plus configuration, so it carries the
             // code location for every package type, not only Zip.
-            snapshot.setCodeLocalPath(fn.getCodeLocalPath());
+            // A version's own copy of the code, not a reference to $LATEST's directory. Sharing that
+            // directory meant a later UpdateFunctionCode rewrote what an already-published version
+            // ran, so the version advertised one CodeSha256 over a different build (issue #2958).
+            // Nothing to copy for image-backed or hot-reload functions, which keep the reference
+            // they had: an image is already immutable by digest, and a hot-reload function's whole
+            // point is that its bind-mounted directory tracks the developer's working tree.
+            snapshot.setCodeLocalPath(versionCodePath(fn, String.valueOf(version)));
             snapshot.setCodeSha256(fn.getCodeSha256());
             snapshot.setS3Bucket(fn.getS3Bucket());
             snapshot.setS3Key(fn.getS3Key());
@@ -2411,13 +2643,18 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void extractZipCode(LambdaFunction fn, String zipFileBase64, String region) {
-        extractZipCodeBytes(fn, Base64.getDecoder().decode(zipFileBase64), region);
+        byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
+        if (zipBytes.length > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
+            throw new AwsException("RequestEntityTooLargeException",
+                    "Request must be smaller than 52428800 bytes.", 413);
+        }
+        extractZipCodeBytes(fn, zipBytes, region);
     }
 
     private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
         Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
         try {
-            zipExtractor.extractTo(zipBytes, codePath);
+            zipExtractor.extractTo(zipBytes, codePath, configuredZipMaxEntries());
             // Publish the new code identity under the same per-function lock publishVersion holds.
             // PublishVersion's CodeSha256 precondition is a check-then-act: it compares the hash and
             // then snapshots the code. Mutating these fields without the lock lets an overlapping
@@ -2478,6 +2715,19 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("InvalidParameterValueException",
                     "Failed to extract deployment package: " + e.getMessage(), 400);
         }
+    }
+
+    private int configuredZipMaxEntries() {
+        if (config == null || config.services() == null || config.services().lambda() == null) {
+            return ZipExtractor.DEFAULT_MAX_ENTRIES;
+        }
+        int configured = config.services().lambda().zipMaxEntries();
+        if (configured < 1) {
+            LOG.warnv("Ignoring invalid Lambda ZIP entry limit {0}; using {1}",
+                    configured, ZipExtractor.DEFAULT_MAX_ENTRIES);
+            return ZipExtractor.DEFAULT_MAX_ENTRIES;
+        }
+        return configured;
     }
 
     private void storeDeploymentPackage(LambdaFunction fn, byte[] zipBytes, String region) {

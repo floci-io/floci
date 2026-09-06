@@ -9,19 +9,19 @@ Status: complete for the local emulator slice.
 Supported MVP 1 behavior:
 
 - Thing CRUD with idempotent identical `CreateThing`, duplicate-conflict semantics, `UpdateThing.expectedVersion`, and list pagination.
-- Certificate basics: `CreateKeysAndCertificate`, `CreateCertificateFromCsr`, `DescribeCertificate`, `ListCertificates`, `UpdateCertificate`, and `DeleteCertificate` with active/attached delete constraints.
+- Certificate basics: `CreateKeysAndCertificate`, `CreateCertificateFromCsr`, `DescribeCertificate`, `ListCertificates`, `UpdateCertificate`, and `DeleteCertificate` with active/attached delete constraints. `CreateKeysAndCertificate` returns a real X.509 client certificate issued by Floci's local CA (`GET /_floci/ca.pem`) with a fresh RSA 2048 key pair, valid until 2049-12-31T23:59:59Z as on AWS, and `certificateId` is the SHA-256 of the certificate's DER encoding as on AWS. `DescribeCertificate` reports `validity` and `certificateMode`. `CreateCertificateFromCsr` signs the request's public key (RSA of at least 2048 bits, or EC on P-256, P-384 or P-521) with the same CA and, as on AWS, returns no private key.
 - Policy basics: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`, policy version lifecycle, `AttachPolicy`, `DetachPolicy`, `ListAttachedPolicies`, and `ListTargetsForPolicy`.
 - Thing principal basics: `AttachThingPrincipal`, `DetachThingPrincipal`, `ListThingPrincipals`, and `ListPrincipalThings`.
 - Tags for things, certificates, policies, and topic rules.
 - IoT Data retained messages: retained `Publish`, `GetRetainedMessage`, and paginated `ListRetainedMessages`.
 - Shadow null-delete and version-conflict behavior for HTTP and shared service paths.
-- Topic rule duplicate/delete/replace semantics, plus `republish`, `sqs`, `sns`, `s3`, `dynamoDBv2`, `kinesis`, and `lambda` action dispatch.
+- Topic rule duplicate/delete/replace semantics, plus `republish`, `sqs`, `sns`, `s3`, `dynamoDBv2`, `kinesis`, `lambda`, `firehose`, and `cloudwatchLogs` action dispatch.
 
 Current MVP 1 limitations:
 
-- Certificate CSR handling creates emulator-local certificates; it does not perform real CA signing.
+- The MQTT listener does not verify device certificates yet.
 - MQTT auth remains permissive; certificate and policy resources are modeled for provisioning compatibility, not enforced as broker authorization yet.
-- Rules support basic topic filter extraction and action dispatch only; SQL projection, WHERE evaluation, and substitutions remain follow-up scope.
+- Rules evaluate the SQL subset described under [Rule SQL](#rule-sql); substitution templates remain follow-up scope.
 
 ## MVP 2 Coverage
 
@@ -37,7 +37,7 @@ Supported MVP 2 behavior:
 - MQTT clients can use QoS 1 subscribe/publish paths with broker PUBACK and delivery behavior.
 - IoT Data connection APIs for live MQTT sessions: `GetConnection`, `DeleteConnection`, `ListSubscriptions`, and `SendDirectMessage`.
 - `DeleteConnection` closes active MQTT client sessions through the embedded broker and optionally purges broker session state for `cleanSession=true`.
-- IoT rules can dispatch matching payloads to SQS, SNS, S3, DynamoDB v2, Kinesis, Lambda, and MQTT republish targets.
+- IoT rules can dispatch matching payloads to SQS, SNS, S3, DynamoDB v2, Kinesis, Lambda, Kinesis Data Firehose, CloudWatch Logs, and MQTT republish targets.
 
 Current MVP 2 limitations:
 
@@ -60,6 +60,7 @@ Status: control plane only.
 - `ListDomainConfigurations` filters by `serviceType` and pages with `marker` and `pageSize`.
 - Tags work through `TagResource`, `UntagResource` and `ListTagsForResource` on the configuration ARN.
 - CloudFormation provisions `AWS::IoT::DomainConfiguration` through the same operations; see the CloudFormation service page for the attribute list.
+- With TLS enabled, a customer-managed configuration (`domainName` set) adds its domain to Floci's server certificate as soon as it is created, so `https://<domain>` verifies without a restart; see [TLS](../configuration/tls.md) for the accepted suffixes. A configuration without a domain name registers nothing.
 - The four AWS-managed configurations every account has (`iot:Data-ATS`, `iot:Data`, `iot:CredentialProvider`, `iot:Jobs`) exist in every region without being created: `AWS_MANAGED`, `ENABLED`, no server certificate, and the address `DescribeEndpoint` returns as their domain name. They can be updated and tagged but not deleted, as on AWS.
 
 Current limitations:
@@ -139,24 +140,92 @@ Phase 8 adds stored IoT topic rules and dispatches matching IoT publishes to rul
 Supported rule behavior:
 
 - `CreateTopicRule`, `GetTopicRule`, `ListTopicRules`, `EnableTopicRule`, `DisableTopicRule`, and `DeleteTopicRule` through AWS SDK-compatible IoT control-plane paths.
-- SQL topic filter extraction for rules shaped like `SELECT * FROM 'topic/filter'`.
+- Rule SQL parsing and evaluation for the subset described under [Rule SQL](#rule-sql): the `SELECT` projection,
+  the `FROM` topic filter, and the `WHERE` predicate.
 - MQTT-style topic filter matching for exact topics, `+`, and terminal `#`.
 - IoT Data `Publish` and MQTT publishes use the same rule dispatch path.
 - Rule matching is region-scoped: an IoT Data `Publish` evaluates the rules of the region named by its SigV4 credential, and a rule's actions target the rule's own region.
 - Publishes that carry no region — MQTT, or an IoT Data `Publish` whose `Authorization` header is absent or not SigV4 — are evaluated against every region's rules.
-- `republish` action republishes the original payload to another MQTT topic through `IotMqttBrokerService`.
-- `sqs` action sends the original payload to an SQS queue through Floci's SQS service boundary.
-- `sns` action publishes the original payload to an SNS topic through Floci's SNS service boundary.
-- `s3` action writes the original payload to the configured bucket/key through Floci's S3 service boundary.
-- `dynamoDBv2` action writes JSON object payload fields as DynamoDB attribute values through Floci's DynamoDB service boundary; nested objects and arrays become maps and lists.
-- `kinesis` action puts the original payload into a Kinesis stream through Floci's Kinesis service boundary.
+- Actions receive the projected document, which is the payload itself for a statement that selects only `*`.
+- `republish` action republishes to another MQTT topic through `IotMqttBrokerService`.
+- `sqs` action sends to an SQS queue through Floci's SQS service boundary.
+- `sns` action publishes to an SNS topic through Floci's SNS service boundary.
+- `s3` action writes to the configured bucket/key through Floci's S3 service boundary.
+- `dynamoDBv2` action writes JSON object fields as DynamoDB attribute values through Floci's DynamoDB service boundary.
+- `kinesis` action puts the document into a Kinesis stream through Floci's Kinesis service boundary.
 - `lambda` action invokes the configured function ARN through Floci's Lambda service boundary.
+- `firehose` action puts the document into a Kinesis Data Firehose delivery stream through Floci's Firehose service boundary, with `separator` appended to each record; the separator must be `\n`, `\t`, `\r\n` or `,`, as the API model requires, or the rule is rejected with `InvalidRequestException`. With `batchMode`, a JSON array document becomes one record per element.
+- `cloudwatchLogs` action writes the document as a log event through Floci's CloudWatch Logs service boundary, into a log stream named after the rule that is created in `logGroupName` on first use. The log group must exist. With `batchMode`, a JSON array document becomes one event per element, and each element supplies its own `timestamp` (epoch milliseconds) and `message`, as the AWS message format for batched device logs requires; an element without them is logged as its JSON text at publish time.
 - One failing action never fails the publish or the other actions of the rule. The failure is logged, and once every action ran the rule's `errorAction` receives the AWS failure document: `ruleName`, `topic`, `base64OriginalPayload` and `failures` with `failedAction`, `failedResource` and `errorMessage` per failed action.
 - `GetTopicRule` returns `awsIotSqlVersion` and `errorAction` as they were given to `CreateTopicRule` or `ReplaceTopicRule`.
 
+### Rule SQL
+
+A rule's statement is parsed once when it is created or replaced, and once on the first publish
+for rules restored from storage. The grammar Floci understands is:
+
+```
+statement  := SELECT item (',' item)* FROM '<topic filter>' [WHERE expr]
+item       := '*' | operand [AS identifier]
+expr       := term (OR term)*
+term       := factor (AND factor)*
+factor     := NOT factor | '(' expr ')' | operand [comparison operand]
+comparison := '=' | '<>' | '!=' | '<' | '<=' | '>' | '>='
+operand    := path | literal | call
+call       := topic() | topic(<segment>) | startswith(operand, operand) | endswith(operand, operand)
+path       := identifier ('.' identifier)*
+literal    := 'string' | "string" | number | TRUE | FALSE | NULL
+```
+
+Semantics:
+
+- Keywords and function names are case insensitive, field names are case sensitive.
+- `topic()` is the full MQTT topic, `topic(n)` is its nth segment counting from 1.
+- A select item without `AS` is written under the last segment of its path, or under the function
+  name, so `topic()` becomes `topic`.
+- When `*` is present, every payload field is copied first and the other select items are written
+  over it. `SELECT *, topic() as topic` on a payload that already has a `topic` field therefore
+  yields the MQTT topic, which is what AWS does.
+- A select item whose value is undefined is left out of the document.
+- A missing field, an out of range topic segment, and a function argument that cannot be converted
+  are `Undefined`, as in AWS. It spreads: a comparison, `AND`, `OR` or `NOT` with an undefined
+  operand is undefined, and a rule fires only when its `WHERE` is true. `endswith(clientToken, 'x')`
+  therefore does not fire when the payload has no `clientToken`, and neither does
+  `clientToken <> 'x'`.
+- JSON `null` is a value, not `Undefined`: it equals only `NULL`, so `clientToken <> 'x'` is true
+  when the field is null and undefined when it is missing.
+- `=` and `<>` compare two numbers by value and anything else by type and value, so operands of
+  different types are simply not equal: `level = '3'` is false and `level <> '3'` is true when
+  `level` is the number 3. These follow the operator tables in the AWS IoT SQL reference.
+- `<`, `<=`, `>` and `>=` convert both operands to a number. A string converts when it looks like
+  one (`'10' > 9` is true); any other operand makes the comparison undefined.
+- Payload numbers are read exactly, never through a double, so `9007199254740993.0`, `1e-400` and
+  `0.30000000000000004` compare as written, at any size or precision, as AWS's Decimal does.
+- `AND`, `OR` and `NOT` take booleans or the strings `'true'` and `'false'` in any case. Any other
+  operand makes the result undefined.
+- `startswith` and `endswith` convert numbers, booleans, arrays and objects to their string form
+  first. A `null` or undefined argument makes the result undefined.
+- String literals use single or double quotes, doubled to escape the quote itself.
+- A statement that selects only `*` forwards the published bytes unchanged, so the payload does not
+  have to be JSON when there is no `WHERE`. Any other statement needs a JSON object: a payload that
+  is not one is logged at DEBUG and the rule does not fire.
+
+Statements outside this grammar are not rejected. They are stored as sent and keep the behavior they
+had before Floci evaluated rule SQL: the topic filter is read out of the statement and the rule fires
+on every matching topic with the whole payload. Floci logs one WARN naming the rule and the token it
+could not parse. Setting `floci.services.iot.rule-sql-strict` to `true`
+(`FLOCI_SERVICES_IOT_RULE_SQL_STRICT`) makes `CreateTopicRule` and `ReplaceTopicRule` reject such a
+statement with `SqlParseException` instead, the way AWS does. It is `false` by default.
+
 Current limitations:
 
-- SQL projection, WHERE clauses, functions, substitutions, and less common AWS IoT rule action types are follow-up scope.
+- Not evaluated: `clientid()`, `timestamp()`, `accountid()`, `principal()`, `newuuid()`, `isNull()`,
+  `isUndefined()`, `encode()`, `get_thing_shadow()`, arithmetic, array indexing, `IN`, `CASE`, and
+  `${}` substitution templates in action fields. A rule using any of them takes the unparsed path
+  described above.
+- `awsIotSqlVersion` is stored and echoed back but not acted on. The versions differ in how
+  `SELECT *` treats arrays, which Floci does not model.
+- Less common AWS IoT rule action types are follow-up scope.
 
 Open follow-up scope for phase 7 unless explicitly deferred:
 

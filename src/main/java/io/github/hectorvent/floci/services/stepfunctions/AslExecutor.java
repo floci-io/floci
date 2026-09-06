@@ -3401,7 +3401,12 @@ public class AslExecutor {
                 if (parts.isEmpty()) {
                     throw new FailStateException("States.Runtime", "States.Format requires at least one argument");
                 }
-                String template = unquoteString(parts.get(0));
+                // The template position is itself an argument, not a raw literal, on real AWS: a
+                // reference path written there is resolved the same way every other argument is,
+                // and a path that matches nothing fails the state instead of formatting as the
+                // path string itself.
+                JsonNode templateArg = resolveIntrinsicArg(parts.get(0), root, context);
+                String template = templateArg.isTextual() ? templateArg.asText() : templateArg.toString();
                 StringBuilder sb = new StringBuilder();
                 int argIdx = 1;
                 for (int i = 0; i < template.length(); i++) {
@@ -3773,14 +3778,6 @@ public class AslExecutor {
             result.add(argsStr.substring(start).trim());
         }
         return result;
-    }
-
-    private String unquoteString(String s) {
-        s = s.trim();
-        if ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith("\"") && s.endsWith("\""))) {
-            return s.substring(1, s.length() - 1);
-        }
-        return s;
     }
 
     // ──────────────────────────── History helpers ────────────────────────────

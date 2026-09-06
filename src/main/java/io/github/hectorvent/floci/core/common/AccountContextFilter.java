@@ -26,6 +26,13 @@ import java.util.Optional;
 @Priority(Priorities.AUTHENTICATION - 100)
 public class AccountContextFilter implements ContainerRequestFilter {
 
+    /**
+     * Set by a {@code @PreMatching} Host filter that resolved the request to a resource owned by
+     * one account (a Cognito custom domain). Such requests carry no AWS credential, so the
+     * owner's account is used instead of the default one.
+     */
+    public static final String PINNED_ACCOUNT_PROPERTY = AccountContextFilter.class.getName() + ".accountId";
+
     private final AccountResolver accountResolver;
     private final RegionResolver regionResolver;
     private final RequestContext requestContext;
@@ -44,6 +51,12 @@ public class AccountContextFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) {
+        Object pinnedAccount = ctx.getProperty(PINNED_ACCOUNT_PROPERTY);
+        if (pinnedAccount != null) {
+            requestContext.setAccountId(pinnedAccount.toString());
+            requestContext.setRegion(regionResolver.resolveRegionFromAuth(null));
+            return;
+        }
         String auth = ctx.getHeaderString("Authorization");
         if (auth != null && !auth.isEmpty()) {
             String akid = accountResolver.extractAccessKeyId(auth);

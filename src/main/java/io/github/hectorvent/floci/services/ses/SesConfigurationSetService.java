@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfigur
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
+import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -17,6 +18,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -31,9 +33,10 @@ import java.util.regex.Pattern;
  * <p>The boundary follows the cross-domain seams: option validation that reads OTHER domains stays
  * in the facade (tracking options check a verified domain identity, delivery options check a
  * dedicated IP pool), which validates first (or resolves existence through {@link #get}) and then
- * mutates through {@link #save}. The facade also keeps the send-path reads (pause check, event
- * publishing, effective suppression reasons), the ARN-dispatched tagging, and the tenant
- * delete-guard around {@link #remove}.
+ * mutates through {@link #save}. The ARN-dispatched configuration-set tagging and the send-time
+ * validation ({@link #validateForSending}: existence plus the sending-paused gate) live here; the
+ * facade keeps the remaining send-path reads (event publishing, effective suppression reasons)
+ * and the tenant delete-guard around {@link #remove}.
  */
 @ApplicationScoped
 public class SesConfigurationSetService {
@@ -102,13 +105,68 @@ public class SesConfigurationSetService {
         LOG.infov("Deleted SES configuration set: {0} in region {1}", name, region);
     }
 
+    /**
+     * Validate that a non-blank {@code ConfigurationSetName} is usable for a send. Performs
+     * two gates:
+     *   1. Existence: raises {@code ConfigurationSetDoesNotExist} (400) when the set is
+     *      missing in the given region. The V2 REST controller's {@code remapV1Exception}
+     *      translates that into {@code NotFoundException 404}; V1 Query keeps the original.
+     *   2. Sending-enabled: raises {@code ConfigurationSetSendingPausedException} (400)
+     *      when the set's {@code SendingEnabled} flag has been turned off via
+     *      {@code UpdateConfigurationSetSendingEnabled} (v1) /
+     *      {@code PutConfigurationSetSendingOptions} (v2). The V2 controller narrows that
+     *      code to {@code SendingPausedException}; V1 keeps the longer form, matching the
+     *      exact wire shape AWS returns on each surface.
+     * Mirrors AWS SES behaviour: invalid or paused set fails fast instead of silently
+     * storing/relaying the message and skipping event publishing later.
+     */
+    public void validateForSending(String configurationSetName, String region) {
+        if (configurationSetName == null || configurationSetName.isBlank()) {
+            return;
+        }
+        ConfigurationSet cs = get(configurationSetName, region);
+        if (cs.getSendingEnabled() != null && !cs.getSendingEnabled()) {
+            throw new AwsException("ConfigurationSetSendingPausedException",
+                    "Sending is paused for configuration set " + configurationSetName, 400);
+        }
+    }
+
+    /** The ARN-dispatched tag operations, sharing the store behind {@code CreateConfigurationSet.Tags}. */
+    public List<Tag> listTags(String name, String region) {
+        return new ArrayList<>(requireForTags(name, region).getTags());
+    }
+
+    public void tag(String name, String region, List<Tag> newTags) {
+        ConfigurationSet cs = requireForTags(name, region);
+        cs.setTags(SesTags.merge(cs.getTags(), newTags));
+        configSetStore.put(configSetKey(region, name), cs);
+        LOG.infov("Tagged SES configuration set: {0} (region {1}, +{2} tags)", name, region, newTags.size());
+    }
+
+    public void untag(String name, String region, List<String> tagKeys) {
+        ConfigurationSet cs = requireForTags(name, region);
+        Set<String> toRemove = new HashSet<>(tagKeys);
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(cs.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        cs.setTags(remaining);
+        configSetStore.put(configSetKey(region, name), cs);
+        LOG.infov("Untagged SES configuration set: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
+    }
+
+    private ConfigurationSet requireForTags(String name, String region) {
+        return configSetStore.get(configSetKey(region, name))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "No ConfigurationSet present with name: " + name, 404));
+    }
+
     /** Reads without throwing on absence (the name is still validated, as the key derivation always
-     * has), for the facade's send-path and tagging lookups. */
+     * has), for the facade's send-path lookups. */
     public Optional<ConfigurationSet> find(String name, String region) {
         return configSetStore.get(configSetKey(region, name));
     }
 
-    /** Persists a configuration set the facade mutated (cross-domain option setters, tagging). */
+    /** Persists a configuration set the facade mutated (the cross-domain option setters). */
     public void save(ConfigurationSet configSet, String region) {
         configSetStore.put(configSetKey(region, configSet.getName()), configSet);
     }

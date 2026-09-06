@@ -10,6 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.util.Map;
 import java.util.UUID;
 
@@ -40,7 +41,8 @@ public class AppConfigDataService {
         session.setApplicationId(appId);
         session.setEnvironmentId(envId);
         session.setConfigurationProfileId(profileId);
-        session.setRequiredMinimumPollIntervalInSeconds((Integer) request.getOrDefault("RequiredMinimumPollIntervalInSeconds", 15));
+        int pollInterval = parsePollInterval(request.getOrDefault("RequiredMinimumPollIntervalInSeconds", 15));
+        session.setRequiredMinimumPollIntervalInSeconds(pollInterval);
         session.setCurrentToken(UUID.randomUUID().toString());
 
         sessionStore.put(session.getCurrentToken(), session);
@@ -48,9 +50,32 @@ public class AppConfigDataService {
         return session.getCurrentToken();
     }
 
+    private static int parsePollInterval(Object value) {
+        if (!(value instanceof Number)) {
+            throw invalidPollInterval();
+        }
+        try {
+            long interval = new BigDecimal(value.toString()).longValueExact();
+            if (interval < 15 || interval > 86400) {
+                throw invalidPollInterval();
+            }
+            return (int) interval;
+        } catch (NumberFormatException | ArithmeticException e) {
+            throw invalidPollInterval();
+        }
+    }
+
+    private static AwsException invalidPollInterval() {
+        return new AwsException("BadRequestException",
+                "RequiredMinimumPollIntervalInSeconds must be an integer between 15 and 86400", 400);
+    }
+
     public ConfigurationData getLatestConfiguration(String token) {
         ConfigurationSession session = sessionStore.get(token)
                 .orElseThrow(() -> new AwsException("BadRequestException", "Invalid configuration token", 400));
+
+        int pollInterval = normalizePollInterval(session.getRequiredMinimumPollIntervalInSeconds());
+        session.setRequiredMinimumPollIntervalInSeconds(pollInterval);
 
         String activeVersion = appConfigService.getActiveVersion(session.getEnvironmentId(), session.getConfigurationProfileId());
         
@@ -73,8 +98,14 @@ public class AppConfigDataService {
         String contentType = (version != null) ? version.getContentType() : "application/octet-stream";
         String versionLabel = (version != null) ? String.valueOf(version.getVersionNumber()) : "";
 
-        return new ConfigurationData(content, contentType, versionLabel, nextToken);
+        return new ConfigurationData(content, contentType, versionLabel, nextToken,
+                pollInterval);
     }
 
-    public record ConfigurationData(byte[] content, String contentType, String configurationVersion, String nextPollConfigurationToken) {}
+    static int normalizePollInterval(int interval) {
+        return interval >= 15 && interval <= 86400 ? interval : 15;
+    }
+
+    public record ConfigurationData(byte[] content, String contentType, String configurationVersion,
+                                    String nextPollConfigurationToken, int nextPollIntervalInSeconds) {}
 }

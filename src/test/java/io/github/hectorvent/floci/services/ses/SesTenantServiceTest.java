@@ -199,6 +199,28 @@ class SesTenantServiceTest {
         assertEquals("team", tags.get(0).key());
     }
 
+    @Test
+    void tagOps_lifecycle_listSortedByKey_notFoundMessage() {
+        Tenant tenant = service.createTenant("acme", List.of(new Tag("team", "floci")), ACCOUNT, REGION);
+        String remainder = "acme/" + tenant.tenantId();
+
+        service.tag(remainder, REGION, List.of(new Tag("env", "dev")));
+        // Ordered by key: env before team (probe-confirmed).
+        assertEquals(List.of("env", "team"),
+                service.listTags(remainder, REGION).stream().map(Tag::key).toList());
+
+        // Re-tagging an existing key replaces its value; untagging a missing key is a silent success.
+        service.tag(remainder, REGION, List.of(new Tag("env", "prod")));
+        service.untag(remainder, REGION, List.of("team", "ghost-key"));
+        List<Tag> tags = service.listTags(remainder, REGION);
+        assertEquals(1, tags.size());
+        assertEquals("prod", tags.get(0).value());
+
+        assertEquals("No Tenant present with name: acmewith tenantId: tn-0000",
+                assertThrows(AwsException.class,
+                        () -> service.listTags("acme/tn-0000", REGION)).getMessage());
+    }
+
     // ──────────────────────── Resource associations (Phase 2) ────────────────────────
 
     private static SesTenantService.AssociationResource identityRef(String name) {

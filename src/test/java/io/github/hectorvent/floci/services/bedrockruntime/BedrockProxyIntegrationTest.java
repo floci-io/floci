@@ -775,14 +775,16 @@ class BedrockProxyIntegrationTest {
     }
 
     @Test
-    void converseStream_noUsableSseChunks_returns424InsteadOfFakeSuccess() {
+    void converseStream_noUsableSseChunks_emitsInBandStreamError() {
         // A 2xx response with a body that isn't SSE-shaped at all (e.g. a plain JSON error
-        // object) must not be silently translated into a "successful" empty completion.
+        // object) never reaches a finish_reason or "[DONE]". The HTTP status is already 200 by
+        // the time messageStart is written, so the failure surfaces as an in-band
+        // modelStreamErrorException event rather than an HTTP error status.
         nextResponseBody.set("""
             {"error": {"message": "model not found"}}
             """);
 
-        given()
+        String body = given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
             .body("""
@@ -791,16 +793,20 @@ class BedrockProxyIntegrationTest {
         .when()
             .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
         .then()
-            .statusCode(424)
-            .body("__type", equalTo("ModelErrorException"));
+            .statusCode(200)
+            .header("Content-Type", containsString("application/vnd.amazon.eventstream"))
+            .extract().body().asString();
+
+        assertThat(body, containsString("messageStart"));
+        assertThat(body, containsString("modelStreamErrorException"));
+        assertThat(body, org.hamcrest.Matchers.not(containsString("messageStop")));
     }
 
     @Test
-    void converseStream_parsableChunksWithNoContent_returns424InsteadOfFakeSuccess() {
-        // Every line here parses as valid JSON (parsedChunks > 0), but none of them carry
-        // actual completion content - a role-only chunk, then a bare finish_reason with no
-        // text or tool_calls. A finish_reason alone must not be treated as proof of a real
-        // completion; this is indistinguishable from a truncated/failed generation.
+    void converseStream_completedWithNoContent_isValidEmptyCompletion() {
+        // A role-only chunk, then a bare finish_reason with no text or tool_calls, then [DONE].
+        // The stream properly completed (finish_reason and "[DONE]" were both seen) - real
+        // Bedrock delivers this as a legitimate empty message, not an error.
         nextResponseBody.set("""
             data: {"choices":[{"delta":{"role":"assistant"}}]}
 
@@ -809,7 +815,7 @@ class BedrockProxyIntegrationTest {
             data: [DONE]
             """);
 
-        given()
+        String body = given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
             .body("""
@@ -818,22 +824,30 @@ class BedrockProxyIntegrationTest {
         .when()
             .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
         .then()
-            .statusCode(424)
-            .body("__type", equalTo("ModelErrorException"));
+            .statusCode(200)
+            .extract().body().asString();
+
+        assertThat(body, containsString("messageStart"));
+        assertThat(body, containsString("messageStop"));
+        assertThat(body, containsString("end_turn"));
+        assertThat(body, containsString("metadata"));
+        assertThat(body, org.hamcrest.Matchers.not(containsString("modelStreamErrorException")));
+        assertThat(body, org.hamcrest.Matchers.not(containsString("contentBlockDelta")));
     }
 
     @Test
-    void converseStream_truncatedTextWithNoFinishReason_returns424() {
+    void converseStream_truncatedTextWithNoFinishReason_emitsInBandStreamErrorAfterPartialText() {
         // A real text delta arrives, but the stream ends (EOF, no [DONE], no finish_reason) -
-        // e.g. the upstream connection dropped mid-generation. Accumulated text alone must not
-        // be treated as a completed answer.
+        // e.g. the upstream connection dropped mid-generation. The already-streamed text and the
+        // 200 status can't be undone, so the truncation is reported as a trailing in-band
+        // modelStreamErrorException event instead of a clean messageStop.
         nextResponseBody.set("""
             data: {"choices":[{"delta":{"role":"assistant"}}]}
 
             data: {"choices":[{"delta":{"content":"Hello"}}]}
             """);
 
-        given()
+        String body = given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
             .body("""
@@ -842,15 +856,21 @@ class BedrockProxyIntegrationTest {
         .when()
             .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
         .then()
-            .statusCode(424)
-            .body("__type", equalTo("ModelErrorException"));
+            .statusCode(200)
+            .extract().body().asString();
+
+        assertThat(body, containsString("messageStart"));
+        assertThat(body, containsString("Hello"));
+        assertThat(body, containsString("modelStreamErrorException"));
+        assertThat(body, org.hamcrest.Matchers.not(containsString("messageStop")));
     }
 
     @Test
-    void converseStream_incompleteToolCallFragment_returns424() {
-        // The tool_calls delta never carries a "name" and its arguments never close into
-        // valid JSON - a partial/corrupted fragment, not a usable tool_use block. It must be
-        // dropped rather than surfacing as a 200 with an empty-name toolUse block.
+    void converseStream_incompleteToolCallFragment_dropsFragmentAndCompletesNormally() {
+        // The tool_calls delta never carries a "name" and its arguments never close into valid
+        // JSON - a partial/corrupted fragment, not a usable tool_use block. It's dropped rather
+        // than surfacing as a toolUse block with empty identity fields; since the stream did
+        // reach "[DONE]"/finish_reason, it still completes normally (as an empty message).
         nextResponseBody.set("""
             data: {"choices":[{"delta":{"role":"assistant"}}]}
 
@@ -861,7 +881,7 @@ class BedrockProxyIntegrationTest {
             data: [DONE]
             """);
 
-        given()
+        String body = given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
             .body("""
@@ -870,8 +890,14 @@ class BedrockProxyIntegrationTest {
         .when()
             .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
         .then()
-            .statusCode(424)
-            .body("__type", equalTo("ModelErrorException"));
+            .statusCode(200)
+            .extract().body().asString();
+
+        assertThat(body, containsString("messageStop"));
+        assertThat(body, containsString("end_turn"));
+        assertThat(body, org.hamcrest.Matchers.not(containsString("call_1")));
+        assertThat(body, org.hamcrest.Matchers.not(containsString("toolUse")));
+        assertThat(body, org.hamcrest.Matchers.not(containsString("modelStreamErrorException")));
     }
 
     @Test

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.acm;
 
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -9,7 +10,9 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.security.Security;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +36,9 @@ class AcmInUseByTest {
     private static CertificateGenerator generator;
     private AcmService service;
 
+    @TempDir
+    Path tempDir;
+
     @BeforeAll
     static void registerProvider() {
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
@@ -45,7 +51,8 @@ class AcmInUseByTest {
     void setUp() {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
-        service = new AcmService(new InMemoryStorage<>(), generator, regionResolver, 0);
+        service = new AcmService(new InMemoryStorage<>(), generator,
+                FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")), regionResolver, 0);
     }
 
     private String requestCertificate() {

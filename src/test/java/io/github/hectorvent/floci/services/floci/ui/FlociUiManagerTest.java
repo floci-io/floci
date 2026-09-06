@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.floci.ui;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerPresence;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
@@ -15,7 +18,10 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.net.BindException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -25,6 +31,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -36,11 +43,13 @@ class FlociUiManagerTest {
 
     private final ContainerDetector containerDetector = mock(ContainerDetector.class);
     private final DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+    private final ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+    private final ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+    private final RegionResolver regionResolver = mock(RegionResolver.class);
     private final EmulatorConfig config = mock(EmulatorConfig.class);
     private final EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
     private final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
     private final EmulatorConfig.UiServiceConfig ui = mock(EmulatorConfig.UiServiceConfig.class);
-    private final RegionResolver regionResolver = mock(RegionResolver.class);
 
     /** Wires config.services().ui() with the defaults every UI test starts from. */
     private void withUiConfig() {
@@ -53,13 +62,14 @@ class FlociUiManagerTest {
     private FlociUiManager newManager() {
         return new FlociUiManager(
                 mock(ContainerBuilder.class),
-                mock(ContainerLifecycleManager.class),
-                mock(ContainerLogStreamer.class),
+                lifecycleManager,
+                logStreamer,
                 containerDetector,
                 mock(CurrentContainerNetworkResolver.class),
                 dockerHostResolver,
                 config,
-                regionResolver);
+                regionResolver,
+                new ObjectMapper());
     }
 
     @Test
@@ -164,19 +174,63 @@ class FlociUiManagerTest {
         // probe must target the sidecar's container IP on the shared Docker network.
         EndpointInfo endpoint = new EndpointInfo("10.88.0.20", 4500);
 
-        assertEquals("http://10.88.0.20:4500/", newManager().resolveProbeUrl(endpoint, 4500));
+        assertEquals("http://10.88.0.20:4500/api/clouds/aws/status",
+                newManager().resolveProbeUrl(endpoint, 4500));
     }
 
     @Test
     void probeUsesLocalhostHostPortNatively() {
         EndpointInfo endpoint = new EndpointInfo("localhost", 4500);
 
-        assertEquals("http://localhost:4500/", newManager().resolveProbeUrl(endpoint, 4500));
+        assertEquals("http://localhost:4500/api/clouds/aws/status",
+                newManager().resolveProbeUrl(endpoint, 4500));
     }
 
     @Test
     void probeFallsBackToLocalhostWhenEndpointMissing() {
-        assertEquals("http://localhost:4500/", newManager().resolveProbeUrl(null, 4500));
+        assertEquals("http://localhost:4500/api/clouds/aws/status",
+                newManager().resolveProbeUrl(null, 4500));
+    }
+
+    @Test
+    void statusIsReadyWhenSidecarCanReachFloci() throws Exception {
+        HttpServer server = startRuntimeStatusServer("""
+                {"runtime":"reachable","endpoint":"http://host.docker.internal:4566"}
+                """);
+        try {
+            FlociUiManager manager = adoptSidecar(server.getAddress().getPort());
+
+            FlociUiManager.UiStatus status = manager.status();
+
+            assertTrue(status.started());
+            assertTrue(status.ready());
+            assertNull(status.error());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void statusSurfacesSidecarRuntimeFailure() throws Exception {
+        HttpServer server = startRuntimeStatusServer("""
+                {
+                  "runtime":"unavailable",
+                  "endpoint":"http://10.88.4.98:4566",
+                  "error":"ECONNREFUSED"
+                }
+                """);
+        try {
+            FlociUiManager manager = adoptSidecar(server.getAddress().getPort());
+
+            FlociUiManager.UiStatus status = manager.status();
+
+            assertTrue(status.started());
+            assertFalse(status.ready());
+            assertTrue(status.error().contains("http://10.88.4.98:4566"), status.error());
+            assertTrue(status.error().contains("ECONNREFUSED"), status.error());
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test
@@ -442,7 +496,8 @@ class FlociUiManagerTest {
                 mock(CurrentContainerNetworkResolver.class),
                 dockerHostResolver,
                 config,
-                regionResolver);
+                regionResolver,
+                new ObjectMapper());
 
         manager.ensureStartedAsync();
         await().atMost(2, TimeUnit.SECONDS)
@@ -480,7 +535,8 @@ class FlociUiManagerTest {
                 mock(CurrentContainerNetworkResolver.class),
                 dockerHostResolver,
                 config,
-                regionResolver);
+                regionResolver,
+                new ObjectMapper());
 
         manager.ensureStarted();
 
@@ -532,7 +588,8 @@ class FlociUiManagerTest {
                 mock(CurrentContainerNetworkResolver.class),
                 dockerHostResolver,
                 config,
-                regionResolver);
+                regionResolver,
+                new ObjectMapper());
 
         manager.ensureStarted();
 
@@ -540,5 +597,40 @@ class FlociUiManagerTest {
         assertTrue(manager.status().error() != null && manager.status().error().contains("http://"),
                 "expected a captured error mentioning the required http:// scheme, was: "
                         + manager.status().error());
+    }
+
+    private FlociUiManager adoptSidecar(int port) {
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.UiServiceConfig ui = mock(EmulatorConfig.UiServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.ui()).thenReturn(ui);
+        when(ui.enabled()).thenReturn(true);
+        when(ui.containerName()).thenReturn("floci-ui");
+        when(ui.port()).thenReturn(port);
+        when(ui.endpoint()).thenReturn(Optional.of("http://custom:4566"));
+
+        Container existing = mock(Container.class);
+        when(existing.getId()).thenReturn("ui-container");
+        when(lifecycleManager.findByName("floci-ui")).thenReturn(Optional.of(existing));
+        when(lifecycleManager.adopt("ui-container", List.of(4500))).thenReturn(
+                new ContainerInfo("ui-container", Map.of(4500, new EndpointInfo("127.0.0.1", port))));
+
+        FlociUiManager manager = newManager();
+        manager.ensureStarted();
+        return manager;
+    }
+
+    private static HttpServer startRuntimeStatusServer(String response) throws IOException {
+        byte[] body = response.getBytes(StandardCharsets.UTF_8);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/clouds/aws/status", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(body);
+            }
+        });
+        server.start();
+        return server;
     }
 }

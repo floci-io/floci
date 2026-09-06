@@ -7,7 +7,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.iot.model.IotPolicy;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -20,16 +24,26 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -38,8 +52,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * Rules engine behaviour of {@link IotService} with in-memory stores and mocked action targets:
- * one failing action never fails the publish or the other actions, and the error action receives
- * the failure document.
+ * one failing action never fails the publish or the other actions, the error action receives the
+ * failure document, and the {@code firehose} and {@code cloudwatchLogs} actions deliver the payload.
+ * Also the five-version cap on a policy, including under racing creates.
  */
 class IotServiceTest {
 
@@ -54,12 +69,15 @@ class IotServiceTest {
     private final SqsService sqs = mock(SqsService.class);
     private final LambdaService lambda = mock(LambdaService.class);
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
+    private final FirehoseService firehose = mock(FirehoseService.class);
+    private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
     private IotService service;
 
     @BeforeEach
     void setUp() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultRegion()).thenReturn(REGION);
+        when(config.services().iot().ruleSqlStrict()).thenReturn(false);
         service = new IotService(
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
@@ -84,7 +102,10 @@ class IotServiceTest {
                 mock(S3Service.class),
                 mock(KinesisService.class),
                 dynamoDb,
-                lambda);
+                lambda,
+                firehose,
+                logs,
+                mock(io.github.hectorvent.floci.config.FlociCertificateAuthority.class));
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {
@@ -199,6 +220,194 @@ class IotServiceTest {
         assertEquals("metrics", failures.get(1).get("failedResource").asText());
     }
 
+    private static String firehoseRule(String separator, boolean batchMode) {
+        String separatorMember = separator == null ? "" : ", \"separator\": \"" + separator + "\"";
+        return """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [{"firehose": {"deliveryStreamName": "metrics", "roleArn": "arn:aws:iam::000000000000:role/rule"%s, "batchMode": %s}}]
+            }
+            """.formatted(separatorMember, batchMode);
+    }
+
+    private static String text(Record record) {
+        return new String(record.getData(), StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void firehoseActionPutsThePayloadWithTheSeparatorAppended() throws Exception {
+        createRule("metricsRule", firehoseRule("\\n", false));
+
+        publish("{\"v\":1}");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("{\"v\":1}\n", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionWithoutASeparatorPutsThePayloadAsIs() throws Exception {
+        createRule("metricsRule", firehoseRule(null, false));
+
+        publish("{\"v\":1}");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("{\"v\":1}", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionInBatchModeDeliversEachElementOfAJsonArrayAsOneRecord() throws Exception {
+        createRule("metricsRule", firehoseRule("\\n", true));
+
+        publish("[{\"v\":1},{\"v\":2}]");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Record>> records = ArgumentCaptor.forClass(List.class);
+        verify(firehose).putRecordBatch(eq("metrics"), records.capture());
+        assertEquals(List.of("{\"v\":1}\n", "{\"v\":2}\n"), records.getValue().stream().map(IotServiceTest::text).toList());
+        verify(firehose, never()).putRecord(anyString(), any());
+    }
+
+    @Test
+    void firehoseActionInBatchModeDeliversAnythingElseAsOneRecord() throws Exception {
+        createRule("metricsRule", firehoseRule(null, true));
+
+        publish("plain text");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("plain text", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionAcceptsEverySeparatorTheApiAllows() throws Exception {
+        List<String> separators = List.of("\\n", "\\t", "\\r\\n", ",");
+        for (int i = 0; i < separators.size(); i++) {
+            createRule("rule" + i, firehoseRule(separators.get(i), false));
+        }
+    }
+
+    @Test
+    void firehoseActionRejectsAnySeparatorTheApiDoesNotAllow() {
+        for (String separator : List.of("|", ";", "", " ", "\\n\\n")) {
+            AwsException e = assertThrows(AwsException.class, () -> createRule("metricsRule", firehoseRule(separator, false)));
+            assertEquals("InvalidRequestException", e.getErrorCode(), separator);
+            assertEquals(400, e.getHttpStatus());
+        }
+        assertThrows(AwsException.class, () -> createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'", "actions": [],
+             "errorAction": {"firehose": {"deliveryStreamName": "errors", "roleArn": "arn:aws:iam::000000000000:role/rule", "separator": "|"}}}
+            """));
+    }
+
+    @Test
+    void firehoseActionFailureIsReportedWithTheDeliveryStreamName() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"firehose": {"deliveryStreamName": "metrics", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": %s}
+            """.formatted(lambdaErrorAction()));
+        doThrow(new AwsException("ResourceNotFoundException", "Delivery stream not found: metrics", 400))
+                .when(firehose).putRecord(eq("metrics"), any());
+
+        publish("{\"v\":1}");
+
+        JsonNode failure = capturedInvocationPayload(ERROR_FUNCTION_ARN).get("failures").get(0);
+        assertEquals("FirehoseAction", failure.get("failedAction").asText());
+        assertEquals("metrics", failure.get("failedResource").asText());
+    }
+
+    private static String cloudwatchLogsRule(boolean batchMode) {
+        return """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [{"cloudwatchLogs": {"logGroupName": "/iot/metrics", "roleArn": "arn:aws:iam::000000000000:role/rule", "batchMode": %s}}]
+            }
+            """.formatted(batchMode);
+    }
+
+    private List<Map<String, Object>> capturedLogEvents() {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(logs).putLogEvents(eq("/iot/metrics"), eq("metricsRule"), events.capture(), eq(REGION));
+        return events.getValue();
+    }
+
+    @Test
+    void cloudwatchLogsActionWritesThePayloadToAStreamNamedAfterTheRule() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(false));
+
+        publish("{\"v\":1}");
+
+        verify(logs).createLogStream("/iot/metrics", "metricsRule", REGION);
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(1, events.size());
+        assertEquals("{\"v\":1}", events.get(0).get("message"));
+        assertTrue(events.get(0).get("timestamp") instanceof Long);
+    }
+
+    @Test
+    void cloudwatchLogsActionReusesAnExistingStream() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(false));
+        doThrow(new AwsException("ResourceAlreadyExistsException", "The specified log stream already exists", 400))
+                .when(logs).createLogStream("/iot/metrics", "metricsRule", REGION);
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        assertEquals("{\"v\":1}", capturedLogEvents().get(0).get("message"));
+    }
+
+    @Test
+    void cloudwatchLogsActionInBatchModeTakesTimestampAndMessageFromEachArrayElement() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(true));
+
+        publish("""
+            [
+              {"timestamp": 1673520691093, "message": "Test message 1"},
+              {"timestamp": 1673520692879, "message": "Test message 2"},
+              {"timestamp": 1673520693442, "message": "Test message 3"}
+            ]
+            """);
+
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(List.of("Test message 1", "Test message 2", "Test message 3"),
+                events.stream().map(event -> event.get("message")).toList());
+        assertEquals(List.of(1673520691093L, 1673520692879L, 1673520693442L),
+                events.stream().map(event -> event.get("timestamp")).toList());
+    }
+
+    @Test
+    void cloudwatchLogsActionInBatchModeFallsBackToThePublishTimeAndTheElementText() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(true));
+        long before = System.currentTimeMillis();
+
+        publish("[{\"v\":1}, {\"timestamp\": \"1673520691093\", \"message\": {\"nested\": true}}, \"plain\"]");
+
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(List.of("{\"v\":1}", "{\"nested\":true}", "\"plain\""),
+                events.stream().map(event -> event.get("message")).toList());
+        events.forEach(event -> assertTrue((Long) event.get("timestamp") >= before));
+    }
+
+    @Test
+    void cloudwatchLogsActionFailsWhenTheLogGroupDoesNotExist() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"cloudwatchLogs": {"logGroupName": "/iot/missing", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": %s}
+            """.formatted(lambdaErrorAction()));
+        doThrow(new AwsException("ResourceNotFoundException", "The specified log group does not exist: /iot/missing", 400))
+                .when(logs).createLogStream("/iot/missing", "metricsRule", REGION);
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        JsonNode failure = capturedInvocationPayload(ERROR_FUNCTION_ARN).get("failures").get(0);
+        assertEquals("CloudwatchLogsAction", failure.get("failedAction").asText());
+        assertEquals("/iot/missing", failure.get("failedResource").asText());
+        verify(logs, never()).putLogEvents(anyString(), anyString(), any(), anyString());
+    }
+
     @Test
     void topicRuleKeepsTheSqlVersionAndTheErrorAction() throws Exception {
         createRule("versionedRule", """
@@ -298,5 +507,162 @@ class IotServiceTest {
 
         verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
         verify(lambda, never()).invoke(eq(REGION), eq(ERROR_FUNCTION_ARN), any(), any());
+    }
+
+    @Test
+    void aPolicyHoldsAtMostFiveVersionsUntilOneIsDeleted() {
+        service.createPolicy("capped", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            assertEquals(Integer.toString(v),
+                    service.createPolicyVersion("capped", "{\"v\":" + v + "}", true, REGION).getVersionId());
+        }
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPolicyVersion("capped", "{\"v\":6}", true, REGION));
+
+        assertEquals("VersionsLimitExceededException", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+        assertEquals(5, service.listPolicyVersions("capped", REGION).size());
+        assertEquals("5", service.getPolicy("capped", REGION).getDefaultVersionId());
+        service.deletePolicyVersion("capped", "2", REGION);
+        assertEquals("6", service.createPolicyVersion("capped", "{\"v\":6}", true, REGION).getVersionId());
+        assertEquals("6", service.getPolicy("capped", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void racingVersionCreatesNeverPushAPolicyPastFiveVersions() throws Exception {
+        service.createPolicy("raced", "{\"v\":1}", REGION);
+        int writers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<Boolean>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        service.createPolicyVersion("raced", "{\"v\":true}", false, REGION);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("VersionsLimitExceededException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int created = 0;
+            for (Future<Boolean> outcome : outcomes) {
+                if (outcome.get()) {
+                    created++;
+                }
+            }
+            assertEquals(4, created, "exactly four of eight racing creates fit under the cap");
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(5, service.listPolicyVersions("raced", REGION).size());
+    }
+
+    @Test
+    void deletingTheOldestVersionRemovesTheNumericallySmallestIdAndKeepsTheDefault() {
+        service.createPolicy("pruned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 10; v++) {
+            if (service.listPolicyVersions("pruned", REGION).size() == IotService.MAX_POLICY_VERSIONS) {
+                service.makeRoomForPolicyVersion("pruned", REGION);
+            }
+            service.createPolicyVersion("pruned", "{\"v\":" + v + "}", true, REGION);
+        }
+        assertEquals(List.of(6, 7, 8, 9, 10), versionIds("pruned"));
+
+        // Sorted as text, "10" would come before "6"; the oldest version is the numerically smallest id.
+        service.makeRoomForPolicyVersion("pruned", REGION);
+
+        assertEquals(List.of(7, 8, 9, 10), versionIds("pruned"));
+        assertEquals("10", service.getPolicy("pruned", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void deletingTheOldestVersionMovesTheDefaultToTheNewestWhenTheOldestIsTheDefault() {
+        service.createPolicy("pinned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            service.createPolicyVersion("pinned", "{\"v\":" + v + "}", false, REGION);
+        }
+        assertEquals("1", service.getPolicy("pinned", REGION).getDefaultVersionId());
+
+        service.makeRoomForPolicyVersion("pinned", REGION);
+
+        assertEquals(List.of(2, 3, 4, 5), versionIds("pinned"));
+        assertEquals("5", service.getPolicy("pinned", REGION).getDefaultVersionId());
+        assertEquals("{\"v\":5}", service.getPolicy("pinned", REGION).getPolicyDocument());
+    }
+
+    @Test
+    void makingRoomOnAPolicyStoredWithMoreThanFiveVersionsDeletesDownToFourInOneStep() {
+        // A policy persisted before the cap existed can hold more than five versions; the stores
+        // hand out the live object, so adding to it is the same as having persisted it that way.
+        service.createPolicy("legacy", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            service.createPolicyVersion("legacy", "{\"v\":" + v + "}", true, REGION);
+        }
+        IotPolicy stored = service.getPolicy("legacy", REGION);
+        List<IotPolicy.PolicyVersion> versions = new ArrayList<>(stored.getVersions());
+        for (int v = 6; v <= 8; v++) {
+            IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
+            version.setVersionId(Integer.toString(v));
+            version.setDocument("{\"v\":" + v + "}");
+            versions.add(version);
+        }
+        stored.setVersions(versions);
+        assertEquals(List.of(1, 2, 3, 4, 5, 6, 7, 8), versionIds("legacy"));
+
+        service.makeRoomForPolicyVersion("legacy", REGION);
+
+        assertEquals(List.of(5, 6, 7, 8), versionIds("legacy"));
+        assertEquals("5", service.getPolicy("legacy", REGION).getDefaultVersionId());
+        assertEquals("9", service.createPolicyVersion("legacy", "{\"v\":9}", true, REGION).getVersionId());
+    }
+
+    @Test
+    void aPolicyDeletedWhileVersionsAreBeingCreatedStaysDeleted() throws Exception {
+        for (int round = 0; round < 20; round++) {
+            String name = "vanishing-" + round;
+            service.createPolicy(name, "{\"v\":1}", REGION);
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool = Executors.newFixedThreadPool(4);
+            List<Future<?>> outcomes = new ArrayList<>();
+            try {
+                for (int i = 0; i < 3; i++) {
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.createPolicyVersion(name, "{\"v\":2}", false, REGION);
+                        } catch (AwsException e) {
+                            assertEquals("ResourceNotFoundException", e.getErrorCode());
+                        }
+                        return null;
+                    }));
+                }
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    service.deletePolicy(name, REGION);
+                    return null;
+                }));
+                start.countDown();
+                for (Future<?> outcome : outcomes) {
+                    outcome.get();
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+            AwsException e = assertThrows(AwsException.class, () -> service.getPolicy(name, REGION));
+            assertEquals("ResourceNotFoundException", e.getErrorCode(), "round " + round + " brought the policy back");
+        }
+    }
+
+    private List<Integer> versionIds(String policyName) {
+        return service.listPolicyVersions(policyName, REGION).stream()
+                .map(version -> Integer.parseInt(version.getVersionId()))
+                .sorted()
+                .toList();
     }
 }

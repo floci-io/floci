@@ -131,7 +131,7 @@ class TlsIntegrationTest {
                     Security.addProvider(new BouncyCastleProvider());
                 }
                 CertificateGenerator gen = new CertificateGenerator();
-                CertificateGenerator.GeneratedCertificate cert = gen.generateCertificate(
+                CertificateGenerator.GeneratedCertificate cert = gen.generateSelfSignedCertificate(
                         "localhost", List.of("localhost", "127.0.0.1"), KeyAlgorithm.RSA_2048);
                 Files.writeString(CERT_FILE, cert.certificatePem());
                 Files.writeString(KEY_FILE, cert.privateKeyPem());
