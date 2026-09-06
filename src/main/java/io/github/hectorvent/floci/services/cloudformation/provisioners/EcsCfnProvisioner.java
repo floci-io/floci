@@ -81,6 +81,26 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
     /**
      * The cluster name is create-only and the physical id, so an unnamed cluster keeps the name its
      * first execution generated. createCluster is idempotent, which is what makes an unchanged
@@ -92,11 +112,13 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         EcsCluster cluster = ecsService.createCluster(clusterName, ctx.region());
         r.setPhysicalId(cluster.getClusterName());
         r.getAttributes().put("Arn", cluster.getClusterArn());
+        ReplacementCleanup.record(r, ctx);
     }
 
     /**
      * Every property of a task definition is create-only, so an update registers a fresh revision
-     * under the same family, as CloudFormation does on AWS; the physical id is the new revision's ARN.
+     * under the same family, as CloudFormation does on AWS; the physical id is the new revision's
+     * ARN, and the displaced revision is deregistered once the stack update commits.
      */
     private void provisionTaskDefinition(StackResource r, JsonNode props, ProvisionContext ctx) {
         String family = ctx.resolveOptional(props, "Family");
@@ -117,14 +139,15 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(td.getTaskDefinitionArn());
         r.getAttributes().put("TaskDefinitionArn", td.getTaskDefinitionArn());
+        ReplacementCleanup.record(r, ctx);
     }
 
     /**
      * The physical id is the service ARN, not the name, so the name an unnamed service got at
      * create time is read back from the {@code Name} attribute rather than the prior id. An update
-     * that keeps that name updates the service in place; a changed name is a replacement and
-     * creates the new service, leaving the prior one behind as every replacement in the legacy
-     * switch does today.
+     * that keeps the name and the cluster updates the service in place; a changed name or a
+     * changed cluster (both create-only) is a replacement: the new service is created and the
+     * displaced one deleted once the stack update commits, through the replacement cleanup.
      */
     private void provisionService(StackResource r, JsonNode props, ProvisionContext ctx) {
         String clusterRef = ctx.resolveOptional(props, "Cluster");
@@ -146,7 +169,8 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
 
         EcsServiceModel svc;
-        if (ctx.isUpdate() && serviceName.equals(priorName)) {
+        if (ctx.isUpdate() && serviceName.equals(priorName)
+                && clusterName(clusterRef).equals(clusterOfServiceArn(ctx.priorPhysicalId()))) {
             svc = ecsService.updateService(clusterRef, serviceName, taskDefinition,
                     desiredCount, networkConfiguration, ctx.region());
         } else {
@@ -157,6 +181,26 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(svc.getServiceArn());
         r.getAttributes().put("Name", svc.getServiceName());
         r.getAttributes().put("ServiceArn", svc.getServiceArn());
+        ReplacementCleanup.record(r, ctx);
+    }
+
+    /** The cluster name a template value addresses: a name, an ARN's last segment, or the default. */
+    private static String clusterName(String clusterRef) {
+        if (clusterRef == null || clusterRef.isBlank()) {
+            return "default";
+        }
+        int slash = clusterRef.lastIndexOf('/');
+        return clusterRef.startsWith("arn:") && slash >= 0 ? clusterRef.substring(slash + 1) : clusterRef;
+    }
+
+    /** The cluster segment of {@code service/<cluster>/<name>}; the legacy {@code service/<name>} form is the default. */
+    private static String clusterOfServiceArn(String serviceArn) {
+        try {
+            String[] segments = AwsArnUtils.parse(serviceArn).resource().split("/");
+            return segments.length == 3 ? segments[1] : "default";
+        } catch (IllegalArgumentException e) {
+            return "default";
+        }
     }
 
     /**

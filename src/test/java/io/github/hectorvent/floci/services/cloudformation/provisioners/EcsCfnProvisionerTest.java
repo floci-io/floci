@@ -18,12 +18,14 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -35,6 +37,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -266,6 +269,95 @@ class EcsCfnProvisionerTest {
         assertNotEquals(SERVICE_ARN, r.getPhysicalId());
         assertEquals("front-v2", r.getAttributes().get("Name"));
         verify(ecs, never()).updateService(anyString(), anyString(), anyString(), anyInt(), any(), anyString());
+    }
+
+    @Test
+    void aServiceMovedToAnotherClusterIsCreatedAsAReplacementAndTheOldOneCleanedUpAfterCommit() {
+        EcsServiceModel moved = service("front");
+        moved.setServiceArn("arn:aws:ecs:us-east-1:000000000000:service/batch/front");
+        when(ecs.createService(eq("batch"), eq("front"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(), isNull(),
+                eq(REGION))).thenReturn(moved);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "batch").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN), ctx(SERVICE_ARN));
+
+        // Cluster is create-only: same name, other cluster is a replacement, never an in-place update
+        // against a service the new cluster may not have (or may have under another owner).
+        verify(ecs, never()).updateService(anyString(), anyString(), anyString(), anyInt(), any(), anyString());
+        assertEquals(moved.getServiceArn(), r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(SERVICE_ARN, provisioner.updateCleanupPhysicalId(r));
+
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+
+        InOrder order = inOrder(ecs);
+        order.verify(ecs).createService(eq("batch"), eq("front"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(), isNull(),
+                eq(REGION));
+        order.verify(ecs).deleteService("web", "front", true, REGION);
+        assertEquals(new UpdateCleanupResult(true, true, SERVICE_ARN, 0, null), cleanup);
+        provisioner.clearUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void theClusterGivenAsAnArnStillCountsAsTheSameCluster() {
+        when(ecs.updateService(eq(CLUSTER_ARN), eq("front"), eq(TASK_DEF_ARN), eq(1), isNull(), eq(REGION)))
+                .thenReturn(service("front"));
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", CLUSTER_ARN).put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN), ctx(SERVICE_ARN));
+
+        verify(ecs).updateService(CLUSTER_ARN, "front", TASK_DEF_ARN, 1, null, REGION);
+        assertFalse(provisioner.hasReplacementUpdate(r), "an in-place update owes no cleanup");
+    }
+
+    @Test
+    void aTaskDefinitionUpdateDeregistersTheDisplacedRevisionAfterCommit() {
+        TaskDefinition next = new TaskDefinition();
+        next.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":4"));
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(next);
+        StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
+
+        provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+
+        assertEquals(next.getTaskDefinitionArn(), r.getPhysicalId());
+        assertEquals(TASK_DEF_ARN, provisioner.updateCleanupPhysicalId(r));
+        assertEquals(new UpdateCleanupResult(true, true, TASK_DEF_ARN, 0, null), provisioner.completeUpdate(r));
+        verify(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+    }
+
+    @Test
+    void aRetainedDisplacedEntityIsNotDeletedAndAFailingDeleteIsRetriedThreeTimes() {
+        TaskDefinition next = new TaskDefinition();
+        next.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":4"));
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(next);
+
+        StackResource retained = resource("AWS::ECS::TaskDefinition", "TaskDef");
+        retained.setUpdateReplacePolicy("Retain");
+        provisioner.provision(retained, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+        assertNull(provisioner.updateCleanupPhysicalId(retained));
+        assertEquals(new UpdateCleanupResult(true, true, TASK_DEF_ARN, 0, null), provisioner.completeUpdate(retained));
+        verify(ecs, never()).deregisterTaskDefinition(anyString(), anyString());
+
+        StackResource failing = resource("AWS::ECS::TaskDefinition", "TaskDef");
+        provisioner.provision(failing, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+        doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+        UpdateCleanupResult first = provisioner.completeUpdate(failing);
+        assertFalse(first.complete());
+        assertEquals(1, first.attempts());
+        provisioner.completeUpdate(failing);
+        UpdateCleanupResult third = provisioner.completeUpdate(failing);
+        assertEquals(3, third.attempts());
+        assertEquals("busy", third.failureReason());
+        UpdateCleanupResult givenUp = provisioner.completeUpdate(failing);
+        assertEquals(3, givenUp.attempts(), "no fourth attempt");
+        verify(ecs, org.mockito.Mockito.times(3)).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
     }
 
     @Test

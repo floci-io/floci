@@ -54,6 +54,15 @@ public final class CfnRollback {
      */
     public static final String PIPE_RENAME_CLEANUP_ATTR = "__FlociPipeRenameCleanup";
 
+    /**
+     * Holds the entity a replacing update displaced, for provisioners whose replacement needs no
+     * rollback snapshot: the prior physical id, its resource type and region, and how many times
+     * deleting it has been attempted. Written by {@link ReplacementCleanup#record} when a
+     * provision leaves the resource with a new physical id, and spent by {@code completeUpdate}
+     * once the update has committed.
+     */
+    public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
+
     private CfnRollback() {
     }
 
