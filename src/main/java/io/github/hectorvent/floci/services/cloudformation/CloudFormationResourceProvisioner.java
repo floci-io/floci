@@ -50,6 +50,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
@@ -858,12 +859,13 @@ public class CloudFormationResourceProvisioner {
         // resources, and clearing them on an unrelated update would close ports another stack
         // resource is responsible for. Removing a rule the template no longer declares needs the
         // provisioner to record what it authorized; noted as a follow-up.
+        var peerGroupId = peerGroupIdResolver(region, sg.getVpcId());
         if (props != null && props.has("SecurityGroupIngress")) {
-            authorizeMissing(props.get("SecurityGroupIngress"), sg.getIpPermissions(), engine,
+            authorizeMissing(props.get("SecurityGroupIngress"), sg.getIpPermissions(), engine, peerGroupId,
                     perms -> ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), perms));
         }
         if (props != null && props.has("SecurityGroupEgress")) {
-            authorizeMissing(props.get("SecurityGroupEgress"), sg.getIpPermissionsEgress(), engine,
+            authorizeMissing(props.get("SecurityGroupEgress"), sg.getIpPermissionsEgress(), engine, peerGroupId,
                     perms -> ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), perms));
         }
     }
@@ -1413,16 +1415,33 @@ public class CloudFormationResourceProvisioner {
      */
     private void authorizeMissing(JsonNode declared, List<IpPermission> existing,
                                   CloudFormationTemplateEngine engine,
+                                  java.util.function.UnaryOperator<String> peerGroupId,
                                   java.util.function.Consumer<List<IpPermission>> authorize) {
         Set<String> present = existing.stream()
-                .map(CloudFormationResourceProvisioner::permissionKey)
+                .map(p -> permissionKey(p, peerGroupId))
                 .collect(java.util.stream.Collectors.toSet());
         for (JsonNode rule : declared) {
             IpPermission perm = Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine);
-            if (present.add(permissionKey(perm))) {
+            if (present.add(permissionKey(perm, peerGroupId))) {
                 authorize.accept(List.of(perm));
             }
         }
+    }
+
+    /**
+     * Resolves a peer group's name to its id, the same lookup {@code Ec2Service} performs when it
+     * stores an authorized rule. Group names are unique per VPC rather than per region, so the
+     * search is confined to the group being authorized. A name matching nothing there stays a
+     * name, which is also what the service does.
+     */
+    private java.util.function.UnaryOperator<String> peerGroupIdResolver(String region, String vpcId) {
+        return groupName -> ec2Service.describeSecurityGroups(region, List.of(), List.of(groupName), Map.of())
+                .stream()
+                .filter(peer -> Objects.equals(vpcId, peer.getVpcId()))
+                .map(SecurityGroup::getGroupId)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(groupName);
     }
 
     /**
@@ -1430,7 +1449,7 @@ public class CloudFormationResourceProvisioner {
      * it holds define no {@code equals}, so compare a canonical rendering instead. Descriptions
      * are left out: AWS treats a rule differing only by description as the same rule.
      */
-    private static String permissionKey(IpPermission p) {
+    private static String permissionKey(IpPermission p, java.util.function.UnaryOperator<String> peerGroupId) {
         return String.join("|",
                 String.valueOf(p.getIpProtocol()),
                 String.valueOf(p.getFromPort()),
@@ -1440,12 +1459,27 @@ public class CloudFormationResourceProvisioner {
                 p.getIpv6Ranges().stream().map(Ipv6Range::getCidrIpv6).filter(Objects::nonNull).sorted()
                         .collect(java.util.stream.Collectors.joining(",")),
                 p.getUserIdGroupPairs().stream()
-                        .map(g -> g.getGroupId() != null ? g.getGroupId() : g.getGroupName())
+                        .map(g -> peerIdentity(g, peerGroupId))
                         .filter(Objects::nonNull).sorted()
                         .collect(java.util.stream.Collectors.joining(",")),
                 p.getPrefixListIds().stream().map(PrefixListId::getPrefixListId)
                         .filter(Objects::nonNull).sorted()
                         .collect(java.util.stream.Collectors.joining(",")));
+    }
+
+    /**
+     * How a peer group is identified when two permissions are compared: its id whenever one can be
+     * had. A stored pair already carries one, because authorize resolves the name as it records the
+     * rule, while a pair straight from the template carries only the name it was declared with.
+     * Keying a resolved id against an unresolved name never matches, which re-authorized a rule
+     * naming its peer through {@code SourceSecurityGroupName} on every single update.
+     */
+    private static String peerIdentity(UserIdGroupPair pair,
+                                       java.util.function.UnaryOperator<String> peerGroupId) {
+        if (pair.getGroupId() != null) {
+            return pair.getGroupId();
+        }
+        return pair.getGroupName() == null ? null : peerGroupId.apply(pair.getGroupName());
     }
 
     /**

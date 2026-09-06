@@ -153,12 +153,6 @@ class CfnUnchangedResourceUpdateIntegrationTest {
             }""";
 
     /**
-     * AuthorizeSecurityGroupIngress appends without a duplicate check, so re-running provision on a
-     * reused group stacks another copy of every inline rule on each update. Retaining the group id
-     * is not enough on its own: the group has to still describe the rules the template declares,
-     * once each.
-     */
-    /**
      * A group can carry rules from standalone AWS::EC2::SecurityGroupIngress resources as well as
      * its own inline ones. Reconciling the inline set by clearing the group first would revoke
      * those too, so a stack update unrelated to them would silently close their ports.
@@ -201,6 +195,12 @@ class CfnUnchangedResourceUpdateIntegrationTest {
                 "the standalone resource's rule was revoked by the inline reconciliation");
     }
 
+    /**
+     * AuthorizeSecurityGroupIngress appends without a duplicate check, so re-running provision on a
+     * reused group stacks another copy of every inline rule on each update. Retaining the group id
+     * is not enough on its own: the group has to still describe the rules the template declares,
+     * once each.
+     */
     @Test
     void securityGroupInlineRulesAreNotDuplicatedByAnUpdate() {
         String body = SG_WITH_INGRESS.replace("DESCRIPTION", "stable");
@@ -217,6 +217,52 @@ class CfnUnchangedResourceUpdateIntegrationTest {
         assertEquals(1, occurrences,
                 "inline ingress rule appears " + occurrences + " times after one update; "
                         + "provision re-authorized it on the reused group");
+    }
+
+    /**
+     * A rule naming its peer through SourceSecurityGroupName is the case the CidrIp rules above
+     * cannot reach. Ec2Service resolves the name to a group id as it records the rule, while the
+     * declaration the template hands back on the next update still carries only the name, so
+     * comparing the two forms directly finds no match and re-authorizes the rule every time.
+     *
+     * <p>DependsOn is load-bearing: the peer has to exist when the rule is first authorized, or
+     * the stored pair keeps the unresolved name and both sides agree for the wrong reason.
+     */
+    @Test
+    void aRuleNamingItsPeerByNameIsNotDuplicatedByAnUpdate() {
+        String body = """
+                "Peer": {
+                  "Type": "AWS::EC2::SecurityGroup",
+                  "Properties": {
+                    "GroupName": "probe-sg-peer-SUFFIX",
+                    "GroupDescription": "probe peer"
+                  }
+                },
+                "Named": {
+                  "Type": "AWS::EC2::SecurityGroup",
+                  "DependsOn": "Peer",
+                  "Properties": {
+                    "GroupName": "probe-sg-byname-SUFFIX",
+                    "GroupDescription": "probe by name",
+                    "SecurityGroupIngress": [
+                      {"IpProtocol": "tcp", "FromPort": 5432, "ToPort": 5432,
+                       "SourceSecurityGroupName": "probe-sg-peer-SUFFIX"}
+                    ]
+                  }
+                }""";
+        String[] ids = createThenUpdate("sg-byname", body, body);
+        assertEquals(ids[0], ids[1], "unchanged security group was re-created under a new physical id");
+
+        String described = given()
+                .contentType("application/x-www-form-urlencoded").header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeSecurityGroups").formParam("GroupId.1", ids[1])
+            .when().post("/").then().statusCode(200)
+            .extract().body().asString();
+
+        int occurrences = described.split("<fromPort>5432</fromPort>", -1).length - 1;
+        assertEquals(1, occurrences,
+                "name-based ingress rule appears " + occurrences + " times after one update; "
+                        + "the stored peer is keyed by id and the declared one by name");
     }
 
     @Test
