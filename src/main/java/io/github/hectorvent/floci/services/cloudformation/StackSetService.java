@@ -253,7 +253,6 @@ public class StackSetService {
             completeOperation(name, operationId, "FAILED");
             throw e;
         }
-        }
     }
 
     public void deleteStackSet(String name) {
