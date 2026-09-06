@@ -49,7 +49,7 @@ public class Inspector2Controller {
         if (request.hasNonNull("nextToken") && !request.path("nextToken").asText().isBlank()) {
             throw new AwsException("ValidationException", "nextToken is invalid.", 400);
         }
-        InspectorState state = service.state(region(headers));
+        InspectorState state = service.delegatedAdminState(region(headers), requestContext.getAccountId());
         var response = objectMapper.createObjectNode();
         var accounts = response.putArray("delegatedAdminAccounts");
         if (state.getAdminAccountId() != null) {
@@ -63,7 +63,7 @@ public class Inspector2Controller {
     public Response enableDelegatedAdminAccount(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
         String accountId = request.path("delegatedAdminAccountId").asText(null);
-        service.enableDelegatedAdmin(region(headers), accountId);
+        service.enableDelegatedAdmin(region(headers), requestContext.getAccountId(), accountId);
         var response = objectMapper.createObjectNode();
         response.put("delegatedAdminAccountId", accountId);
         return Response.ok(response).build();
@@ -74,7 +74,7 @@ public class Inspector2Controller {
     public Response disableDelegatedAdminAccount(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
         String accountId = request.path("delegatedAdminAccountId").asText(null);
-        service.disableDelegatedAdmin(region(headers), accountId);
+        service.disableDelegatedAdmin(region(headers), requestContext.getAccountId(), accountId);
         var response = objectMapper.createObjectNode();
         response.put("delegatedAdminAccountId", accountId);
         return Response.ok(response).build();
@@ -89,28 +89,16 @@ public class Inspector2Controller {
             throw new AwsException("ValidationException",
                     "accountIds must contain at most 100 account IDs.", 400);
         }
-        InspectorState state = service.accountStatus(region(headers));
+        java.util.List<String> requestedAccounts = requestedAccounts(accountIds);
         var response = objectMapper.createObjectNode();
         var accounts = response.putArray("accounts");
-        java.util.List<String> requestedAccounts = new java.util.ArrayList<>();
-        if (accountIds == null || accountIds.isEmpty()) {
-            requestedAccounts.add(requestContext.getAccountId());
-        } else {
-            for (JsonNode accountId : accountIds) {
-                Inspector2Service.requireAccountId(accountId.asText(null));
-                requestedAccounts.add(accountId.asText());
-            }
-        }
         for (String accountId : requestedAccounts) {
+            InspectorState state = service.accountStatus(
+                    region(headers), requestContext.getAccountId(), accountId);
             var account = accounts.addObject();
             account.put("accountId", accountId);
             account.set("state", stateNode(state.getStatus()));
-            var resources = account.putObject("resourceState");
-            resources.set("ec2", stateNode(state.getStatus()));
-            resources.set("ecr", stateNode(state.getStatus()));
-            resources.set("lambda", stateNode(state.getStatus()));
-            resources.set("lambdaCode", stateNode(state.getStatus()));
-            resources.set("codeRepository", stateNode(state.getStatus()));
+            account.set("resourceState", resourceState(state));
         }
         response.putArray("failedAccounts");
         return Response.ok(response).build();
@@ -120,29 +108,15 @@ public class Inspector2Controller {
     @Path("/enable")
     public Response enable(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
-        service.enable(region(headers), request);
+        var enabled = service.enable(region(headers), requestContext.getAccountId(), request);
         var response = objectMapper.createObjectNode();
         var accounts = response.putArray("accounts");
-        JsonNode accountIds = request.get("accountIds");
-        java.util.List<String> requestedAccounts = new java.util.ArrayList<>();
-        if (accountIds == null || accountIds.isEmpty()) {
-            requestedAccounts.add(requestContext.getAccountId());
-        } else {
-            for (JsonNode accountId : accountIds) {
-                requestedAccounts.add(accountId.asText());
-            }
-        }
-        for (String accountId : requestedAccounts) {
+        enabled.forEach((accountId, state) -> {
             var account = accounts.addObject();
             account.put("accountId", accountId);
-            account.put("status", "ENABLING");
-            var resourceStatus = account.putObject("resourceStatus");
-            resourceStatus.put("ec2", "ENABLING");
-            resourceStatus.put("ecr", "ENABLING");
-            resourceStatus.put("lambda", "ENABLING");
-            resourceStatus.put("lambdaCode", "ENABLING");
-            resourceStatus.put("codeRepository", "ENABLING");
-        }
+            account.put("status", state.getStatus());
+            account.set("resourceStatus", resourceStatus(state));
+        });
         response.putArray("failedAccounts");
         return Response.ok(response).build();
     }
@@ -172,6 +146,38 @@ public class Inspector2Controller {
         autoEnable.put("codeRepository", state.isAutoEnableCodeRepository());
         response.put("maxAccountLimitReached", false);
         return response;
+    }
+
+    private java.util.List<String> requestedAccounts(JsonNode accountIds) {
+        if (accountIds == null || accountIds.isEmpty()) {
+            return java.util.List.of(requestContext.getAccountId());
+        }
+        java.util.List<String> result = new java.util.ArrayList<>(accountIds.size());
+        for (JsonNode accountId : accountIds) {
+            Inspector2Service.requireAccountId(accountId.asText(null));
+            result.add(accountId.asText());
+        }
+        return result;
+    }
+
+    private com.fasterxml.jackson.databind.node.ObjectNode resourceState(InspectorState state) {
+        var resources = objectMapper.createObjectNode();
+        resources.set("ec2", stateNode(state.getEc2Status()));
+        resources.set("ecr", stateNode(state.getEcrStatus()));
+        resources.set("lambda", stateNode(state.getLambdaStatus()));
+        resources.set("lambdaCode", stateNode(state.getLambdaCodeStatus()));
+        resources.set("codeRepository", stateNode(state.getCodeRepositoryStatus()));
+        return resources;
+    }
+
+    private com.fasterxml.jackson.databind.node.ObjectNode resourceStatus(InspectorState state) {
+        var resources = objectMapper.createObjectNode();
+        resources.put("ec2", state.getEc2Status());
+        resources.put("ecr", state.getEcrStatus());
+        resources.put("lambda", state.getLambdaStatus());
+        resources.put("lambdaCode", state.getLambdaCodeStatus());
+        resources.put("codeRepository", state.getCodeRepositoryStatus());
+        return resources;
     }
 
     private com.fasterxml.jackson.databind.node.ObjectNode stateNode(String status) {
