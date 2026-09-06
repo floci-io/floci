@@ -581,6 +581,7 @@ floci:
       enabled: true
     iot:
       enabled: true
+      rule-sql-strict: false
       mqtt:
         enabled: true
         auto-start: false

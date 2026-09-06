@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -74,8 +75,9 @@ class IotServiceTest {
 
     @BeforeEach
     void setUp() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultRegion()).thenReturn(REGION);
+        when(config.services().iot().ruleSqlStrict()).thenReturn(false);
         service = new IotService(
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
@@ -135,7 +137,7 @@ class IotServiceTest {
     }
 
     private void publish(String payload) {
-        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION);
+        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null);
     }
 
     private JsonNode capturedInvocationPayload(String functionArn) throws Exception {

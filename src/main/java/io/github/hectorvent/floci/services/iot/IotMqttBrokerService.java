@@ -223,7 +223,7 @@ public class IotMqttBrokerService {
             return;
         }
 
-        iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null);
+        iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null, session.clientId());
         fanOut(topic, payload, false);
     }
 
