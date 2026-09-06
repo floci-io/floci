@@ -31,19 +31,18 @@ class Ec2VpcCfnProvisionerTest {
 
     private Ec2Service ec2;
     private Ec2VpcCfnProvisioner provisioner;
-    private ProvisionContext ctx;
+    private CloudFormationTemplateEngine engine;
 
     @BeforeEach
     void setUp() {
         ec2 = mock(Ec2Service.class);
         provisioner = new Ec2VpcCfnProvisioner(ec2);
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(i -> {
             JsonNode node = i.getArgument(0);
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(i -> i.getArgument(0));
-        ctx = new ProvisionContext(engine, REGION, "000000000000", "my-stack");
         when(ec2.describeSecurityGroups(anyString(), any(), any(), any())).thenReturn(List.of());
     }
 
@@ -62,11 +61,22 @@ class Ec2VpcCfnProvisionerTest {
         return v;
     }
 
+    /**
+     * Provisions the way the engine does: an update arrives with the prior id on both the context
+     * and the resource, so a provisioner reading the wrong one still looks correct here. The
+     * create-path cases below are what separate them.
+     */
     private StackResource provision(String priorPhysicalId, String json) {
+        return provision(priorPhysicalId, priorPhysicalId, json);
+    }
+
+    private StackResource provision(String contextPriorId, String resourcePhysicalId, String json) {
         StackResource r = new StackResource();
         r.setLogicalId("Vpc");
         r.setResourceType("AWS::EC2::VPC");
-        r.setPhysicalId(priorPhysicalId);
+        r.setPhysicalId(resourcePhysicalId);
+        ProvisionContext ctx =
+                new ProvisionContext(engine, REGION, "000000000000", "my-stack", contextPriorId);
         provisioner.provision(r, props(json), ctx);
         return r;
     }
@@ -113,6 +123,21 @@ class Ec2VpcCfnProvisionerTest {
 
         verify(ec2).createVpc(REGION, "10.1.0.0/16", false);
         assertEquals("vpc-replaced", r.getPhysicalId());
+    }
+
+    @Test
+    void anIdOnTheResourceAloneDoesNotCountAsAnUpdate() {
+        when(ec2.createVpc(anyString(), anyString(), anyBoolean())).thenReturn(vpc("vpc-new", "10.0.0.0/16"));
+
+        // A resource carrying a physical id under a create context: what provision() itself
+        // produces the moment it assigns the new id. Reading create-vs-update off the resource
+        // makes that state indistinguishable from a real update.
+        StackResource r = provision(null, "vpc-assigned-mid-method", """
+                {"CidrBlock": "10.0.0.0/16"}""");
+
+        verify(ec2, never()).describeVpcs(anyString(), any(), any());
+        verify(ec2).createVpc(REGION, "10.0.0.0/16", false);
+        assertEquals("vpc-new", r.getPhysicalId());
     }
 
     @Test

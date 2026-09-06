@@ -37,7 +37,7 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         String cidr = ctx.resolveOptional(props, "CidrBlock");
-        Vpc reconciled = existingVpcToReconcile(r.getPhysicalId(), cidr, ctx.region());
+        Vpc reconciled = existingVpcToReconcile(ctx.isUpdate() ? ctx.priorPhysicalId() : null, cidr, ctx.region());
         final Vpc vpc = reconciled != null ? reconciled : ec2Service.createVpc(ctx.region(), cidr, false);
         r.setPhysicalId(vpc.getVpcId());
         r.getAttributes().put("VpcId", vpc.getVpcId());
@@ -60,6 +60,10 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
      *
      * <p>Returns {@code null} for a fresh create, for a CidrBlock change (which AWS treats as a
      * replacement), or when the VPC is gone from the backend - the caller then creates.
+     *
+     * <p>The prior id is the one the context captured, not the one on the {@link StackResource}:
+     * {@code provision} assigns the new id onto that resource as it runs, so a resource-derived
+     * check flips from create to update mid-method.
      */
     private Vpc existingVpcToReconcile(String priorPhysicalId, String cidr, String region) {
         if (priorPhysicalId == null || priorPhysicalId.isBlank()) {
