@@ -56,7 +56,7 @@ public class SecurityHubController {
         if (nextToken != null && !nextToken.isBlank()) {
             throw new AwsException("InvalidInputException", "NextToken is invalid.", 400);
         }
-        SecurityHubState state = securityHubService.state(region(headers));
+        SecurityHubState state = securityHubService.organizationAdminState(region(headers));
         ObjectNode response = objectMapper.createObjectNode();
         var accounts = response.putArray("AdminAccounts");
         String requestedFeature = securityHubService.normalizeFeature(feature);

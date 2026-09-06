@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.securityhub.model.SecurityHubState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,7 +29,8 @@ class SecurityHubServiceTest {
     void setUp() {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
-        service = new SecurityHubService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver);
+        service = new SecurityHubService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
+                mock(OrganizationsService.class));
     }
 
     @Test

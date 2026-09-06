@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.securityhub.model.SecurityHubAssociation;
 import io.github.hectorvent.floci.services.securityhub.model.SecurityHubState;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -28,26 +29,36 @@ public class SecurityHubService implements Resettable {
 
     private final AccountAwareStorageBackend<SecurityHubState> states;
     private final RegionResolver regionResolver;
+    private final OrganizationsService organizationsService;
 
     @Inject
-    public SecurityHubService(StorageFactory storageFactory, RegionResolver regionResolver) {
+    public SecurityHubService(StorageFactory storageFactory, RegionResolver regionResolver,
+                              OrganizationsService organizationsService) {
         this(storageFactory.create("securityhub", "securityhub-state.json",
-                new TypeReference<Map<String, SecurityHubState>>() {}), regionResolver);
+                new TypeReference<Map<String, SecurityHubState>>() {}), regionResolver, organizationsService);
     }
 
-    SecurityHubService(AccountAwareStorageBackend<SecurityHubState> states, RegionResolver regionResolver) {
+    SecurityHubService(AccountAwareStorageBackend<SecurityHubState> states, RegionResolver regionResolver,
+                       OrganizationsService organizationsService) {
         this.states = states;
         this.regionResolver = regionResolver;
+        this.organizationsService = organizationsService;
     }
 
     public SecurityHubState state(String region) {
         return states.get(region).orElseGet(SecurityHubState::new);
     }
 
+    public SecurityHubState organizationAdminState(String region) {
+        requireCallerManagementAccount();
+        return state(region);
+    }
+
     public synchronized SecurityHubState enableOrganizationAdminAccount(String region, String adminAccountId,
                                                                         String feature) {
         requireAccountId(adminAccountId, "AdminAccountId");
         String requestedFeature = normalizeFeature(feature);
+        requireOrganizationManagementAccount(adminAccountId);
         SecurityHubState management = state(region);
         if (management.getAdminAccountId() != null && !management.getAdminAccountId().equals(adminAccountId)) {
             throw conflict("A different Security Hub administrator account is already configured.");
@@ -220,17 +231,13 @@ public class SecurityHubService implements Resettable {
     public synchronized String createConfigurationPolicy(String region, JsonNode request) {
         SecurityHubState state = requireAdministrator(region);
         String name = requireText(request, "Name", "InvalidInputException");
-        if (name.length() > 128) {
-            throw invalid("Name exceeds the maximum length.");
-        }
+        validatePolicyName(name);
         boolean duplicate = state.getPolicies().values().stream()
                 .anyMatch(policy -> name.equals(text(policy, "Name")));
         if (duplicate) {
             throw conflict("A configuration policy with the same name already exists.");
         }
-        if (!request.path("ConfigurationPolicy").isObject()) {
-            throw invalid("ConfigurationPolicy is required.");
-        }
+        validateConfigurationPolicy(request.get("ConfigurationPolicy"));
         validateTags(request.get("Tags"));
         String id = UUID.randomUUID().toString();
         ObjectNode stored = (ObjectNode) request.deepCopy();
@@ -260,6 +267,7 @@ public class SecurityHubService implements Resettable {
         }
         String newName = text(request, "Name");
         if (newName != null) {
+            validatePolicyName(newName);
             boolean duplicate = state.getPolicies().entrySet().stream()
                     .anyMatch(entry -> !entry.getKey().equals(id)
                             && newName.equals(text(entry.getValue(), "Name")));
@@ -275,9 +283,7 @@ public class SecurityHubService implements Resettable {
             merged.set("Description", request.get("Description"));
         }
         if (request.has("ConfigurationPolicy")) {
-            if (!request.get("ConfigurationPolicy").isObject()) {
-                throw invalid("ConfigurationPolicy must be an object.");
-            }
+            validateConfigurationPolicy(request.get("ConfigurationPolicy"));
             merged.set("ConfigurationPolicy", request.get("ConfigurationPolicy").deepCopy());
         }
         merged.put("UpdatedAt", java.time.Instant.now().toString());
@@ -288,7 +294,7 @@ public class SecurityHubService implements Resettable {
 
     public synchronized SecurityHubAssociation associate(String region, JsonNode request) {
         SecurityHubState state = requireAdministrator(region);
-        TargetRef target = target(request);
+        TargetRef target = organizationTarget(request);
         String policyIdentifier = requireText(request, "ConfigurationPolicyIdentifier", "InvalidInputException");
         String policyId = normalizePolicyId(policyIdentifier);
         if (!SELF_MANAGED.equals(policyId) && !state.getPolicies().containsKey(policyId)) {
@@ -308,7 +314,7 @@ public class SecurityHubService implements Resettable {
 
     public synchronized SecurityHubAssociation association(String region, JsonNode request) {
         SecurityHubState state = requireAdministrator(region);
-        TargetRef target = target(request);
+        TargetRef target = organizationTarget(request);
         SecurityHubAssociation association = state.getAssociations().get(target.id());
         if (association == null) {
             throw notFound("The configuration policy association was not found.");
@@ -335,7 +341,7 @@ public class SecurityHubService implements Resettable {
 
     public synchronized void disassociate(String region, JsonNode request) {
         SecurityHubState state = requireAdministrator(region);
-        TargetRef target = target(request);
+        TargetRef target = organizationTarget(request);
         String policyIdentifier = requireText(request, "ConfigurationPolicyIdentifier", "InvalidInputException");
         String requestedPolicyId = normalizePolicyId(policyIdentifier);
         SecurityHubAssociation association = state.getAssociations().get(target.id());
@@ -532,6 +538,13 @@ public class SecurityHubService implements Resettable {
                 && regions != null && !regions.isEmpty()) {
             throw invalid("Regions must be empty for the selected RegionLinkingMode.");
         }
+        if (regions != null) {
+            for (JsonNode candidate : regions) {
+                if (!candidate.isTextual() || candidate.textValue().isBlank()) {
+                    throw invalid("Regions must contain non-blank Region identifiers.");
+                }
+            }
+        }
         return regions == null ? null : regions.deepCopy();
     }
 
@@ -602,6 +615,80 @@ public class SecurityHubService implements Resettable {
         }
         int slash = identifier.lastIndexOf('/');
         return slash >= 0 ? identifier.substring(slash + 1) : identifier;
+    }
+
+    private String requireCallerManagementAccount() {
+        String callerAccountId = regionResolver.getAccountId();
+        String managementAccountId = organizationsService.findManagementAccountForResource(callerAccountId)
+                .orElseThrow(() -> new AwsException("AccessDeniedException",
+                        "Only the organization management account can perform this operation.", 403));
+        if (!callerAccountId.equals(managementAccountId)) {
+            throw new AwsException("AccessDeniedException",
+                    "Only the organization management account can perform this operation.", 403);
+        }
+        return managementAccountId;
+    }
+
+    private void requireOrganizationManagementAccount(String targetAccountId) {
+        String managementAccountId = requireCallerManagementAccount();
+        String targetManagementAccountId = organizationsService.findManagementAccountForResource(targetAccountId)
+                .orElseThrow(() -> invalid("AdminAccountId must belong to the caller's AWS organization."));
+        if (!managementAccountId.equals(targetManagementAccountId)) {
+            throw invalid("AdminAccountId must belong to the caller's AWS organization.");
+        }
+    }
+
+    private TargetRef organizationTarget(JsonNode input) {
+        TargetRef target = target(input);
+        String callerAccountId = regionResolver.getAccountId();
+        String managementAccountId = organizationsService.findManagementAccountForResource(callerAccountId)
+                .orElseThrow(() -> new AwsException("InvalidAccessException",
+                        "The delegated administrator must belong to an AWS organization.", 401));
+        String targetManagementAccountId = organizationsService.findManagementAccountForResource(target.id())
+                .orElseThrow(() -> notFound("The specified organization target was not found."));
+        if (!managementAccountId.equals(targetManagementAccountId)) {
+            throw notFound("The specified organization target was not found.");
+        }
+        return target;
+    }
+
+    private static void validatePolicyName(String name) {
+        if (name == null || name.isBlank()) {
+            throw invalid("Name must contain a non-whitespace character.");
+        }
+        if (name.length() > 128) {
+            throw invalid("Name exceeds the maximum length.");
+        }
+    }
+
+    private static void validateConfigurationPolicy(JsonNode configurationPolicy) {
+        if (configurationPolicy == null || !configurationPolicy.isObject()
+                || configurationPolicy.size() != 1 || !configurationPolicy.has("SecurityHub")) {
+            throw invalid("ConfigurationPolicy must contain exactly one SecurityHub policy.");
+        }
+        JsonNode securityHub = configurationPolicy.get("SecurityHub");
+        if (securityHub == null || !securityHub.isObject()) {
+            throw invalid("ConfigurationPolicy.SecurityHub must be an object.");
+        }
+        JsonNode serviceEnabled = securityHub.get("ServiceEnabled");
+        if (serviceEnabled != null && !serviceEnabled.isBoolean()) {
+            throw invalid("ConfigurationPolicy.SecurityHub.ServiceEnabled must be a boolean.");
+        }
+        JsonNode standards = securityHub.get("EnabledStandardIdentifiers");
+        if (standards != null) {
+            if (!standards.isArray()) {
+                throw invalid("EnabledStandardIdentifiers must be an array.");
+            }
+            for (JsonNode standard : standards) {
+                if (!standard.isTextual() || standard.textValue().isBlank()) {
+                    throw invalid("EnabledStandardIdentifiers must contain non-blank strings.");
+                }
+            }
+        }
+        JsonNode controls = securityHub.get("SecurityControlsConfiguration");
+        if (controls != null && !controls.isObject()) {
+            throw invalid("SecurityControlsConfiguration must be an object.");
+        }
     }
 
     private static TargetRef target(JsonNode input) {
