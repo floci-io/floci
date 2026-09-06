@@ -99,21 +99,17 @@ public class VerifiedPermissionsOidcSignatureVerifier implements AutoCloseable {
             throw new VerificationException("Token signature is invalid");
         }
     }
-
-    private RSAPublicKey resolveKey(String issuer, String kid) throws VerificationException {
+    RSAPublicKey resolveKey(String issuer, String kid) throws VerificationException {
         CachedJwks cached = jwksCache.get(issuer);
         if (cached != null && !cached.expired()) {
-            RSAPublicKey key = cached.keysByKid().get(kid);
-            if (key != null) {
-                return key;
-            }
+            return cached.keysByKid().get(kid);
         }
         Map<String, RSAPublicKey> fetched = fetchJwks(issuer);
         jwksCache.put(issuer, new CachedJwks(fetched, Instant.now()));
         return fetched.get(kid);
     }
 
-    private Map<String, RSAPublicKey> fetchJwks(String issuer) throws VerificationException {
+    Map<String, RSAPublicKey> fetchJwks(String issuer) throws VerificationException {
         String discoveryUrl = issuer.replaceAll("/+$", "") + "/.well-known/openid-configuration";
         JsonNode discovery = getJson(discoveryUrl, "OIDC discovery document");
         String jwksUri = discovery.path("jwks_uri").asText(null);

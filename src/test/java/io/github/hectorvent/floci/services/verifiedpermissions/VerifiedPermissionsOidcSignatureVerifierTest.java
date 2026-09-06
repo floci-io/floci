@@ -1,10 +1,17 @@
 package io.github.hectorvent.floci.services.verifiedpermissions;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetAddress;
+import java.security.interfaces.RSAPublicKey;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -32,5 +39,30 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
                 InetAddress.getByName("10.0.0.1")));
         assertTrue(VerifiedPermissionsOidcSignatureVerifier.isBlockedPublicAddress(
                 InetAddress.getByName("192.168.1.1")));
+    }
+
+    @Test
+    void freshJwksCacheDoesNotRefetchForUnknownKids() throws Exception {
+        RSAPublicKey key = org.mockito.Mockito.mock(RSAPublicKey.class);
+        class CountingVerifier extends VerifiedPermissionsOidcSignatureVerifier {
+            int fetches;
+
+            CountingVerifier() {
+                super(new ObjectMapper(), SystemDefaultDnsResolver.INSTANCE);
+            }
+
+            @Override
+            Map<String, RSAPublicKey> fetchJwks(String issuer) {
+                fetches++;
+                return Map.of("known", key);
+            }
+        }
+
+        try (CountingVerifier verifier = new CountingVerifier()) {
+            assertSame(key, verifier.resolveKey("https://issuer.example.com", "known"));
+            assertNull(verifier.resolveKey("https://issuer.example.com", "missing-one"));
+            assertNull(verifier.resolveKey("https://issuer.example.com", "missing-two"));
+            assertEquals(1, verifier.fetches);
+        }
     }
 }
