@@ -8,22 +8,21 @@ import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Polls Kafka pipe sources (MSK and self-managed, {@code smk://}) over a Kafka REST Proxy
+ * (Karapace) instead of embedding {@code kafka-clients} directly: see #2916, where kafka-clients
+ * and the zstd-jni/lz4-java it pulls in were reachable in every build regardless of whether a
+ * Pipe ever used a Kafka source. {@link KarapaceManager} starts a Karapace sidecar per distinct
+ * target on demand, and {@link PipesKafkaRestClient} speaks its REST API.
+ */
 @ApplicationScoped
 public class PipesKafkaConsumerManager {
 
@@ -32,11 +31,16 @@ public class PipesKafkaConsumerManager {
     private static final String DEFAULT_STARTING_POSITION = "LATEST";
 
     private final MskService mskService;
-    private final ConcurrentHashMap<String, KafkaConsumer<byte[], byte[]>> consumers = new ConcurrentHashMap<>();
+    private final KarapaceManager karapaceManager;
+    private final PipesKafkaRestClient restClient;
+    private final ConcurrentHashMap<String, KafkaConsumerHandle> consumers = new ConcurrentHashMap<>();
 
     @Inject
-    public PipesKafkaConsumerManager(MskService mskService) {
+    public PipesKafkaConsumerManager(MskService mskService, KarapaceManager karapaceManager,
+                                      PipesKafkaRestClient restClient) {
         this.mskService = mskService;
+        this.karapaceManager = karapaceManager;
+        this.restClient = restClient;
     }
 
     @PreDestroy
@@ -45,39 +49,26 @@ public class PipesKafkaConsumerManager {
         consumers.clear();
     }
 
-    public ConsumerRecords<byte[], byte[]> poll(Pipe pipe) {
-        KafkaConsumer<byte[], byte[]> consumer = consumers.computeIfAbsent(pipe.getArn(), ignored -> createConsumer(pipe));
+    public List<KafkaRecordDto> poll(Pipe pipe) {
+        KafkaConsumerHandle consumer = consumers.computeIfAbsent(pipe.getArn(), ignored -> createConsumer(pipe));
         try {
-            return consumer.poll(POLL_TIMEOUT);
+            return restClient.poll(consumer, POLL_TIMEOUT);
         } catch (RuntimeException e) {
             close(pipe);
             throw e;
         }
     }
 
-    public void commit(Pipe pipe) {
-        KafkaConsumer<byte[], byte[]> consumer = consumers.get(pipe.getArn());
-        if (consumer == null) {
-            return;
-        }
-        try {
-            consumer.commitSync();
-        } catch (RuntimeException e) {
-            close(pipe);
-            throw e;
-        }
-    }
-
-    public void commit(Pipe pipe, Map<TopicPartition, OffsetAndMetadata> offsets) {
+    public void commit(Pipe pipe, List<KafkaOffsetDto> offsets) {
         if (offsets.isEmpty()) {
             return;
         }
-        KafkaConsumer<byte[], byte[]> consumer = consumers.get(pipe.getArn());
+        KafkaConsumerHandle consumer = consumers.get(pipe.getArn());
         if (consumer == null) {
             return;
         }
         try {
-            consumer.commitSync(offsets);
+            restClient.commit(consumer, offsets);
         } catch (RuntimeException e) {
             close(pipe);
             throw e;
@@ -85,7 +76,7 @@ public class PipesKafkaConsumerManager {
     }
 
     public void close(Pipe pipe) {
-        KafkaConsumer<byte[], byte[]> consumer = consumers.remove(pipe.getArn());
+        KafkaConsumerHandle consumer = consumers.remove(pipe.getArn());
         if (consumer != null) {
             closeQuietly(consumer);
         }
@@ -131,34 +122,25 @@ public class PipesKafkaConsumerManager {
         return resolveConsumerGroupId(pipe, kafkaParameters(pipe));
     }
 
-    /** Package-private so {@code PipesKafkaNativeSupportTest} guards the real settings, not a copy. */
-    Properties consumerProperties(Pipe pipe) {
-        JsonNode params = kafkaParameters(pipe);
-
-        Properties properties = new Properties();
-        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, resolveBootstrapServers(pipe));
-        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, resolveOffsetReset(params));
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, resolveConsumerGroupId(pipe, params));
-        properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "floci-pipes-" + UUID.randomUUID());
-        properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(resolveBatchSize(pipe, 100)));
-        // On by default (KIP-714). Floci has no reason to push metrics to a user's broker, and it
-        // makes the shaded protobuf serializer reflectively reachable on a path no broker we test
-        // against exercises.
-        properties.put(ConsumerConfig.ENABLE_METRICS_PUSH_CONFIG, "false");
-        return properties;
-    }
-
-    private KafkaConsumer<byte[], byte[]> createConsumer(Pipe pipe) {
-        Properties properties = consumerProperties(pipe);
+    private KafkaConsumerHandle createConsumer(Pipe pipe) {
+        String bootstrapServers = resolveBootstrapServers(pipe);
         String topicName = resolveTopicName(pipe);
+        String groupId = resolveConsumerGroupId(pipe);
+        String offsetReset = resolveOffsetReset(kafkaParameters(pipe));
 
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(properties);
-        consumer.subscribe(List.of(topicName));
-        LOG.infov("Pipe {0}: subscribed Kafka consumer to topic {1} via {2}",
-                pipe.getName(), topicName, properties.get(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG));
+        URI restBaseUri = karapaceManager.ensureStarted(bootstrapServers);
+        KafkaConsumerHandle consumer = restClient.createConsumer(restBaseUri, groupId, offsetReset);
+        try {
+            restClient.subscribe(consumer, List.of(topicName));
+        } catch (RuntimeException e) {
+            // The consumer already exists server-side; this method's caller only learns about it
+            // through the returned handle, so a failure here must delete it itself or it is never
+            // reachable again to close, and every retry creates another orphaned server consumer.
+            closeQuietly(consumer);
+            throw e;
+        }
+        LOG.infov("Pipe {0}: subscribed Kafka REST consumer to topic {1} via {2}",
+                pipe.getName(), topicName, bootstrapServers);
         return consumer;
     }
 
@@ -210,11 +192,11 @@ public class PipesKafkaConsumerManager {
         throw new AwsException("ValidationException", "Unsupported Kafka source: " + pipe.getSource(), 400);
     }
 
-    private void closeQuietly(KafkaConsumer<byte[], byte[]> consumer) {
+    private void closeQuietly(KafkaConsumerHandle consumer) {
         try {
-            consumer.close();
+            restClient.close(consumer);
         } catch (Exception e) {
-            LOG.debugv("Ignoring Kafka consumer close error: {0}", e.getMessage());
+            LOG.debugv("Ignoring Kafka REST consumer close error: {0}", e.getMessage());
         }
     }
 }

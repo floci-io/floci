@@ -9,10 +9,6 @@ import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.vertx.core.Vertx;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -20,20 +16,18 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +49,7 @@ class PipesPollerTest {
     @BeforeEach
     void setUp() {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(kafkaConsumerManager.resolveBatchSize(any(), anyInt())).thenReturn(10);
         poller = new PipesPoller(vertx, sqsService, kinesisService, dynamoDbStreamService,
                 kafkaConsumerManager, targetInvoker, new PipesFilterMatcher(MAPPER), MAPPER, config);
     }
@@ -147,19 +142,19 @@ class PipesPollerTest {
     @Test
     void pollKafka_filtersUsingDecodedPayloadButDeliversOriginalRecord() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
-        byte[] key = "customer-123".getBytes(StandardCharsets.UTF_8);
-        byte[] value = "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8);
-        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>("orders", 0, 42L, key, value);
-        record.headers().add("traceId", "abc123".getBytes(StandardCharsets.UTF_8));
+        byte[] key = "customer-123".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] value = "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] traceId = "abc123".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        KafkaRecordDto record = kafkaRecord("orders", 0, 42L, key, value, new KafkaHeaderDto("traceId", traceId));
 
-        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(record));
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(record));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
 
         poller.pollKafka(pipe, "us-east-1");
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(targetInvoker).invoke(eq(pipe), payloadCaptor.capture(), eq("us-east-1"));
-        verify(kafkaConsumerManager).commit(eq(pipe), anyMap());
+        verify(kafkaConsumerManager).commit(eq(pipe), anyList());
 
         JsonNode delivered = MAPPER.readTree(payloadCaptor.getValue());
         assertEquals("orders", delivered.path("topic").asText());
@@ -177,29 +172,28 @@ class PipesPollerTest {
     @Test
     void pollKafka_doesNotCommitWhenDeliveryFails() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
-        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>(
-                "orders", 0, 7L, null, "{\"status\":\"active\"}".getBytes(StandardCharsets.UTF_8));
+        KafkaRecordDto record = kafkaRecord("orders", 0, 7L, null,
+                "{\"status\":\"active\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
-        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(record));
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(record));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
         org.mockito.Mockito.doThrow(new RuntimeException("boom"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
         poller.pollKafka(pipe, "us-east-1");
 
-        verify(kafkaConsumerManager, never()).commit(pipe);
-        verify(kafkaConsumerManager, never()).commit(eq(pipe), anyMap());
+        verify(kafkaConsumerManager, never()).commit(eq(pipe), anyList());
     }
 
     @Test
     void pollKafka_commitsDeliveredPrefixWhenLaterRecordFails() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
-        ConsumerRecord<byte[], byte[]> first = new ConsumerRecord<>(
-                "orders", 0, 0L, null, "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
-        ConsumerRecord<byte[], byte[]> second = new ConsumerRecord<>(
-                "orders", 0, 1L, null, "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
+        KafkaRecordDto first = kafkaRecord("orders", 0, 0L, null,
+                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        KafkaRecordDto second = kafkaRecord("orders", 0, 1L, null,
+                "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
-        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(first, second));
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, second));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
         org.mockito.Mockito.doNothing()
                 .doThrow(new RuntimeException("boom"))
@@ -207,17 +201,42 @@ class PipesPollerTest {
 
         poller.pollKafka(pipe, "us-east-1");
 
-        ArgumentCaptor<Map<TopicPartition, OffsetAndMetadata>> offsetsCaptor = ArgumentCaptor.forClass(Map.class);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<KafkaOffsetDto>> offsetsCaptor = ArgumentCaptor.forClass(List.class);
         verify(kafkaConsumerManager).commit(eq(pipe), offsetsCaptor.capture());
-        assertEquals(1L, offsetsCaptor.getValue().get(new TopicPartition("orders", 0)).offset());
+        assertEquals(1L, singleOffset(offsetsCaptor.getValue(), "orders", 0));
+    }
+
+    @Test
+    void pollKafka_laterGeneratedBatchDoesNotCommitPastAnEarlierFailureInTheSamePartition() throws Exception {
+        // A REST Proxy poll can return more than one BatchSize worth of records, so pollKafka
+        // splits them into several generated batches. If the first batch fails to deliver record 0
+        // and a later batch then succeeds delivering record 1 from the same partition, the second
+        // batch's commit must not advance past record 0, or it is lost forever.
+        Pipe pipe = selfManagedKafkaPipe();
+        when(kafkaConsumerManager.resolveBatchSize(eq(pipe), anyInt())).thenReturn(1);
+        KafkaRecordDto first = kafkaRecord("orders", 0, 0L, null,
+                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        KafkaRecordDto second = kafkaRecord("orders", 0, 1L, null,
+                "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, second));
+        when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
+        org.mockito.Mockito.doThrow(new RuntimeException("boom"))
+                .doNothing()
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.pollKafka(pipe, "us-east-1");
+
+        verify(kafkaConsumerManager, never()).commit(eq(pipe), anyList());
     }
 
     @Test
     void pollKafka_representsNullKeyAndValueAsJsonNull() throws Exception {
         Pipe pipe = nullableSelfManagedKafkaPipe();
-        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>("orders", 0, 3L, null, null);
+        KafkaRecordDto record = kafkaRecord("orders", 0, 3L, null, null);
 
-        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(record));
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(record));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
 
         poller.pollKafka(pipe, "us-east-1");
@@ -232,14 +251,14 @@ class PipesPollerTest {
     @Test
     void pollKafka_lambdaCommitsSuccessfulPrefixBeforeLaterFailure() throws Exception {
         Pipe pipe = lambdaSelfManagedKafkaPipe();
-        ConsumerRecord<byte[], byte[]> first = new ConsumerRecord<>(
-                "orders", 0, 0L, null, "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
-        ConsumerRecord<byte[], byte[]> skipped = new ConsumerRecord<>(
-                "orders", 0, 1L, null, "{\"status\":\"inactive\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
-        ConsumerRecord<byte[], byte[]> failing = new ConsumerRecord<>(
-                "orders", 0, 2L, null, "{\"status\":\"active\",\"id\":\"order-3\"}".getBytes(StandardCharsets.UTF_8));
+        KafkaRecordDto first = kafkaRecord("orders", 0, 0L, null,
+                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        KafkaRecordDto skipped = kafkaRecord("orders", 0, 1L, null,
+                "{\"status\":\"inactive\",\"id\":\"order-2\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        KafkaRecordDto failing = kafkaRecord("orders", 0, 2L, null,
+                "{\"status\":\"active\",\"id\":\"order-3\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
-        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(first, skipped, failing));
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, skipped, failing));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
         org.mockito.Mockito.doNothing()
                 .doThrow(new RuntimeException("boom"))
@@ -247,9 +266,10 @@ class PipesPollerTest {
 
         poller.pollKafka(pipe, "us-east-1");
 
-        ArgumentCaptor<Map<TopicPartition, OffsetAndMetadata>> offsetsCaptor = ArgumentCaptor.forClass(Map.class);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<KafkaOffsetDto>> offsetsCaptor = ArgumentCaptor.forClass(List.class);
         verify(kafkaConsumerManager).commit(eq(pipe), offsetsCaptor.capture());
-        assertEquals(2L, offsetsCaptor.getValue().get(new TopicPartition("orders", 0)).offset());
+        assertEquals(2L, singleOffset(offsetsCaptor.getValue(), "orders", 0));
     }
 
     private Pipe selfManagedKafkaPipe() throws Exception {
@@ -300,12 +320,17 @@ class PipesPollerTest {
         return pipe;
     }
 
-    private ConsumerRecords<byte[], byte[]> records(ConsumerRecord<byte[], byte[]>... records) {
-        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> byPartition = new java.util.LinkedHashMap<>();
-        for (ConsumerRecord<byte[], byte[]> record : records) {
-            TopicPartition topicPartition = new TopicPartition(record.topic(), record.partition());
-            byPartition.computeIfAbsent(topicPartition, ignored -> new java.util.ArrayList<>()).add(record);
-        }
-        return new ConsumerRecords<>(byPartition);
+    private static KafkaRecordDto kafkaRecord(String topic, int partition, long offset, byte[] key, byte[] value,
+                                              KafkaHeaderDto... headers) {
+        return new KafkaRecordDto(topic, partition, offset, System.currentTimeMillis(),
+                KafkaRecordDto.DEFAULT_TIMESTAMP_TYPE, key, value, List.of(headers));
+    }
+
+    private static long singleOffset(List<KafkaOffsetDto> offsets, String topic, int partition) {
+        return offsets.stream()
+                .filter(offset -> offset.topic().equals(topic) && offset.partition() == partition)
+                .mapToLong(KafkaOffsetDto::offset)
+                .findFirst()
+                .orElseThrow();
     }
 }
