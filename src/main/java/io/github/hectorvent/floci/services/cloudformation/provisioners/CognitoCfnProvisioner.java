@@ -241,8 +241,6 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(client.getClientId());
         r.getAttributes().put("ClientId", client.getClientId());
-        r.getAttributes().put("ClientName", client.getClientName());
-        // Name is the attribute the registry schema declares read-only for the client.
         r.getAttributes().put("Name", client.getClientName());
         if (client.getClientSecret() != null) {
             r.getAttributes().put("ClientSecret", client.getClientSecret());

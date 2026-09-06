@@ -512,7 +512,7 @@ class CognitoCfnProvisionerTest {
                 eq(List.of()), eq(Map.of("AccessToken", "minutes")), eq(List.of()),
                 isNull(), isNull());
         assertEquals(CLIENT_ID, r.getPhysicalId());
-        assertEquals(Set.of("ClientId", "ClientName", "Name", "ClientSecret"), r.getAttributes().keySet());
+        assertEquals(Set.of("ClientId", "Name", "ClientSecret"), r.getAttributes().keySet());
         assertEquals(CLIENT_ID, r.getAttributes().get("ClientId"));
         assertEquals("web", r.getAttributes().get("Name"));
         assertEquals("s3cr3t", r.getAttributes().get("ClientSecret"));
@@ -525,7 +525,7 @@ class CognitoCfnProvisionerTest {
 
         provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web"), ctx());
 
-        assertEquals(Set.of("ClientId", "ClientName", "Name"), r.getAttributes().keySet());
+        assertEquals(Set.of("ClientId", "Name"), r.getAttributes().keySet());
     }
 
     @Test
@@ -567,7 +567,7 @@ class CognitoCfnProvisionerTest {
         stubClientCreate(client("replacement-client", "us-east-1_OtherPool", "web", null));
         StackResource r = resource(USER_POOL_CLIENT, "Client");
         r.setPhysicalId(CLIENT_ID);
-        r.getAttributes().putAll(Map.of("ClientId", CLIENT_ID, "ClientName", "web", "Name", "web"));
+        r.getAttributes().putAll(Map.of("ClientId", CLIENT_ID, "Name", "web"));
         ObjectNode props = mapper.createObjectNode().put("UserPoolId", "us-east-1_OtherPool").put("ClientName", "web");
 
         provisioner.provision(r, props, ctx(CLIENT_ID));
@@ -619,7 +619,7 @@ class CognitoCfnProvisionerTest {
         stubClientCreate(client("replacement-client", "us-east-1_OtherPool", "web", null));
         StackResource r = resource(USER_POOL_CLIENT, "Client");
         r.setPhysicalId(CLIENT_ID);
-        r.getAttributes().putAll(Map.of("ClientId", CLIENT_ID, "ClientName", "web", "Name", "web"));
+        r.getAttributes().putAll(Map.of("ClientId", CLIENT_ID, "Name", "web"));
         provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", "us-east-1_OtherPool"), ctx(CLIENT_ID));
 
         assertTrue(provisioner.rollbackUpdate(r));
