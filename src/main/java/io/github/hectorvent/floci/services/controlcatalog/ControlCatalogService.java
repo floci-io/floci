@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.controlcatalog.model.ControlDefinition;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -283,15 +284,4 @@ public class ControlCatalogService {
                 "DETECTIVE", "HIGH", "REGIONAL", CONFIG_RULE, List.of()));
     }
 
-    private record ControlDefinition(
-            String globalIdentifier,
-            List<String> aliases,
-            String name,
-            String description,
-            String behavior,
-            String severity,
-            String scope,
-            String implementationType,
-            List<String> parameters) {
-    }
 }
