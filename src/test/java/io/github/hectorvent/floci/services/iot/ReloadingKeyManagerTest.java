@@ -14,6 +14,7 @@ import javax.net.ssl.X509ExtendedKeyManager;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -84,16 +85,36 @@ class ReloadingKeyManagerTest {
     }
 
     @Test
-    void anAliasFromTwoReloadsAgoIsGone() {
+    void anAliasChosenBeforeSeveralQuickReloadsStillResolvesItsOwnChainAndKey() {
         X509ExtendedKeyManager first = delegate("srv", "first");
         ReloadingKeyManager manager = new ReloadingKeyManager(first);
-        String stale = manager.chooseEngineServerAlias("RSA", null, null);
+        String inFlight = manager.chooseEngineServerAlias("RSA", null, null);
 
         manager.reload(delegate("srv", "second"));
         manager.reload(delegate("srv", "third"));
+        manager.reload(delegate("srv", "fourth"));
+
+        assertSame(first.getCertificateChain("srv"), manager.getCertificateChain(inFlight));
+        assertSame(first.getPrivateKey("srv"), manager.getPrivateKey(inFlight));
+    }
+
+    @Test
+    void aRetiredGenerationIsDroppedOnceNoHandshakeCanStillReferenceIt() {
+        AtomicLong clock = new AtomicLong();
+        X509ExtendedKeyManager first = delegate("srv", "first");
+        ReloadingKeyManager manager = new ReloadingKeyManager(first, clock::get);
+        String stale = manager.chooseEngineServerAlias("RSA", null, null);
+        manager.reload(delegate("srv", "second"));
+        clock.addAndGet(ReloadingKeyManager.RETIRED_GENERATION_RETENTION.toNanos() - 1);
+        manager.reload(delegate("srv", "third"));
+        assertSame(first.getPrivateKey("srv"), manager.getPrivateKey(stale), "still inside the retention window");
+
+        clock.addAndGet(1);
+        manager.reload(delegate("srv", "fourth"));
 
         assertNull(manager.getCertificateChain(stale));
         assertNull(manager.getPrivateKey(stale));
+        assertEquals(2, manager.retiredGenerations(), "the two generations retired inside the window are kept, the first is gone");
     }
 
     @Test

@@ -12,6 +12,10 @@ import java.net.Socket;
 import java.security.Principal;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.LongSupplier;
 
 /**
  * Server key manager for the MQTT TLS listener that answers every handshake from the key material
@@ -19,20 +23,31 @@ import java.security.cert.X509Certificate;
  * SSL context: Vert.x drops the connections it accepts while a context is being rebuilt, whereas
  * JSSE asks the key manager for an alias, then that alias's key and chain, on every handshake.
  *
- * <p>The alias handed to JSSE names the generation it came from, and the previous generation is
- * kept, so a handshake that began before {@link #reload} still reads a matching key and chain. Two
- * reloads inside one handshake's key lookup make that handshake fail; a client retries.
+ * <p>The alias handed to JSSE names the generation it came from, and a retired generation stays
+ * readable for {@link #RETIRED_GENERATION_RETENTION} after its replacement, longer than any
+ * handshake can live (Vert.x closes a connection whose handshake exceeds its 10 second timeout), so
+ * a handshake that began before any number of reloads still reads a matching key and chain.
+ * Retired generations are dropped on the next reload after that window.
  */
 final class ReloadingKeyManager extends X509ExtendedKeyManager {
 
-    private record Generation(long number, X509KeyManager delegate) {
+    static final Duration RETIRED_GENERATION_RETENTION = Duration.ofSeconds(60);
+
+    private record Generation(long number, X509KeyManager delegate, long retiredAtNanos) {
     }
 
+    private final LongSupplier nanoTime;
     private volatile Generation current;
-    private volatile Generation previous;
+    /** Superseded generations, newest first, each within the retention window at its last reload. */
+    private volatile List<Generation> retired = List.of();
 
     ReloadingKeyManager(X509KeyManager delegate) {
-        this.current = new Generation(0, delegate);
+        this(delegate, System::nanoTime);
+    }
+
+    ReloadingKeyManager(X509KeyManager delegate, LongSupplier nanoTime) {
+        this.nanoTime = nanoTime;
+        this.current = new Generation(0, delegate, 0);
     }
 
     /** The first X.509 key manager of {@code options}, the TLS registry's default key store. */
@@ -56,10 +71,22 @@ final class ReloadingKeyManager extends X509ExtendedKeyManager {
         throw new IllegalStateException("the default TLS configuration has no X.509 key manager");
     }
 
-    /** Serves {@code delegate} from the next handshake on; the one before it stays readable. */
+    /** Serves {@code delegate} from the next handshake on; the generations before it stay readable for a while. */
     synchronized void reload(X509KeyManager delegate) {
-        previous = current;
-        current = new Generation(current.number() + 1, delegate);
+        long now = nanoTime.getAsLong();
+        List<Generation> kept = new ArrayList<>();
+        kept.add(new Generation(current.number(), current.delegate(), now));
+        for (Generation generation : retired) {
+            if (now - generation.retiredAtNanos() < RETIRED_GENERATION_RETENTION.toNanos()) {
+                kept.add(generation);
+            }
+        }
+        retired = List.copyOf(kept);
+        current = new Generation(current.number() + 1, delegate, 0);
+    }
+
+    int retiredGenerations() {
+        return retired.size();
     }
 
     @Override
@@ -135,7 +162,11 @@ final class ReloadingKeyManager extends X509ExtendedKeyManager {
         if (Long.toString(candidate.number()).equals(number)) {
             return candidate;
         }
-        candidate = previous;
-        return candidate != null && Long.toString(candidate.number()).equals(number) ? candidate : null;
+        for (Generation generation : retired) {
+            if (Long.toString(generation.number()).equals(number)) {
+                return generation;
+            }
+        }
+        return null;
     }
 }
