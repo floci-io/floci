@@ -244,6 +244,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>macie2</artifactId>
         </dependency>
+        <!-- IAM Access Analyzer client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>accessanalyzer</artifactId>
+        </dependency>
         <!-- Cloud Map (servicediscovery) client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

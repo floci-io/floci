@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.accessanalyzer.model.Analyzer;
@@ -20,7 +21,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class AccessAnalyzerService {
+public class AccessAnalyzerService implements Resettable {
     private static final Pattern ANALYZER_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_.-]*");
     private static final Set<String> ANALYZER_TYPES = Set.of(
             "ACCOUNT",
@@ -29,7 +30,6 @@ public class AccessAnalyzerService {
             "ORGANIZATION_UNUSED_ACCESS",
             "ACCOUNT_INTERNAL_ACCESS",
             "ORGANIZATION_INTERNAL_ACCESS");
-    private static final int ORGANIZATION_ANALYZER_LIMIT = 5;
 
     private final AccountAwareStorageBackend<Analyzer> analyzers;
     private final RegionResolver regionResolver;
@@ -51,9 +51,8 @@ public class AccessAnalyzerService {
         }
 
         List<Analyzer> inRegion = analyzers.scan(candidate -> candidate.startsWith(region + "::"));
-        long sameScope = inRegion.stream().filter(analyzer -> sameScope(type, analyzer.getType())).count();
-        if ((type.startsWith("ACCOUNT") && sameScope >= 1)
-                || (type.startsWith("ORGANIZATION") && sameScope >= ORGANIZATION_ANALYZER_LIMIT)) {
+        long sameType = inRegion.stream().filter(analyzer -> type.equals(analyzer.getType())).count();
+        if (sameType >= analyzerLimit(type)) {
             throw new AwsException("ServiceQuotaExceededException",
                     "The analyzer quota for this account or organization in the Region has been exceeded.", 402);
         }
@@ -94,10 +93,18 @@ public class AccessAnalyzerService {
         analyzers.delete(key);
     }
 
-    private static boolean sameScope(String requestedType, String existingType) {
-        return requestedType.startsWith("ACCOUNT")
-                ? existingType != null && existingType.startsWith("ACCOUNT")
-                : existingType != null && existingType.startsWith("ORGANIZATION");
+    private static int analyzerLimit(String type) {
+        return switch (type) {
+            case "ORGANIZATION", "ORGANIZATION_UNUSED_ACCESS" -> 5;
+            case "ACCOUNT", "ACCOUNT_UNUSED_ACCESS", "ACCOUNT_INTERNAL_ACCESS",
+                    "ORGANIZATION_INTERNAL_ACCESS" -> 1;
+            default -> throw new IllegalArgumentException("Unsupported analyzer type: " + type);
+        };
+    }
+
+    @Override
+    public void clear() {
+        analyzers.clear();
     }
 
     private static String requireAnalyzerName(JsonNode request) {

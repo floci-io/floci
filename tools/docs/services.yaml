@@ -10,6 +10,10 @@
 # the new-service sentinel only fires on genuinely unregistered handlers.
 
 services:
+  - service: accessanalyzer
+    doc: docs/services/access-analyzer.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/accessanalyzer/AccessAnalyzerController.java, mode: rest }
   - service: acm
     doc: docs/services/acm.md
     sources:

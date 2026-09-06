@@ -374,6 +374,8 @@ floci:
       enabled: true
     macie2:
       enabled: true
+    accessanalyzer:
+      enabled: true
     controltower:
       enabled: true
       seed-landing-zone: true

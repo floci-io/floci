@@ -3,6 +3,7 @@ package com.floci.test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.accessanalyzer.AccessAnalyzerClient;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
 import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
@@ -271,6 +272,14 @@ public final class TestFixtures {
 
     public static OrganizationsClient organizationsClient() {
         return OrganizationsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static AccessAnalyzerClient accessAnalyzerClient() {
+        return AccessAnalyzerClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

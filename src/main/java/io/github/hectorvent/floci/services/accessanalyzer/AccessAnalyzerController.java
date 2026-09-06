@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.accessanalyzer;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -90,7 +91,9 @@ public class AccessAnalyzerController {
 
     private JsonNode readTree(String body) {
         try {
-            return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            return objectMapper.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(body == null || body.isBlank() ? "{}" : body);
         } catch (Exception e) {
             throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse());
         }
