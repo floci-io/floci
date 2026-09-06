@@ -28,6 +28,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -35,6 +36,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -49,6 +51,7 @@ public class ElbV2DataPlane {
             "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailers", "proxy-authorization", "proxy-authenticate"
     );
     private static final String PRESERVE_HOST_HEADER_ATTRIBUTE = "routing.http.preserve_host_header.enabled";
+    private static final int MAX_LAMBDA_BODY_BYTES = 1024 * 1024;
 
     @Inject
     Vertx vertx;
@@ -400,27 +403,57 @@ public class ElbV2DataPlane {
     }
 
     private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
-        req.bodyHandler(body -> {
-            Map<String, Object> event = buildAlbEvent(req, body);
-            // Lambda invocation is synchronous and may take seconds while a cold container
-            // boots and polls the Runtime API. The Runtime API itself runs on Vert.x event
-            // loops, so blocking the listener's event loop here would deadlock the runtime
-            // and the function would time out. Offload to a worker thread, same as WebSocket.
-            // ordered=false so independent ALB requests run in parallel on the worker pool.
-            vertx.<InvokeResult>executeBlocking(() -> {
-                byte[] payload = objectMapper.writeValueAsBytes(event);
-                return lambdaService.invoke(region, functionArn, payload, InvocationType.RequestResponse);
-            }, false).onSuccess(result -> {
-                try {
-                    writeLambdaResponse(req, result);
-                } catch (Exception e) {
-                    LOG.errorf(e, "Error writing Lambda response for %s", functionArn);
-                    req.response().setStatusCode(502).end("Lambda invocation error");
-                }
-            }).onFailure(e -> {
-                LOG.errorf(e, "Error invoking Lambda target %s", functionArn);
+        if (req.isEnded()) {
+            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer());
+            return;
+        }
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        AtomicBoolean rejected = new AtomicBoolean();
+        req.handler(chunk -> {
+            if (rejected.get()) {
+                return;
+            }
+            if (body.size() > MAX_LAMBDA_BODY_BYTES - chunk.length()) {
+                rejected.set(true);
+                req.response().setStatusCode(413).end();
+                return;
+            }
+            body.writeBytes(chunk.getBytes());
+        });
+        req.exceptionHandler(error -> {
+            if (rejected.compareAndSet(false, true)) {
+                req.response().setStatusCode(502).end("Request body error");
+            }
+        });
+        req.endHandler(ignored -> {
+            if (rejected.get()) {
+                return;
+            }
+            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer(body.toByteArray()));
+        });
+    }
+
+    private void invokeLambdaWithBody(io.vertx.core.http.HttpServerRequest req, String functionArn,
+                                      String region, Buffer body) {
+        Map<String, Object> event = buildAlbEvent(req, body);
+        // Lambda invocation is synchronous and may take seconds while a cold container
+        // boots and polls the Runtime API. The Runtime API itself runs on Vert.x event
+        // loops, so blocking the listener's event loop here would deadlock the runtime
+        // and the function would time out. Offload to a worker thread, same as WebSocket.
+        // ordered=false so independent ALB requests run in parallel on the worker pool.
+        vertx.<InvokeResult>executeBlocking(() -> {
+            byte[] payload = objectMapper.writeValueAsBytes(event);
+            return lambdaService.invoke(region, functionArn, payload, InvocationType.RequestResponse);
+        }, false).onSuccess(result -> {
+            try {
+                writeLambdaResponse(req, result);
+            } catch (Exception e) {
+                LOG.errorf(e, "Error writing Lambda response for %s", functionArn);
                 req.response().setStatusCode(502).end("Lambda invocation error");
-            });
+            }
+        }).onFailure(e -> {
+            LOG.errorf(e, "Error invoking Lambda target %s", functionArn);
+            req.response().setStatusCode(502).end("Lambda invocation error");
         });
     }
 
@@ -434,16 +467,34 @@ public class ElbV2DataPlane {
             req.response().setStatusCode(200).end();
             return;
         }
-
         Map<String, Object> lambdaResp = objectMapper.readValue(result.getPayload(),
                 new TypeReference<Map<String, Object>>() {});
+
+        Object responseBody = lambdaResp.get("body");
+        Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
+        byte[] decodedBody = null;
+        String textBody = null;
+        if (responseBody != null) {
+            if (Boolean.TRUE.equals(isBase64)) {
+                decodedBody = Base64.getDecoder().decode(String.valueOf(responseBody));
+                if (decodedBody.length > MAX_LAMBDA_BODY_BYTES) {
+                    req.response().setStatusCode(460).end();
+                    return;
+                }
+            } else {
+                textBody = String.valueOf(responseBody);
+                if (textBody.getBytes(StandardCharsets.UTF_8).length > MAX_LAMBDA_BODY_BYTES) {
+                    req.response().setStatusCode(460).end();
+                    return;
+                }
+            }
+        }
 
         int statusCode = 200;
         Object sc = lambdaResp.get("statusCode");
         if (sc != null) {
             statusCode = ((Number) sc).intValue();
         }
-
         req.response().setStatusCode(statusCode);
 
         Object headers = lambdaResp.get("headers");
@@ -464,15 +515,12 @@ public class ElbV2DataPlane {
             }
         }
 
-        Object responseBody = lambdaResp.get("body");
-        Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
         if (responseBody == null) {
             req.response().end();
-        } else if (Boolean.TRUE.equals(isBase64)) {
-            byte[] decoded = Base64.getDecoder().decode(String.valueOf(responseBody));
-            req.response().end(Buffer.buffer(decoded));
+        } else if (decodedBody != null) {
+            req.response().end(Buffer.buffer(decodedBody));
         } else {
-            req.response().end(String.valueOf(responseBody));
+            req.response().end(textBody);
         }
     }
 
@@ -547,38 +595,62 @@ public class ElbV2DataPlane {
 
     private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
                               boolean preserveHostHeader) {
-        req.bodyHandler(body -> {
-            RequestOptions opts = new RequestOptions()
-                    .setHost(host)
-                    .setPort(port)
-                    .setURI(req.uri())
-                    .setMethod(req.method());
-            proxyClient.request(opts)
-                    .onSuccess(clientReq -> {
-                        req.headers().forEach(entry -> {
+        req.pause();
+        RequestOptions opts = new RequestOptions()
+                .setHost(host)
+                .setPort(port)
+                .setURI(req.uri())
+                .setMethod(req.method());
+        proxyClient.request(opts)
+                .onSuccess(clientReq -> {
+                    req.headers().forEach(entry -> {
+                        if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
+                            clientReq.putHeader(entry.getKey(), entry.getValue());
+                        }
+                    });
+                    if (!preserveHostHeader) {
+                        clientReq.putHeader("Host", host + ":" + port);
+                    }
+                    AtomicBoolean responseStarted = new AtomicBoolean();
+                    AtomicBoolean requestFailed = new AtomicBoolean();
+                    clientReq.response().onSuccess(resp -> {
+                        if (requestFailed.get()) {
+                            return;
+                        }
+                        responseStarted.set(true);
+                        req.response().setStatusCode(resp.statusCode());
+                        resp.headers().forEach(entry -> {
                             if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                clientReq.putHeader(entry.getKey(), entry.getValue());
+                                req.response().putHeader(entry.getKey(), entry.getValue());
                             }
                         });
-                        if (!preserveHostHeader) {
-                            clientReq.putHeader("Host", host + ":" + port);
+                        if (resp.getHeader("Content-Length") == null) {
+                            req.response().setChunked(true);
                         }
-                        clientReq.send(body)
-                                .onSuccess(resp -> {
-                                    req.response().setStatusCode(resp.statusCode());
-                                    resp.headers().forEach(entry -> {
-                                        if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                            req.response().putHeader(entry.getKey(), entry.getValue());
-                                        }
-                                    });
-                                    resp.body()
-                                            .onSuccess(req.response()::end)
-                                            .onFailure(err -> req.response().setStatusCode(502).end("Body error"));
-                                })
-                                .onFailure(err -> req.response().setStatusCode(502).end("Bad gateway"));
-                    })
-                    .onFailure(err -> req.response().setStatusCode(503).end("Service unavailable"));
-        });
+                        resp.pipeTo(req.response());
+                        resp.exceptionHandler(error -> {
+                            if (req.response().headWritten()) {
+                                req.response().close();
+                            } else {
+                                req.response().setStatusCode(502).end("Body error");
+                            }
+                        });
+                    }).onFailure(error -> {
+                        vertx.runOnContext(ignored -> {
+                            if (requestFailed.compareAndSet(false, true)) {
+                                if (responseStarted.get() || req.response().headWritten()) {
+                                    req.response().close();
+                                } else {
+                                    req.response().setStatusCode(502).end("Bad gateway");
+                                }
+                            }
+                        });
+                    });
+
+                    clientReq.send(req);
+                    req.resume();
+                })
+                .onFailure(err -> req.response().setStatusCode(503).end("Service unavailable"));
     }
 
     private void executeRedirect(io.vertx.core.http.HttpServerRequest req, Action action) {
