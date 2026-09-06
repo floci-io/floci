@@ -151,6 +151,14 @@
             <artifactId>vertx-mqtt</artifactId>
         </dependency>
 
+        <!-- Official Cedar authorization engine for Amazon Verified Permissions emulation -->
+        <dependency>
+            <groupId>com.cedarpolicy</groupId>
+            <artifactId>cedar-java</artifactId>
+            <version>4.10.0</version>
+            <classifier>uber</classifier>
+        </dependency>
+
         <!-- cron-utils for EventBridge schedule expression parsing -->
         <dependency>
             <groupId>com.cronutils</groupId>

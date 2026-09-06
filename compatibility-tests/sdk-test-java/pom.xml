@@ -438,6 +438,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ssooidc</artifactId>
         </dependency>
+        <!-- Amazon Verified Permissions client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>verifiedpermissions</artifactId>
+        </dependency>
         <!-- AppSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
