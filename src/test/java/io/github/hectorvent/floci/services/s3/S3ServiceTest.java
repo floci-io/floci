@@ -1149,4 +1149,12 @@ class S3ServiceTest {
                     "configuration config-" + i + " was lost by a concurrent put");
         }
     }
+
+    @Test
+    void authorizeAnonymousPutObjectIsANoOpWhenEnforceAuthIsOff() {
+        // Default test config has FLOCI_SERVICES_S3_ENFORCE_AUTH unset/false.
+        s3Service.createBucket("anon-put-bucket", "us-east-1");
+        assertDoesNotThrow(() -> s3Service.authorizeAnonymousPutObject("anon-put-bucket", "some/key"));
+    }
 }
+
