@@ -2258,8 +2258,10 @@ public class CognitoService implements ResourceProvider {
             try {
                 String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                         VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+                Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                        pool, client, user, "CustomMessage_SignUp");
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
-                        code, List.of(deliveryTarget.deliveryMedium()));
+                        code, List.of(deliveryTarget.deliveryMedium()), customMessage);
             } catch (VerificationCodeException e) {
                 rollbackSignUpConfirmationArtifacts(pool.getId(), user.getUsername(), key);
                 throw mapVerificationCodeException(e);
@@ -2355,8 +2357,10 @@ public class CognitoService implements ResourceProvider {
         try {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+            Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                    pool, client, user, "CustomMessage_ResendCode");
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
-                    code, List.of(deliveryTarget.deliveryMedium()));
+                    code, List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         } catch (RuntimeException e) {
@@ -2464,8 +2468,10 @@ public class CognitoService implements ResourceProvider {
         try {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
+            Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                    pool, client, user, "CustomMessage_ForgotPassword");
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
-                    List.of(deliveryTarget.deliveryMedium()));
+                    List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         }
@@ -2504,7 +2510,7 @@ public class CognitoService implements ResourceProvider {
         validateOriginJtiNotRevoked(accessToken, poolId);
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
-        
+
         CognitoUser user = adminGetUser(poolId, username);
         Map<String, Object> result = new HashMap<>();
         result.put("Username", user.getUsername());
@@ -2605,7 +2611,7 @@ public class CognitoService implements ResourceProvider {
         validateOriginJtiNotRevoked(accessToken, poolId);
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
-        
+
         adminDeleteUserAttributes(poolId, username, attributeNames);
     }
 
@@ -2690,14 +2696,14 @@ public class CognitoService implements ResourceProvider {
         String poolId = parts[0];
         String username = parts[1];
         String refreshTokenUuid = parts[4]; // UUID from refresh token
-        
+
         if (!client.getUserPoolId().equals(poolId)) {
             throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
         }
         if (isRefreshTokenExpired(client, parts)) {
             throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
         }
-        
+
         // Check if refresh token has been revoked
         validateTokenNotRevoked(refreshTokenUuid, poolId, "refresh");
         long issuedAt = 0L;
@@ -2705,11 +2711,11 @@ public class CognitoService implements ResourceProvider {
             issuedAt = Long.parseLong(parts[3]);
         } catch (NumberFormatException ignored) {}
         validateUserNotGloballySignedOut(username, poolId, "refresh", issuedAt);
-        
+
         UserPool pool = describeUserPool(poolId);
         CognitoUser user = adminGetUser(poolId, username);
         ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user);
-        
+
         // Use refresh token UUID as origin_jti for derived tokens
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
@@ -2779,7 +2785,7 @@ public class CognitoService implements ResourceProvider {
         String originJti = UUID.randomUUID().toString();
         return generateAuthResult(user, pool, client, override, originJti);
     }
-    
+
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));
@@ -2793,7 +2799,7 @@ public class CognitoService implements ResourceProvider {
     String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client, ClaimsOverride override) {
         return generateSignedJwt(user, pool, type, client, override, null);
     }
-    
+
     String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client, ClaimsOverride override, String originJti) {
         String header = encodeJwtHeader(pool);
         long now = System.currentTimeMillis() / 1000L;
@@ -2818,11 +2824,11 @@ public class CognitoService implements ResourceProvider {
         // Add JWT ID (jti) claim for token revocation support
         String jti = UUID.randomUUID().toString();
         claims.put("jti", jti);
-        
+
         if (("access".equals(type) || "id".equals(type)) && originJti != null && isTokenRevocationEnabled(client)) {
             claims.put("origin_jti", originJti);
         }
-        
+
         String clientId = client != null ? client.getClientId() : null;
         if (clientId != null && !clientId.isBlank()) {
             if ("access".equals(type)) claims.put("client_id", clientId);
@@ -3699,7 +3705,7 @@ public class CognitoService implements ResourceProvider {
         }
         return null;
     }
-    
+
     /**
      * Validate that a refresh token has not been revoked, including global user sign-out.
      * Called from CognitoAuthFlowHandler for the REFRESH_TOKEN_AUTH flow.
@@ -3708,7 +3714,7 @@ public class CognitoService implements ResourceProvider {
         validateTokenNotRevoked(jti, poolId, "refresh");
         validateUserNotGloballySignedOut(username, poolId, "refresh", iat);
     }
-    
+
     /**
      * Validate that a token has not been revoked.
      * @param jti The JWT ID to check
@@ -3720,20 +3726,20 @@ public class CognitoService implements ResourceProvider {
         if (jti == null) {
             return; // Skip validation for tokens without jti (legacy tokens)
         }
-        
+
         // Check for specific token revocation
         String revokedKey = revokedTokenKey(poolId, jti);
         Optional<RevokedTokenInfo> revoked = revokedTokenStore.get(revokedKey);
-        
+
         if (revoked.isPresent()) {
             RevokedTokenInfo revokedInfo = revoked.get();
-            
+
             // Clean up expired revocation records
             if (revokedInfo.isExpired()) {
                 revokedTokenStore.delete(revokedKey);
                 return;
             }
-            
+
             // Token has been revoked
             String errorMessage = switch (tokenType) {
                 case "access" -> "Access Token has been revoked";
@@ -3744,7 +3750,7 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("NotAuthorizedException", errorMessage, 400);
         }
     }
-    
+
     private void validateOriginJtiNotRevoked(String accessToken, String poolId) {
         String originJti = extractOriginJtiFromToken(accessToken);
         if (originJti != null) {
@@ -3759,13 +3765,13 @@ public class CognitoService implements ResourceProvider {
     private void validateUserNotGloballySignedOut(String username, String poolId, String tokenType, long iat) {
         String globalRevokeKey = revokedTokenKey(poolId, "global:" + username);
         Optional<RevokedTokenInfo> globalRevoked = revokedTokenStore.get(globalRevokeKey);
-        
+
         if (globalRevoked.isPresent()) {
             RevokedTokenInfo globalInfo = globalRevoked.get();
             if (!globalInfo.isExpired()) {
                 long revokedAtMs = globalInfo.getRevokedAt();
                 boolean revoked = false;
-                
+
                 if (iat > 1000000000000L) {
                     // iat is in milliseconds (refresh token)
                     revoked = iat <= revokedAtMs;
@@ -3778,7 +3784,7 @@ public class CognitoService implements ResourceProvider {
                 if (revoked) {
                     String errorMessage = switch (tokenType) {
                         case "access" -> "Access Token has been revoked";
-                        case "id" -> "ID Token has been revoked"; 
+                        case "id" -> "ID Token has been revoked";
                         case "refresh" -> "Refresh Token has been revoked";
                         default -> "Token has been revoked";
                     };
@@ -3789,24 +3795,24 @@ public class CognitoService implements ResourceProvider {
             }
         }
     }
-    
+
     /**
      * Revoke all tokens (refresh, access, ID) for a specific user.
      * This implements the core logic for AdminUserGlobalSignOut.
      */
     private void revokeAllUserTokens(String userPoolId, String username) {
         long nowMs = System.currentTimeMillis();
-        
+
         // Note: In a real implementation, we would need to track all active tokens for a user.
         // Since Floci doesn't currently maintain a token registry, we implement a simpler
         // approach that marks the user as globally signed out with a future expiration.
         // This covers the most common use case where tokens are checked at validation time.
-        
+
         // Create a revocation record for the user with a future expiration
         // This will catch any existing tokens when they're next validated
         String globalRevokeKey = revokedTokenKey(userPoolId, "global:" + username);
         long globalExpiration = nowMs + (365L * 24L * 60L * 60L * 1000L); // 1 year from now in ms
-        
+
         RevokedTokenInfo globalRevocation = new RevokedTokenInfo(
             "global:" + username,
             "global",
@@ -3815,12 +3821,12 @@ public class CognitoService implements ResourceProvider {
             nowMs,
             globalExpiration
         );
-        
+
         revokedTokenStore.put(globalRevokeKey, globalRevocation);
-        
+
         LOG.debugv("Created global revocation record for user {0} in pool {1}", username, userPoolId);
     }
-    
+
     /**
      * Generate a storage key for revoked token information.
      */
