@@ -1015,6 +1015,32 @@ class RdsServiceTest {
     }
 
     @Test
+    void dbProxyTargetGroupTagsRoundTripByArn() {
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        String targetGroupArn = rdsService.describeDbProxyTargetGroups("app-proxy")
+                .iterator().next().getTargetGroupArn();
+
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(targetGroupArn));
+
+        rdsService.addTagsToResource(targetGroupArn, java.util.Map.of("env", "test"));
+        assertEquals(java.util.Map.of("env", "test"),
+                rdsService.listTagsForResource(targetGroupArn));
+
+        rdsService.removeTagsFromResource(targetGroupArn, java.util.List.of("env"));
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(targetGroupArn));
+    }
+
+    @Test
+    void dbProxyTargetGroupTagOperationsRejectMissingTargetGroup() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource(
+                        "arn:aws:rds:us-east-1:123456789012:target-group:prx-tg-missing"));
+
+        assertEquals("DBProxyTargetGroupNotFoundFault", exception.getErrorCode());
+    }
+
+    @Test
     void tagOperationsRejectUnsupportedResourceArn() {
         // Parameter groups are tagged now, so an absent one is a missing resource rather than a
         // missing feature. A type Floci still does not model keeps the limitation message.

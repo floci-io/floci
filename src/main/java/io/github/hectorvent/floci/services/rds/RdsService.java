@@ -840,8 +840,30 @@ public class RdsService implements Resettable, ResourceProvider {
                     putOptionGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
-            // Valid RDS resource types Floci does not model yet (snapshot, ri, ...) — taggable
-            // on real AWS, so the message states the Floci limitation rather than AWS semantics.
+            case "target-group" -> {
+                DbProxyTargetGroup targetGroup = proxyTargetGroups.scan(k -> true).stream()
+                        .filter(candidate -> effectiveRegion.equals(
+                                regionFromArn(candidate.getTargetGroupArn())))
+                        .filter(candidate -> resourceName.equals(candidate.getTargetGroupArn()))
+                        .findFirst()
+                        .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
+                                "DB proxy target group " + resourceId + " not found.", 404));
+                targetGroup = findProxyTargetGroup(targetGroup.getDbProxyName(), effectiveRegion)
+                        .filter(candidate -> resourceName.equals(candidate.getTargetGroupArn()))
+                        .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
+                                "DB proxy target group " + resourceId + " not found.", 404));
+                DbProxyTargetGroup resolvedTargetGroup = targetGroup;
+                yield new TagHandle(targetGroup.getTags(), updated -> {
+                    DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(resolvedTargetGroup);
+                    updatedTargetGroup.setTags(updated);
+                    putTargetGroupForAccount(currentAccountId(),
+                            dbProxyKey(effectiveRegion, resolvedTargetGroup.getDbProxyName()),
+                            updatedTargetGroup);
+                });
+            }
+            // Valid RDS resource types Floci does not model yet (snapshot, ri, es, secgrp, ...):
+            // taggable on real AWS, so the message states the Floci limitation rather than AWS
+            // semantics.
             default -> throw new AwsException("InvalidParameterValue",
                     "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
         };
@@ -4033,6 +4055,7 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setInitQuery(source.getInitQuery());
         copy.setSessionPinningFilters(source.getSessionPinningFilters());
         copy.setTargets(source.getTargets());
+        copy.setTags(source.getTags());
         return copy;
     }
 
