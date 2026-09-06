@@ -526,7 +526,7 @@ public final class S3CopySimulator {
                     closeAcc(acc, sink);
                     closeQuietly(backend);
                     if (spec.manifest()) {
-                        deleteWritten(s3, spec.bucket(), writtenKeys);
+                        deleteWritten(s3, spec, writtenKeys);
                     }
                     sendError(client, null, SQLSTATE_INTERNAL,
                             "UNLOAD failed: backend closed mid-stream", txStatus, onStatusChange);
@@ -561,7 +561,7 @@ public final class S3CopySimulator {
                         closeAcc(acc, sink);
                         closeQuietly(backend);
                         if (spec.manifest()) {
-                            deleteWritten(s3, spec.bucket(), writtenKeys);
+                            deleteWritten(s3, spec, writtenKeys);
                         }
                         sendError(client, null,
                                 SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
@@ -579,7 +579,7 @@ public final class S3CopySimulator {
                         } catch (AwsException e) {
                             LOG.debugv(e, "UNLOAD slice write to s3://{0}/{1} failed", spec.bucket(), key);
                             if (spec.manifest()) {
-                                deleteWritten(s3, spec.bucket(), writtenKeys);
+                                deleteWritten(s3, spec, writtenKeys);
                             }
                             return abortUnload(client, backend, backendDecoder, sink, sink,
                                     unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
@@ -608,7 +608,7 @@ public final class S3CopySimulator {
                 } else if (t == 'E') {
                     closeAcc(acc, sink);
                     if (spec.manifest()) {
-                        deleteWritten(s3, spec.bucket(), writtenKeys);
+                        deleteWritten(s3, spec, writtenKeys);
                     }
                     forward(client, m);
                     drainToReadyForQuery(backendDecoder, client, onStatusChange);
@@ -620,14 +620,14 @@ public final class S3CopySimulator {
         } catch (AwsException e) {
             LOG.debugv(e, "UNLOAD S3 operation failed during streaming");
             if (spec.manifest()) {
-                deleteWritten(s3, spec.bucket(), writtenKeys);
+                deleteWritten(s3, spec, writtenKeys);
             }
             return abortUnload(client, backend, backendDecoder, acc, sink,
                     unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
         } catch (RuntimeException | IOException e) {
             LOG.warnv(e, "UNLOAD streaming failed");
             if (spec.manifest()) {
-                deleteWritten(s3, spec.bucket(), writtenKeys);
+                deleteWritten(s3, spec, writtenKeys);
             }
             String detail = e.getMessage() != null ? e.getMessage() : e.toString();
             return abortUnload(client, backend, backendDecoder, acc, sink,
@@ -646,7 +646,7 @@ public final class S3CopySimulator {
             } catch (AwsException e) {
                 LOG.debugv(e, "UNLOAD final slice write to s3://{0}/{1} failed", spec.bucket(), key);
                 if (spec.manifest()) {
-                    deleteWritten(s3, spec.bucket(), writtenKeys);
+                    deleteWritten(s3, spec, writtenKeys);
                 }
                 sendError(client, backend, unloadWriteSqlState(e), unloadWriteMessage(e, spec),
                         txStatus, onStatusChange);
@@ -654,7 +654,7 @@ public final class S3CopySimulator {
             } catch (RuntimeException e) {
                 LOG.warnv(e, "UNLOAD final slice write failed");
                 if (spec.manifest()) {
-                    deleteWritten(s3, spec.bucket(), writtenKeys);
+                    deleteWritten(s3, spec, writtenKeys);
                 }
                 String detail = e.getMessage() != null ? e.getMessage() : e.toString();
                 sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
@@ -672,7 +672,7 @@ public final class S3CopySimulator {
                         "application/json", Map.of());
             } catch (RuntimeException e) {
                 LOG.warnv(e, "UNLOAD manifest write failed; removing partial data objects");
-                deleteWritten(s3, spec.bucket(), writtenKeys);
+                deleteWritten(s3, spec, writtenKeys);
                 sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD manifest write failed", txStatus, onStatusChange);
                 return true;
             }
@@ -777,12 +777,18 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void deleteWritten(S3Service s3, String bucket, List<String> keys) {
+    private static void deleteWritten(S3Service s3, CopyStatementParser.S3Unload spec, List<String> keys) {
+        if (spec.allowOverwrite()) {
+            // With ALLOWOVERWRITE, written objects may have replaced pre-existing data;
+            // do not delete them on failure to avoid destroying prior state.
+            return;
+        }
         for (String k : keys) {
             try {
-                s3.deleteObject(bucket, k);
+                s3.authorizeAnonymousDeleteObject(spec.bucket(), k);
+                s3.deleteObject(spec.bucket(), k);
             } catch (RuntimeException e) {
-                LOG.debugv(e, "could not remove partial UNLOAD object s3://{0}/{1}", bucket, k);
+                LOG.debugv(e, "could not remove partial UNLOAD object s3://{0}/{1}", spec.bucket(), k);
             }
         }
     }

@@ -1156,5 +1156,11 @@ class S3ServiceTest {
         s3Service.createBucket("anon-put-bucket", "us-east-1");
         assertDoesNotThrow(() -> s3Service.authorizeAnonymousPutObject("anon-put-bucket", "some/key"));
     }
+
+    @Test
+    void authorizeAnonymousDeleteObjectIsANoOpWhenEnforceAuthIsOff() {
+        s3Service.createBucket("anon-del-bucket", "us-east-1");
+        assertDoesNotThrow(() -> s3Service.authorizeAnonymousDeleteObject("anon-del-bucket", "some/key"));
+    }
 }
 
