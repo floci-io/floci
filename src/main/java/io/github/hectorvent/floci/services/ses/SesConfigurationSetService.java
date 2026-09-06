@@ -33,8 +33,9 @@ import java.util.regex.Pattern;
  * <p>The boundary follows the cross-domain seams: option validation that reads OTHER domains stays
  * in the facade (tracking options check a verified domain identity, delivery options check a
  * dedicated IP pool), which validates first (or resolves existence through {@link #get}) and then
- * mutates through {@link #save}. The ARN-dispatched configuration-set tagging lives here; the
- * facade keeps the send-path reads (pause check, event publishing, effective suppression reasons)
+ * mutates through {@link #save}. The ARN-dispatched configuration-set tagging and the send-time
+ * validation ({@link #validateForSending}: existence plus the sending-paused gate) live here; the
+ * facade keeps the remaining send-path reads (event publishing, effective suppression reasons)
  * and the tenant delete-guard around {@link #remove}.
  */
 @ApplicationScoped
@@ -102,6 +103,32 @@ public class SesConfigurationSetService {
     public void remove(String name, String region) {
         configSetStore.delete(configSetKey(region, name));
         LOG.infov("Deleted SES configuration set: {0} in region {1}", name, region);
+    }
+
+    /**
+     * Validate that a non-blank {@code ConfigurationSetName} is usable for a send. Performs
+     * two gates:
+     *   1. Existence: raises {@code ConfigurationSetDoesNotExist} (400) when the set is
+     *      missing in the given region. The V2 REST controller's {@code remapV1Exception}
+     *      translates that into {@code NotFoundException 404}; V1 Query keeps the original.
+     *   2. Sending-enabled: raises {@code ConfigurationSetSendingPausedException} (400)
+     *      when the set's {@code SendingEnabled} flag has been turned off via
+     *      {@code UpdateConfigurationSetSendingEnabled} (v1) /
+     *      {@code PutConfigurationSetSendingOptions} (v2). The V2 controller narrows that
+     *      code to {@code SendingPausedException}; V1 keeps the longer form, matching the
+     *      exact wire shape AWS returns on each surface.
+     * Mirrors AWS SES behaviour: invalid or paused set fails fast instead of silently
+     * storing/relaying the message and skipping event publishing later.
+     */
+    public void validateForSending(String configurationSetName, String region) {
+        if (configurationSetName == null || configurationSetName.isBlank()) {
+            return;
+        }
+        ConfigurationSet cs = get(configurationSetName, region);
+        if (cs.getSendingEnabled() != null && !cs.getSendingEnabled()) {
+            throw new AwsException("ConfigurationSetSendingPausedException",
+                    "Sending is paused for configuration set " + configurationSetName, 400);
+        }
     }
 
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateConfigurationSet.Tags}. */

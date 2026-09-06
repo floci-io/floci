@@ -160,6 +160,44 @@ class FlociCertificateAuthorityTest {
         assertEquals("CN=AWS IoT Certificate", cert.getSubjectX500Principal().getName());
         assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage());
         assertTrue(ca.isIssuedByUs(cert));
+        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant(), "AWS's fixed expiry");
+        assertEquals(java.time.Instant.parse("2050-12-31T23:59:59Z"), ca.certificate().getNotAfter().toInstant(),
+                "a new CA outlives the device certificates it signs");
+    }
+
+    @Test
+    void expiryRulesStayValidAfterTheFixedDates() {
+        java.time.Instant in2051 = java.time.Instant.parse("2051-06-01T00:00:00Z");
+        assertEquals(in2051.plus(3650, java.time.temporal.ChronoUnit.DAYS), FlociCertificateAuthority.caNotAfter(in2051),
+                "a CA created after 2050 lives ten years instead of being born expired");
+        assertEquals(java.time.Instant.parse("2050-12-31T23:59:59Z"),
+                FlociCertificateAuthority.caNotAfter(java.time.Instant.parse("2026-09-05T00:00:00Z")));
+
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        assertEquals(ca.certificate().getNotAfter().toInstant(),
+                ca.deviceCertificateNotAfter(java.time.Instant.parse("2050-06-01T00:00:00Z")),
+                "after 2049 a device certificate lives a year, capped at the CA's expiry: never born expired");
+        assertTrue(ca.deviceCertificateNotAfter(java.time.Instant.parse("2050-06-01T00:00:00Z"))
+                .isAfter(java.time.Instant.parse("2050-06-01T00:00:00Z")));
+        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"),
+                ca.deviceCertificateNotAfter(java.time.Instant.parse("2026-09-05T00:00:00Z")));
+    }
+
+    @Test
+    void deviceCertificateNeverOutlivesAShortLivedCa() throws Exception {
+        CertificateGenerator gen = new CertificateGenerator();
+        var shortLived = gen.generateCaCertificate(FlociCertificateAuthority.COMMON_NAME,
+                java.time.Instant.now().plus(30, java.time.temporal.ChronoUnit.DAYS));
+        Files.writeString(tempDir.resolve("floci-root-ca.crt"), shortLived.certificatePem());
+        Files.writeString(tempDir.resolve("floci-root-ca.key"), shortLived.privateKeyPem());
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        assertEquals(parse(shortLived.certificatePem()), ca.certificate(), "the short-lived CA is kept as is");
+
+        X509Certificate leaf = parse(ca.issueClientCertificate("device").certificatePem());
+        X509Certificate fromCsr = ca.signClientCsr(csrPem("CN=device", rsaKeyPair(2048)));
+
+        assertEquals(ca.certificate().getNotAfter(), leaf.getNotAfter(), "capped at the CA's expiry");
+        assertEquals(ca.certificate().getNotAfter(), fromCsr.getNotAfter(), "the CSR path is capped the same way");
     }
 
     @Test
@@ -182,6 +220,61 @@ class FlociCertificateAuthorityTest {
                 CertificateGenerator.LeafUsage.SERVER);
 
         assertFalse(ca.isIssuedByUs(parse(forged.certificatePem())), "same issuer name, wrong signature");
+    }
+
+    @Test
+    void signsACsrAsAClientLeafWithTheCsrSubjectAndKey() throws Exception {
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        java.security.KeyPair deviceKey = rsaKeyPair(2048);
+
+        X509Certificate cert = ca.signClientCsr(csrPem("CN=device-42,O=Example", deviceKey));
+
+        cert.verify(ca.certificate().getPublicKey());
+        assertEquals(deviceKey.getPublic(), cert.getPublicKey());
+        assertEquals(new javax.security.auth.x500.X500Principal(
+                new org.bouncycastle.asn1.x500.X500Name("CN=device-42,O=Example").getEncoded()), cert.getSubjectX500Principal());
+        assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage());
+        assertEquals(-1, cert.getBasicConstraints());
+        assertTrue(ca.isIssuedByUs(cert));
+    }
+
+    @Test
+    void refusesWhatIsNotACsr() throws Exception {
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+
+        var notPem = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ca.signClientCsr("hello"));
+        assertTrue(notPem.getMessage().contains("certificateSigningRequest"), notPem.getMessage());
+        var certificate = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ca.signClientCsr(ca.caPem()));
+        assertTrue(certificate.getMessage().contains("not a PEM CERTIFICATE REQUEST"), certificate.getMessage());
+    }
+
+    @Test
+    void refusesAWeakRsaKey() throws Exception {
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
+        String weak = csrPem("CN=weak", rsaKeyPair(1024));
+
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ca.signClientCsr(weak));
+        assertTrue(refused.getMessage().contains("2048"), refused.getMessage());
+    }
+
+    private static java.security.KeyPair rsaKeyPair(int bits) throws Exception {
+        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(bits);
+        return kpg.generateKeyPair();
+    }
+
+    private static String csrPem(String subject, java.security.KeyPair keyPair) throws Exception {
+        var csr = new org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder(
+                new org.bouncycastle.asn1.x500.X500Name(subject), keyPair.getPublic())
+                .build(new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(keyPair.getPrivate()));
+        java.io.StringWriter out = new java.io.StringWriter();
+        try (var writer = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(out)) {
+            writer.writeObject(csr);
+        }
+        return out.toString();
     }
 
     private static X509Certificate parse(String pem) {

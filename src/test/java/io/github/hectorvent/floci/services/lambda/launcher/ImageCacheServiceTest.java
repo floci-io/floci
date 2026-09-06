@@ -207,6 +207,37 @@ class ImageCacheServiceTest {
     }
 
     @Test
+    void repullsDefaultImageWhenCachedImageWasRemoved() throws Exception {
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectImageCmd inspectImage = mock(InspectImageCmd.class);
+        InspectImageCmd inspectCachedImage = mock(InspectImageCmd.class);
+        PullImageCmd pullImage = mock(PullImageCmd.class);
+        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
+        when(dockerClient.inspectImageCmd("sha256:default-old")).thenReturn(inspectCachedImage);
+        when(inspectImage.exec())
+                .thenReturn(new InspectImageResponse()
+                        .withId("sha256:default-old")
+                        .withOs("linux")
+                        .withArch("amd64"))
+                .thenThrow(new NotFoundException("image not found locally"))
+                .thenReturn(new InspectImageResponse()
+                        .withId("sha256:default-new")
+                        .withOs("linux")
+                        .withArch("amd64"));
+        when(inspectCachedImage.exec()).thenThrow(new NotFoundException("image was removed"));
+        when(dockerClient.pullImageCmd(IMAGE)).thenReturn(pullImage);
+        when(pullImage.withAuthConfig(any())).thenReturn(pullImage);
+        when(pullImage.exec(any(PullImageResultCallback.class))).thenReturn(callback);
+
+        ImageCacheService service = newService(dockerClient);
+        assertEquals("sha256:default-old", service.ensureImageExists(IMAGE));
+
+        assertEquals("sha256:default-new", service.ensureImageExists(IMAGE));
+        verify(pullImage).exec(any(PullImageResultCallback.class));
+    }
+
+    @Test
     void succeedsOnFirstAttempt() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         ImageCacheService.runWithRetry(IMAGE, 3, 1L, calls::incrementAndGet);

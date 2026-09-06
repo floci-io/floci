@@ -568,7 +568,7 @@ public class SesController {
                 if (hasName || hasArn) {
                     String resolvedName = hasName
                             ? templateName
-                            : SesService.templateNameFromArn(templateArn);
+                            : SesTemplateService.templateNameFromArn(templateArn);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, resolvedName, regionResolver.getAccountId(), region);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
@@ -666,7 +666,7 @@ public class SesController {
             } else {
                 String resolvedName = hasName
                         ? templateName
-                        : SesService.templateNameFromArn(templateArn);
+                        : SesTemplateService.templateNameFromArn(templateArn);
                 gateTemplateName = resolvedName;
                 EmailTemplate stored = sesService.getTemplate(resolvedName, region);
                 subject = stored.getSubject();

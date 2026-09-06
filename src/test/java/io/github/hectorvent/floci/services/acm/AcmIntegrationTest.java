@@ -243,7 +243,9 @@ class AcmIntegrationTest {
             .body("Certificate.Issuer", equalTo("CN=Floci Local CA"))
             .body("Certificate.KeyAlgorithm", equalTo("RSA-2048"))
             .body("Certificate.NotBefore", notNullValue())
-            .body("Certificate.NotAfter", notNullValue());
+            .body("Certificate.NotAfter", notNullValue())
+            .body("Certificate.DomainValidationOptions.ValidationStatus", everyItem(equalTo("SUCCESS")))
+            .body("Certificate.DomainValidationOptions.ResourceRecord.Type", everyItem(equalTo("CNAME")));
     }
 
     @Test

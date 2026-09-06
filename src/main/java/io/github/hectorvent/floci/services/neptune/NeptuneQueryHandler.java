@@ -65,7 +65,8 @@ public class NeptuneQueryHandler {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in Neptune {0}", action);
-            return Response.serverError().entity("Unexpected error: " + e.getMessage()).build();
+            return AwsQueryResponse.error("InternalFailure",
+                    "Unexpected error: " + e.getMessage(), AwsNamespaces.RDS, 500);
         }
     }
 

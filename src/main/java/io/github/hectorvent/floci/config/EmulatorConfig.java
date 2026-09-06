@@ -711,6 +711,7 @@ public interface EmulatorConfig {
         ServiceCatalogServiceConfig servicecatalog();
         SsoAdminServiceConfig ssoadmin();
         Macie2ServiceConfig macie2();
+        AccessAnalyzerServiceConfig accessanalyzer();
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
@@ -740,6 +741,11 @@ public interface EmulatorConfig {
     }
 
     interface Macie2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface AccessAnalyzerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -890,6 +896,14 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
+
+        /**
+         * Optional control-plane processing window for VPC association mutations. A positive
+         * value makes documented Route 53 retryable overlap errors reproducible; zero preserves
+         * the default immediate-completion behavior.
+         */
+        @WithDefault("0")
+        long vpcAssociationControlPlaneDelayMs();
     }
 
     interface ConfigServiceConfig {
@@ -1876,6 +1890,14 @@ public interface EmulatorConfig {
 
         @WithDefault("./data/lambda-code")
         String codePath();
+
+        /**
+         * Maximum number of entries accepted in a Lambda ZIP archive.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_ZIP_MAX_ENTRIES
+         */
+        @WithDefault("100000")
+        int zipMaxEntries();
 
         @WithDefault("1000")
         long pollIntervalMs();

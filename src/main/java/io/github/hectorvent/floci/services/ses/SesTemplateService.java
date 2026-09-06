@@ -40,9 +40,7 @@ import java.util.regex.Pattern;
  * {@link SecureRandom} (no static instance, so no native-image run-time-init registration).
  *
  * <p>Tag validation is a shared cross-resource concern, so {@code createTemplate} calls
- * {@link SesTags#validate} rather than depending back on the facade. The template ARN parser
- * ({@code SesService.templateNameFromArn}) stays on the facade because external callers reference it
- * statically.
+ * {@link SesTags#validate} rather than depending back on the facade.
  */
 @ApplicationScoped
 public class SesTemplateService {
@@ -170,6 +168,29 @@ public class SesTemplateService {
     private static String templateKey(String region, String templateName) {
         validateTemplateName(templateName);
         return "template::" + region + "::" + templateName;
+    }
+
+    /**
+     * Extracts the template name from an SES template ARN of the form
+     * {@code arn:aws:ses:<region>:<account>:template/<name>}. Region and
+     * account segments are not validated; only the {@code template/<name>}
+     * suffix is required.
+     */
+    public static String templateNameFromArn(String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TemplateArn is required.", 400);
+        }
+        int marker = arn.indexOf(":template/");
+        if (!arn.startsWith("arn:") || marker < 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "TemplateArn is not a valid SES template ARN: " + arn, 400);
+        }
+        String name = arn.substring(marker + ":template/".length());
+        if (name.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "TemplateArn is missing a template name: " + arn, 400);
+        }
+        return name;
     }
 
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateEmailTemplate.Tags}. */

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -22,6 +23,7 @@ import io.github.hectorvent.floci.services.iot.model.IotShadow;
 import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
 import io.github.hectorvent.floci.services.iot.model.IotThingType;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.iot.model.Thing;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
@@ -39,12 +41,15 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +70,10 @@ public class IotService {
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
+    public static final int MAX_POLICY_VERSIONS = 5;
+
+    /** One lock for every policy version write and the policy delete, so a cap check, an append and a delete cannot interleave. */
+    private final Object policyWriteLock = new Object();
 
     private final StorageBackend<String, Thing> thingStore;
     private final StorageBackend<String, IotCertificate> certificateStore;
@@ -92,6 +101,7 @@ public class IotService {
     private final LambdaService lambdaService;
     private final FirehoseService firehoseService;
     private final CloudWatchLogsService cloudWatchLogsService;
+    private final FlociCertificateAuthority certificateAuthority;
 
     @Inject
     public IotService(StorageFactory storageFactory,
@@ -107,7 +117,8 @@ public class IotService {
                         DynamoDbService dynamoDbService,
                         LambdaService lambdaService,
                         FirehoseService firehoseService,
-                        CloudWatchLogsService cloudWatchLogsService) {
+                        CloudWatchLogsService cloudWatchLogsService,
+                        FlociCertificateAuthority certificateAuthority) {
         this(storageFactory.create("iot", "iot-things.json", new TypeReference<Map<String, Thing>>() {}),
                 storageFactory.create("iot", "iot-certificates.json", new TypeReference<Map<String, IotCertificate>>() {}),
                 storageFactory.create("iot", "iot-policies.json", new TypeReference<Map<String, IotPolicy>>() {}),
@@ -122,7 +133,7 @@ public class IotService {
                 storageFactory.create("iot", "iot-thing-groups.json", new TypeReference<Map<String, IotThingGroup>>() {}),
                 storageFactory.create("iot", "iot-thing-group-memberships.json", new TypeReference<Map<String, Set<String>>>() {}),
                 config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService, snsService,
-                s3Service, kinesisService, dynamoDbService, lambdaService, firehoseService, cloudWatchLogsService);
+                s3Service, kinesisService, dynamoDbService, lambdaService, firehoseService, cloudWatchLogsService, certificateAuthority);
     }
 
     IotService(StorageBackend<String, Thing> thingStore,
@@ -150,7 +161,8 @@ public class IotService {
                   DynamoDbService dynamoDbService,
                   LambdaService lambdaService,
                   FirehoseService firehoseService,
-                  CloudWatchLogsService cloudWatchLogsService) {
+                  CloudWatchLogsService cloudWatchLogsService,
+                  FlociCertificateAuthority certificateAuthority) {
         this.thingStore = thingStore;
         this.certificateStore = certificateStore;
         this.policyStore = policyStore;
@@ -177,6 +189,7 @@ public class IotService {
         this.lambdaService = lambdaService;
         this.firehoseService = firehoseService;
         this.cloudWatchLogsService = cloudWatchLogsService;
+        this.certificateAuthority = certificateAuthority;
     }
 
     public String describeEndpoint(String endpointType) {
@@ -297,17 +310,68 @@ public class IotService {
 
     private IotCertificate createCertificate(boolean setAsActive, String certificateSigningRequest, String region) {
         startMqttIfEnabled();
-        String id = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "");
         IotCertificate certificate = new IotCertificate();
-        certificate.setCertificateId(id);
-        certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + id));
-        certificate.setCertificatePem("-----BEGIN CERTIFICATE-----\n" + id + "\n-----END CERTIFICATE-----");
-        certificate.setPublicKey("-----BEGIN PUBLIC KEY-----\n" + (certificateSigningRequest == null ? id : certificateSigningRequest.hashCode()) + "\n-----END PUBLIC KEY-----");
-        certificate.setPrivateKey("-----BEGIN PRIVATE KEY-----\n" + id + "\n-----END PRIVATE KEY-----");
+        if (certificateSigningRequest == null) {
+            issueFromLocalCa(certificate);
+        } else {
+            issueFromCsr(certificate, certificateSigningRequest);
+        }
+        certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + certificate.getCertificateId()));
         certificate.setStatus(setAsActive ? "ACTIVE" : "INACTIVE");
         certificate.setCreationDate(Instant.now());
-        certificateStore.put(certificateKey(region, id), certificate);
+        certificateStore.put(certificateKey(region, certificate.getCertificateId()), withoutPrivateKey(certificate));
         return certificate;
+    }
+
+    /** As on AWS, the private key is returned once and never kept: the stored record has none. */
+    private static IotCertificate withoutPrivateKey(IotCertificate certificate) {
+        IotCertificate stored = new IotCertificate();
+        stored.setCertificateId(certificate.getCertificateId());
+        stored.setCertificateArn(certificate.getCertificateArn());
+        stored.setCertificatePem(certificate.getCertificatePem());
+        stored.setPublicKey(certificate.getPublicKey());
+        stored.setStatus(certificate.getStatus());
+        stored.setCreationDate(certificate.getCreationDate());
+        stored.setNotBefore(certificate.getNotBefore());
+        stored.setNotAfter(certificate.getNotAfter());
+        stored.setTags(certificate.getTags());
+        return stored;
+    }
+
+    /** As on AWS: a fresh RSA 2048 pair, the subject {@code AWS IoT Certificate}, and the private key returned once. */
+    private void issueFromLocalCa(IotCertificate certificate) {
+        CertificateGenerator.GeneratedCertificate issued = certificateAuthority.issueClientCertificate("AWS IoT Certificate");
+        try {
+            fill(certificate, new CertificateGenerator().parseCertificate(issued.certificatePem()));
+            certificate.setPrivateKey(issued.privateKeyPem());
+        } catch (Exception e) {
+            throw new AwsException("InternalFailureException", "Could not issue device certificate: " + e.getMessage(), 500);
+        }
+    }
+
+    /** The device keeps its key: only the certificate and its public key are stored. */
+    private void issueFromCsr(IotCertificate certificate, String csrPem) {
+        X509Certificate x509;
+        try {
+            x509 = certificateAuthority.signClientCsr(csrPem);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+        try {
+            fill(certificate, x509);
+        } catch (Exception e) {
+            throw new AwsException("InternalFailureException", "Could not encode device certificate: " + e.getMessage(), 500);
+        }
+    }
+
+    /** AWS IoT's certificateId is the lowercase hex SHA-256 of the certificate's DER encoding. */
+    private static void fill(IotCertificate certificate, X509Certificate x509) throws Exception {
+        CertificateGenerator pem = new CertificateGenerator();
+        certificate.setCertificateId(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(x509.getEncoded())));
+        certificate.setCertificatePem(pem.toPem(x509));
+        certificate.setPublicKey(pem.toPem(x509.getPublicKey()));
+        certificate.setNotBefore(x509.getNotBefore().toInstant());
+        certificate.setNotAfter(x509.getNotAfter().toInstant());
     }
 
     public IotCertificate describeCertificate(String certificateId, String region) {
@@ -373,34 +437,42 @@ public class IotService {
     }
 
     public void deletePolicy(String policyName, String region) {
-        getPolicy(policyName, region);
-        if (!policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()).isEmpty()) {
-            throw new AwsException("InvalidRequestException", "Cannot delete attached policy", 400);
+        synchronized (policyWriteLock) {
+            getPolicy(policyName, region);
+            if (!policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()).isEmpty()) {
+                throw new AwsException("InvalidRequestException", "Cannot delete attached policy", 400);
+            }
+            policyStore.delete(policyKey(region, policyName));
+            policyAttachmentStore.delete(policyAttachmentKey(region, policyName));
         }
-        policyStore.delete(policyKey(region, policyName));
-        policyAttachmentStore.delete(policyAttachmentKey(region, policyName));
     }
 
     public IotPolicy.PolicyVersion createPolicyVersion(String policyName, String policyDocument, boolean setAsDefault, String region) {
-        IotPolicy policy = getPolicy(policyName, region);
-        int next = policy.getVersions().stream()
-                .map(IotPolicy.PolicyVersion::getVersionId)
-                .mapToInt(Integer::parseInt)
-                .max()
-                .orElse(0) + 1;
-        IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
-        version.setVersionId(Integer.toString(next));
-        version.setDocument(policyDocument);
-        version.setCreateDate(Instant.now());
-        List<IotPolicy.PolicyVersion> versions = new java.util.ArrayList<>(policy.getVersions());
-        versions.add(version);
-        policy.setVersions(versions);
-        if (setAsDefault) {
-            policy.setDefaultVersionId(version.getVersionId());
-            policy.setPolicyDocument(policyDocument);
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            if (policy.getVersions().size() >= MAX_POLICY_VERSIONS) {
+                throw new AwsException("VersionsLimitExceededException", "The policy " + policyName
+                        + " already has the maximum number of versions (" + MAX_POLICY_VERSIONS + ")", 409);
+            }
+            int next = policy.getVersions().stream()
+                    .map(IotPolicy.PolicyVersion::getVersionId)
+                    .mapToInt(Integer::parseInt)
+                    .max()
+                    .orElse(0) + 1;
+            IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
+            version.setVersionId(Integer.toString(next));
+            version.setDocument(policyDocument);
+            version.setCreateDate(Instant.now());
+            List<IotPolicy.PolicyVersion> versions = new ArrayList<>(policy.getVersions());
+            versions.add(version);
+            policy.setVersions(versions);
+            if (setAsDefault) {
+                policy.setDefaultVersionId(version.getVersionId());
+                policy.setPolicyDocument(policyDocument);
+            }
+            policyStore.put(policyKey(region, policyName), policy);
+            return version;
         }
-        policyStore.put(policyKey(region, policyName), policy);
-        return version;
     }
 
     public IotPolicy.PolicyVersion getPolicyVersion(String policyName, String versionId, String region) {
@@ -418,26 +490,55 @@ public class IotService {
     }
 
     public void setDefaultPolicyVersion(String policyName, String versionId, String region) {
-        IotPolicy policy = getPolicy(policyName, region);
-        IotPolicy.PolicyVersion version = getPolicyVersion(policyName, versionId, region);
-        policy.setDefaultVersionId(versionId);
-        policy.setPolicyDocument(version.getDocument());
-        policyStore.put(policyKey(region, policyName), policy);
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            IotPolicy.PolicyVersion version = getPolicyVersion(policyName, versionId, region);
+            policy.setDefaultVersionId(versionId);
+            policy.setPolicyDocument(version.getDocument());
+            policyStore.put(policyKey(region, policyName), policy);
+        }
     }
 
     public void deletePolicyVersion(String policyName, String versionId, String region) {
-        IotPolicy policy = getPolicy(policyName, region);
-        if (versionId.equals(policy.getDefaultVersionId())) {
-            throw new AwsException("InvalidRequestException", "Cannot delete default policy version", 400);
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            if (versionId.equals(policy.getDefaultVersionId())) {
+                throw new AwsException("InvalidRequestException", "Cannot delete default policy version", 400);
+            }
+            List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
+                    .filter(version -> !versionId.equals(version.getVersionId()))
+                    .toList();
+            if (versions.size() == policy.getVersions().size()) {
+                throw new AwsException("ResourceNotFoundException", "Policy version not found: " + versionId, 404);
+            }
+            policy.setVersions(versions);
+            policyStore.put(policyKey(region, policyName), policy);
         }
-        List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
-                .filter(version -> !versionId.equals(version.getVersionId()))
-                .toList();
-        if (versions.size() == policy.getVersions().size()) {
-            throw new AwsException("ResourceNotFoundException", "Policy version not found: " + versionId, 404);
+    }
+
+    /**
+     * Deletes the oldest versions until one more fits under the cap, which is what the AWS
+     * CloudFormation handler means to do once the service refuses a sixth (it sorts version ids as
+     * text, so past nine it picks another one). A policy persisted before the cap can hold more
+     * than five, so this deletes as many as it takes. A default version cannot be deleted, so when
+     * the oldest is the default the newest becomes the default first. One step under the policy
+     * write lock, so nothing else can move the selection in between.
+     */
+    public void makeRoomForPolicyVersion(String policyName, String region) {
+        synchronized (policyWriteLock) {
+            IotPolicy policy = getPolicy(policyName, region);
+            while (policy.getVersions().size() >= MAX_POLICY_VERSIONS) {
+                List<IotPolicy.PolicyVersion> versions = policy.getVersions().stream()
+                        .sorted(Comparator.comparingInt(version -> Integer.parseInt(version.getVersionId())))
+                        .toList();
+                String oldest = versions.get(0).getVersionId();
+                if (oldest.equals(policy.getDefaultVersionId())) {
+                    setDefaultPolicyVersion(policyName, versions.get(versions.size() - 1).getVersionId(), region);
+                }
+                deletePolicyVersion(policyName, oldest, region);
+                policy = getPolicy(policyName, region);
+            }
         }
-        policy.setVersions(versions);
-        policyStore.put(policyKey(region, policyName), policy);
     }
 
     public void attachPolicy(String policyName, String target, String region) {

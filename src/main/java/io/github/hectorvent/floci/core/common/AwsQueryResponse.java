@@ -102,10 +102,21 @@ public final class AwsQueryResponse {
      * @param xmlns the namespace URI, or {@code null} for namespace-free error responses (e.g. SQS)
      */
     public static Response error(String code, String message, String xmlns, int status) {
+        String type = status >= 500 ? "Receiver" : "Sender";
+        return error(code, message, xmlns, status, type);
+    }
+
+    /**
+     * Builds a Query-protocol XML error response with an explicit error type and returns a JAX-RS {@link Response}.
+     *
+     * @param xmlns the namespace URI, or {@code null} for namespace-free error responses (e.g. SQS)
+     * @param type  the error type, typically "Sender" for 4xx or "Receiver" for 5xx
+     */
+    public static Response error(String code, String message, String xmlns, int status, String type) {
         String xml = new XmlBuilder()
                 .start("ErrorResponse", xmlns)
                   .start("Error")
-                    .elem("Type", "Sender")
+                    .elem("Type", type)
                     .elem("Code", code)
                     .elem("Message", message)
                   .end("Error")

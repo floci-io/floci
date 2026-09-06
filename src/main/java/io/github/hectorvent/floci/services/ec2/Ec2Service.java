@@ -181,7 +181,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
-    private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
+    private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
     // subnetId → counter for IP assignment (runtime-only, not persisted)
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
 
@@ -428,7 +428,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // ─── Default resource seeding ──────────────────────────────────────────────
 
     public void ensureDefaultResources(String region) {
-        if (!seededRegions.add(region)) {
+        String ownerAccountId = callerAccountId();
+        String seedScope = ownerAccountId + "::" + region;
+        if (!seededAccountRegions.add(seedScope)) {
             return;
         }
         // Already provisioned in a previous run and reloaded from persistent storage: the default
@@ -445,7 +447,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         defaultVpc.setCidrBlock("172.31.0.0/16");
         defaultVpc.setState("available");
         defaultVpc.setDefault(true);
-        defaultVpc.setOwnerId(accountId);
+        defaultVpc.setOwnerId(ownerAccountId);
         defaultVpc.setRegion(region);
         defaultVpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-default", "172.31.0.0/16"));
@@ -469,9 +471,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             subnet.setAvailableIpAddressCount(4091);
             subnet.setDefaultForAz(true);
             subnet.setMapPublicIpOnLaunch(true);
-            subnet.setOwnerId(accountId);
+            subnet.setOwnerId(ownerAccountId);
             subnet.setRegion(region);
-            subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetIds[i]).toString());
+            subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "subnet/" + subnetIds[i]).toString());
             subnets.put(key(region, subnetIds[i]), subnet);
         }
 
@@ -495,7 +497,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String igwId = "igw-default";
         InternetGateway igw = new InternetGateway();
         igw.setInternetGatewayId(igwId);
-        igw.setOwnerId(accountId);
+        igw.setOwnerId(ownerAccountId);
         igw.setRegion(region);
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
@@ -514,7 +516,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         defaultSg.setGroupName("default");
         defaultSg.setDescription("default VPC security group");
         defaultSg.setVpcId(vpcId);
-        defaultSg.setOwnerId(accountId);
+        defaultSg.setOwnerId(callerAccountId());
         defaultSg.setRegion(region);
 
         // Default egress: all traffic
@@ -532,7 +534,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         RouteTable mainRt = new RouteTable();
         mainRt.setRouteTableId(routeTableId);
         mainRt.setVpcId(vpc.getVpcId());
-        mainRt.setOwnerId(accountId);
+        mainRt.setOwnerId(callerAccountId());
         mainRt.setRegion(region);
         mainRt.getRoutes().add(new Route(vpc.getCidrBlock(), "local", "CreateRouteTable"));
 
@@ -563,7 +565,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         NetworkAcl acl = new NetworkAcl();
         acl.setNetworkAclId(networkAclId);
         acl.setVpcId(vpcId);
-        acl.setOwnerId(accountId);
+        acl.setOwnerId(callerAccountId());
         acl.setRegion(region);
         acl.setDefault(true);
         acl.getEntries().add(naclEntry(100, "-1", "allow", false, "0.0.0.0/0"));
@@ -594,7 +596,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         NetworkAcl acl = new NetworkAcl();
         acl.setNetworkAclId(networkAclId);
         acl.setVpcId(vpcId);
-        acl.setOwnerId(accountId);
+        acl.setOwnerId(callerAccountId());
         acl.setRegion(region);
         acl.setDefault(false);
         acl.getEntries().add(naclEntry(32767, "-1", "deny", false, "0.0.0.0/0"));
@@ -2874,7 +2876,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vpc.setCidrBlock(cidrBlock);
         vpc.setState("available");
         vpc.setDefault(isDefault);
-        vpc.setOwnerId(accountId);
+        vpc.setOwnerId(callerAccountId());
         vpc.setRegion(region);
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
@@ -5409,6 +5411,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return accountAware.findAnyAccountEntry(key(region, vpcId));
         }
         return vpcs.get(key(region, vpcId)).map(v -> new AccountAwareStorageBackend.OwnedEntry<>(null, v));
+    }
+
+    /**
+     * Resolves the owning account of a VPC across account partitions when the VPC exists in Floci.
+     * Cross-service consumers such as Route 53 use this to enforce AWS ownership rules without
+     * changing the public EC2 API surface. An empty result means the VPC is not modelled locally.
+     */
+    public Optional<String> findVpcOwnerAccount(String region, String vpcId) {
+        return findAnyVpcEntry(region, vpcId).map(AccountAwareStorageBackend.OwnedEntry::account);
     }
 
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
