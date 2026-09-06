@@ -382,7 +382,7 @@ class CognitoCfnProvisionerTest {
         assertEquals(Set.of("Arn", "UserPoolId", "ProviderName", "ProviderURL"), r.getAttributes().keySet());
         assertEquals(POOL_ARN, r.getAttributes().get("Arn"));
         assertEquals(POOL_ID, r.getAttributes().get("UserPoolId"));
-        assertEquals("my-pool", r.getAttributes().get("ProviderName"));
+        assertEquals("cognito-idp.us-east-1.amazonaws.com/" + POOL_ID, r.getAttributes().get("ProviderName"));
         assertEquals(ISSUER, r.getAttributes().get("ProviderURL"));
     }
 
@@ -438,8 +438,11 @@ class CognitoCfnProvisionerTest {
 
         provisioner.provision(r, mapper.createObjectNode(), ctx());
 
-        assertTrue(r.getAttributes().get("ProviderName").startsWith("my-stack-Pool-"),
-                r.getAttributes().get("ProviderName"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).createUserPool(request.capture(), eq(REGION));
+        String poolName = (String) request.getValue().get("PoolName");
+        assertTrue(poolName.startsWith("my-stack-Pool-"), poolName);
     }
 
     @Test

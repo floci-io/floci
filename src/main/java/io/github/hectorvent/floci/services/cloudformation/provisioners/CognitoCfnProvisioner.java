@@ -23,6 +23,8 @@ import java.util.Set;
  *
  * <p>{@code AWS::Cognito::UserPool}: the physical id is the pool id, the whole resolved property
  * set is handed to the service as the API request, and the pool name falls back to a generated one.
+ * {@code Fn::GetAtt ProviderName} has AWS's shape, {@code cognito-idp.<region>.amazonaws.com/<id>},
+ * while {@code ProviderURL} is the issuer of the tokens Floci mints, {@code <base-url>/<id>}.
  * {@code AWS::Cognito::UserPoolClient}: the physical id is the client id and {@code ClientSecret}
  * is only an attribute when the client has one, as on AWS. A pool is updated in place. A client is
  * updated in place unless {@code UserPoolId} or {@code GenerateSecret}, its create-only properties,
@@ -176,7 +178,10 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(pool.getId());
         r.getAttributes().put("Arn", pool.getArn());
         r.getAttributes().put("UserPoolId", pool.getId());
-        r.getAttributes().put("ProviderName", pool.getName());
+        // ProviderName is what a template feeds into an identity pool's CognitoIdentityProviders,
+        // cognito-idp.<region>.amazonaws.com/<pool id> on AWS. ProviderURL stays the issuer Floci
+        // mints tokens with, so a template wiring it into a JWT authorizer validates locally.
+        r.getAttributes().put("ProviderName", "cognito-idp." + ctx.region() + ".amazonaws.com/" + pool.getId());
         r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
     }
 
