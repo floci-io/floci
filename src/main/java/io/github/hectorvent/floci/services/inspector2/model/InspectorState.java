@@ -13,6 +13,7 @@ public class InspectorState {
     private boolean autoEnableEcr;
     private boolean autoEnableLambda;
     private boolean autoEnableLambdaCode;
+    private boolean autoEnableCodeRepository;
 
     public InspectorState() {
     }
@@ -31,4 +32,6 @@ public class InspectorState {
     public void setAutoEnableLambda(boolean value) { autoEnableLambda = value; }
     public boolean isAutoEnableLambdaCode() { return autoEnableLambdaCode; }
     public void setAutoEnableLambdaCode(boolean value) { autoEnableLambdaCode = value; }
+    public boolean isAutoEnableCodeRepository() { return autoEnableCodeRepository; }
+    public void setAutoEnableCodeRepository(boolean value) { autoEnableCodeRepository = value; }
 }

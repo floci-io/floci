@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.inspector2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.inspector2.model.InspectorState;
@@ -13,15 +14,19 @@ import java.util.Map;
 import java.util.Set;
 
 @ApplicationScoped
-public class Inspector2Service {
-    private static final Set<String> RESOURCE_TYPES = Set.of("EC2", "ECR", "LAMBDA", "LAMBDA_CODE");
+public class Inspector2Service implements Resettable {
+    private static final Set<String> RESOURCE_TYPES = Set.of("EC2", "ECR", "LAMBDA", "LAMBDA_CODE", "CODE_REPOSITORY");
 
     private final AccountAwareStorageBackend<InspectorState> states;
 
     @Inject
     public Inspector2Service(StorageFactory storageFactory) {
-        states = storageFactory.create("inspector2", "inspector2-state.json",
-                new TypeReference<Map<String, InspectorState>>() {});
+        this(storageFactory.create("inspector2", "inspector2-state.json",
+                new TypeReference<Map<String, InspectorState>>() {}));
+    }
+
+    Inspector2Service(AccountAwareStorageBackend<InspectorState> states) {
+        this.states = states;
     }
 
     public InspectorState state(String region) {
@@ -45,6 +50,20 @@ public class Inspector2Service {
         states.putForAccount(accountId, region, delegated);
     }
 
+    public synchronized void disableDelegatedAdmin(String region, String accountId) {
+        requireAccountId(accountId);
+        InspectorState management = state(region);
+        if (!accountId.equals(management.getAdminAccountId())) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The specified delegated administrator was not found.", 404);
+        }
+        management.setAdminAccountId(null);
+        states.put(region, management);
+        InspectorState delegated = states.getForAccount(accountId, region).orElseGet(InspectorState::new);
+        delegated.setAdminAccountId(null);
+        states.putForAccount(accountId, region, delegated);
+    }
+
     public synchronized InspectorState accountStatus(String region) {
         InspectorState state = state(region);
         if ("ENABLING".equals(state.getStatus()) && state.getEnablingPollsRemaining() > 0) {
@@ -62,8 +81,8 @@ public class Inspector2Service {
 
     public synchronized void enable(String region, JsonNode request) {
         JsonNode resourceTypes = request.get("resourceTypes");
-        if (resourceTypes == null || !resourceTypes.isArray() || resourceTypes.isEmpty()) {
-            throw new AwsException("ValidationException", "resourceTypes must contain at least one resource type.", 400);
+        if (resourceTypes == null || !resourceTypes.isArray() || resourceTypes.isEmpty() || resourceTypes.size() > 5) {
+            throw new AwsException("ValidationException", "resourceTypes must contain between 1 and 5 resource types.", 400);
         }
         for (JsonNode resourceType : resourceTypes) {
             if (!resourceType.isTextual() || !RESOURCE_TYPES.contains(resourceType.textValue())) {
@@ -71,8 +90,8 @@ public class Inspector2Service {
             }
         }
         JsonNode accountIds = request.get("accountIds");
-        if (accountIds != null && !accountIds.isArray()) {
-            throw new AwsException("ValidationException", "accountIds must be an array.", 400);
+        if (accountIds != null && (!accountIds.isArray() || accountIds.size() > 100)) {
+            throw new AwsException("ValidationException", "accountIds must contain at most 100 account IDs.", 400);
         }
         if (accountIds != null) {
             for (JsonNode accountId : accountIds) {
@@ -88,11 +107,9 @@ public class Inspector2Service {
         states.put(region, state);
     }
 
-    public synchronized void updateOrganizationConfiguration(String region, JsonNode request) {
-        InspectorState state = state(region);
-        if (state.getAdminAccountId() == null) {
-            throw new AwsException("AccessDeniedException", "A delegated administrator is required.", 403);
-        }
+    public synchronized InspectorState updateOrganizationConfiguration(
+            String region, String callerAccountId, JsonNode request) {
+        InspectorState state = requireAdministrator(region, callerAccountId);
         JsonNode autoEnable = request.get("autoEnable");
         if (autoEnable == null || !autoEnable.isObject()) {
             throw new AwsException("ValidationException", "autoEnable is required.", 400);
@@ -101,7 +118,22 @@ public class Inspector2Service {
         state.setAutoEnableEcr(requiredBoolean(autoEnable, "ecr"));
         state.setAutoEnableLambda(optionalBoolean(autoEnable, "lambda"));
         state.setAutoEnableLambdaCode(optionalBoolean(autoEnable, "lambdaCode"));
+        state.setAutoEnableCodeRepository(optionalBoolean(autoEnable, "codeRepository"));
         states.put(region, state);
+        return state;
+    }
+
+    public InspectorState organizationConfiguration(String region, String callerAccountId) {
+        return requireAdministrator(region, callerAccountId);
+    }
+
+    private InspectorState requireAdministrator(String region, String callerAccountId) {
+        InspectorState state = state(region);
+        if (state.getAdminAccountId() == null || !callerAccountId.equals(state.getAdminAccountId())) {
+            throw new AwsException("AccessDeniedException",
+                    "Only the delegated Amazon Inspector administrator can manage organization configuration.", 403);
+        }
+        return state;
     }
 
     private static InspectorState copyState(InspectorState source) {
@@ -113,6 +145,7 @@ public class Inspector2Service {
         copy.setAutoEnableEcr(source.isAutoEnableEcr());
         copy.setAutoEnableLambda(source.isAutoEnableLambda());
         copy.setAutoEnableLambdaCode(source.isAutoEnableLambdaCode());
+        copy.setAutoEnableCodeRepository(source.isAutoEnableCodeRepository());
         return copy;
     }
 
@@ -133,6 +166,11 @@ public class Inspector2Service {
             throw new AwsException("ValidationException", "autoEnable." + field + " must be a boolean.", 400);
         }
         return value.booleanValue();
+    }
+
+    @Override
+    public void clear() {
+        states.clear();
     }
 
     static void requireAccountId(String accountId) {
