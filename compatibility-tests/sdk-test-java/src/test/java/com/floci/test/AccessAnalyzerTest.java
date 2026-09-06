@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.accessanalyzer.AccessAnalyzerClient;
@@ -12,6 +13,8 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("IAM Access Analyzer lifecycle")
 class AccessAnalyzerTest {
+
+    private static final Logger LOG = Logger.getLogger(AccessAnalyzerTest.class);
 
     @Test
     void analyzerLifecycleAndTypeSpecificQuotaUseAwsSdk() {
@@ -45,7 +48,7 @@ class AccessAnalyzerTest {
         try {
             client.deleteAnalyzer(request -> request.analyzerName(analyzerName));
         } catch (Exception cleanupError) {
-            System.err.println("Best-effort cleanup failed for " + analyzerName + ": " + cleanupError.getMessage());
+            LOG.warnf(cleanupError, "Best-effort cleanup failed for analyzerName=%s", analyzerName);
         }
     }
 }
