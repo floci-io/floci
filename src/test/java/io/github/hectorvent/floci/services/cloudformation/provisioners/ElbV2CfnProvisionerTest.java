@@ -529,6 +529,64 @@ class ElbV2CfnProvisionerTest {
     }
 
     @Test
+    void givingUpOnOneEntityDoesNotForgetAnotherThatStillHasAttemptsLeft() {
+        String orphanArn = LB_ARN.replace("/web/", "/web-v2/");
+        LoadBalancer renamed = loadBalancer("web-v2");
+        renamed.setLoadBalancerArn(orphanArn);
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v2"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(renamed);
+        doThrow(new AwsException("ResourceInUse", "listeners attached", 400)).when(elb).deleteLoadBalancer(REGION, orphanArn);
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        r.getAttributes().put("LoadBalancerName", "web");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v2"), ctx(LB_ARN));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        // The orphan uses up its three attempts in a cleanup where it is the only entry.
+        for (int i = 0; i < 3; i++) {
+            provisioner.completeUpdate(r);
+        }
+        assertEquals(3, provisioner.completeUpdate(r).attempts());
+
+        // A later replacement lists the prior beside the exhausted orphan; its delete fails once.
+        LoadBalancer third = loadBalancer("web-v3");
+        third.setLoadBalancerArn(LB_ARN.replace("/web/", "/web-v3/"));
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v3"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(third);
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v3"), ctx(LB_ARN));
+        doThrow(new AwsException("ResourceInUse", "listeners attached", 400)).when(elb).deleteLoadBalancer(REGION, LB_ARN);
+        UpdateCleanupResult first = provisioner.completeUpdate(r);
+        assertFalse(first.complete());
+        assertEquals(1, first.attempts(), "the entry with attempts left is what the engine retries for");
+        assertEquals(LB_ARN, first.previousPhysicalId());
+
+        org.mockito.Mockito.doNothing().when(elb).deleteLoadBalancer(REGION, LB_ARN);
+        UpdateCleanupResult second = provisioner.completeUpdate(r);
+        assertEquals(3, second.attempts(), "only the exhausted orphan remains");
+        assertEquals(orphanArn, second.previousPhysicalId());
+        provisioner.clearUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        verify(elb, org.mockito.Mockito.times(4)).deleteLoadBalancer(REGION, orphanArn);
+    }
+
+    @Test
+    void clearingAfterAGiveUpKeepsAnEntryThatStillHasAttemptsLeft() {
+        String orphanArn = LB_ARN.replace("/web/", "/web-v2/");
+        LoadBalancer renamed = loadBalancer("web-v2");
+        renamed.setLoadBalancerArn(orphanArn);
+        when(elb.createLoadBalancer(eq(REGION), eq("web-v2"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenReturn(renamed);
+        doThrow(new AwsException("ResourceInUse", "listeners attached", 400)).when(elb).deleteLoadBalancer(REGION, orphanArn);
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        r.getAttributes().put("LoadBalancerName", "web");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "web-v2"), ctx(LB_ARN));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        provisioner.completeUpdate(r);
+
+        provisioner.clearUpdate(r);
+        assertTrue(provisioner.hasReplacementUpdate(r), "cleared with attempts left, the orphan is not forgotten");
+        assertEquals(orphanArn, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
     void aNonIntegerPortOrPriorityIsAValidationError() {
         StackResource listener = resource("AWS::ElasticLoadBalancingV2::Listener", "Listener");
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(listener,
