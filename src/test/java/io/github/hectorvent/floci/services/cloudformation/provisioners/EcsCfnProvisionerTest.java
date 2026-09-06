@@ -428,7 +428,49 @@ class EcsCfnProvisionerTest {
         assertEquals("busy", e.getMessage());
         assertEquals(TASK_DEF_ARN, r.getPhysicalId());
         assertEquals(TASK_DEF_ARN, r.getAttributes().get("TaskDefinitionArn"));
-        assertFalse(provisioner.hasReplacementUpdate(r), "the record is spent so the prior is never put on a cleanup list");
+
+        // The replacement the failed update created stays owed a delete; the restored prior does not.
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(next.getTaskDefinitionArn(), provisioner.updateCleanupPhysicalId(r));
+        org.mockito.Mockito.reset(ecs);
+        assertEquals(new UpdateCleanupResult(true, true, next.getTaskDefinitionArn(), 0, null), provisioner.completeUpdate(r));
+        verify(ecs).deregisterTaskDefinition(next.getTaskDefinitionArn(), REGION);
+        verify(ecs, never()).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void anOrphanFromAFailedRollbackSurvivesAnInPlaceUpdateAndIsDeletedWithTheNextReplacement() {
+        String orphan = TASK_DEF_ARN.replace(":3", ":4");
+        TaskDefinition next = new TaskDefinition();
+        next.setTaskDefinitionArn(orphan);
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(next);
+        doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(orphan, REGION);
+        StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
+        r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);
+        provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertEquals(TASK_DEF_ARN, r.getPhysicalId());
+
+        // A rollback with no replacement of its own deletes nothing and keeps the orphan owed.
+        assertFalse(provisioner.rollbackUpdate(r));
+        assertTrue(provisioner.hasReplacementUpdate(r));
+
+        // The next update registers revision 5: revision 3 (the prior) joins the orphan on the list
+        // and the committed cleanup deletes both, never the live revision.
+        TaskDefinition fifth = new TaskDefinition();
+        fifth.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":5"));
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                eq(REGION))).thenReturn(fifth);
+        provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
+        org.mockito.Mockito.reset(ecs);
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.complete(), cleanup.toString());
+        verify(ecs).deregisterTaskDefinition(orphan, REGION);
+        verify(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+        verify(ecs, never()).deregisterTaskDefinition(fifth.getTaskDefinitionArn(), REGION);
+        assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
     @Test
