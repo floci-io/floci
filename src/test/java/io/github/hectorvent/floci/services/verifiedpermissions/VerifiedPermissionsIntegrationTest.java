@@ -86,9 +86,17 @@ class VerifiedPermissionsIntegrationTest {
     }
 
     @Test
-    void protocolRejectsWrongValidationSettingsAndUnknownActions() {
+    void protocolRejectsWrongValidationSettingsInvalidSchemasAndUnknownActions() {
         givenAws("CreatePolicyStore", "{\"validationSettings\":{\"mode\":\"INVALID\"}}")
                 .then().statusCode(400).body("__type", containsString("ValidationException"));
+
+        String store = createStore("OFF", "DISABLED");
+        String malformedCedarSchema = "{\"Demo\":{\"entityTypes\":[]}}";
+        givenAws("PutSchema", objectJson(Map.of(
+                        "policyStoreId", store,
+                        "definition", Map.of("cedarJson", malformedCedarSchema))))
+                .then().statusCode(400).body("__type", containsString("ValidationException"));
+
         givenAws("DoesNotExist", "{}")
                 .then().statusCode(400).body("__type", containsString("UnknownOperationException"));
     }

@@ -123,6 +123,7 @@ nav:
     - IAM Access Analyzer: services/access-analyzer.md
     - IAM Identity Center (SSO Admin): services/ssoadmin.md
     - Amazon Macie: services/macie2.md
+    - Amazon Verified Permissions: services/verifiedpermissions.md
     - Control Tower: services/controltower.md
     - AWS Service Catalog: services/service-catalog.md
     - ElastiCache: services/elasticache.md

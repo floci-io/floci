@@ -193,7 +193,9 @@ public class VerifiedPermissionsService implements Resettable {
 
     public synchronized IdentitySource createIdentitySource(JsonNode request, String region) {
         IdempotencyRecord replay = findIdempotent("CreateIdentitySource", request, region);
-        if (replay != null) return getIdentitySource(replay.policyStoreId(), replay.resourceId(), region);
+        if (replay != null) {
+            return getIdentitySource(replay.policyStoreId(), replay.resourceId(), region);
+        }
         PolicyStore store = getPolicyStore(requiredText(request, "policyStoreId"), region);
         JsonNode configuration = normalizeIdentityConfiguration(requiredObject(request, "configuration"), region);
         String principalEntityType = text(request, "principalEntityType", "AWS::Cognito");
@@ -201,7 +203,9 @@ public class VerifiedPermissionsService implements Resettable {
         String issuer = identityIssuer(configuration);
         boolean duplicate = identitySources.scan(k -> k.startsWith(region + ":" + store.policyStoreId() + ":")).stream()
                 .anyMatch(existing -> issuer.equals(identityIssuer(existing.configuration())));
-        if (duplicate) throw conflict("An identity source for this issuer already exists in the policy store.");
+        if (duplicate) {
+            throw conflict("An identity source for this issuer already exists in the policy store.");
+        }
         Instant now = Instant.now();
         String id = "IS" + compactId();
         IdentitySource source = new IdentitySource(store.policyStoreId(), id, principalEntityType,
@@ -234,7 +238,9 @@ public class VerifiedPermissionsService implements Resettable {
         boolean duplicate = identitySources.scan(k -> k.startsWith(region + ":" + current.policyStoreId() + ":")).stream()
                 .anyMatch(existing -> !existing.identitySourceId().equals(current.identitySourceId())
                         && issuer.equals(identityIssuer(existing.configuration())));
-        if (duplicate) throw conflict("An identity source for this issuer already exists in the policy store.");
+        if (duplicate) {
+            throw conflict("An identity source for this issuer already exists in the policy store.");
+        }
         IdentitySource updated = current.updated(principalType, normalized.deepCopy(), Instant.now());
         identitySources.put(identitySourceKey(region, current.policyStoreId(), current.identitySourceId()), updated);
         return updated;
@@ -263,7 +269,9 @@ public class VerifiedPermissionsService implements Resettable {
 
     public synchronized PolicyTemplate createPolicyTemplate(JsonNode request, String region) {
         IdempotencyRecord replay = findIdempotent("CreatePolicyTemplate", request, region);
-        if (replay != null) return getPolicyTemplate(replay.policyStoreId(), replay.resourceId(), region);
+        if (replay != null) {
+            return getPolicyTemplate(replay.policyStoreId(), replay.resourceId(), region);
+        }
         PolicyStore store = getPolicyStore(requiredText(request, "policyStoreId"), region);
         String statement = requiredText(request, "statement");
         validatePolicyStatement(statement);
@@ -327,7 +335,9 @@ public class VerifiedPermissionsService implements Resettable {
 
     public synchronized Policy createPolicy(JsonNode request, String region) {
         IdempotencyRecord replay = findIdempotent("CreatePolicy", request, region);
-        if (replay != null) return getPolicy(replay.policyStoreId(), replay.resourceId(), region);
+        if (replay != null) {
+            return getPolicy(replay.policyStoreId(), replay.resourceId(), region);
+        }
         PolicyStore store = getPolicyStore(requiredText(request, "policyStoreId"), region);
         JsonNode definition = requiredObject(request, "definition");
         String name = optionalName(request, "name");
@@ -570,25 +580,33 @@ public class VerifiedPermissionsService implements Resettable {
         ObjectNode normalized = objectMapper.createObjectNode();
         if (configuration.has("cognitoUserPoolConfiguration")) {
             JsonNode source = configuration.get("cognitoUserPoolConfiguration");
-            if (!source.isObject()) throw validation("cognitoUserPoolConfiguration must be an object.");
+            if (!source.isObject()) {
+                throw validation("cognitoUserPoolConfiguration must be an object.");
+            }
             ObjectNode cognito = source.deepCopy();
             String arn = requiredText(cognito, "userPoolArn");
             String[] arnParts = arn.split(":", 6);
             if (arnParts.length != 6 || !"cognito-idp".equals(arnParts[2]) || !arnParts[5].startsWith("userpool/")) {
                 throw validation("userPoolArn must be a Cognito user pool ARN.");
             }
-            if (!region.equals(arnParts[3])) throw validation("The Cognito user pool must be in the same Region as the policy store.");
+            if (!region.equals(arnParts[3])) {
+                throw validation("The Cognito user pool must be in the same Region as the policy store.");
+            }
             String poolId = arnParts[5].substring("userpool/".length());
             cognito.put("issuer", "https://cognito-idp." + arnParts[3] + ".amazonaws.com/" + poolId);
             validateStringArray(cognito.get("clientIds"), "clientIds", 0, 1000);
             JsonNode group = cognito.get("groupConfiguration");
-            if (group != null && !group.isNull()) validateEntityType(requiredText(group, "groupEntityType"), "groupEntityType");
+            if (group != null && !group.isNull()) {
+                validateEntityType(requiredText(group, "groupEntityType"), "groupEntityType");
+            }
             normalized.set("cognitoUserPoolConfiguration", cognito);
             return normalized;
         }
         if (configuration.has("openIdConnectConfiguration")) {
             JsonNode source = configuration.get("openIdConnectConfiguration");
-            if (!source.isObject()) throw validation("openIdConnectConfiguration must be an object.");
+            if (!source.isObject()) {
+                throw validation("openIdConnectConfiguration must be an object.");
+            }
             ObjectNode oidc = source.deepCopy();
             String issuer = requiredText(oidc, "issuer");
             if (!issuer.startsWith("https://") || issuer.length() > 2048) {
@@ -628,12 +646,16 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private static void validateIdentityFilters(JsonNode filters) {
-        if (filters == null || filters.isNull()) return;
+        if (filters == null || filters.isNull()) {
+            return;
+        }
         if (!filters.isArray() || filters.size() > 10) {
             throw validation("filters must be an array with at most 10 items.");
         }
         for (JsonNode filter : filters) {
-            if (!filter.isObject()) throw validation("Each identity source filter must be an object.");
+            if (!filter.isObject()) {
+                throw validation("Each identity source filter must be an object.");
+            }
             if (filter.has("principalEntityType")) {
                 validateEntityType(requiredText(filter, "principalEntityType"), "principalEntityType");
             }
@@ -641,7 +663,9 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private static boolean matchesIdentityFilters(IdentitySource source, JsonNode filters) {
-        if (filters == null || filters.isNull()) return true;
+        if (filters == null || filters.isNull()) {
+            return true;
+        }
         for (JsonNode filter : filters) {
             if (filter.has("principalEntityType")
                     && !filter.path("principalEntityType").asText().equals(source.principalEntityType())) return false;
@@ -650,13 +674,21 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private static void validateEntityType(String value, String field) {
-        if (value == null || value.isBlank() || value.length() > 200) throw validation(field + " does not satisfy the required constraints.");
-        if (com.cedarpolicy.value.EntityTypeName.parse(value).isEmpty()) throw validation(field + " is not a valid Cedar entity type.");
+        if (value == null || value.isBlank() || value.length() > 200) {
+            throw validation(field + " does not satisfy the required constraints.");
+        }
+        if (com.cedarpolicy.value.EntityTypeName.parse(value).isEmpty()) {
+            throw validation(field + " is not a valid Cedar entity type.");
+        }
     }
 
     private static void validateStringArray(JsonNode node, String field, int min, int max) {
-        if (node == null || node.isNull()) return;
-        if (!node.isArray() || node.size() < min || node.size() > max) throw validation(field + " has an invalid number of items.");
+        if (node == null || node.isNull()) {
+            return;
+        }
+        if (!node.isArray() || node.size() < min || node.size() > max) {
+            throw validation(field + " has an invalid number of items.");
+        }
         node.forEach(value -> {
             if (!value.isTextual() || value.asText().isEmpty() || value.asText().length() > 255) {
                 throw validation(field + " must contain strings between 1 and 255 characters.");
@@ -670,11 +702,15 @@ public class VerifiedPermissionsService implements Resettable {
 
     private IdempotencyRecord findIdempotent(String operation, JsonNode request, String region) {
         String token = text(request, "clientToken", null);
-        if (token == null) return null;
+        if (token == null) {
+            return null;
+        }
         validateClientToken(token);
         String key = idempotencyKey(region, operation, token);
         IdempotencyRecord record = idempotency.get(key).orElse(null);
-        if (record == null) return null;
+        if (record == null) {
+            return null;
+        }
         if (record.createdAt().plus(Duration.ofHours(8)).isBefore(Instant.now())) {
             idempotency.delete(key);
             return null;
@@ -688,7 +724,9 @@ public class VerifiedPermissionsService implements Resettable {
 
     private void rememberIdempotent(String operation, JsonNode request, String region, String resourceId, String storeId) {
         String token = text(request, "clientToken", null);
-        if (token == null) return;
+        if (token == null) {
+            return;
+        }
         validateClientToken(token);
         idempotency.put(idempotencyKey(region, operation, token),
                 new IdempotencyRecord(operation, token, requestFingerprint(request), resourceId, storeId, Instant.now()));
@@ -711,7 +749,9 @@ public class VerifiedPermissionsService implements Resettable {
             StringBuilder b = new StringBuilder("{");
             boolean first = true;
             for (var e : sorted.entrySet()) {
-                if (!first) b.append(',');
+                if (!first) {
+                    b.append(',');
+                }
                 first = false;
                 b.append(objectMapper.writeValueAsString(e.getKey())).append(':').append(canonical(e.getValue()));
             }
@@ -720,7 +760,9 @@ public class VerifiedPermissionsService implements Resettable {
         if (node.isArray()) {
             StringBuilder b = new StringBuilder("[");
             for (int i = 0; i < node.size(); i++) {
-                if (i > 0) b.append(',');
+                if (i > 0) {
+                    b.append(',');
+                }
                 b.append(canonical(node.get(i)));
             }
             return b.append(']').toString();
@@ -735,11 +777,19 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private Encryption parseEncryption(JsonNode settings, String region) {
-        if (settings == null || settings.isNull()) return new Encryption(null, Map.of());
-        if (!settings.isObject() || settings.size() != 1) throw validation("encryptionSettings must contain exactly one union member.");
-        if (settings.has("default")) return new Encryption(null, Map.of());
+        if (settings == null || settings.isNull()) {
+            return new Encryption(null, Map.of());
+        }
+        if (!settings.isObject() || settings.size() != 1) {
+            throw validation("encryptionSettings must contain exactly one union member.");
+        }
+        if (settings.has("default")) {
+            return new Encryption(null, Map.of());
+        }
         JsonNode kms = settings.get("kmsEncryptionSettings");
-        if (kms == null || !kms.isObject()) throw validation("encryptionSettings must contain default or kmsEncryptionSettings.");
+        if (kms == null || !kms.isObject()) {
+            throw validation("encryptionSettings must contain default or kmsEncryptionSettings.");
+        }
         String key = requiredText(kms, "key");
         String keyArn = kmsService.describeKey(key, region).getArn();
         Map<String, String> context = stringMap(kms.get("encryptionContext"));
@@ -776,7 +826,9 @@ public class VerifiedPermissionsService implements Resettable {
 
     private String resolvePolicyId(String region, String storeId, String identifier) {
         String resolved = resolvePolicyIdOrNull(region, storeId, identifier);
-        if (resolved == null) throw notFound("Policy not found: " + identifier);
+        if (resolved == null) {
+            throw notFound("Policy not found: " + identifier);
+        }
         return resolved;
     }
 
@@ -793,8 +845,12 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private String resolveTemplateId(String region, String storeId, String identifier) {
-        if (identifier == null || identifier.isBlank()) throw validation("policyTemplateId is required.");
-        if (!identifier.startsWith("name/")) return identifier;
+        if (identifier == null || identifier.isBlank()) {
+            throw validation("policyTemplateId is required.");
+        }
+        if (!identifier.startsWith("name/")) {
+            return identifier;
+        }
         return policyTemplates.scan(k -> k.startsWith(region + ":" + storeId + ":")).stream()
                 .filter(t -> identifier.equals(t.name())).map(PolicyTemplate::policyTemplateId).findFirst()
                 .orElseThrow(() -> notFound("Policy template not found: " + identifier));
@@ -805,7 +861,9 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private static String normalizeOptionalName(String value) {
-        if (value == null || value.isEmpty()) return null;
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
         if (value.length() > 150 || !value.startsWith("name/") || !value.matches("[A-Za-z0-9-/_]*")) {
             throw validation("Policy names must be prefixed with name/ and satisfy the documented constraints.");
         }
@@ -813,22 +871,34 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private void ensurePolicyNameAvailable(String region, String storeId, String name, String exceptId) {
-        if (name == null) return;
+        if (name == null) {
+            return;
+        }
         boolean duplicate = policies.scan(k -> k.startsWith(region + ":" + storeId + ":")).stream()
                 .anyMatch(p -> name.equals(p.name()) && !p.policyId().equals(exceptId));
-        if (duplicate) throw conflict("A policy with this name already exists.");
+        if (duplicate) {
+            throw conflict("A policy with this name already exists.");
+        }
     }
 
     private void ensureTemplateNameAvailable(String region, String storeId, String name, String exceptId) {
-        if (name == null) return;
+        if (name == null) {
+            return;
+        }
         boolean duplicate = policyTemplates.scan(k -> k.startsWith(region + ":" + storeId + ":")).stream()
                 .anyMatch(t -> name.equals(t.name()) && !t.policyTemplateId().equals(exceptId));
-        if (duplicate) throw conflict("A policy template with this name already exists.");
+        if (duplicate) {
+            throw conflict("A policy template with this name already exists.");
+        }
     }
 
     private static EntityIdentifier entityIdentifier(JsonNode node) {
-        if (node == null || node.isNull()) return null;
-        if (!node.isObject()) throw validation("Entity identifiers must be objects.");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isObject()) {
+            throw validation("Entity identifiers must be objects.");
+        }
         return new EntityIdentifier(requiredText(node, "entityType"), requiredText(node, "entityId"));
     }
 
@@ -935,32 +1005,52 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private static EntityIdentifier scopedEntity(JsonNode scope, EntityIdentifier slotValue) {
-        if (scope.has("entity")) return cedarJsonEntity(scope.get("entity"));
-        if (scope.has("slot")) return slotValue;
+        if (scope.has("entity")) {
+            return cedarJsonEntity(scope.get("entity"));
+        }
+        if (scope.has("slot")) {
+            return slotValue;
+        }
         return null;
     }
 
     private static EntityIdentifier cedarJsonEntity(JsonNode entity) {
-        if (entity == null || !entity.isObject()) return null;
+        if (entity == null || !entity.isObject()) {
+            return null;
+        }
         String type = entity.path("type").asText(null);
         String id = entity.path("id").asText(null);
-        if (type == null || id == null) return null;
+        if (type == null || id == null) {
+            return null;
+        }
         return new EntityIdentifier(type, id);
     }
 
     public record PolicyMetadata(List<EntityIdentifier> actions, EntityIdentifier principal, EntityIdentifier resource) {}
 
     private static boolean matchesPolicyFilter(Policy policy, JsonNode filter) {
-        if (filter == null || filter.isNull()) return true;
-        if (filter.has("policyType") && !filter.path("policyType").asText().equals(policy.policyType())) return false;
-        if (filter.has("policyTemplateId") && !filter.path("policyTemplateId").asText().equals(policy.policyTemplateId())) return false;
-        if (filter.has("principal") && !matchesReference(policy.principal(), filter.get("principal"))) return false;
+        if (filter == null || filter.isNull()) {
+            return true;
+        }
+        if (filter.has("policyType") && !filter.path("policyType").asText().equals(policy.policyType())) {
+            return false;
+        }
+        if (filter.has("policyTemplateId") && !filter.path("policyTemplateId").asText().equals(policy.policyTemplateId())) {
+            return false;
+        }
+        if (filter.has("principal") && !matchesReference(policy.principal(), filter.get("principal"))) {
+            return false;
+        }
         return !filter.has("resource") || matchesReference(policy.resource(), filter.get("resource"));
     }
 
     private static boolean matchesReference(EntityIdentifier entity, JsonNode reference) {
-        if (reference == null || !reference.isObject()) return false;
-        if (reference.has("unspecified")) return reference.path("unspecified").asBoolean(false) && entity == null;
+        if (reference == null || !reference.isObject()) {
+            return false;
+        }
+        if (reference.has("unspecified")) {
+            return reference.path("unspecified").asBoolean(false) && entity == null;
+        }
         JsonNode id = reference.get("identifier");
         return entity != null && id != null && id.isObject()
                 && entity.entityType().equals(id.path("entityType").asText())
@@ -975,7 +1065,9 @@ public class VerifiedPermissionsService implements Resettable {
 
     private void validateStrictPolicy(PolicyStore store, com.cedarpolicy.model.policy.Policy policy, boolean template) {
         ensureStrictSchemaPresent(store);
-        if (!"STRICT".equals(store.validationMode())) return;
+        if (!"STRICT".equals(store.validationMode())) {
+            return;
+        }
         try {
             com.cedarpolicy.model.schema.Schema schema = com.cedarpolicy.model.schema.Schema.parse(
                     com.cedarpolicy.model.schema.Schema.JsonOrCedar.Json, store.schema());
@@ -1032,24 +1124,36 @@ public class VerifiedPermissionsService implements Resettable {
             if (node == null || !node.isObject()) {
                 throw validation("The Cedar schema must be a JSON object.");
             }
-        } catch (JsonProcessingException e) {
-            throw validation("The Cedar schema isn't valid JSON.");
+            com.cedarpolicy.model.schema.Schema.parse(
+                    com.cedarpolicy.model.schema.Schema.JsonOrCedar.Json, schema);
+        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw validation("The Cedar schema is invalid: " + safeMessage(e));
         }
     }
 
     private static Map<String, String> stringMap(JsonNode node) {
         Map<String, String> result = new LinkedHashMap<>();
-        if (node == null || node.isNull()) return result;
-        if (!node.isObject()) throw validation("tags must be an object.");
+        if (node == null || node.isNull()) {
+            return result;
+        }
+        if (!node.isObject()) {
+            throw validation("tags must be an object.");
+        }
         node.fields().forEachRemaining(e -> {
-            if (!e.getValue().isTextual()) throw validation("Tag values must be strings.");
+            if (!e.getValue().isTextual()) {
+                throw validation("Tag values must be strings.");
+            }
             result.put(e.getKey(), e.getValue().asText());
         });
         return result;
     }
 
     private static void validateTags(Map<String, String> tags) {
-        if (tags.size() > MAX_TAGS) throw validation("A resource can have at most 200 tags.");
+        if (tags.size() > MAX_TAGS) {
+            throw validation("A resource can have at most 200 tags.");
+        }
         for (var tag : tags.entrySet()) {
             if (tag.getKey() == null || tag.getKey().isEmpty() || tag.getKey().length() > 128 || tag.getValue().length() > 256) {
                 throw validation("A tag doesn't satisfy the required length constraints.");
@@ -1058,10 +1162,14 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private static void validateMode(String mode) {
-        if (!"OFF".equals(mode) && !"STRICT".equals(mode)) throw validation("mode must be OFF or STRICT.");
+        if (!"OFF".equals(mode) && !"STRICT".equals(mode)) {
+            throw validation("mode must be OFF or STRICT.");
+        }
     }
     private static void validateDeletionProtection(String value) {
-        if (!"ENABLED".equals(value) && !"DISABLED".equals(value)) throw validation("deletionProtection must be ENABLED or DISABLED.");
+        if (!"ENABLED".equals(value) && !"DISABLED".equals(value)) {
+            throw validation("deletionProtection must be ENABLED or DISABLED.");
+        }
     }
     private static void validatePolicyStatement(String value) {
         if (value == null || value.isEmpty() || value.length() > MAX_POLICY_STATEMENT_LENGTH) {
@@ -1069,19 +1177,27 @@ public class VerifiedPermissionsService implements Resettable {
         }
     }
     private static void validateDescription(String value) {
-        if (value != null && value.length() > 150) throw validation("description must be 150 characters or fewer.");
+        if (value != null && value.length() > 150) {
+            throw validation("description must be 150 characters or fewer.");
+        }
     }
     private static void validateAliasName(String value) {
-        if (value == null || value.length() > 150 || !ALIAS_NAME.matcher(value).matches()) throw validation("aliasName does not satisfy the required constraints.");
+        if (value == null || value.length() > 150 || !ALIAS_NAME.matcher(value).matches()) {
+            throw validation("aliasName does not satisfy the required constraints.");
+        }
     }
     static String requiredText(JsonNode node, String name) {
         JsonNode value = node == null ? null : node.get(name);
-        if (value == null || !value.isTextual() || value.asText().isEmpty()) throw validation(name + " is required.");
+        if (value == null || !value.isTextual() || value.asText().isEmpty()) {
+            throw validation(name + " is required.");
+        }
         return value.asText();
     }
     static JsonNode requiredObject(JsonNode node, String name) {
         JsonNode value = node == null ? null : node.get(name);
-        if (value == null || !value.isObject()) throw validation(name + " is required.");
+        if (value == null || !value.isObject()) {
+            throw validation(name + " is required.");
+        }
         return value;
     }
     static String text(JsonNode node, String name, String defaultValue) {

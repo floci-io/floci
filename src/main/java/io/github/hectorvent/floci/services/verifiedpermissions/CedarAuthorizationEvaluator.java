@@ -58,7 +58,9 @@ public class CedarAuthorizationEvaluator {
                 cedarEntities = objectMapper.createArrayNode();
             } else if (entitiesDefinition.has("cedarJson")) {
                 JsonNode parsed = objectMapper.readTree(entitiesDefinition.path("cedarJson").asText());
-                if (!parsed.isArray()) throw VerifiedPermissionsService.validation("entities.cedarJson must encode an array.");
+                if (!parsed.isArray()) {
+                    throw VerifiedPermissionsService.validation("entities.cedarJson must encode an array.");
+                }
                 cedarEntities = (ArrayNode) parsed.deepCopy();
             } else if (entitiesDefinition.has("entityList") && entitiesDefinition.get("entityList").isArray()) {
                 cedarEntities = toCedarEntities((ArrayNode) entitiesDefinition.get("entityList"));
@@ -70,7 +72,9 @@ public class CedarAuthorizationEvaluator {
             ObjectNode attrs = entity.putObject("attrs");
             if (identityClaims != null && identityClaims.isObject()) {
                 identityClaims.fields().forEachRemaining(e -> {
-                    if (!isGroupClaim(e.getKey()) && claimCanBeCedar(e.getValue())) attrs.set(e.getKey(), e.getValue().deepCopy());
+                    if (!isGroupClaim(e.getKey()) && claimCanBeCedar(e.getValue())) {
+                        attrs.set(e.getKey(), e.getValue().deepCopy());
+                    }
                 });
             }
             ArrayNode parentArray = entity.putArray("parents");
@@ -89,15 +93,27 @@ public class CedarAuthorizationEvaluator {
     }
 
     private static boolean claimCanBeCedar(JsonNode value) {
-        if (value == null || value.isNull()) return false;
-        if (value.isTextual() || value.isBoolean() || value.isIntegralNumber()) return true;
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (value.isTextual() || value.isBoolean() || value.isIntegralNumber()) {
+            return true;
+        }
         if (value.isArray()) {
-            for (JsonNode item : value) if (!claimCanBeCedar(item) || item.isContainerNode()) return false;
+            for (JsonNode item : value) {
+                if (!claimCanBeCedar(item) || item.isContainerNode()) {
+                    return false;
+                }
+            }
             return true;
         }
         if (value.isObject()) {
             var it = value.elements();
-            while (it.hasNext()) if (!claimCanBeCedar(it.next())) return false;
+            while (it.hasNext()) {
+                if (!claimCanBeCedar(it.next())) {
+                    return false;
+                }
+            }
             return true;
         }
         return false;
@@ -139,25 +155,35 @@ public class CedarAuthorizationEvaluator {
                 continue;
             }
             List<LinkValue> values = new ArrayList<>();
-            if (policy.principal() != null) values.add(new LinkValue("?principal", euid(policy.principal())));
-            if (policy.resource() != null) values.add(new LinkValue("?resource", euid(policy.resource())));
+            if (policy.principal() != null) {
+                values.add(new LinkValue("?principal", euid(policy.principal())));
+            }
+            if (policy.resource() != null) {
+                values.add(new LinkValue("?resource", euid(policy.resource())));
+            }
             links.add(new TemplateLink(policy.policyTemplateId(), policy.policyId(), values));
         }
         return new PolicySet(staticPolicies, cedarTemplates, links);
     }
 
     private Entities entities(JsonNode definition) throws JsonProcessingException {
-        if (definition == null || definition.isNull()) return new Entities();
+        if (definition == null || definition.isNull()) {
+            return new Entities();
+        }
         if (!definition.isObject() || definition.size() != 1) {
             throw VerifiedPermissionsService.validation("entities must contain exactly one union member.");
         }
         if (definition.has("cedarJson")) {
-            if (!definition.get("cedarJson").isTextual()) throw VerifiedPermissionsService.validation("entities.cedarJson must be a string.");
+            if (!definition.get("cedarJson").isTextual()) {
+                throw VerifiedPermissionsService.validation("entities.cedarJson must be a string.");
+            }
             return Entities.parse(definition.get("cedarJson").asText());
         }
         if (definition.has("entityList")) {
             JsonNode entityList = definition.get("entityList");
-            if (!entityList.isArray()) throw VerifiedPermissionsService.validation("entities.entityList must be an array.");
+            if (!entityList.isArray()) {
+                throw VerifiedPermissionsService.validation("entities.entityList must be an array.");
+            }
             return Entities.parse(toCedarEntities((ArrayNode) entityList).toString());
         }
         throw VerifiedPermissionsService.validation("entities must contain cedarJson or entityList.");
@@ -167,26 +193,34 @@ public class CedarAuthorizationEvaluator {
         ArrayNode output = objectMapper.createArrayNode();
         Map<String, ObjectNode> lastByUid = new LinkedHashMap<>();
         for (JsonNode entity : input) {
-            if (!entity.isObject()) throw VerifiedPermissionsService.validation("Each entityList item must be an object.");
+            if (!entity.isObject()) {
+                throw VerifiedPermissionsService.validation("Each entityList item must be an object.");
+            }
             EntityIdentifier id = identifier(entity.get("identifier"), "identifier");
             ObjectNode cedar = objectMapper.createObjectNode();
             cedar.set("uid", cedarEntity(id));
             ObjectNode attrs = cedar.putObject("attrs");
             JsonNode attributes = entity.get("attributes");
             if (attributes != null && !attributes.isNull()) {
-                if (!attributes.isObject()) throw VerifiedPermissionsService.validation("entity attributes must be an object.");
+                if (!attributes.isObject()) {
+                    throw VerifiedPermissionsService.validation("entity attributes must be an object.");
+                }
                 attributes.fields().forEachRemaining(e -> attrs.set(e.getKey(), cedarAttribute(e.getValue())));
             }
             ArrayNode parents = cedar.putArray("parents");
             JsonNode parentInput = entity.get("parents");
             if (parentInput != null && !parentInput.isNull()) {
-                if (!parentInput.isArray()) throw VerifiedPermissionsService.validation("entity parents must be an array.");
+                if (!parentInput.isArray()) {
+                    throw VerifiedPermissionsService.validation("entity parents must be an array.");
+                }
                 parentInput.forEach(p -> parents.add(cedarEntity(identifier(p, "parent"))));
             }
             ObjectNode tags = cedar.putObject("tags");
             JsonNode tagInput = entity.get("tags");
             if (tagInput != null && !tagInput.isNull()) {
-                if (!tagInput.isObject()) throw VerifiedPermissionsService.validation("entity tags must be an object.");
+                if (!tagInput.isObject()) {
+                    throw VerifiedPermissionsService.validation("entity tags must be an object.");
+                }
                 tagInput.fields().forEachRemaining(e -> tags.set(e.getKey(), cedarAttribute(e.getValue())));
             }
             lastByUid.put(id.entityType() + "\u0000" + id.entityId(), cedar);
@@ -210,13 +244,17 @@ public class CedarAuthorizationEvaluator {
             case "datetime" -> extension("datetime", member.getValue().asText());
             case "duration" -> extension("duration", member.getValue().asText());
             case "set" -> {
-                if (!member.getValue().isArray()) throw VerifiedPermissionsService.validation("set must be an array.");
+                if (!member.getValue().isArray()) {
+                    throw VerifiedPermissionsService.validation("set must be an array.");
+                }
                 ArrayNode set = objectMapper.createArrayNode();
                 member.getValue().forEach(v -> set.add(cedarAttribute(v)));
                 yield set;
             }
             case "record" -> {
-                if (!member.getValue().isObject()) throw VerifiedPermissionsService.validation("record must be an object.");
+                if (!member.getValue().isObject()) {
+                    throw VerifiedPermissionsService.validation("record must be an object.");
+                }
                 ObjectNode record = objectMapper.createObjectNode();
                 member.getValue().fields().forEachRemaining(e -> record.set(e.getKey(), cedarAttribute(e.getValue())));
                 yield record;
@@ -226,20 +264,28 @@ public class CedarAuthorizationEvaluator {
     }
 
     private Context context(JsonNode definition) throws JsonProcessingException {
-        if (definition == null || definition.isNull()) return new Context();
+        if (definition == null || definition.isNull()) {
+            return new Context();
+        }
         if (!definition.isObject() || definition.size() != 1) {
             throw VerifiedPermissionsService.validation("context must contain exactly one union member.");
         }
         JsonNode raw;
         if (definition.has("cedarJson")) {
-            if (!definition.get("cedarJson").isTextual()) throw VerifiedPermissionsService.validation("context.cedarJson must be a string.");
+            if (!definition.get("cedarJson").isTextual()) {
+                throw VerifiedPermissionsService.validation("context.cedarJson must be a string.");
+            }
             raw = objectMapper.readTree(definition.get("cedarJson").asText());
-            if (!raw.isObject()) throw VerifiedPermissionsService.validation("context.cedarJson must encode an object.");
+            if (!raw.isObject()) {
+                throw VerifiedPermissionsService.validation("context.cedarJson must encode an object.");
+            }
             return new Context(valueMapFromCedarJson(raw));
         }
         if (definition.has("contextMap")) {
             raw = definition.get("contextMap");
-            if (!raw.isObject()) throw VerifiedPermissionsService.validation("context.contextMap must be an object.");
+            if (!raw.isObject()) {
+                throw VerifiedPermissionsService.validation("context.contextMap must be an object.");
+            }
             Map<String, Value> values = new LinkedHashMap<>();
             raw.fields().forEachRemaining(e -> values.put(e.getKey(), valueFromUnion(e.getValue())));
             return new Context(values);
@@ -254,16 +300,24 @@ public class CedarAuthorizationEvaluator {
     }
 
     private Value valueFromCedarJson(JsonNode value) {
-        if (value.isBoolean()) return new PrimBool(value.asBoolean());
-        if (value.isIntegralNumber()) return new PrimLong(value.asLong());
-        if (value.isTextual()) return new PrimString(value.asText());
+        if (value.isBoolean()) {
+            return new PrimBool(value.asBoolean());
+        }
+        if (value.isIntegralNumber()) {
+            return new PrimLong(value.asLong());
+        }
+        if (value.isTextual()) {
+            return new PrimString(value.asText());
+        }
         if (value.isArray()) {
             List<Value> values = new ArrayList<>();
             value.forEach(v -> values.add(valueFromCedarJson(v)));
             return new CedarList(values);
         }
         if (value.isObject()) {
-            if (value.has("__entity")) return euid(value.get("__entity"), "__entity");
+            if (value.has("__entity")) {
+                return euid(value.get("__entity"), "__entity");
+            }
             if (value.has("__extn")) {
                 JsonNode ext = value.get("__extn");
                 return extensionValue(ext.path("fn").asText(), ext.path("arg").asText());
@@ -289,12 +343,16 @@ public class CedarAuthorizationEvaluator {
             case "duration" -> new Duration(member.getValue().asText());
             case "set" -> {
                 List<Value> list = new ArrayList<>();
-                if (!member.getValue().isArray()) throw VerifiedPermissionsService.validation("set must be an array.");
+                if (!member.getValue().isArray()) {
+                    throw VerifiedPermissionsService.validation("set must be an array.");
+                }
                 member.getValue().forEach(v -> list.add(valueFromUnion(v)));
                 yield new CedarList(list);
             }
             case "record" -> {
-                if (!member.getValue().isObject()) throw VerifiedPermissionsService.validation("record must be an object.");
+                if (!member.getValue().isObject()) {
+                    throw VerifiedPermissionsService.validation("record must be an object.");
+                }
                 Map<String, Value> map = new LinkedHashMap<>();
                 member.getValue().fields().forEachRemaining(e -> map.put(e.getKey(), valueFromUnion(e.getValue())));
                 yield new CedarMap(map);
@@ -335,7 +393,9 @@ public class CedarAuthorizationEvaluator {
     }
 
     private static EntityUID actionEuid(JsonNode node) {
-        if (node == null || !node.isObject()) throw VerifiedPermissionsService.validation("action is required.");
+        if (node == null || !node.isObject()) {
+            throw VerifiedPermissionsService.validation("action is required.");
+        }
         EntityIdentifier id = new EntityIdentifier(
                 VerifiedPermissionsService.requiredText(node, "actionType"),
                 VerifiedPermissionsService.requiredText(node, "actionId"));
@@ -354,7 +414,9 @@ public class CedarAuthorizationEvaluator {
     }
 
     private static EntityIdentifier identifier(JsonNode node, String field) {
-        if (node == null || !node.isObject()) throw VerifiedPermissionsService.validation(field + " is required.");
+        if (node == null || !node.isObject()) {
+            throw VerifiedPermissionsService.validation(field + " is required.");
+        }
         String type = VerifiedPermissionsService.requiredText(node, node.has("entityType") ? "entityType" : "type");
         String id = VerifiedPermissionsService.requiredText(node, node.has("entityId") ? "entityId" : "id");
         return new EntityIdentifier(type, id);

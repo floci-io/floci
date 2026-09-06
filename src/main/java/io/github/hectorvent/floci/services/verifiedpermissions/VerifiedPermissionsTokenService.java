@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.verifiedpermissions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.verifiedpermissions.model.EntityIdentifier;
 import io.github.hectorvent.floci.services.verifiedpermissions.model.IdentitySource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -19,13 +18,13 @@ import java.util.List;
 public class VerifiedPermissionsTokenService {
     private final VerifiedPermissionsService service;
     private final CedarAuthorizationEvaluator evaluator;
-    private final JwtSignatureVerifier signatureVerifier;
+    private final VerifiedPermissionsOidcSignatureVerifier signatureVerifier;
     private final ObjectMapper objectMapper;
 
     @Inject
     public VerifiedPermissionsTokenService(VerifiedPermissionsService service,
                                            CedarAuthorizationEvaluator evaluator,
-                                           JwtSignatureVerifier signatureVerifier,
+                                           VerifiedPermissionsOidcSignatureVerifier signatureVerifier,
                                            ObjectMapper objectMapper) {
         this.service = service;
         this.evaluator = evaluator;
@@ -57,20 +56,24 @@ public class VerifiedPermissionsTokenService {
         JsonNode identityClaims = identity == null ? null : identity.claims();
         List<EntityIdentifier> parents = mergeParents(identity, access);
         prepared.set("entities", evaluator.appendTokenPrincipal(prepared.get("entities"), principalToken.principal(), identityClaims, parents));
-        if (access != null) prepared.set("context", mergeAccessContext(prepared.get("context"), access.claims()));
+        if (access != null) {
+            prepared.set("context", mergeAccessContext(prepared.get("context"), access.claims()));
+        }
         return new PreparedTokenRequest(prepared, principalToken.principal());
     }
 
     private TokenInfo validateToken(String store, String token, TokenKind requestedKind, String region) {
         JsonNode claims = decodeClaims(token);
         String issuer = claims.path("iss").asText(null);
-        if (issuer == null || issuer.isBlank()) throw VerifiedPermissionsService.validation("Token has no issuer claim.");
+        if (issuer == null || issuer.isBlank()) {
+            throw VerifiedPermissionsService.validation("Token has no issuer claim.");
+        }
         IdentitySource source = service.identitySourcesForStore(store, region).stream()
                 .filter(candidate -> issuer.equals(VerifiedPermissionsService.identityIssuer(candidate.configuration())))
                 .findFirst().orElseThrow(() -> VerifiedPermissionsService.validation("No identity source matches the token issuer."));
         try {
             signatureVerifier.verify(token, issuer);
-        } catch (JwtSignatureVerifier.JwtVerificationException e) {
+        } catch (VerifiedPermissionsOidcSignatureVerifier.VerificationException e) {
             throw VerifiedPermissionsService.validation("Token signature validation failed: " + e.getMessage());
         }
         validateTimes(claims);
@@ -126,9 +129,13 @@ public class VerifiedPermissionsTokenService {
                 ? source.configuration().path("cognitoUserPoolConfiguration").path("groupConfiguration")
                 : source.configuration().path("openIdConnectConfiguration").path("groupConfiguration");
         String groupType = groupConfiguration.path("groupEntityType").asText(null);
-        if (groupType == null) return List.of();
+        if (groupType == null) {
+            return List.of();
+        }
         JsonNode groups = claims.get(claimName);
-        if (groups == null || groups.isNull()) return List.of();
+        if (groups == null || groups.isNull()) {
+            return List.of();
+        }
         List<EntityIdentifier> result = new ArrayList<>();
         if (groups.isArray()) {
             groups.forEach(group -> result.add(new EntityIdentifier(groupType, qualify(prefix, group.asText()))));
@@ -144,8 +151,12 @@ public class VerifiedPermissionsTokenService {
 
     private List<EntityIdentifier> mergeParents(TokenInfo identity, TokenInfo access) {
         java.util.LinkedHashSet<EntityIdentifier> parents = new java.util.LinkedHashSet<>();
-        if (identity != null) parents.addAll(identity.parents());
-        if (access != null) parents.addAll(access.parents());
+        if (identity != null) {
+            parents.addAll(identity.parents());
+        }
+        if (access != null) {
+            parents.addAll(access.parents());
+        }
         return new ArrayList<>(parents);
     }
 
@@ -156,7 +167,9 @@ public class VerifiedPermissionsTokenService {
                 root = objectMapper.createObjectNode();
             } else if (existing.has("cedarJson")) {
                 JsonNode parsed = objectMapper.readTree(existing.path("cedarJson").asText());
-                if (!parsed.isObject()) throw VerifiedPermissionsService.validation("context.cedarJson must encode an object.");
+                if (!parsed.isObject()) {
+                    throw VerifiedPermissionsService.validation("context.cedarJson must encode an object.");
+                }
                 root = (ObjectNode) parsed.deepCopy();
             } else if (existing.has("contextMap")) {
                 root = contextMapToRaw(existing.get("contextMap"));
@@ -184,7 +197,9 @@ public class VerifiedPermissionsTokenService {
     }
 
     private JsonNode rawAttribute(JsonNode union) {
-        if (!union.isObject() || union.size() != 1) throw VerifiedPermissionsService.validation("Context attributes must contain one union member.");
+        if (!union.isObject() || union.size() != 1) {
+            throw VerifiedPermissionsService.validation("Context attributes must contain one union member.");
+        }
         var entry = union.fields().next();
         return switch (entry.getKey()) {
             case "boolean", "long", "string" -> entry.getValue().deepCopy();
@@ -200,11 +215,15 @@ public class VerifiedPermissionsTokenService {
 
     private JsonNode decodeClaims(String token) {
         String[] parts = token == null ? new String[0] : token.split("\\.", -1);
-        if (parts.length != 3) throw VerifiedPermissionsService.validation("Token isn't a well-formed JWT.");
+        if (parts.length != 3) {
+            throw VerifiedPermissionsService.validation("Token isn't a well-formed JWT.");
+        }
         try {
             byte[] decoded = Base64.getUrlDecoder().decode(pad(parts[1]));
             JsonNode claims = objectMapper.readTree(new String(decoded, StandardCharsets.UTF_8));
-            if (claims == null || !claims.isObject()) throw VerifiedPermissionsService.validation("Token claims aren't a JSON object.");
+            if (claims == null || !claims.isObject()) {
+                throw VerifiedPermissionsService.validation("Token claims aren't a JSON object.");
+            }
             return claims;
         } catch (IllegalArgumentException | java.io.IOException e) {
             throw VerifiedPermissionsService.validation("Token payload isn't valid base64url JSON.");
@@ -230,24 +249,44 @@ public class VerifiedPermissionsTokenService {
     }
 
     private static boolean arrayContains(JsonNode array, String value) {
-        for (JsonNode item : array) if (value.equals(item.asText())) return true;
+        for (JsonNode item : array) {
+            if (value.equals(item.asText())) {
+                return true;
+            }
+        }
         return false;
     }
 
     private static boolean audienceMatches(JsonNode actual, JsonNode accepted) {
-        if (actual == null) return false;
-        if (actual.isTextual()) return arrayContains(accepted, actual.asText());
+        if (actual == null) {
+            return false;
+        }
+        if (actual.isTextual()) {
+            return arrayContains(accepted, actual.asText());
+        }
         if (actual.isArray()) {
-            for (JsonNode item : actual) if (arrayContains(accepted, item.asText())) return true;
+            for (JsonNode item : actual) {
+                if (arrayContains(accepted, item.asText())) {
+                    return true;
+                }
+            }
         }
         return false;
     }
 
     private static boolean claimSupported(JsonNode value) {
-        if (value == null || value.isNull()) return false;
-        if (value.isTextual() || value.isBoolean() || value.isIntegralNumber()) return true;
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (value.isTextual() || value.isBoolean() || value.isIntegralNumber()) {
+            return true;
+        }
         if (value.isArray()) {
-            for (JsonNode item : value) if (!(item.isTextual() || item.isBoolean() || item.isIntegralNumber())) return false;
+            for (JsonNode item : value) {
+                if (!(item.isTextual() || item.isBoolean() || item.isIntegralNumber())) {
+                    return false;
+                }
+            }
             return true;
         }
         return false;

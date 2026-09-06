@@ -130,7 +130,9 @@ public class VerifiedPermissionsJsonHandler {
         out.putObject("validationSettings").put("mode", store.validationMode());
         out.put("cedarVersion", "CEDAR_4");
         out.put("deletionProtection", store.deletionProtection());
-        if (store.description() != null) out.put("description", store.description());
+        if (store.description() != null) {
+            out.put("description", store.description());
+        }
         ObjectNode encryptionState = out.putObject("encryptionState");
         if (store.encryptionKeyArn() == null) {
             encryptionState.putObject("default");
@@ -156,9 +158,13 @@ public class VerifiedPermissionsJsonHandler {
             time(item, "createdDate", store.createdDate());
             time(item, "lastUpdatedDate", store.lastUpdatedDate());
             item.put("policyStoreId", store.policyStoreId());
-            if (store.description() != null) item.put("description", store.description());
+            if (store.description() != null) {
+                item.put("description", store.description());
+            }
         }
-        if (result.nextToken() != null) out.put("nextToken", result.nextToken());
+        if (result.nextToken() != null) {
+            out.put("nextToken", result.nextToken());
+        }
         return out;
     }
 
@@ -179,10 +185,14 @@ public class VerifiedPermissionsJsonHandler {
     }
 
     private List<String> schemaNamespaces(String schema) {
-        if (schema == null) return List.of();
+        if (schema == null) {
+            return List.of();
+        }
         try {
             JsonNode parsed = objectMapper.readTree(schema);
-            if (!parsed.isObject()) return List.of();
+            if (!parsed.isObject()) {
+                return List.of();
+            }
             java.util.ArrayList<String> names = new java.util.ArrayList<>();
             parsed.fieldNames().forEachRemaining(names::add);
             names.sort(String::compareTo);
@@ -211,7 +221,9 @@ public class VerifiedPermissionsJsonHandler {
             JsonNode cognito = source.configuration().get("cognitoUserPoolConfiguration");
             ObjectNode details = out.putObject("details");
             ArrayNode clients = details.putArray("clientIds");
-            if (cognito.path("clientIds").isArray()) cognito.path("clientIds").forEach(clients::add);
+            if (cognito.path("clientIds").isArray()) {
+                cognito.path("clientIds").forEach(clients::add);
+            }
             details.put("discoveryUrl", cognito.path("issuer").asText() + "/.well-known/openid-configuration");
             details.put("openIdIssuer", "COGNITO");
             details.put("userPoolArn", cognito.path("userPoolArn").asText());
@@ -223,7 +235,9 @@ public class VerifiedPermissionsJsonHandler {
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("identitySources");
         for (IdentitySource source : result.items()) list.add(identitySourceDetail(source));
-        if (result.nextToken() != null) out.put("nextToken", result.nextToken());
+        if (result.nextToken() != null) {
+            out.put("nextToken", result.nextToken());
+        }
         return out;
     }
 
@@ -247,14 +261,28 @@ public class VerifiedPermissionsJsonHandler {
         for (JsonNode item : requests) {
             ObjectNode single = objectMapper.createObjectNode();
             single.put("policyStoreId", storeIdentifier);
-            if (request.has("identityToken")) single.set("identityToken", request.get("identityToken"));
-            if (request.has("accessToken")) single.set("accessToken", request.get("accessToken"));
-            if (request.has("entities")) single.set("entities", request.get("entities"));
-            if (item.has("action")) single.set("action", item.get("action"));
-            if (item.has("resource")) single.set("resource", item.get("resource"));
-            if (item.has("context")) single.set("context", item.get("context"));
+            if (request.has("identityToken")) {
+                single.set("identityToken", request.get("identityToken"));
+            }
+            if (request.has("accessToken")) {
+                single.set("accessToken", request.get("accessToken"));
+            }
+            if (request.has("entities")) {
+                single.set("entities", request.get("entities"));
+            }
+            if (item.has("action")) {
+                single.set("action", item.get("action"));
+            }
+            if (item.has("resource")) {
+                single.set("resource", item.get("resource"));
+            }
+            if (item.has("context")) {
+                single.set("context", item.get("context"));
+            }
             VerifiedPermissionsTokenService.PreparedTokenRequest prepared = tokenService.prepare(single, region);
-            if (principal == null) principal = prepared.principal();
+            if (principal == null) {
+                principal = prepared.principal();
+            }
             CedarAuthorizationEvaluator.EvaluationResult evaluation = authorizationEvaluator.evaluate(prepared.request(),
                     service.policiesForStore(storeIdentifier, region), service.templatesForStore(storeIdentifier, region));
             ObjectNode result = authorizationResult(evaluation);
@@ -285,7 +313,9 @@ public class VerifiedPermissionsJsonHandler {
         ArrayNode results = out.putArray("results");
         for (JsonNode batchRequest : requests) {
             ObjectNode evaluationRequest = batchRequest.deepCopy();
-            if (request.has("entities")) evaluationRequest.set("entities", request.get("entities"));
+            if (request.has("entities")) {
+                evaluationRequest.set("entities", request.get("entities"));
+            }
             CedarAuthorizationEvaluator.EvaluationResult result = authorizationEvaluator.evaluate(evaluationRequest,
                     service.policiesForStore(storeIdentifier, region), service.templatesForStore(storeIdentifier, region));
             ObjectNode item = authorizationResult(result);
@@ -303,8 +333,16 @@ public class VerifiedPermissionsJsonHandler {
         for (JsonNode item : requests) {
             String nextPrincipal = item.has("principal") ? item.get("principal").toString() : "<absent>";
             String nextResource = item.has("resource") ? item.get("resource").toString() : "<absent>";
-            if (principal == null) principal = nextPrincipal; else principalsSame &= principal.equals(nextPrincipal);
-            if (resource == null) resource = nextResource; else resourcesSame &= resource.equals(nextResource);
+            if (principal == null) {
+                principal = nextPrincipal;
+            } else {
+                principalsSame &= principal.equals(nextPrincipal);
+            }
+            if (resource == null) {
+                resource = nextResource;
+            } else {
+                resourcesSame &= resource.equals(nextResource);
+            }
         }
         if (!principalsSame && !resourcesSame) {
             throw VerifiedPermissionsService.validation("BatchIsAuthorized requires either the same principal or the same resource in every request.");
@@ -328,8 +366,12 @@ public class VerifiedPermissionsJsonHandler {
         out.put("policyStoreId", template.policyStoreId());
         out.put("policyTemplateId", template.policyTemplateId());
         out.put("statement", template.statement());
-        if (template.description() != null) out.put("description", template.description());
-        if (template.name() != null) out.put("name", template.name());
+        if (template.description() != null) {
+            out.put("description", template.description());
+        }
+        if (template.name() != null) {
+            out.put("name", template.name());
+        }
         return out;
     }
 
@@ -351,10 +393,16 @@ public class VerifiedPermissionsJsonHandler {
             time(item, "lastUpdatedDate", template.lastUpdatedDate());
             item.put("policyStoreId", template.policyStoreId());
             item.put("policyTemplateId", template.policyTemplateId());
-            if (template.description() != null) item.put("description", template.description());
-            if (template.name() != null) item.put("name", template.name());
+            if (template.description() != null) {
+                item.put("description", template.description());
+            }
+            if (template.name() != null) {
+                item.put("name", template.name());
+            }
         }
-        if (result.nextToken() != null) out.put("nextToken", result.nextToken());
+        if (result.nextToken() != null) {
+            out.put("nextToken", result.nextToken());
+        }
         return out;
     }
 
@@ -380,7 +428,9 @@ public class VerifiedPermissionsJsonHandler {
 
     private ObjectNode policyDetail(Policy policy, String region) {
         ObjectNode out = policyCreateOrUpdate(policy, region);
-        if (policy.name() != null) out.put("name", policy.name());
+        if (policy.name() != null) {
+            out.put("name", policy.name());
+        }
         out.set("definition", policyDefinition(policy));
         return out;
     }
@@ -390,7 +440,9 @@ public class VerifiedPermissionsJsonHandler {
         if ("STATIC".equals(policy.policyType())) {
             ObjectNode body = definition.putObject("static");
             body.put("statement", policy.statement());
-            if (policy.description() != null) body.put("description", policy.description());
+            if (policy.description() != null) {
+                body.put("description", policy.description());
+            }
         } else {
             ObjectNode body = definition.putObject("templateLinked");
             body.put("policyTemplateId", policy.policyTemplateId());
@@ -407,7 +459,9 @@ public class VerifiedPermissionsJsonHandler {
             ObjectNode item = policyDetail(policy, region);
             list.add(item);
         }
-        if (result.nextToken() != null) out.put("nextToken", result.nextToken());
+        if (result.nextToken() != null) {
+            out.put("nextToken", result.nextToken());
+        }
         return out;
     }
 
@@ -429,9 +483,13 @@ public class VerifiedPermissionsJsonHandler {
                 error.put("policyStoreId", store);
                 error.put("policyId", policy);
                 boolean alias = store.startsWith("policy-store-alias/");
-                if (alias) error.put("code", "POLICY_STORE_ALIAS_NOT_FOUND");
-                else if ("ResourceNotFoundException".equals(e.getErrorCode()) && !storeExists(store, region)) error.put("code", "POLICY_STORE_NOT_FOUND");
-                else error.put("code", "POLICY_NOT_FOUND");
+                if (alias) {
+                    error.put("code", "POLICY_STORE_ALIAS_NOT_FOUND");
+                } else if ("ResourceNotFoundException".equals(e.getErrorCode()) && !storeExists(store, region)) {
+                    error.put("code", "POLICY_STORE_NOT_FOUND");
+                } else {
+                    error.put("code", "POLICY_NOT_FOUND");
+                }
                 error.put("message", e.getMessage());
             }
         }
@@ -444,7 +502,9 @@ public class VerifiedPermissionsJsonHandler {
     }
 
     private static void addEntity(ObjectNode out, String field, io.github.hectorvent.floci.services.verifiedpermissions.model.EntityIdentifier entity) {
-        if (entity == null) return;
+        if (entity == null) {
+            return;
+        }
         ObjectNode node = out.putObject(field);
         node.put("entityType", entity.entityType());
         node.put("entityId", entity.entityId());
@@ -469,7 +529,9 @@ public class VerifiedPermissionsJsonHandler {
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("policyStoreAliases");
         result.items().forEach(a -> list.add(aliasDetail(a)));
-        if (result.nextToken() != null) out.put("nextToken", result.nextToken());
+        if (result.nextToken() != null) {
+            out.put("nextToken", result.nextToken());
+        }
         return out;
     }
 
@@ -481,27 +543,37 @@ public class VerifiedPermissionsJsonHandler {
     }
 
     private Map<String, String> stringMap(JsonNode node) {
-        if (!node.isObject()) throw VerifiedPermissionsService.validation("tags is required.");
+        if (!node.isObject()) {
+            throw VerifiedPermissionsService.validation("tags is required.");
+        }
         Map<String, String> out = new java.util.LinkedHashMap<>();
         node.fields().forEachRemaining(e -> {
-            if (!e.getValue().isTextual()) throw VerifiedPermissionsService.validation("Tag values must be strings.");
+            if (!e.getValue().isTextual()) {
+                throw VerifiedPermissionsService.validation("Tag values must be strings.");
+            }
             out.put(e.getKey(), e.getValue().asText());
         });
         return out;
     }
 
     private List<String> stringList(JsonNode node) {
-        if (!node.isArray()) throw VerifiedPermissionsService.validation("tagKeys is required.");
+        if (!node.isArray()) {
+            throw VerifiedPermissionsService.validation("tagKeys is required.");
+        }
         java.util.ArrayList<String> out = new java.util.ArrayList<>();
         node.forEach(v -> {
-            if (!v.isTextual()) throw VerifiedPermissionsService.validation("tagKeys must contain strings.");
+            if (!v.isTextual()) {
+                throw VerifiedPermissionsService.validation("tagKeys must contain strings.");
+            }
             out.add(v.asText());
         });
         return out;
     }
 
     private static void time(ObjectNode node, String field, Instant value) {
-        if (value != null) node.put(field, value.toString());
+        if (value != null) {
+            node.put(field, value.toString());
+        }
     }
 
     private Response ok(JsonNode body) { return Response.ok(body).build(); }
