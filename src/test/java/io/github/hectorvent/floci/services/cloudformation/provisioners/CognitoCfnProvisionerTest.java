@@ -387,6 +387,50 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
+    void userPoolTagsAreResolvedAsAStringMap() {
+        when(cognito.createUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "my-pool"));
+        ObjectNode props = mapper.createObjectNode().put("UserPoolName", "my-pool");
+        props.putObject("UserPoolTags").put("env", "test").put("cost-center", 42);
+
+        provisioner.provision(resource(USER_POOL, "Pool"), props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).createUserPool(request.capture(), eq(REGION));
+        assertEquals(Map.of("env", "test", "cost-center", "42"), request.getValue().get("UserPoolTags"));
+    }
+
+    @Test
+    void userPoolTagsGivenAsAKeyValueListAreStillAccepted() {
+        when(cognito.createUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "my-pool"));
+        ObjectNode props = mapper.createObjectNode().put("UserPoolName", "my-pool");
+        props.putArray("UserPoolTags").addObject().put("Key", "team").put("Value", "auth");
+
+        provisioner.provision(resource(USER_POOL, "Pool"), props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).createUserPool(request.capture(), eq(REGION));
+        assertEquals(Map.of("team", "auth"), request.getValue().get("UserPoolTags"));
+    }
+
+    @Test
+    void userPoolUpdateCarriesTheTags() {
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "my-pool"));
+        ObjectNode props = mapper.createObjectNode().put("UserPoolName", "my-pool");
+        props.putObject("UserPoolTags").put("env", "prod");
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+
+        provisioner.provision(r, props, ctx(POOL_ID));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(cognito).updateUserPool(request.capture(), eq(REGION));
+        assertEquals(Map.of("env", "prod"), request.getValue().get("UserPoolTags"));
+    }
+
+    @Test
     void userPoolWithoutANameGetsAGeneratedOne() {
         when(cognito.createUserPool(any(), eq(REGION))).thenAnswer(inv ->
                 pool(POOL_ID, (String) inv.<Map<String, Object>>getArgument(0).get("PoolName")));

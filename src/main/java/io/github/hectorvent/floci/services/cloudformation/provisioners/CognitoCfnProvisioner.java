@@ -160,8 +160,8 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         }
         req.put("PoolName", poolName);
 
-        Map<String, String> tags = ctx.resolveTags(props, "UserPoolTags");
-        if (!tags.isEmpty()) {
+        Map<String, String> tags = resolveUserPoolTags(props, ctx);
+        if (tags != null) {
             req.put("UserPoolTags", tags);
         }
 
@@ -301,6 +301,23 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
             LOG.debugv("User pool domain {0} is gone", domain);
             return null;
         }
+    }
+
+    /**
+     * UserPoolTags is a map in the schema (the type's tagProperty), not the Key/Value list most types
+     * carry, so it is resolved as one; through the raw property map a numeric tag value would reach
+     * the service as a number. The list shape, which hand-written templates sometimes use and which
+     * the switch accepted, is still taken.
+     */
+    private static Map<String, String> resolveUserPoolTags(JsonNode props, ProvisionContext ctx) {
+        if (props == null || !props.has("UserPoolTags") || props.get("UserPoolTags").isNull()) {
+            return null;
+        }
+        JsonNode resolved = ctx.engine().resolveNode(props.get("UserPoolTags"));
+        if (resolved != null && resolved.isArray()) {
+            return ctx.resolveTags(props, "UserPoolTags");
+        }
+        return resolveStringMapOrNull(props, "UserPoolTags", ctx);
     }
 
     private static Map<String, Object> resolveCustomDomainConfig(JsonNode props, ProvisionContext ctx) {
