@@ -273,7 +273,7 @@ public class CloudFormationTemplateEngine {
      * ({@code Fn::GetAZs}, {@code Fn::Cidr}, {@code Fn::Split}), an {@code Fn::If} choosing between
      * two such lists, or a comma-delimited scalar (e.g. a {@code Ref} to a {@code List<>} parameter).
      */
-    public List<String> resolveList(JsonNode node) {
+    private List<String> resolveList(JsonNode node) {
         List<String> out = new ArrayList<>();
         if (node == null || node.isNull() || node.isMissingNode()) {
             return out;

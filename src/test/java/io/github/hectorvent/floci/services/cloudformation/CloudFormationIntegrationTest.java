@@ -4794,8 +4794,8 @@ class CloudFormationIntegrationTest {
     void createStack_lambdaEventSourceMappingWithConditionalFunctionResponseTypes() throws Exception {
         // github.com/floci-io/floci/issues/2848 follow-up (Greptile review on the fix): a
         // whole-property intrinsic such as Fn::If must still resolve FunctionResponseTypes, not
-        // just a plain array. Was silently dropped by resolveStringList's raw isArray() check on
-        // the unresolved node; resolveStringListOrEmpty resolves the node first.
+        // just a plain array. resolveStringList (via the engine's resolveList) now resolves
+        // Fn::If, Fn::Split and a CommaDelimitedList Ref, and drops any resulting blank entries.
         String stackName = "cfn-esm-conditional-stack";
         String funcName = "cfn-esm-conditional-func";
         String queueName = "cfn-esm-conditional-queue";

@@ -166,23 +166,24 @@ class CloudFormationTemplateEngineTest {
     // github.com/floci-io/floci/issues/2848 (Greptile review on the follow-up fix): "List
     // intrinsics remain scalar" - resolveNode's Fn::If fix alone does not make Fn::Split or a Ref
     // to a CommaDelimitedList parameter list-shaped, since resolveNode never split anything to
-    // begin with. resolveList is the engine's dedicated list resolver and already handled
-    // Fn::Split and comma-delimited scalars correctly; it only needed Fn::If added.
+    // begin with. resolveStringList already handled Fn::Split and comma-delimited scalars
+    // correctly (and drops blank entries, unlike the private resolveList it delegates to); it
+    // only needed Fn::If added, which is what these exercise.
 
     @Test
-    void resolveListSplitsFnSplitWithItsActualDelimiter() {
+    void resolveStringListSplitsFnSplitWithItsActualDelimiter() {
         assertEquals(List.of("a", "b", "c"),
-                engine().resolveList(json("{\"Fn::Split\": [\"|\", \"a|b|c\"]}")));
+                engine().resolveStringList(json("{\"Fn::Split\": [\"|\", \"a|b|c\"]}")));
     }
 
     @Test
-    void resolveListSplitsACommaDelimitedListParameterRef() {
+    void resolveStringListSplitsACommaDelimitedListParameterRef() {
         assertEquals(List.of("a", "b", "c"),
-                engineWithParameter("Csv", "a,b,c").resolveList(json("{\"Ref\": \"Csv\"}")));
+                engineWithParameter("Csv", "a,b,c").resolveStringList(json("{\"Ref\": \"Csv\"}")));
     }
 
     @Test
-    void resolveListResolvesFnIfChoosingBetweenTwoFnSplitLists() {
+    void resolveStringListResolvesFnIfChoosingBetweenTwoFnSplitLists() {
         // The delimiter is deliberately not a comma: falling through to the pre-existing
         // scalar-then-comma-split fallback (rather than actually recursing into the Fn::Split
         // branch) would return the whole unsplit "a|b|c" source as a single element instead of
@@ -195,20 +196,34 @@ class CloudFormationTemplateEngineTest {
                 """);
 
         assertEquals(List.of("a", "b", "c"),
-                engineWithCondition("UseReportBatch", true).resolveList(node));
+                engineWithCondition("UseReportBatch", true).resolveStringList(node));
         assertEquals(List.of("x", "y"),
-                engineWithCondition("UseReportBatch", false).resolveList(node));
+                engineWithCondition("UseReportBatch", false).resolveStringList(node));
     }
 
     @Test
-    void resolveListResolvesFnIfChoosingBetweenACommaDelimitedRefAndALiteralArray() {
+    void resolveStringListResolvesFnIfChoosingBetweenACommaDelimitedRefAndALiteralArray() {
         JsonNode node = json("{\"Fn::If\": [\"UseParam\", {\"Ref\": \"Csv\"}, [\"fallback\"]]}");
 
         CloudFormationTemplateEngine trueEngine = new CloudFormationTemplateEngine(
                 "000000000000", "us-east-1", "my-stack", "stack/id",
                 Map.of("Csv", "x,y"), Map.of(), Map.of(), Map.of("UseParam", true), Map.of(), mapper,
                 (Function<String, String>) n -> null);
-        assertEquals(List.of("x", "y"), trueEngine.resolveList(node));
+        assertEquals(List.of("x", "y"), trueEngine.resolveStringList(node));
+    }
+
+    @Test
+    void resolveStringListDropsAConditionalElementThatResolvesToNoValue() {
+        // github.com/floci-io/floci/pull/2996 (Greptile review): a list element that resolves to
+        // AWS::NoValue must be omitted, not forwarded as an invalid empty-string list entry. This
+        // is exactly why FunctionResponseTypes must go through resolveStringList (which drops
+        // blanks) rather than the private resolveList it delegates to (which keeps them).
+        JsonNode node = json("""
+                ["ReportBatchItemFailures", {"Fn::If": ["UseExtra", "ExtraType", {"Ref": "AWS::NoValue"}]}]
+                """);
+
+        assertEquals(List.of("ReportBatchItemFailures"),
+                engineWithCondition("UseExtra", false).resolveStringList(node));
     }
 
     @Test
