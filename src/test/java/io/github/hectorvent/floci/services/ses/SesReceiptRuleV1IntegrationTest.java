@@ -283,6 +283,20 @@ class SesReceiptRuleV1IntegrationTest {
 
     @Test
     @Order(9)
+    void nonAsciiDigitIndex_isIgnoredLikeAnUnmodeledParameter() {
+        req("CreateReceiptRule").formParam("RuleSetName", RS)
+                .formParam("Rule.Name", "fwidx")
+                .formParam("Rule.Actions.member.１.StopAction.Scope", "RuleSet")
+        .when().post("/").then().statusCode(200);
+
+        req("DescribeReceiptRule").formParam("RuleSetName", RS)
+                .formParam("RuleName", "fwidx")
+        .when().post("/").then().statusCode(200)
+                .body(containsString("<Actions></Actions>"));
+    }
+
+    @Test
+    @Order(9)
     void actionIndexZero_isRejectedAsMalformedInput() {
         req("CreateReceiptRule").formParam("RuleSetName", RS)
                 .formParam("Rule.Name", "zeroidx")

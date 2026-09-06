@@ -1108,7 +1108,9 @@ public class SesQueryHandler {
                 continue;
             }
             String token = key.substring(prefix.length(), dot);
-            if (token.isEmpty() || !token.chars().allMatch(Character::isDigit)) {
+            // ASCII digits only: Character.isDigit also accepts non-ASCII Unicode digits, which
+            // no AWS Query index grammar does; such a key is skipped like any unmodeled param.
+            if (token.isEmpty() || !token.chars().allMatch(c -> c >= '0' && c <= '9')) {
                 continue;
             }
             // A digit run that overflows int implies an index far beyond any contiguous list,
