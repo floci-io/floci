@@ -63,6 +63,22 @@ class Route53Test {
             String spokeVpcId = vpcEc2.createVpc(CreateVpcRequest.builder()
                     .cidrBlock("10.92.0.0/16")
                     .build()).vpc().vpcId();
+
+            assertThat(zoneEc2.describeVpcs().vpcs())
+                    .anySatisfy(vpc -> {
+                        assertThat(vpc.isDefault()).isTrue();
+                        assertThat(vpc.ownerId()).isEqualTo(zoneAccount);
+                    });
+            assertThat(vpcEc2.describeVpcs().vpcs())
+                    .anySatisfy(vpc -> {
+                        assertThat(vpc.isDefault()).isTrue();
+                        assertThat(vpc.ownerId()).isEqualTo(vpcAccount);
+                    });
+            try (Ec2Client defaultEc2 = TestFixtures.ec2Client()) {
+                assertThat(defaultEc2.describeVpcs().vpcs())
+                        .anySatisfy(vpc -> assertThat(vpc.isDefault()).isTrue());
+            }
+
             String zoneId = null;
 
             try {
