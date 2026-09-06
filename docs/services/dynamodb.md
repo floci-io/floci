@@ -35,6 +35,9 @@
 | `ExportTableToPointInTime` | Export table data to S3 as gzip NDJSON |
 | `DescribeExport` | Get export status and metadata |
 | `ListExports` | List exports, optionally filtered by table ARN |
+| `ImportTable` | Create a table and load DynamoDB JSON from S3 into it |
+| `DescribeImport` | Get import status and metadata |
+| `ListImports` | List imports, optionally filtered by table ARN |
 
 ## Streams {#streams}
 
@@ -165,6 +168,39 @@ aws dynamodb list-exports \
 ```
 
 The export writes to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/data/` as one or more `.json.gz` files, along with `manifest-summary.json` and `manifest-files.json`, the same layout as real AWS DynamoDB exports.
+
+## Import from S3
+
+Create a new table and load it from newline-delimited DynamoDB JSON objects in S3. Each line is `{"Item": {...}}`, the format an export writes:
+
+```bash
+# Upload the data
+printf '{"Item":{"userId":{"S":"u1"}}}\n{"Item":{"userId":{"S":"u2"}}}\n' > data.json
+aws s3 cp data.json s3://my-exports/imports/data.json --endpoint-url $AWS_ENDPOINT_URL
+
+# Start an import
+IMPORT_ARN=$(aws dynamodb import-table \
+  --s3-bucket-source S3Bucket=my-exports,S3KeyPrefix=imports/ \
+  --input-format DYNAMODB_JSON \
+  --input-compression-type NONE \
+  --table-creation-parameters '{"TableName":"UsersCopy","AttributeDefinitions":[{"AttributeName":"userId","AttributeType":"S"}],"KeySchema":[{"AttributeName":"userId","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST"}' \
+  --query ImportTableDescription.ImportArn --output text \
+  --endpoint-url $AWS_ENDPOINT_URL)
+
+# Poll until COMPLETED
+aws dynamodb describe-import \
+  --import-arn $IMPORT_ARN \
+  --query ImportTableDescription.ImportStatus \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# List imports
+aws dynamodb list-imports --endpoint-url $AWS_ENDPOINT_URL
+```
+
+The import reads every object under the key prefix. Point it at the `data/` prefix of an export with `--input-compression-type GZIP` to load an export back. Set `S3BucketOwner` when the bucket belongs to another account. The table stays in `CREATING` until the import finishes, then becomes `ACTIVE`. `DeleteTable` and `UpdateTable` return `ResourceInUseException` while the table is `CREATING`. A line that is not valid DynamoDB JSON or does not match the key schema is skipped and counted in `ErrorCount`. An object that cannot be read, for example a plain file under a `GZIP` import, is skipped and counted as one error. A missing bucket or an empty prefix ends the import as `FAILED` with a `FailureCode`. A reused `ClientToken` with different parameters returns `ImportConflictException`.
+
+Deviations from AWS: only `InputFormat` `DYNAMODB_JSON` with `InputCompressionType` `NONE` or `GZIP` is accepted. `CSV`, `ION` and `ZSTD` are rejected with a `ValidationException`.
+
 
 ## Kinesis change data capture (CDC)
 
