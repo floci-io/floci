@@ -4,9 +4,13 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -21,6 +25,8 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     private static final String MANAGEMENT = "555555555555";
     private static final String REGION = "us-east-1";
     private static final String ORG_TARGET = "AWSOrganizationsV20161128.";
+
+    private final Set<String> organizationOwners = new LinkedHashSet<>();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -377,7 +383,7 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
 
     @Test
     void activateOrganizationsAccessRequiresAllFeatures() {
-        String management = "666666666666";
+        String management = "939393939393";
         organizations(management, "CreateOrganization", "{\"FeatureSet\":\"CONSOLIDATED_BILLING\"}")
                 .post("/").then().statusCode(200);
 
@@ -408,11 +414,53 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     private RequestSpecification organizations(String account, String action, String body) {
+        if ("CreateOrganization".equals(action)) {
+            organizationOwners.add(account);
+        }
         return given()
                 .header("Authorization", auth(account, "organizations"))
                 .header("X-Amz-Target", ORG_TARGET + action)
                 .contentType("application/x-amz-json-1.1")
                 .body(body);
+    }
+
+    /**
+     * Organizations state is shared by every test in the JVM and keyed by the management account,
+     * so an organization left behind here makes the next class that creates one under the same
+     * account fail with AlreadyInOrganizationException. Dismantle each one this test created:
+     * member accounts out, organizational units bottom-up, then the organization.
+     */
+    @AfterEach
+    void deleteTheOrganizationsThisTestCreated() {
+        for (String owner : organizationOwners) {
+            if (organizations(owner, "DescribeOrganization", "{}").post("/").statusCode() != 200) {
+                continue;
+            }
+            JsonPath accounts = organizations(owner, "ListAccounts", "{}").post("/").jsonPath();
+            for (String accountId : accounts.getList("Accounts.Id", String.class)) {
+                if (!owner.equals(accountId)) {
+                    organizations(owner, "RemoveAccountFromOrganization", "{\"AccountId\":\"" + accountId + "\"}")
+                            .post("/").then().statusCode(200);
+                }
+            }
+            JsonPath roots = organizations(owner, "ListRoots", "{}").post("/").jsonPath();
+            for (String rootId : roots.getList("Roots.Id", String.class)) {
+                deleteOrganizationalUnitsUnder(owner, rootId);
+            }
+            organizations(owner, "DeleteOrganization", "{}").post("/").then().statusCode(200);
+        }
+        organizationOwners.clear();
+    }
+
+    private void deleteOrganizationalUnitsUnder(String owner, String parentId) {
+        JsonPath units = organizations(owner, "ListOrganizationalUnitsForParent", "{\"ParentId\":\"" + parentId + "\"}")
+                .post("/").jsonPath();
+        List<String> ouIds = units.getList("OrganizationalUnits.Id", String.class);
+        for (String ouId : ouIds) {
+            deleteOrganizationalUnitsUnder(owner, ouId);
+            organizations(owner, "DeleteOrganizationalUnit", "{\"OrganizationalUnitId\":\"" + ouId + "\"}")
+                    .post("/").then().statusCode(200);
+        }
     }
 
     private RequestSpecification cloudFormation(String action) {
