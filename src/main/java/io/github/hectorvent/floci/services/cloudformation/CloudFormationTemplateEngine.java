@@ -120,8 +120,17 @@ public class CloudFormationTemplateEngine {
             return node;
         }
         if (node.isObject()) {
+            if (node.has("Fn::If")) {
+                // Unlike the other intrinsics below, Fn::If's two branches can be any JSON shape
+                // (array, object, or scalar) - it just forwards one of them verbatim. Collapsing it
+                // through resolve() like the scalar-only intrinsics would stringify a chosen array or
+                // object instead of preserving it, so a conditional list (e.g. a Tags property) reads
+                // as unresolvable everywhere a caller checks isArray() on the result.
+                JsonNode branch = selectIfBranch(node.get("Fn::If"));
+                return branch == null ? TextNode.valueOf("") : resolveNode(branch);
+            }
             if (node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join") ||
-                    node.has("Fn::Select") || node.has("Fn::If") || node.has("Fn::Base64") ||
+                    node.has("Fn::Select") || node.has("Fn::Base64") ||
                     node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::Split") ||
                     node.has("Fn::GetAZs") || node.has("Fn::Cidr") || node.has("Fn::FindInMap")) {
                 return TextNode.valueOf(resolve(node));
@@ -261,8 +270,8 @@ public class CloudFormationTemplateEngine {
 
     /**
      * Resolves a node that represents a list — a literal array, a list-producing intrinsic
-     * ({@code Fn::GetAZs}, {@code Fn::Cidr}, {@code Fn::Split}), or a comma-delimited scalar
-     * (e.g. a {@code Ref} to a {@code List<>} parameter).
+     * ({@code Fn::GetAZs}, {@code Fn::Cidr}, {@code Fn::Split}), an {@code Fn::If} choosing between
+     * two such lists, or a comma-delimited scalar (e.g. a {@code Ref} to a {@code List<>} parameter).
      */
     private List<String> resolveList(JsonNode node) {
         List<String> out = new ArrayList<>();
@@ -273,6 +282,14 @@ public class CloudFormationTemplateEngine {
             return resolveListElements(node);
         }
         if (node.isObject()) {
+            if (node.has("Fn::If")) {
+                // Fn::If's branch can itself be any of the shapes this method already handles
+                // (literal array, Fn::Split, ...), so recurse into it rather than falling through
+                // to the scalar branch below, which would stringify a list-shaped branch instead
+                // of splitting it.
+                JsonNode branch = selectIfBranch(node.get("Fn::If"));
+                return branch == null ? out : resolveList(branch);
+            }
             if (node.has("Fn::GetAZs")) {
                 return resolveAvailabilityZones(node.get("Fn::GetAZs"));
             }
@@ -281,14 +298,6 @@ public class CloudFormationTemplateEngine {
             }
             if (node.has("Fn::Split")) {
                 return resolveSplit(node.get("Fn::Split"));
-            }
-            if (node.has("Fn::If")) {
-                JsonNode ifNode = node.get("Fn::If");
-                if (ifNode.isArray() && ifNode.size() >= 3) {
-                    String conditionName = ifNode.get(0).asText();
-                    boolean condValue = conditions.getOrDefault(conditionName, false);
-                    return resolveList(condValue ? ifNode.get(1) : ifNode.get(2));
-                }
             }
         }
         String scalar = resolve(node);
@@ -448,12 +457,19 @@ public class CloudFormationTemplateEngine {
     }
 
     private String resolveIf(JsonNode ifNode) {
+        JsonNode branch = selectIfBranch(ifNode);
+        return branch == null ? "" : resolve(branch);
+    }
+
+    /** Picks Fn::If's true/false branch without resolving it further, so the caller decides
+     *  whether to collapse it to a scalar ({@link #resolve}) or preserve its shape ({@link #resolveNode}). */
+    private JsonNode selectIfBranch(JsonNode ifNode) {
         if (!ifNode.isArray() || ifNode.size() < 3) {
-            return "";
+            return null;
         }
         String conditionName = ifNode.get(0).asText();
         boolean condValue = conditions.getOrDefault(conditionName, false);
-        return resolve(condValue ? ifNode.get(1) : ifNode.get(2));
+        return condValue ? ifNode.get(1) : ifNode.get(2);
     }
 
     private String resolveGetAtt(JsonNode getAtt) {

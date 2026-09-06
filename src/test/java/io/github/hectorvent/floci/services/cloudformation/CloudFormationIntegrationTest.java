@@ -4770,6 +4770,90 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_lambdaEventSourceMappingWithConditionalFunctionResponseTypes() throws Exception {
+        // github.com/floci-io/floci/issues/2848 follow-up (Greptile review on the fix): a
+        // whole-property intrinsic such as Fn::If must still resolve FunctionResponseTypes, not
+        // just a plain array. resolveStringList (via the engine's resolveList) now resolves
+        // Fn::If, Fn::Split and a CommaDelimitedList Ref, and drops any resulting blank entries.
+        String stackName = "cfn-esm-conditional-stack";
+        String funcName = "cfn-esm-conditional-func";
+        String queueName = "cfn-esm-conditional-queue";
+
+        String template = """
+            {
+              "Parameters": {
+                "ReportBatchFailures": { "Type": "String", "Default": "true" }
+              },
+              "Conditions": {
+                "ShouldReportBatchFailures": { "Fn::Equals": [{ "Ref": "ReportBatchFailures" }, "true"] }
+              },
+              "Resources": {
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": { "QueueName": "%s" }
+                },
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Code": {
+                      "ZipFile": "exports.handler = async (e) => ({ statusCode: 200 });"
+                    }
+                  }
+                },
+                "MyESM": {
+                  "Type": "AWS::Lambda::EventSourceMapping",
+                  "Properties": {
+                    "FunctionName": { "Ref": "MyFunction" },
+                    "EventSourceArn": { "Fn::GetAtt": ["MyQueue", "Arn"] },
+                    "BatchSize": 5,
+                    "FunctionResponseTypes": {
+                      "Fn::If": ["ShouldReportBatchFailures", ["ReportBatchItemFailures"], []]
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(queueName, funcName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String esmJson = given()
+        .when()
+            .get("/2015-03-31/event-source-mappings?FunctionName=" + funcName)
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        JsonNode esmList = OBJECT_MAPPER.readTree(esmJson);
+        JsonNode responseTypes = esmList.path("EventSourceMappings").get(0).path("FunctionResponseTypes");
+        assertTrue(responseTypes.isArray() && responseTypes.size() == 1
+                        && "ReportBatchItemFailures".equals(responseTypes.get(0).asText()),
+                "expected the Fn::If-selected branch to carry through but was: " + responseTypes);
+    }
+
+    @Test
     void createStack_lambdaEventSourceMappingKafka() throws Exception {
         String stackName = "cfn-esm-kafka-stack";
         String funcName = "cfn-esm-kafka-func";
