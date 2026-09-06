@@ -239,6 +239,7 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
 
     @Test
     void anUnchangedUsagePlanKeyUpdateIsANoOp() {
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(plan("plan-1", "gold", null, Map.of()));
         when(apiGateway.getUsagePlanKey(REGION, "plan-1", "key-1"))
                 .thenReturn(new UsagePlanKey("key-1", "my-key", "API_KEY", "value"));
         StackResource r = resource(PLAN_KEY, "PlanKey", "key-1:plan-1");
@@ -252,6 +253,7 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
 
     @Test
     void aChangedKeyOrPlanIsRefusedAsReplacementWorthy() {
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(plan("plan-1", "gold", null, Map.of()));
         when(apiGateway.getUsagePlanKey(REGION, "plan-1", "key-1"))
                 .thenReturn(new UsagePlanKey("key-1", "my-key", "API_KEY", "value"));
 
@@ -265,6 +267,7 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
 
     @Test
     void aUsagePlanKeyGoneFromThePlanIsAssociatedAgain() {
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(plan("plan-1", "gold", null, Map.of()));
         when(apiGateway.getUsagePlanKey(REGION, "plan-1", "key-1"))
                 .thenThrow(new AwsException("NotFoundException", "Usage Plan Key not found", 404));
         when(apiGateway.createUsagePlanKey(eq(REGION), eq("plan-1"), anyMap()))
@@ -275,6 +278,49 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
 
         verify(apiGateway).createUsagePlanKey(eq(REGION), eq("plan-1"), anyMap());
         assertEquals("key-1:plan-1", r.getPhysicalId());
+    }
+
+    @Test
+    void anAssociationWhosePlanIsGoneIsRecreatedOnTheNewPlan() {
+        when(apiGateway.getUsagePlan(REGION, "plan-old")).thenThrow(NOT_FOUND);
+        when(apiGateway.createUsagePlanKey(eq(REGION), eq("plan-new"), anyMap()))
+                .thenReturn(new UsagePlanKey("key-1", "my-key", "API_KEY", "value"));
+        StackResource r = resource(PLAN_KEY, "PlanKey", "key-1:plan-old");
+
+        provisioner.provision(r, keyProps("plan-new", "key-1", "API_KEY"), ctx("key-1:plan-old"));
+
+        // The stale association under the deleted plan is not consulted, so the new plan id is not a rename.
+        verify(apiGateway, never()).getUsagePlanKey(any(), any(), any());
+        verify(apiGateway).createUsagePlanKey(eq(REGION), eq("plan-new"), anyMap());
+        assertEquals("key-1:plan-new", r.getPhysicalId());
+    }
+
+    @Test
+    void aKeyTypeOtherThanApiKeyIsRejected() {
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource(PLAN_KEY, "PlanKey", null), keyProps("plan-1", "key-1", "BEARER"), ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(apiGateway, never()).createUsagePlanKey(any(), any(), anyMap());
+    }
+
+    @Test
+    void aMissingKeyIdIsRejected() {
+        ObjectNode props = mapper.createObjectNode().put("UsagePlanId", "plan-1").put("KeyType", "API_KEY");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(PLAN_KEY, "PlanKey", null), props, ctx()));
+        verify(apiGateway, never()).createUsagePlanKey(any(), any(), anyMap());
+    }
+
+    @Test
+    void apiStagesThatIsNotAListIsRejected() {
+        ObjectNode props = mapper.createObjectNode().put("UsagePlanName", "gold").put("ApiStages", "api1:dev");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(PLAN, "Plan", null), props, ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(apiGateway, never()).createUsagePlan(any(), anyMap());
     }
 
     @Test

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
@@ -39,6 +40,8 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
     private static final String USAGE_PLAN_KEY = "AWS::ApiGateway::UsagePlanKey";
     private static final String NOT_FOUND = "NotFoundException";
     private static final String KEY_ID_SEPARATOR = ":";
+    /** The registry schema's only allowed KeyType. */
+    private static final String API_KEY_TYPE = "API_KEY";
     /** Well under AWS's 1024-character name limit, and in line with the other generated names. */
     private static final int GENERATED_NAME_MAX = 128;
 
@@ -127,8 +130,10 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
                 ? existing
                 : apiGatewayService.updateUsagePlan(ctx.region(), existing.getId(), patches);
 
+        // The stored tags never include the reserved id-override keys (createUsagePlan strips them),
+        // so the comparison ignores them too; the service strips them again on the way in.
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
-        if (!desiredTags.equals(plan.getTags())) {
+        if (!ReservedTags.stripApiGatewayReservedTags(desiredTags).equals(plan.getTags())) {
             plan = apiGatewayService.replaceUsagePlanTags(ctx.region(), plan.getId(), desiredTags);
         }
         recordPlan(r, plan);
@@ -141,8 +146,11 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
             return stages;
         }
         JsonNode resolved = ctx.engine().resolveNode(props.get("ApiStages"));
-        if (resolved == null || !resolved.isArray()) {
+        if (resolved == null || resolved.isNull()) {
             return stages;
+        }
+        if (!resolved.isArray()) {
+            throw new AwsException("ValidationError", "ApiStages of a usage plan must be a list.", 400);
         }
         for (JsonNode entry : resolved) {
             String apiId = blankToNull(ctx.engine().resolve(entry.path("ApiId")));
@@ -179,13 +187,26 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
     // ──────────────────────────── UsagePlanKey ────────────────────────────
 
     private void provisionUsagePlanKey(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String usagePlanId = ctx.resolveOptional(props, "UsagePlanId");
-        String keyId = ctx.resolveOptional(props, "KeyId");
-        String keyType = ctx.resolveOptional(props, "KeyType");
+        String usagePlanId = blankToNull(ctx.resolveOptional(props, "UsagePlanId"));
+        String keyId = blankToNull(ctx.resolveOptional(props, "KeyId"));
+        String keyType = blankToNull(ctx.resolveOptional(props, "KeyType"));
+        if (usagePlanId == null || keyId == null) {
+            throw new AwsException("ValidationError",
+                    "AWS::ApiGateway::UsagePlanKey requires both UsagePlanId and KeyId.", 400);
+        }
+        if (!API_KEY_TYPE.equals(keyType)) {
+            throw new AwsException("ValidationError",
+                    "KeyType of a usage plan key must be " + API_KEY_TYPE + ".", 400);
+        }
 
         if (ctx.isUpdate()) {
             String[] prior = splitKeyId(ctx.priorPhysicalId());
-            UsagePlanKey existing = prior == null ? null : findUsagePlanKey(ctx.region(), prior[1], prior[0]);
+            // The association only still exists while its plan does. deleteUsagePlan leaves
+            // associations behind, and a plan recreated after an out-of-band delete has a new id, so
+            // an association whose plan is gone is stale and the key is attached to the new plan.
+            UsagePlanKey existing = prior == null || findUsagePlan(ctx.region(), prior[1]) == null
+                    ? null
+                    : findUsagePlanKey(ctx.region(), prior[1], prior[0]);
             if (existing != null) {
                 rejectIfChanged("KeyId", prior[0], keyId);
                 rejectIfChanged("UsagePlanId", prior[1], usagePlanId);

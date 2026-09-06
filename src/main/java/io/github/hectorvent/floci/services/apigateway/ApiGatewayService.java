@@ -1128,9 +1128,11 @@ public class ApiGatewayService {
      * TagResource shape cannot express.
      */
     public UsagePlan replaceUsagePlanTags(String region, String usagePlanId, Map<String, String> tags) {
-        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         UsagePlan plan = getUsagePlan(region, usagePlanId);
-        plan.setTags(new HashMap<>(tags));
+        // createUsagePlan consumes the reserved id-override tags and strips them, so a template that
+        // pinned the id still carries them on every update. They are stripped here the same way
+        // rather than refused, or a pinned plan could never change an ordinary tag again.
+        plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
         return plan;
     }
