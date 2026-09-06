@@ -358,7 +358,7 @@ public class ApiGatewayExecuteController {
         }
 
         // 1. Authorizer
-        String resolvedApiKey = resolveApiKeyForRequest(region, apiId, stageName, headers);
+        ResolvedApiKey resolvedApiKey = resolveApiKeyForRequest(region, apiId, stageName, headers);
 
         // AWS_IAM is verified before the CUSTOM authorizer path because it gates the request on the
         // caller's signature rather than on a Lambda's verdict, and a method carries one
@@ -415,7 +415,7 @@ public class ApiGatewayExecuteController {
                                  Stage stage,
                                  Integration integration, HttpHeaders headers,
                                  UriInfo uriInfo, byte[] body,
-                                 AuthorizerResult authorizerResult, String resolvedApiKey,
+                                 AuthorizerResult authorizerResult, ResolvedApiKey resolvedApiKey,
                                  ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         String functionName = functionNameFromUri(integration.getUri());
         if (functionName == null) {
@@ -448,7 +448,7 @@ public class ApiGatewayExecuteController {
                                               String resourceId,
                                               Stage stage,
                                               MethodConfig method,
-                                              HttpHeaders headers, UriInfo uriInfo, String resolvedApiKey) {
+                                              HttpHeaders headers, UriInfo uriInfo, ResolvedApiKey resolvedApiKey) {
         if ("CUSTOM".equals(method.getAuthorizationType())) {
             String authorizerId = method.getAuthorizerId();
             if (authorizerId == null) {
@@ -589,7 +589,7 @@ public class ApiGatewayExecuteController {
                                      HttpHeaders headers, String region, String apiId, String stageName,
                                      String httpMethod, String requestPath,
                                      String resourcePath, String resourceId, Stage stage, UriInfo uriInfo,
-                                     String resolvedApiKey) {
+                                     ResolvedApiKey resolvedApiKey) {
         // Recover the trailing slash the JAX-RS {proxy} binding strips, so the authorizer sees
         // the same raw path the Lambda later receives from buildProxyEvent (AWS parity). Path
         // matching and path-parameter extraction keep using the normalized requestPath.
@@ -639,15 +639,17 @@ public class ApiGatewayExecuteController {
             ctx.put("requestId", UUID.randomUUID().toString());
             ctx.put("requestTimeEpoch", System.currentTimeMillis());
 
-            // identity.apiKey: resolve from usage plans linked to this (apiId, stage)
+            // identity.apiKey / identity.apiKeyId: resolve from usage plans linked to this (apiId, stage)
             ObjectNode identity = ctx.putObject("identity");
             identity.put("sourceIp", "127.0.0.1");
             String userAgent = headers.getHeaderString("User-Agent");
             identity.put("userAgent", userAgent != null ? userAgent : "");
             if (resolvedApiKey != null) {
-                identity.put("apiKey", resolvedApiKey);
+                identity.put("apiKey", resolvedApiKey.value());
+                identity.put("apiKeyId", resolvedApiKey.id());
             } else {
                 identity.putNull("apiKey");
+                identity.putNull("apiKeyId");
             }
             identity.putNull("clientCert"); // null when mTLS is not configured (Floci does not support mTLS)
         }
@@ -655,12 +657,13 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * Resolves the API key value for a request by matching the {@code x-api-key} header
+     * Resolves the API key id and value for a request by matching the {@code x-api-key} header
      * against usage plan keys linked to this (apiId, stageName) pair.
      *
-     * <p>Returns the key value string if a matching enabled key is found, {@code null} otherwise.
+     * <p>Returns {@code null} when the header is missing or does not match any enabled key linked
+     * to this (apiId, stage) through a usage plan.
      */
-    private String resolveApiKeyForRequest(String region, String apiId, String stageName, HttpHeaders headers) {
+    private ResolvedApiKey resolveApiKeyForRequest(String region, String apiId, String stageName, HttpHeaders headers) {
         String keyHeader = headers.getHeaderString("x-api-key");
         if (keyHeader == null || keyHeader.isBlank()) {
             return null;
@@ -679,12 +682,19 @@ public class ApiGatewayExecuteController {
                 if (apiGatewayService.findApiKey(region, planKey.getId())
                         .filter(ApiKey::isEnabled)
                         .isPresent()) {
-                    return planKey.getValue();
+                    return new ResolvedApiKey(planKey.getId(), planKey.getValue());
                 }
             }
         }
         return null;
     }
+
+    /**
+     * The id and value of an API key matched to a request via a usage plan. A REQUEST authorizer
+     * resolves {@code GetApiKey} by id (event.requestContext.identity.apiKeyId), while the key
+     * value is carried separately under identity.apiKey.
+     */
+    private record ResolvedApiKey(String id, String value) {}
 
     private String buildMethodArn(String region, String apiId, String stageName, String httpMethod, String requestPath) {
         String normalizedPath = requestPath == null ? "" : requestPath.replaceFirst("^/", "");
@@ -710,7 +720,7 @@ public class ApiGatewayExecuteController {
                            HttpHeaders headers, UriInfo uriInfo,
                            byte[] body, String requestId,
                            String principalId, Map<String, Object> authorizerContext,
-                           String resolvedApiKey,
+                           ResolvedApiKey resolvedApiKey,
                            ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         // The JAX-RS {proxy} binding strips a trailing slash, but a trailing slash is
         // significant in the delivered path (routers treat /x and /x/ as distinct routes).
@@ -793,11 +803,13 @@ public class ApiGatewayExecuteController {
         identity.put("userAgent", userAgent != null ? userAgent : "");
         putOrNull(identity, "userArn", iamIdentity == null ? null : iamIdentity.userArn());
         identity.putNull("clientCert"); // null when mTLS is not configured (Floci does not support mTLS)
-        // apiKey: use pre-resolved value from usage plan keys linked to this (apiId, stage)
+        // apiKey / apiKeyId: use the pre-resolved id and value from usage plan keys linked to this (apiId, stage)
         if (resolvedApiKey != null) {
-            identity.put("apiKey", resolvedApiKey);
+            identity.put("apiKey", resolvedApiKey.value());
+            identity.put("apiKeyId", resolvedApiKey.id());
         } else {
             identity.putNull("apiKey");
+            identity.putNull("apiKeyId");
         }
 
         // authorizer context (set by CUSTOM authorizer)
