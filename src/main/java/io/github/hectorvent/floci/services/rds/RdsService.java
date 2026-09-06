@@ -1026,6 +1026,19 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setMasterUserSecretKmsKeyId(null);
     }
 
+    /**
+     * Applies a new KMS key to a cluster's existing managed master user secret. AWS re-encrypts the
+     * secret in place on {@code ModifyDBCluster}; silently keeping the old key would make the call
+     * report a success it did not perform.
+     */
+    private void rekeyManagedMasterUserSecret(DbCluster cluster, String kmsKeyId, String region) {
+        if (secretsManagerService == null) {
+            return;
+        }
+        secretsManagerService.updateSecret(cluster.getMasterUserSecretArn(), null, kmsKeyId, region);
+        cluster.setMasterUserSecretKmsKeyId(kmsKeyId);
+    }
+
     private static String managedMasterSecretString(DbCluster cluster) {
         try {
             return JSON.writeValueAsString(Map.of(
@@ -1573,23 +1586,32 @@ public class RdsService implements Resettable, ResourceProvider {
             attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId);
         }
 
-        if (!mock) {
-            String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
-            final String accountId = accountIdFromArn(cluster.getDbClusterArn());
-            final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
-            proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
-                    engine, iamEnabled, proxyPort,
-                    cluster.getContainerHost(), cluster.getContainerPort(),
-                    cluster.getEndpoint().address(),
-                    effectiveMasterUser, masterPassword, databaseName,
-                    (user, pw) -> validateDbClusterPasswordForScope(
-                            accountId, clusterRegion, id, user, pw));
-        }
+        try {
+            if (!mock) {
+                String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
+                final String accountId = accountIdFromArn(cluster.getDbClusterArn());
+                final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
+                proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
+                        engine, iamEnabled, proxyPort,
+                        cluster.getContainerHost(), cluster.getContainerPort(),
+                        cluster.getEndpoint().address(),
+                        effectiveMasterUser, masterPassword, databaseName,
+                        (user, pw) -> validateDbClusterPasswordForScope(
+                                accountId, clusterRegion, id, user, pw));
+            }
 
-        cluster.setServerlessV2MinCapacity(serverlessV2MinCapacity);
-        cluster.setServerlessV2MaxCapacity(serverlessV2MaxCapacity);
-        cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
-        putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+            cluster.setServerlessV2MinCapacity(serverlessV2MinCapacity);
+            cluster.setServerlessV2MaxCapacity(serverlessV2MaxCapacity);
+            cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
+            putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        } catch (RuntimeException e) {
+            // The cluster is not persisted, so DeleteDBCluster cannot reach the secret we just
+            // created: roll it back here rather than leave an orphaned RDS-owned secret.
+            if (manageMasterUserPassword) {
+                detachManagedMasterUserSecret(cluster, effectiveRegion);
+            }
+            throw e;
+        }
         LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
                 id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
         return cluster;
@@ -1810,6 +1832,10 @@ public class RdsService implements Resettable, ResourceProvider {
             attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId);
         } else if (Boolean.FALSE.equals(manageMasterUserPassword) && cluster.getMasterUserSecretArn() != null) {
             detachManagedMasterUserSecret(cluster, effectiveRegion);
+        } else if (cluster.getMasterUserSecretArn() != null
+                && masterUserSecretKmsKeyId != null
+                && !masterUserSecretKmsKeyId.equals(cluster.getMasterUserSecretKmsKeyId())) {
+            rekeyManagedMasterUserSecret(cluster, masterUserSecretKmsKeyId, effectiveRegion);
         }
         if (modifiesServerlessV2Scaling) {
             cluster.setServerlessV2MinCapacity(effectiveMinCapacity);

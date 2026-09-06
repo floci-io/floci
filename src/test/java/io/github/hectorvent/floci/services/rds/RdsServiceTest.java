@@ -592,6 +592,54 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbClusterRollsBackManagedSecretWhenProxyStartupFails() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-RB";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        doThrow(new IllegalStateException("proxy down"))
+                .when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                        any(), any(), any(), any(), any());
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        assertThrows(IllegalStateException.class, () -> service.createDbCluster(
+                "cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null));
+
+        verify(secretsManager).deleteSecret(eq(secretArn), any(), anyBoolean(), eq("us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterRekeysExistingManagedSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-RK";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, "kms-key-1");
+
+        DbCluster cluster = service.modifyDbCluster("cluster1", null, null,
+                null, null, null, true, "kms-key-2", "us-east-1");
+
+        assertEquals("kms-key-2", cluster.getMasterUserSecretKmsKeyId());
+        verify(secretsManager).updateSecret(eq(secretArn), any(), eq("kms-key-2"), eq("us-east-1"));
+    }
+
+    @Test
     void modifyDbClusterEnablingManagedMasterPasswordCreatesSecret() {
         when(config.services().rds().mock()).thenReturn(true);
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
