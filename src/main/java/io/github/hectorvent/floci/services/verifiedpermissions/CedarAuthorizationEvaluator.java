@@ -5,6 +5,7 @@ import com.cedarpolicy.model.AuthorizationRequest;
 import com.cedarpolicy.model.AuthorizationSuccessResponse;
 import com.cedarpolicy.model.Context;
 import com.cedarpolicy.model.entity.Entities;
+import com.cedarpolicy.model.entity.Entity;
 import com.cedarpolicy.model.policy.LinkValue;
 import com.cedarpolicy.model.policy.PolicySet;
 import com.cedarpolicy.model.policy.TemplateLink;
@@ -177,16 +178,59 @@ public class CedarAuthorizationEvaluator {
             if (!definition.get("cedarJson").isTextual()) {
                 throw VerifiedPermissionsService.validation("entities.cedarJson must be a string.");
             }
-            return Entities.parse(definition.get("cedarJson").asText());
+            JsonNode raw = objectMapper.readTree(definition.get("cedarJson").asText());
+            return entitiesFromCedarJson(raw);
         }
         if (definition.has("entityList")) {
             JsonNode entityList = definition.get("entityList");
             if (!entityList.isArray()) {
                 throw VerifiedPermissionsService.validation("entities.entityList must be an array.");
             }
-            return Entities.parse(toCedarEntities((ArrayNode) entityList).toString());
+            return entitiesFromCedarJson(toCedarEntities((ArrayNode) entityList));
         }
         throw VerifiedPermissionsService.validation("entities must contain cedarJson or entityList.");
+    }
+
+    private Entities entitiesFromCedarJson(JsonNode raw) {
+        if (!raw.isArray()) {
+            throw VerifiedPermissionsService.validation("entities.cedarJson must encode an array.");
+        }
+        Set<Entity> entities = new LinkedHashSet<>();
+        for (JsonNode node : raw) {
+            if (!node.isObject()) {
+                throw VerifiedPermissionsService.validation("Each Cedar entity must be an object.");
+            }
+            EntityUID uid = euid(node.get("uid"), "uid");
+            Map<String, Value> attrs = cedarValueMap(node.get("attrs"), "attrs");
+            Set<EntityUID> parents = cedarParents(node.get("parents"));
+            Map<String, Value> tags = cedarValueMap(node.get("tags"), "tags");
+            entities.add(new Entity(uid, attrs, parents, tags));
+        }
+        return new Entities(entities);
+    }
+
+    private Map<String, Value> cedarValueMap(JsonNode node, String field) {
+        if (node == null || node.isNull()) {
+            return Map.of();
+        }
+        if (!node.isObject()) {
+            throw VerifiedPermissionsService.validation("Entity " + field + " must be an object.");
+        }
+        Map<String, Value> values = new LinkedHashMap<>();
+        node.fields().forEachRemaining(e -> values.put(e.getKey(), valueFromCedarJson(e.getValue())));
+        return values;
+    }
+
+    private Set<EntityUID> cedarParents(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return Set.of();
+        }
+        if (!node.isArray()) {
+            throw VerifiedPermissionsService.validation("Entity parents must be an array.");
+        }
+        Set<EntityUID> parents = new LinkedHashSet<>();
+        node.forEach(parent -> parents.add(euid(parent, "parent")));
+        return parents;
     }
 
     private ArrayNode toCedarEntities(ArrayNode input) {

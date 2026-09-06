@@ -2467,13 +2467,5 @@
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
     "allDeclaredFields": true
-  },
-  {
-    "name": "com.cedarpolicy.serializer.ValueDeserializer",
-    "allDeclaredConstructors": true
-  },
-  {
-    "name": "com.cedarpolicy.serializer.EntityDeserializer",
-    "allDeclaredConstructors": true
   }
 ]
