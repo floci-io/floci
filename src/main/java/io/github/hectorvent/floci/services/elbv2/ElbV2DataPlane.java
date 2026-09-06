@@ -470,12 +470,31 @@ public class ElbV2DataPlane {
         Map<String, Object> lambdaResp = objectMapper.readValue(result.getPayload(),
                 new TypeReference<Map<String, Object>>() {});
 
+        Object responseBody = lambdaResp.get("body");
+        Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
+        byte[] decodedBody = null;
+        String textBody = null;
+        if (responseBody != null) {
+            if (Boolean.TRUE.equals(isBase64)) {
+                decodedBody = Base64.getDecoder().decode(String.valueOf(responseBody));
+                if (decodedBody.length > MAX_LAMBDA_BODY_BYTES) {
+                    req.response().setStatusCode(460).end();
+                    return;
+                }
+            } else {
+                textBody = String.valueOf(responseBody);
+                if (textBody.getBytes(StandardCharsets.UTF_8).length > MAX_LAMBDA_BODY_BYTES) {
+                    req.response().setStatusCode(460).end();
+                    return;
+                }
+            }
+        }
+
         int statusCode = 200;
         Object sc = lambdaResp.get("statusCode");
         if (sc != null) {
             statusCode = ((Number) sc).intValue();
         }
-
         req.response().setStatusCode(statusCode);
 
         Object headers = lambdaResp.get("headers");
@@ -496,24 +515,12 @@ public class ElbV2DataPlane {
             }
         }
 
-        Object responseBody = lambdaResp.get("body");
-        Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
         if (responseBody == null) {
             req.response().end();
-        } else if (Boolean.TRUE.equals(isBase64)) {
-            byte[] decoded = Base64.getDecoder().decode(String.valueOf(responseBody));
-            if (decoded.length > MAX_LAMBDA_BODY_BYTES) {
-                req.response().setStatusCode(460).end();
-                return;
-            }
-            req.response().end(Buffer.buffer(decoded));
+        } else if (decodedBody != null) {
+            req.response().end(Buffer.buffer(decodedBody));
         } else {
-            String body = String.valueOf(responseBody);
-            if (body.getBytes(StandardCharsets.UTF_8).length > MAX_LAMBDA_BODY_BYTES) {
-                req.response().setStatusCode(460).end();
-                return;
-            }
-            req.response().end(body);
+            req.response().end(textBody);
         }
     }
 

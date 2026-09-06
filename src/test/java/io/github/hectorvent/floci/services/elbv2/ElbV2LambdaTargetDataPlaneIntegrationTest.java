@@ -18,6 +18,7 @@ import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -70,7 +71,7 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
                 "    if event.get(\"path\") == \"/response-at-limit\":\n" +
                 "        return {\"statusCode\": 200, \"body\": \"x\" * (1024 * 1024)}\n" +
                 "    if event.get(\"path\") == \"/response-oversized\":\n" +
-                "        return {\"statusCode\": 200, \"body\": \"x\" * (1024 * 1024 + 1)}\n" +
+                "        return {\"statusCode\": 200, \"headers\": {\"Content-Length\": \"1048577\"}, \"body\": \"x\" * (1024 * 1024 + 1)}\n" +
                 "    return {\"statusCode\": 200, \"body\": \"ok\"}\n"
             ).getBytes(StandardCharsets.UTF_8));
             zos.closeEntry();
@@ -259,13 +260,14 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
     @Test
     @Order(9)
     void oversizedLambdaResponseIsRejected() {
-        given()
+        Response response = given()
                 .baseUri("http://" + lbDnsName)
                 .port(LISTENER_PORT)
             .when()
-                .get("/response-oversized")
-            .then()
-                .statusCode(460);
+                .get("/response-oversized");
+
+        response.then().statusCode(460);
+        assertNotEquals("1048577", response.getHeader("Content-Length"));
     }
 
     /**
