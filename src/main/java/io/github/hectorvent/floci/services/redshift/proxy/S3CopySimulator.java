@@ -14,7 +14,10 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Semaphore;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Emulates {@code COPY <table> FROM 's3://bucket/keyOrPrefix'} by reading the S3 object (or every
@@ -33,6 +36,17 @@ public final class S3CopySimulator {
     private static final int LIST_PAGE_SIZE = 1000;
     private static final int CHUNK = 8192;
 
+    /** Default per-object size when the statement gives no MAXFILESIZE. Small because each slice is buffered in heap. */
+    static long UNLOAD_TARGET_FILE_BYTES = 6L * 1024 * 1024;
+    /** Whole-result ceiling; a larger UNLOAD is aborted rather than filling the in-memory S3 store. */
+    static long UNLOAD_MAX_TOTAL_BYTES = 256L * 1024 * 1024;
+    private static final long UNLOAD_WARN_BYTES = 32L * 1024 * 1024;
+    /** Shared across every connection so concurrent UNLOADs cannot multiply the per-slice heap cost without bound. */
+    private static final Semaphore UNLOAD_HEAP_MIB = new Semaphore(192);
+    private static final int UNLOAD_INITIAL_MIB = 12;
+
+    private static final String SQLSTATE_PROGRAM_LIMIT_EXCEEDED = "54000";
+    private static final String SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED = "53400";
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
     private static final String SQLSTATE_INTERNAL = "XX000";
 
@@ -400,5 +414,324 @@ public final class S3CopySimulator {
         return new byte[]{
                 (byte) (value >>> 24), (byte) (value >>> 16), (byte) (value >>> 8), (byte) value
         };
+    }
+
+    public static boolean runUnload(Socket client, Socket backend,
+            CopyStatementParser.S3Unload spec, S3Service s3, char txStatus) throws IOException {
+        return runUnload(client, backend, spec, s3, txStatus, null);
+    }
+
+    public static boolean runUnload(Socket client, Socket backend,
+            CopyStatementParser.S3Unload spec, S3Service s3, char txStatus,
+            java.util.function.IntConsumer onStatusChange) throws IOException {
+
+        String manifestKey = spec.prefix() + "manifest";
+        try {
+            s3.authorizeAnonymousPutObject(spec.bucket(), spec.prefix() + "0000_part_00");
+            if (spec.manifest()) {
+                s3.authorizeAnonymousPutObject(spec.bucket(), manifestKey);
+            }
+        } catch (AwsException e) {
+            LOG.debugv(e, "PutObject denied for UNLOAD to s3://{0}/{1}", spec.bucket(), spec.prefix());
+            sendError(client, backend, SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.prefix(), txStatus, onStatusChange);
+            return true;
+        }
+
+        if (!spec.allowOverwrite() && targetPrefixHasObjects(spec, s3)) {
+            sendError(client, backend, SQLSTATE_INTERNAL,
+                    "S3 prefix s3://" + spec.bucket() + "/" + spec.prefix()
+                            + " is not empty; specify ALLOWOVERWRITE to overwrite", txStatus, onStatusChange);
+            return true;
+        }
+
+        if (!UNLOAD_HEAP_MIB.tryAcquire(UNLOAD_INITIAL_MIB)) {
+            sendError(client, backend, SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
+                    "UNLOAD memory budget exhausted; retry shortly", txStatus, onStatusChange);
+            return true;
+        }
+        int[] heldMib = {UNLOAD_INITIAL_MIB};
+        try {
+            return runUnloadStreaming(client, backend, spec, s3, txStatus, onStatusChange, heldMib);
+        } finally {
+            UNLOAD_HEAP_MIB.release(heldMib[0]);
+        }
+    }
+
+    private static boolean runUnloadStreaming(Socket client, Socket backend,
+            CopyStatementParser.S3Unload spec, S3Service s3, char txStatus,
+            java.util.function.IntConsumer onStatusChange, int[] heldMib) throws IOException {
+
+        PostgresWireDecoder.FrontendMessage cmdComplete = null;
+        PostgresWireDecoder.FrontendMessage readyForQuery = null;
+
+        OutputStream backendOut = backend.getOutputStream();
+        backendOut.write(PostgresWireDecoder.encodeQuery(fabricateUnloadCopy(spec)));
+        backendOut.flush();
+
+        PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
+        PostgresWireDecoder.FrontendMessage first;
+        try {
+            first = nextNonAsync(backendDecoder, client);
+        } catch (IOException e) {
+            LOG.warnv(e, "backend read failed while awaiting CopyOutResponse");
+            closeQuietly(backend);
+            sendError(client, null, SQLSTATE_INTERNAL,
+                    "UNLOAD failed: backend closed or timed out", txStatus, onStatusChange);
+            closeQuietly(client);
+            return true;
+        }
+        if (first == null) {
+            closeQuietly(backend);
+            sendError(client, null, SQLSTATE_INTERNAL,
+                    "UNLOAD failed: backend closed before COPY started", txStatus, onStatusChange);
+            closeQuietly(client);
+            return true;
+        }
+        if (first.type() != 'H') {
+            // Backend rejected the SELECT itself. Its ErrorResponse + ReadyForQuery are the client's one response.
+            forward(client, first);
+            drainToReadyForQuery(backendDecoder, client, onStatusChange);
+            return true;
+        }
+
+        long threshold = spec.maxFileSizeBytes() > 0 ? spec.maxFileSizeBytes() : UNLOAD_TARGET_FILE_BYTES;
+        String contentType = spec.gzip() ? "application/gzip" : "text/plain";
+        List<String> writtenKeys = new ArrayList<>();
+        List<Integer> writtenLengths = new ArrayList<>();
+
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        OutputStream acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
+        long rawSlice = 0;
+        long rawTotal = 0;
+        boolean lastByteNewline = true;
+        boolean warned = false;
+        int sliceIndex = 0;
+
+        try {
+            while (true) {
+                PostgresWireDecoder.FrontendMessage m = backendDecoder.nextMessage();
+                if (m == null) {
+                    closeAcc(acc, sink);
+                    closeQuietly(backend);
+                    sendError(client, null, SQLSTATE_INTERNAL,
+                            "UNLOAD failed: backend closed mid-stream", txStatus, onStatusChange);
+                    closeQuietly(client);
+                    return true;
+                }
+                char t = m.type();
+                if (t == 'd') {
+                    byte[] body = m.body();
+                    acc.write(body, 0, body.length);
+                    rawSlice += body.length;
+                    rawTotal += body.length;
+                    if (body.length > 0) {
+                        lastByteNewline = body[body.length - 1] == '\n';
+                    }
+                    if (!warned && rawTotal > UNLOAD_WARN_BYTES) {
+                        warned = true;
+                        LOG.warnv("UNLOAD result passed {0} bytes and is buffered a slice at a time "
+                                + "(bucket={1}, prefix={2})", UNLOAD_WARN_BYTES, spec.bucket(), spec.prefix());
+                    }
+                    int wantMib = (int) ((rawSlice * 3) / (1024 * 1024)) + 1;
+                    while (heldMib[0] < wantMib) {
+                        if (!UNLOAD_HEAP_MIB.tryAcquire(1)) {
+                            return abortUnload(client, backend, backendDecoder, acc, sink,
+                                    SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
+                                    "UNLOAD memory budget exhausted; retry with a smaller result",
+                                    txStatus, onStatusChange);
+                        }
+                        heldMib[0]++;
+                    }
+                    if (rawTotal > UNLOAD_MAX_TOTAL_BYTES) {
+                        return abortUnload(client, backend, backendDecoder, acc, sink,
+                                SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+                                "UNLOAD result exceeds the " + UNLOAD_MAX_TOTAL_BYTES + "-byte limit",
+                                txStatus, onStatusChange);
+                    }
+                    if (rawSlice >= threshold && lastByteNewline) {
+                        byte[] payload = finishSlice(acc, sink);
+                        String key = unloadDataKey(spec, sliceIndex);
+                        s3.authorizeAnonymousPutObject(spec.bucket(), key);
+                        s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
+                        writtenKeys.add(key);
+                        writtenLengths.add(payload.length);
+                        sliceIndex++;
+                        int release = heldMib[0] - UNLOAD_INITIAL_MIB;
+                        if (release > 0) {
+                            UNLOAD_HEAP_MIB.release(release);
+                            heldMib[0] = UNLOAD_INITIAL_MIB;
+                        }
+                        rawSlice = 0;
+                        lastByteNewline = true;
+                        sink = new ByteArrayOutputStream();
+                        acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
+                    }
+                } else if (t == 'c') {
+                    // CopyDone, ignore
+                } else if (t == 'C') {
+                    // CommandComplete, hold until we see 'Z'
+                    cmdComplete = m;
+                } else if (t == 'Z') {
+                    readyForQuery = m;
+                    break;
+                } else if (t == 'E') {
+                    closeAcc(acc, sink);
+                    forward(client, m);
+                    drainToReadyForQuery(backendDecoder, client, onStatusChange);
+                    return true;
+                } else if (t == 'N' || t == 'A' || t == 'S') {
+                    forward(client, m);
+                }
+            }
+        } catch (RuntimeException | IOException e) {
+            LOG.warnv(e, "UNLOAD streaming failed");
+            closeAcc(acc, sink);
+            if (spec.manifest()) {
+                deleteWritten(s3, spec.bucket(), writtenKeys);
+            }
+            String detail = e.getMessage() != null ? e.getMessage() : e.toString();
+            sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
+            return true;
+        }
+
+        // Flush the final (or only, possibly empty) slice.
+        byte[] payload = finishSlice(acc, sink);
+        if (payload.length > 0 || writtenKeys.isEmpty()) {
+            String key = unloadDataKey(spec, sliceIndex);
+            try {
+                s3.authorizeAnonymousPutObject(spec.bucket(), key);
+                s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
+            } catch (AwsException e) {
+                LOG.debugv(e, "PutObject denied writing the final UNLOAD slice");
+                if (spec.manifest()) {
+                    deleteWritten(s3, spec.bucket(), writtenKeys);
+                }
+                sendError(client, backend, SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                        "S3 access denied for s3://" + spec.bucket() + "/" + spec.prefix(), txStatus, onStatusChange);
+                return true;
+            }
+            writtenKeys.add(key);
+            writtenLengths.add(payload.length);
+        }
+
+        if (spec.manifest()) {
+            try {
+                s3.authorizeAnonymousPutObject(spec.bucket(), spec.prefix() + "manifest");
+                s3.putObject(spec.bucket(), spec.prefix() + "manifest",
+                        manifestJson(spec.bucket(), writtenKeys, writtenLengths).getBytes(StandardCharsets.UTF_8),
+                        "application/json", Map.of());
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "UNLOAD manifest write failed; removing partial data objects");
+                deleteWritten(s3, spec.bucket(), writtenKeys);
+                sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD manifest write failed", txStatus, onStatusChange);
+                return true;
+            }
+        }
+
+        if (cmdComplete != null) {
+            forward(client, cmdComplete);
+        }
+        forward(client, readyForQuery);
+        if (onStatusChange != null && readyForQuery.body().length > 0) {
+            onStatusChange.accept(readyForQuery.body()[0]);
+        }
+        return true;
+    }
+
+    private static boolean targetPrefixHasObjects(CopyStatementParser.S3Unload spec, S3Service s3) {
+        try {
+            S3Service.ListObjectsResult r = s3.listObjectsWithPrefixes(
+                    spec.bucket(), spec.prefix(), null, 1, null, null);
+            return r != null && r.objects() != null && !r.objects().isEmpty();
+        } catch (RuntimeException e) {
+            // Unknown bucket or listing error: treat as "no collision" and let putObject surface the real failure.
+            LOG.debugv(e, "could not list s3://{0}/{1} for the ALLOWOVERWRITE check", spec.bucket(), spec.prefix());
+            return false;
+        }
+    }
+
+    private static String fabricateUnloadCopy(CopyStatementParser.S3Unload spec) {
+        boolean csvFraming = spec.csv() || spec.addQuotes();
+        StringBuilder sql = new StringBuilder("COPY (").append(spec.selectQuery())
+                .append(") TO STDOUT WITH (FORMAT ").append(csvFraming ? "csv" : "text");
+        String delimiter = spec.delimiter() != null ? spec.delimiter() : (csvFraming ? "," : "|");
+        sql.append(", DELIMITER '").append(quoteLiteral(delimiter)).append("'");
+        if (spec.header()) {
+            sql.append(", HEADER true");
+        }
+        if (spec.addQuotes()) {
+            sql.append(", FORCE_QUOTE *");
+        }
+        if (spec.nullAs() != null) {
+            sql.append(", NULL '").append(quoteLiteral(spec.nullAs())).append("'");
+        }
+        sql.append(")");
+        return sql.toString();
+    }
+
+    private static String unloadDataKey(CopyStatementParser.S3Unload spec, int index) {
+        String base = spec.parallel()
+                ? spec.prefix() + String.format("%04d_part_00", index)
+                : spec.prefix() + String.format("%03d", index);
+        return spec.gzip() ? base + ".gz" : base;
+    }
+
+    private static byte[] finishSlice(OutputStream acc, ByteArrayOutputStream sink) throws IOException {
+        if (acc != sink) {
+            acc.close(); // flush the GZIP trailer
+        }
+        return sink.toByteArray();
+    }
+
+    private static void closeAcc(OutputStream acc, ByteArrayOutputStream sink) {
+        if (acc != sink) {
+            try {
+                acc.close();
+            } catch (IOException e) {
+                LOG.debugv(e, "error closing the UNLOAD accumulation stream");
+            }
+        }
+    }
+
+    private static boolean abortUnload(Socket client, Socket backend, PostgresWireDecoder backendDecoder,
+            OutputStream acc, ByteArrayOutputStream sink, String sqlState, String message,
+            char txStatus, java.util.function.IntConsumer onStatusChange) throws IOException {
+        closeAcc(acc, sink);
+        drainBackendDiscarding(backendDecoder);
+        sendError(client, backend, sqlState, message, txStatus, onStatusChange);
+        return true;
+    }
+
+    /** Read backend messages, forwarding nothing, until its ReadyForQuery or EOF. Leaves the backend socket clean. */
+    private static void drainBackendDiscarding(PostgresWireDecoder decoder) throws IOException {
+        PostgresWireDecoder.FrontendMessage m;
+        while ((m = decoder.nextMessage()) != null) {
+            if (m.type() == 'Z') {
+                return;
+            }
+        }
+    }
+
+    private static void deleteWritten(S3Service s3, String bucket, List<String> keys) {
+        for (String k : keys) {
+            try {
+                s3.deleteObject(bucket, k);
+            } catch (RuntimeException e) {
+                LOG.debugv(e, "could not remove partial UNLOAD object s3://{0}/{1}", bucket, k);
+            }
+        }
+    }
+
+    private static String manifestJson(String bucket, List<String> keys, List<Integer> lengths) {
+        StringBuilder json = new StringBuilder("{\"entries\":[");
+        for (int i = 0; i < keys.size(); i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            json.append("{\"url\":\"s3://").append(bucket).append('/').append(keys.get(i))
+                    .append("\",\"meta\":{\"content_length\":").append(lengths.get(i)).append("}}");
+        }
+        return json.append("]}").toString();
     }
 }

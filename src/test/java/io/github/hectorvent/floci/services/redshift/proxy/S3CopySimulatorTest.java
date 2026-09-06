@@ -108,6 +108,275 @@ class S3CopySimulatorTest {
         return new PostgresWireDecoder(testBackend.getInputStream()).nextMessage();
     }
 
+    /** Play a PostgreSQL backend for a fabricated COPY (...) TO STDOUT: 'H', N 'd' rows, 'c', 'C', 'Z'. */
+    private void playUnloadBackend(String... rows) throws IOException {
+        OutputStream out = testBackend.getOutputStream();
+        PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+        PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+        assertEquals('Q', q.type());
+        assertTrue(q.getSql().contains("TO STDOUT"), q.getSql());
+        out.write(new byte[]{'H', 0, 0, 0, 7, 0, 0, 0}); // CopyOutResponse
+        for (String row : rows) {
+            byte[] b = row.getBytes(StandardCharsets.US_ASCII);
+            out.write('d');
+            out.write(intBytes(4 + b.length));
+            out.write(b);
+        }
+        out.write(new byte[]{'c', 0, 0, 0, 4});          // CopyDone
+        byte[] tag = "COPY 2\0".getBytes(StandardCharsets.US_ASCII);
+        out.write('C');
+        out.write(intBytes(4 + tag.length));
+        out.write(tag);
+        out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+        out.flush();
+    }
+
+    private CopyStatementParser.S3Unload unloadSpec(String bucket, String prefix,
+            boolean gzip, boolean manifest, boolean allowOverwrite, boolean parallel, long maxFileSize) {
+        return new CopyStatementParser.S3Unload("select a,b from t", bucket, prefix,
+                "|", false, gzip, false, false, null, manifest, allowOverwrite, parallel, maxFileSize);
+    }
+
+    @Test
+    void unloadWritesSingleObjectAndForwardsCommandComplete() throws Exception {
+        java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+        when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+            written.put(inv.getArgument(1), inv.getArgument(2));
+            return null;
+        });
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+
+        CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
+        Thread backend = backendThread(() -> playUnloadBackend("1|alice\n", "2|bob\n"));
+
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+
+        assertTrue(handled);
+        assertEquals(1, written.size());
+        assertTrue(written.containsKey("out/0000_part_00"), written.keySet().toString());
+        assertEquals("1|alice\n2|bob\n", new String(written.get("out/0000_part_00"), StandardCharsets.US_ASCII));
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('C', in.nextMessage().type());
+        assertEquals('Z', in.nextMessage().type());
+    }
+
+    @Test
+    void unloadSplitsIntoMultipleObjectsOnNewlineBoundaries() throws Exception {
+        long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 8; // force a split after the first row
+        try {
+            java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+            when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+                written.put(inv.getArgument(1), inv.getArgument(2));
+                return null;
+            });
+            when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+
+            CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
+            Thread backend = backendThread(() -> playUnloadBackend("1|alice\n", "2|bob\n", "3|carol\n"));
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            joinBackend(backend);
+
+            assertTrue(written.size() >= 2, written.keySet().toString());
+            assertTrue(written.containsKey("out/0000_part_00"));
+            assertTrue(written.containsKey("out/0001_part_00"));
+            StringBuilder all = new StringBuilder();
+            written.entrySet().stream().sorted(java.util.Map.Entry.comparingByKey())
+                    .forEach(e -> all.append(new String(e.getValue(), StandardCharsets.US_ASCII)));
+            assertEquals("1|alice\n2|bob\n3|carol\n", all.toString());
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = saved;
+        }
+    }
+
+    @Test
+    void unloadParallelOffUsesThreeDigitKeyNames() throws Exception {
+        java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+        when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+            written.put(inv.getArgument(1), inv.getArgument(2));
+            return null;
+        });
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+
+        CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, false, 0);
+        Thread backend = backendThread(() -> playUnloadBackend("1|a\n"));
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+
+        assertTrue(written.containsKey("out/000"), written.keySet().toString());
+    }
+
+    @Test
+    void unloadGzipAppendsGzSuffixAndWritesDecompressibleBytes() throws Exception {
+        java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+        when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+            written.put(inv.getArgument(1), inv.getArgument(2));
+            return null;
+        });
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+
+        CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", true, false, false, true, 0);
+        Thread backend = backendThread(() -> playUnloadBackend("1|a\n", "2|b\n"));
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+
+        assertTrue(written.containsKey("out/0000_part_00.gz"), written.keySet().toString());
+        byte[] gz = written.get("out/0000_part_00.gz");
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPInputStream in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(gz))) {
+            in.transferTo(out);
+        }
+        assertEquals("1|a\n2|b\n", out.toString(StandardCharsets.US_ASCII));
+    }
+
+    @Test
+    void unloadManifestListsEveryDataObject() throws Exception {
+        long saved = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 8;
+        try {
+            java.util.Map<String, byte[]> written = new java.util.concurrent.ConcurrentHashMap<>();
+            when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+                written.put(inv.getArgument(1), inv.getArgument(2));
+                return null;
+            });
+            when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+
+            CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, true, false, true, 0);
+            Thread backend = backendThread(() -> playUnloadBackend("1|alice\n", "2|bob\n", "3|carol\n"));
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            joinBackend(backend);
+
+            String manifest = new String(written.get("out/manifest"), StandardCharsets.UTF_8);
+            assertTrue(manifest.contains("s3://wh/out/0000_part_00"), manifest);
+            assertTrue(manifest.contains("s3://wh/out/0001_part_00"), manifest);
+            assertTrue(manifest.contains("\"content_length\":"), manifest);
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = saved;
+        }
+    }
+
+    @Test
+    void unloadIntoNonEmptyPrefixWithoutAllowOverwriteErrorsAndSkipsSelect() throws Exception {
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("wh", "out/old", new byte[]{1}, "text/plain")), List.of(), false, null));
+
+        CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
+        // No backend thread: the select must never run.
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        assertTrue(handled);
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        assertEquals('Z', in.nextMessage().type());
+    }
+
+    @Test
+    void unloadForwardsBackendErrorWhenSelectIsInvalid() throws Exception {
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+        CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
+
+        Thread backend = backendThread(() -> {
+            OutputStream out = testBackend.getOutputStream();
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            assertEquals('Q', in.nextMessage().type());
+            byte[] err = "SERROR\0C42703\0Mcolumn \"nope\" does not exist\0\0".getBytes(StandardCharsets.US_ASCII);
+            out.write('E');
+            out.write(intBytes(4 + err.length));
+            out.write(err);
+            out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+            out.flush();
+        });
+
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        joinBackend(backend);
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        assertEquals('Z', in.nextMessage().type());
+        testClient.setSoTimeout(400);
+        assertThrows(SocketTimeoutException.class, () -> testClient.getInputStream().read());
+    }
+
+    @Test
+    void unloadAbortsWhenResultExceedsTotalCeiling() throws Exception {
+        long saved = S3CopySimulator.UNLOAD_MAX_TOTAL_BYTES;
+        S3CopySimulator.UNLOAD_MAX_TOTAL_BYTES = 16;
+        try {
+            when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                    .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+            CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 1_000_000);
+
+            Thread backend = backendThread(() -> {
+                OutputStream out = testBackend.getOutputStream();
+                PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+                assertEquals('Q', in.nextMessage().type());
+                out.write(new byte[]{'H', 0, 0, 0, 7, 0, 0, 0});
+                byte[] big = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".getBytes(StandardCharsets.US_ASCII);
+                out.write('d');
+                out.write(intBytes(4 + big.length));
+                out.write(big);
+                out.write(new byte[]{'c', 0, 0, 0, 4});
+                out.write('C');
+                byte[] tag = "COPY 1\0".getBytes(StandardCharsets.US_ASCII);
+                out.write(intBytes(4 + tag.length));
+                out.write(tag);
+                out.write(new byte[]{'Z', 0, 0, 0, 5, 'I'});
+                out.flush();
+            });
+
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            joinBackend(backend);
+
+            PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+            PostgresWireDecoder.FrontendMessage err = in.nextMessage();
+            assertEquals('E', err.type());
+            assertTrue(new String(err.body(), StandardCharsets.US_ASCII).contains("54000"));
+            assertEquals('Z', in.nextMessage().type());
+        } finally {
+            S3CopySimulator.UNLOAD_MAX_TOTAL_BYTES = saved;
+        }
+    }
+
+    @Test
+    void unloadInTransactionBlockReportsFailedTransactionStatusOnError() throws Exception {
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("wh", "out/old", new byte[]{1}, "text/plain")), List.of(), false, null));
+        CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
+
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+            assertEquals('Q', q.type());
+            assertTrue(q.getSql().contains("FLOCI_ABORT_TX"));
+            OutputStream out = testBackend.getOutputStream();
+            byte[] err = "SERROR\0C42601\0Msyntax error\0\0".getBytes(StandardCharsets.US_ASCII);
+            out.write('E');
+            out.write(intBytes(4 + err.length));
+            out.write(err);
+            out.write(new byte[]{'Z', 0, 0, 0, 5, 'E'});
+            out.flush();
+        });
+
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'T');
+        joinBackend(backend);
+
+        PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('E', in.nextMessage().type());
+        PostgresWireDecoder.FrontendMessage z = in.nextMessage();
+        assertEquals('Z', z.type());
+        assertEquals('E', (char) z.body()[0]);
+    }
+
     /** Play a minimal happy-path PostgreSQL backend: 'G' then, after CopyDone, 'C' and 'Z'. */
     private void playHappyBackend(ByteArrayOutputStream capturedCopyData) throws IOException {
         OutputStream out = testBackend.getOutputStream();
