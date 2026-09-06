@@ -146,6 +146,21 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     }
 
     @Test
+    void droppingDescriptionClearsItOnTheKey() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
+
+        provisioner.provision(resource("abc123"), mapper.createObjectNode().put("Name", "my-key"), ctx("abc123"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, String>>> patches = ArgumentCaptor.forClass(List.class);
+        verify(apiGateway).updateApiKey(eq(REGION), eq("abc123"), patches.capture());
+        assertTrue(patches.getValue().stream().anyMatch(op ->
+                "/description".equals(op.get("path")) && op.get("value") == null), patches.getValue().toString());
+    }
+
+    @Test
     void anUnchangedUpdateTouchesNothing() {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "same", Map.of("team", "core"));
         when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
