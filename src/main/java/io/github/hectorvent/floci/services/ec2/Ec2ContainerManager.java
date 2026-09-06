@@ -46,6 +46,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -95,6 +96,22 @@ public class Ec2ContainerManager {
     private static final int LAUNCH_MAX_THREADS = 8;
     private static final int LAUNCH_QUEUE_CAPACITY = 64;
     private static final long USER_DATA_EXECUTION_TIMEOUT_MINUTES = 30;
+    // Wait for capacity so accepted launches are not dropped, but never run launch work on callers.
+    static final RejectedExecutionHandler BLOCKING_BACKPRESSURE = (runnable, executor) -> {
+        if (executor.isShutdown()) {
+            throw new RejectedExecutionException("EC2 container manager is stopped");
+        }
+        try {
+            executor.getQueue().put(runnable);
+            if (executor.isShutdown() && executor.getQueue().remove(runnable)) {
+                throw new RejectedExecutionException("EC2 container manager is stopped");
+            }
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RejectedExecutionException("Interrupted while waiting for EC2 launch capacity", e);
+        }
+    };
     /** Test seam: when non-null, invoked by {@link #gunzip} right after it acquires a
      *  decompression-budget permit and before it starts decompressing, so tests can observe and
      *  serialize concurrent decompressions deterministically. Always null in production. */
@@ -182,7 +199,7 @@ public class Ec2ContainerManager {
                     thread.setDaemon(true);
                     return thread;
                 },
-                new ThreadPoolExecutor.AbortPolicy());
+                BLOCKING_BACKPRESSURE);
     }
 
     @PreDestroy

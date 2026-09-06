@@ -777,7 +777,7 @@ class Ec2ContainerManagerTest {
     void launchAppliesBackpressureWhenDockerLaunchesAreSaturated() throws Exception {
         ThreadPoolExecutor launchExecutor = new ThreadPoolExecutor(
                 1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1),
-                new ThreadPoolExecutor.AbortPolicy());
+                Ec2ContainerManager.BLOCKING_BACKPRESSURE);
         LaunchHarness harness = launchHarness(launchExecutor, Duration.ofSeconds(1));
         ExecutorService callerExecutor = Executors.newSingleThreadExecutor();
         CountDownLatch createEntered = new CountDownLatch(1);
@@ -791,15 +791,14 @@ class Ec2ContainerManagerTest {
         try {
             harness.manager().launch(instance("i-backpressure-1"), "ubuntu:24.04", null, "us-west-2");
             harness.manager().launch(instance("i-backpressure-2"), "ubuntu:24.04", null, "us-west-2");
-            Instance rejectedInstance = instance("i-backpressure-3");
-            Future<?> rejectedLaunch = callerExecutor.submit(() ->
-                    harness.manager().launch(rejectedInstance, "ubuntu:24.04", null, "us-west-2"));
+            Future<?> waitingLaunch = callerExecutor.submit(() ->
+                    harness.manager().launch(instance("i-backpressure-3"), "ubuntu:24.04", null, "us-west-2"));
 
             assertTrue(createEntered.await(2, TimeUnit.SECONDS), "worker launch should enter Docker launch");
-            assertTrue(rejectedLaunch.get(2, TimeUnit.SECONDS) == null, "rejected launch should return immediately");
-            assertEquals("terminated", rejectedInstance.getState().getName());
+            assertFalse(waitingLaunch.isDone(), "saturated launch should wait for queue capacity");
 
             releaseCreate.countDown();
+            waitingLaunch.get(2, TimeUnit.SECONDS);
         } finally {
             releaseCreate.countDown();
             harness.manager().stop();
