@@ -65,7 +65,7 @@ class IdentityStoreTest {
             var describedUser = client.describeUser(DescribeUserRequest.builder()
                     .identityStoreId(STORE).userId(user.userId()).build());
             assertEquals("identitystore-sdk@example.com", describedUser.userName());
-            assertEquals("identitystore-sdk@example.com", describedUser.emails().getFirst().value());
+            assertEquals("identitystore-sdk@example.com", describedUser.emails().get(0).value());
             assertNotNull(describedUser.createdAt());
 
             assertEquals(group.groupId(), client.getGroupId(GetGroupIdRequest.builder()
@@ -115,7 +115,7 @@ class IdentityStoreTest {
             MemberId member = MemberId.builder().userId(user.userId()).build();
             assertFalse(client.isMemberInGroups(IsMemberInGroupsRequest.builder()
                     .identityStoreId(STORE).memberId(member).groupIds(group.groupId()).build())
-                    .results().getFirst().membershipExists());
+                    .results().get(0).membershipExists());
 
             var membership = client.createGroupMembership(CreateGroupMembershipRequest.builder()
                     .identityStoreId(STORE).groupId(group.groupId()).memberId(member).build());
@@ -123,7 +123,7 @@ class IdentityStoreTest {
 
             assertTrue(client.isMemberInGroups(IsMemberInGroupsRequest.builder()
                     .identityStoreId(STORE).memberId(member).groupIds(group.groupId()).build())
-                    .results().getFirst().membershipExists());
+                    .results().get(0).membershipExists());
 
             var describedMembership = client.describeGroupMembership(DescribeGroupMembershipRequest.builder()
                     .identityStoreId(STORE).membershipId(membership.membershipId()).build());
@@ -142,7 +142,7 @@ class IdentityStoreTest {
                     .identityStoreId(STORE).membershipId(membership.membershipId()).build());
             assertFalse(client.isMemberInGroups(IsMemberInGroupsRequest.builder()
                     .identityStoreId(STORE).memberId(member).groupIds(group.groupId()).build())
-                    .results().getFirst().membershipExists());
+                    .results().get(0).membershipExists());
 
             client.deleteUser(DeleteUserRequest.builder().identityStoreId(STORE).userId(user.userId()).build());
             client.deleteGroup(DeleteGroupRequest.builder().identityStoreId(STORE).groupId(group.groupId()).build());

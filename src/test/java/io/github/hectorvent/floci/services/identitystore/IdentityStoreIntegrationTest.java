@@ -120,6 +120,33 @@ class IdentityStoreIntegrationTest {
                 .statusCode(400).body("__type", equalTo("ConflictException"));
     }
 
+    @Test
+    void updatesRejectImmutableAndResourceSpecificAttributePaths() {
+        String store = "d-2222222222";
+        String user = json("AWSIdentityStore.CreateUser",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserName\":\"immutable@example.com\"}")
+                .statusCode(200).extract().path("UserId");
+        String group = json("AWSIdentityStore.CreateGroup",
+                "{\"IdentityStoreId\":\"" + store + "\",\"DisplayName\":\"ImmutableGroup\"}")
+                .statusCode(200).extract().path("GroupId");
+
+        json("AWSIdentityStore.UpdateUser",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + user
+                        + "\",\"Operations\":[{\"AttributePath\":\"UserId\",\"AttributeValue\":\"forbidden\"}]}")
+                .statusCode(400).body("__type", equalTo("ValidationException"));
+        json("AWSIdentityStore.UpdateGroup",
+                "{\"IdentityStoreId\":\"" + store + "\",\"GroupId\":\"" + group
+                        + "\",\"Operations\":[{\"AttributePath\":\"aws:identitystore:enterprise.department\","
+                        + "\"AttributeValue\":\"forbidden\"}]}")
+                .statusCode(400).body("__type", equalTo("ValidationException"));
+
+        json("AWSIdentityStore.DescribeUser",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + user + "\"}")
+                .statusCode(200)
+                .body("UserId", equalTo(user))
+                .body("UserName", equalTo("immutable@example.com"));
+    }
+
     private static io.restassured.response.ValidatableResponse json(String target, String body) {
         return given()
                 .contentType(TYPE)

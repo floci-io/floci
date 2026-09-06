@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.identitystore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.identitystore.model.Group;
 import io.github.hectorvent.floci.services.identitystore.model.Membership;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IdentityStoreServiceTest {
@@ -106,6 +108,36 @@ class IdentityStoreServiceTest {
     }
 
     @Test
+    void updateUserRejectsImmutableAndUnsupportedAttributePaths() {
+        User user = service.createUser(request("UserName", "immutable@example.com"));
+
+        for (String path : new String[]{"UserId", "userId", "identityStoreId", "createdAt", "updatedBy"}) {
+            ObjectNode update = updateRequest("UserId", user.userId(), path, "forbidden");
+            AwsException error = assertThrows(AwsException.class, () -> service.updateUser(update));
+            assertEquals("ValidationException", error.getErrorCode());
+        }
+
+        User unchanged = service.describeUser(describeUser(user.userId()));
+        assertEquals(user.userId(), unchanged.userId());
+        assertTrue(!unchanged.attributes().has("UserId"));
+    }
+
+    @Test
+    void updateGroupRejectsUserExtensionsAndUnsupportedAttributes() {
+        Group group = service.createGroup(request("DisplayName", "ImmutableGroup"));
+
+        for (String path : new String[]{"GroupId", "groupId", "createdAt", "name", "aws:identitystore:enterprise.department"}) {
+            ObjectNode update = updateRequest("GroupId", group.groupId(), path, "forbidden");
+            AwsException error = assertThrows(AwsException.class, () -> service.updateGroup(update));
+            assertEquals("ValidationException", error.getErrorCode());
+        }
+
+        Group unchanged = service.describeGroup(describeGroup(group.groupId()));
+        assertEquals(group.groupId(), unchanged.groupId());
+        assertEquals("ImmutableGroup", unchanged.displayName());
+    }
+
+    @Test
     void clearRemovesAllPersistedState() {
         service.createGroup(request("DisplayName", "PlatformAdmins"));
         service.createUser(request("UserName", "admin@example.com"));
@@ -135,6 +167,21 @@ class IdentityStoreServiceTest {
     private ObjectNode describeUser(String userId) {
         ObjectNode request = mapper.createObjectNode().put("IdentityStoreId", STORE);
         request.put("UserId", userId);
+        return request;
+    }
+
+    private ObjectNode describeGroup(String groupId) {
+        ObjectNode request = mapper.createObjectNode().put("IdentityStoreId", STORE);
+        request.put("GroupId", groupId);
+        return request;
+    }
+
+    private ObjectNode updateRequest(String idField, String id, String path, String value) {
+        ObjectNode request = mapper.createObjectNode().put("IdentityStoreId", STORE);
+        request.put(idField, id);
+        request.putArray("Operations").addObject()
+                .put("AttributePath", path)
+                .put("AttributeValue", value);
         return request;
     }
 }

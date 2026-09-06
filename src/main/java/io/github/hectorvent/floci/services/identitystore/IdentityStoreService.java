@@ -32,6 +32,15 @@ public class IdentityStoreService implements Resettable {
     private static final Pattern RESOURCE_ID = Pattern.compile(
             "([0-9a-f]{10}-|)[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}");
     private static final Set<String> RESERVED_NAMES = Set.of("Administrator", "AWSAdministrators");
+    private static final Set<String> GROUP_WRITABLE_ATTRIBUTES = Set.of(
+            "description", "displayName", "externalIds");
+    private static final Set<String> USER_WRITABLE_ATTRIBUTES = Set.of(
+            "addresses", "birthdate", "displayName", "emails", "externalIds", "locale", "name", "nickName",
+            "phoneNumbers", "photos", "preferredLanguage", "profileUrl", "roles", "timezone", "title", "userName",
+            "userStatus", "userType", "website");
+    private static final String ENTERPRISE_EXTENSION = "aws:identitystore:enterprise";
+    private static final Pattern ATTRIBUTE_PATH = Pattern.compile(
+            "(?:\\p{L}+:\\p{L}+:\\p{L}+(?:\\.\\p{L}+){0,3}|\\p{L}+(?:\\.\\p{L}+){0,2})");
     private static final int MAX_GROUPS = 100_000;
     private static final int MAX_USERS = 200_000;
 
@@ -444,10 +453,13 @@ public class IdentityStoreService implements Resettable {
     }
 
     private void applyAttribute(ObjectNode attributes, String path, JsonNode value, boolean user) {
-        if (path.equals("identityStoreId") || path.equals("userId") || path.equals("groupId")) {
-            throw validation("Resource identifiers cannot be updated.");
+        if (path.length() > 255 || !ATTRIBUTE_PATH.matcher(path).matches()) {
+            throw validation("AttributePath is invalid.");
         }
         if (path.startsWith("aws:identitystore:")) {
+            if (!user || !(path.equals(ENTERPRISE_EXTENSION) || path.startsWith(ENTERPRISE_EXTENSION + "."))) {
+                throw validation("The attribute path is not supported for this resource.");
+            }
             ObjectNode extensions = attributes.withObject("Extensions");
             int dot = path.indexOf('.');
             if (dot < 0) {
@@ -461,11 +473,12 @@ public class IdentityStoreService implements Resettable {
             return;
         }
         String[] segments = path.split("\\.");
+        Set<String> writableAttributes = user ? USER_WRITABLE_ATTRIBUTES : GROUP_WRITABLE_ATTRIBUTES;
+        if (!writableAttributes.contains(segments[0])) {
+            throw validation("The " + (user ? "user" : "group") + " attribute path is not supported.");
+        }
         segments[0] = upperCamel(segments[0]);
         setNested(attributes, String.join(".", segments), value);
-        if (!user && !Set.of("DisplayName", "Description", "ExternalIds").contains(segments[0])) {
-            throw validation("The group attribute path is not supported.");
-        }
     }
 
     private void setNested(ObjectNode root, String path, JsonNode value) {
