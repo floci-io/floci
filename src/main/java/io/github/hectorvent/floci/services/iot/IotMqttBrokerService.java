@@ -179,7 +179,7 @@ public class IotMqttBrokerService {
         try {
             mqttServer.listen().toCompletionStage().toCompletableFuture().join();
         } catch (Exception e) {
-            mqttServer.close();
+            mqttServer.close().toCompletionStage().toCompletableFuture().join();
             throw new IllegalStateException("Failed to start " + name + " on port " + options.getPort(), e);
         }
         LOG.infov("{0} started on {1}:{2}", name, options.getHost(), Integer.toString(options.getPort()));
