@@ -46,7 +46,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -96,14 +95,6 @@ public class Ec2ContainerManager {
     private static final int LAUNCH_MAX_THREADS = 8;
     private static final int LAUNCH_QUEUE_CAPACITY = 64;
     private static final long USER_DATA_EXECUTION_TIMEOUT_MINUTES = 30;
-    // Keep Docker-backed launches finite. Saturation applies caller-runs backpressure instead of dropping work.
-    private static final RejectedExecutionHandler CALLER_RUNS_UNLESS_STOPPED =
-            (runnable, executor) -> {
-                if (executor.isShutdown()) {
-                    throw new RejectedExecutionException("EC2 container manager is stopped");
-                }
-                runnable.run();
-            };
     /** Test seam: when non-null, invoked by {@link #gunzip} right after it acquires a
      *  decompression-budget permit and before it starts decompressing, so tests can observe and
      *  serialize concurrent decompressions deterministically. Always null in production. */
@@ -191,7 +182,7 @@ public class Ec2ContainerManager {
                     thread.setDaemon(true);
                     return thread;
                 },
-                CALLER_RUNS_UNLESS_STOPPED);
+                new ThreadPoolExecutor.AbortPolicy());
     }
 
     @PreDestroy
@@ -354,7 +345,7 @@ public class Ec2ContainerManager {
                 }
             });
         } catch (RejectedExecutionException e) {
-            LOG.warnv("Could not schedule EC2 instance {0} launch because the manager is stopping",
+            LOG.warnv("Could not schedule EC2 instance {0} launch because the launch executor is saturated or stopping",
                     instance.getInstanceId());
             failLaunch(instance);
         }

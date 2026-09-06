@@ -777,10 +777,10 @@ class Ec2ContainerManagerTest {
     void launchAppliesBackpressureWhenDockerLaunchesAreSaturated() throws Exception {
         ThreadPoolExecutor launchExecutor = new ThreadPoolExecutor(
                 1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                new ThreadPoolExecutor.AbortPolicy());
         LaunchHarness harness = launchHarness(launchExecutor, Duration.ofSeconds(1));
         ExecutorService callerExecutor = Executors.newSingleThreadExecutor();
-        CountDownLatch createEntered = new CountDownLatch(2);
+        CountDownLatch createEntered = new CountDownLatch(1);
         CountDownLatch releaseCreate = new CountDownLatch(1);
         when(harness.lifecycleManager().create(any(ContainerSpec.class))).thenAnswer(invocation -> {
             createEntered.countDown();
@@ -791,14 +791,15 @@ class Ec2ContainerManagerTest {
         try {
             harness.manager().launch(instance("i-backpressure-1"), "ubuntu:24.04", null, "us-west-2");
             harness.manager().launch(instance("i-backpressure-2"), "ubuntu:24.04", null, "us-west-2");
-            Future<?> callerRunsLaunch = callerExecutor.submit(() ->
-                    harness.manager().launch(instance("i-backpressure-3"), "ubuntu:24.04", null, "us-west-2"));
+            Instance rejectedInstance = instance("i-backpressure-3");
+            Future<?> rejectedLaunch = callerExecutor.submit(() ->
+                    harness.manager().launch(rejectedInstance, "ubuntu:24.04", null, "us-west-2"));
 
-            assertTrue(createEntered.await(2, TimeUnit.SECONDS), "worker and caller should enter Docker launch");
-            assertFalse(callerRunsLaunch.isDone(), "saturated launch must apply caller-runs backpressure");
+            assertTrue(createEntered.await(2, TimeUnit.SECONDS), "worker launch should enter Docker launch");
+            assertTrue(rejectedLaunch.get(2, TimeUnit.SECONDS) == null, "rejected launch should return immediately");
+            assertEquals("terminated", rejectedInstance.getState().getName());
 
             releaseCreate.countDown();
-            callerRunsLaunch.get(2, TimeUnit.SECONDS);
         } finally {
             releaseCreate.countDown();
             harness.manager().stop();
