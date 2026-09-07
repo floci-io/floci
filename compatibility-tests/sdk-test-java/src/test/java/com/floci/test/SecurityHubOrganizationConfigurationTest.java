@@ -94,12 +94,22 @@ class SecurityHubOrganizationConfigurationTest {
                 assertThat(administrator.listTagsForResource(request -> request.resourceArn(policy.arn())).tags())
                         .containsEntry("env", "test");
             } finally {
-                organizations.removeAccountFromOrganization(request -> request.accountId(memberAccount));
-                organizations.removeAccountFromOrganization(request -> request.accountId(adminAccount));
+                cleanup("remove member account", () ->
+                        organizations.removeAccountFromOrganization(request -> request.accountId(memberAccount)));
+                cleanup("remove administrator account", () ->
+                        organizations.removeAccountFromOrganization(request -> request.accountId(adminAccount)));
                 if (createdOrganization) {
-                    organizations.deleteOrganization();
+                    cleanup("delete test organization", organizations::deleteOrganization);
                 }
             }
+        }
+    }
+
+    private static void cleanup(String action, Runnable cleanup) {
+        try {
+            cleanup.run();
+        } catch (RuntimeException e) {
+            LOG.warnf(e, "Security Hub compatibility cleanup failed: %s", action);
         }
     }
 
