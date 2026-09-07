@@ -46,6 +46,7 @@ public class FirehoseJsonHandler {
                 S3Destination s3 = null;
                 if (request.has("S3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("S3DestinationConfiguration"), S3Destination.class);
+                    dropExtendedOnlyMembers(s3);
                     S3DestinationValidator.validateWireShape(s3, "s3DestinationConfiguration");
                 } else if (request.has("ExtendedS3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("ExtendedS3DestinationConfiguration"), S3Destination.class);
@@ -81,6 +82,7 @@ public class FirehoseJsonHandler {
                     S3DestinationValidator.validateWireShape(update, "extendedS3DestinationUpdate");
                 } else if (request.has("S3DestinationUpdate")) {
                     update = mapper.treeToValue(request.get("S3DestinationUpdate"), S3Destination.class);
+                    dropExtendedOnlyMembers(update);
                     S3DestinationValidator.validateWireShape(update, "s3DestinationUpdate");
                 }
                 firehoseService.updateDestination(name, currentVersionId, destinationId, update);
@@ -193,6 +195,22 @@ public class FirehoseJsonHandler {
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    /**
+     * Clears the members AWS models only on the extended S3 shapes, so a request that
+     * puts one on {@code S3DestinationConfiguration} or {@code S3DestinationUpdate} is
+     * answered as AWS answers it. The shapes share one class here, which would
+     * otherwise let the legacy ones store a member their contract does not define.
+     *
+     * Dropped rather than rejected: AWS's JSON protocol ignores a member the shape does
+     * not model, so a request carrying one succeeds with the member disregarded. The
+     * SDKs cannot even send it, since it is absent from the legacy shape's model.
+     */
+    private static void dropExtendedOnlyMembers(S3Destination s3) {
+        if (s3 != null) {
+            s3.setDataFormatConversionConfiguration(null);
+        }
     }
 
     /** DeliveryStreamType values the 2015-08-04 model enumerates. */
