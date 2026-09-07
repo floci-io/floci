@@ -838,6 +838,9 @@ public class DynamoDbJsonHandler {
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
+    private static final String SELECT_NEEDS_PROJECTION =
+            "Must specify the AttributesToGet or ProjectionExpression when choosing to get SPECIFIC_ATTRIBUTES";
+
     private Response handleQuery(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
         DynamoDbTableNames.resolve(tableName); // validate tableName first
@@ -921,8 +924,9 @@ public class DynamoDbJsonHandler {
 
         boolean hasAttributesToGet = attributesToGet != null && attributesToGet.size() > 0;
         if ("SPECIFIC_ATTRIBUTES".equals(select) && projectionExpression == null && !hasAttributesToGet) {
+            // Query prefixes the count here, Scan does not.
             throw new AwsException("ValidationException",
-                    "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
+                    "1 validation error detected: " + SELECT_NEEDS_PROJECTION, 400);
         }
 
         TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
@@ -1096,8 +1100,7 @@ public class DynamoDbJsonHandler {
         boolean hasAttributesToGetScan = attributesToGetScan != null && attributesToGetScan.size() > 0;
         if ("SPECIFIC_ATTRIBUTES".equals(select)
                 && projectionExpressionScan == null && !hasAttributesToGetScan) {
-            throw new AwsException("ValidationException",
-                    "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
+            throw new AwsException("ValidationException", SELECT_NEEDS_PROJECTION, 400);
         }
 
         TableDefinition scanTable = dynamoDbService.describeTable(tableName, region);

@@ -387,6 +387,36 @@ class DynamoDbAccessPathValidatorTest {
         assertEquals("Query key condition not supported", error.getMessage());
     }
 
+    @Test
+    void namesTheSelectValueWhenRejectingAProjectionExpression() {
+        AwsException allAttributes = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "ALL_ATTRIBUTES", "sk", null, null));
+        assertEquals("Cannot specify the ProjectionExpression when choosing to get ALL_ATTRIBUTES",
+                allAttributes.getMessage());
+
+        AwsException count = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "COUNT", "sk", null, null));
+        assertEquals("Cannot specify the ProjectionExpression when choosing to get only the Count",
+                count.getMessage());
+    }
+
+    @Test
+    void reportsTheProjectionExpressionConflictBeforeTheMissingIndex() {
+        AwsException both = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "ALL_PROJECTED_ATTRIBUTES", "sk", null, null));
+        assertEquals("Cannot specify the ProjectionExpression when choosing to get ALL_PROJECTED_ATTRIBUTES",
+                both.getMessage());
+
+        AwsException indexOnly = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "ALL_PROJECTED_ATTRIBUTES", null, null, null));
+        assertEquals("ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName",
+                indexOnly.getMessage());
+    }
+
     private void validateExpression(DynamoDbAccessPath accessPath, String expression) {
         DynamoDbAccessPathValidator.validateQuery(
                 table, accessPath, null, expression, null, null, null,
