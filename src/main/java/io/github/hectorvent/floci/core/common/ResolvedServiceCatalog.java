@@ -35,6 +35,7 @@ import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
 import io.github.hectorvent.floci.services.macie2.MacieController;
 import io.github.hectorvent.floci.services.account.AccountController;
 import io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController;
+import io.github.hectorvent.floci.services.inspector2.Inspector2Controller;
 import io.github.hectorvent.floci.services.aps.ApsController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerControlController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
@@ -423,6 +424,9 @@ public class ResolvedServiceCatalog {
                 descriptor("identitystore", "identitystore", config.services().identitystore().enabled(), true,
                         "identitystore", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON), Set.of("AWSIdentityStore."), Set.of("identitystore"), Set.of(), Set.of()),
+                descriptor("inspector2", "inspector2", config.services().inspector2().enabled(), true,
+                        "inspector2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("inspector2"), Set.of(), Set.of(Inspector2Controller.class)),
                 descriptor("autoscaling", "autoscaling", config.services().autoscaling().enabled(), true,
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),

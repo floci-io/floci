@@ -35,6 +35,7 @@ import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
 import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
 import software.amazon.awssdk.services.macie2.Macie2Client;
+import software.amazon.awssdk.services.inspector2.Inspector2Client;
 import software.amazon.awssdk.services.rum.RumClient;
 import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2Client;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
@@ -318,6 +319,14 @@ public final class TestFixtures {
 
     public static Macie2Client macie2Client(String accountId) {
         return Macie2Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
+    public static Inspector2Client inspector2Client(String accountId) {
+        return Inspector2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
