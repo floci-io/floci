@@ -59,7 +59,13 @@ Any other value, including differently-cased ones such as `SNAPPY` instead of `S
 
 ## Data format conversion
 
-`DataFormatConversionConfiguration` on the extended S3 destination is accepted, validated, persisted, and echoed back by `DescribeDeliveryStream`. **The conversion itself, JSON to Parquet at delivery time, is not implemented yet**: a conversion-enabled stream delivers its records unconverted, under the usual key format, and creating or updating one logs a warning saying so.
+`DataFormatConversionConfiguration` on the extended S3 destination converts buffered JSON records to Parquet at delivery time, typed by the stream's Glue table schema. Parquet is the only format Floci writes: the configuration is validated as AWS models it, but an enabled `OrcSerDe` is rejected at create and update time, so the rest of this section describes the Parquet path only. The Parquet file itself is written by the `floci-duck` sidecar (the same engine behind Athena, S3 Select, and CUR), so conversion needs Docker available, or a pre-started sidecar via `floci.services.duck.url`.
+
+Each buffered record is parsed and type-checked against the Glue table's columns. The valid rows are staged as NDJSON in `floci.services.firehose.staging-bucket`, then written to the destination as one Parquet object keyed like any other delivery but ending in `.parquet`, unless `FileExtension` replaces it. `ParquetSerDe.Compression` picks the codec, SNAPPY by default.
+
+Records that cannot be converted fail **individually**, as on AWS: the rest of the batch still converts. They are delivered instead to the evaluated `ErrorOutputPrefix`, where `!{firehose:error-output-type}` resolves to `format-conversion-failed`, as one extensionless object holding an NDJSON line per record: `attemptsMade`, `arrivalTimestamp`, `lastErrorCode`, `lastErrorMessage`, `attemptEndingTimestamp`, base64 `rawData`, and a `dataCatalogTable` block. The code is `DataFormatConversion.ParseError` for a record that is not valid JSON, `DataFormatConversion.MalformedData` for one whose values do not fit the column types.
+
+A failure of the batch as a whole is routed rather than discarded: a missing Glue table, a schema Floci cannot convert, or a sidecar failure sends every buffered record to the error output, under `DataFormatConversion.EntityNotFoundException`, `.UnsupportedSchema` and `.InternalError` respectively; those three codes are Floci's own. That routing is only as good as the write it depends on. Floci does not retry a delivery, and a flush whose S3 write fails loses its batch on a DirectPut stream, with or without conversion.
 
 Validation matches AWS on both `CreateDeliveryStream` and `UpdateDestination`, down to the [modeled](https://docs.aws.amazon.com/firehose/latest/APIReference/API_DataFormatConversionConfiguration.html) bounds, enums and patterns, so a raw JSON client cannot store a configuration AWS would reject. Two rules are worth knowing because they constrain the destination rather than the conversion block: `CompressionFormat` must be `UNCOMPRESSED`, compression being chosen by the output serializer instead, and an explicitly specified `BufferingHints.SizeInMBs` must be at least 64. Omitting `BufferingHints` stores 128 MiB, AWS's larger default for converting streams, rather than the ordinary 5 MiB.
 
@@ -67,10 +73,15 @@ An omitted `Enabled` counts as enabled; `Enabled: false` stores and merges the c
 
 ### Known deviations from AWS
 
-- **An enabled `OrcSerDe` is rejected** with `InvalidArgumentException` at create/update time. Real AWS accepts it; Floci's planned conversion engine (DuckDB) cannot write ORC, and refusing early beats storing a configuration that could never deliver. A disabled one is stored and echoed with its ORC members intact.
-- **The Glue table is not resolved at create or update time.** Real AWS rejects a `SchemaConfiguration` naming a database or table that does not exist, with `InvalidArgumentException` wrapping a Glue `EntityNotFoundException`; Floci accepts it. Floci performs no role-assumption check either, where AWS validates the role last.
+- **An enabled `OrcSerDe` is rejected** with `InvalidArgumentException` at create/update time. Real AWS accepts it; DuckDB cannot write ORC, and refusing early beats storing a configuration that could never deliver. A disabled one is stored and echoed with its ORC members intact.
+- **The Glue table is not resolved at create or update time.** Real AWS rejects a `SchemaConfiguration` naming a database or table that does not exist, with `InvalidArgumentException` wrapping a Glue `EntityNotFoundException`. Floci accepts it and only discovers the missing table at delivery, routing that batch to the error output as `DataFormatConversion.EntityNotFoundException`. Floci performs no role-assumption check either, where AWS validates the role last.
 - **Two kinds of validation are skipped**: the element constraints AWS puts on `OrcSerDe.BloomFilterColumns` and `HiveJsonSerDe.TimestampFormats` entries (the equivalent ones on `ColumnToJsonKeyMappings` are enforced), and AWS's semantic check of SerDe option values, which answers `InvalidArgumentException` ("Invalid deserializer option(s): ...") for a well-formed but unusable value.
 - A malformed but non-empty `SchemaConfiguration.RoleARN` is accepted. AWS answers `InvalidParameterValueException` ("Invalid role ARN.") before its modeled rules run; Floci validates no ARNs, so it applies only the length and pattern rules, which an empty value trips exactly as on AWS.
+- **Several stored members do not reach the conversion**: `HiveJsonSerDe.TimestampFormats`, `OpenXJsonSerDe.ConvertDotsInJsonKeysToUnderscores`, every `ParquetSerDe` member except `Compression`, and `SchemaConfiguration.Region`, `CatalogId` and `VersionId`, which are not resolved against the Glue store (Floci's catalog is neither region- nor version-partitioned) and only flow into the error-output metadata.
+- An epoch timestamp outside the range AWS's Parquet writer can hold wraps there into an unrelated instant (probed: `999999999999` seconds arrives as the year 2092, not 33658). Floci keeps such a value as long as it is representable as a `TIMESTAMP`, and fails only a value beyond that, as its own record's `DataFormatConversion.MalformedData` rather than as a silently corrupted row.
+- Complex and binary Hive types (`array`, `map`, `struct`, `binary`) are not convertible; a schema containing them routes the batch to the error output as `DataFormatConversion.UnsupportedSchema`.
+- Error-output records report the delivery time as both `arrivalTimestamp` and `attemptEndingTimestamp` (Floci does not track per-record arrival), and omit AWS's `sequenceNumber`/`subSequenceNumber` members. An absent `ErrorOutputPrefix` writes them at the bucket root with no default time prefix, which matches AWS's object-name documentation but was not probed.
+- The Parquet object carries no `Content-Encoding`, where AWS labels it `hadoop-snappy` even though the body is a plain Parquet file (probed), and its row order may differ from put order, as it does on AWS (probed).
 
 ## S3 object keys
 
@@ -89,6 +100,7 @@ Known deviations from AWS: timestamps are evaluated at flush time instead of the
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_FIREHOSE_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_FIREHOSE_STAGING_BUCKET` | `floci-firehose-staging` | S3 bucket used to stage NDJSON batches before DuckDB writes the Parquet object |
 
 ## Example
 

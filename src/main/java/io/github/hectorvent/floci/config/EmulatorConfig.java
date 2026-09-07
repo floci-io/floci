@@ -1467,6 +1467,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("0")
         int flushRecordCount();
+
+        /**
+         * S3 bucket used to stage validated NDJSON batches before DuckDB writes
+         * the Parquet object for data-format-converting delivery streams.
+         * Created on first use if it doesn't exist.
+         */
+        @WithDefault("floci-firehose-staging")
+        String stagingBucket();
     }
 
     interface KmsServiceConfig {

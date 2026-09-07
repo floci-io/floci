@@ -48,11 +48,46 @@ final class S3ObjectKeyResolver {
 
     static String resolveKey(S3Destination s3, String streamName, String versionId,
                              Instant deliveryTime, FirehoseCompression compression) {
+        return resolveKey(s3, streamName, versionId, deliveryTime, compression.extension());
+    }
+
+    /**
+     * Variant for format-converting deliveries, whose extension comes from the
+     * output format (.parquet) rather than the compression format; an explicit
+     * {@code FileExtension} still replaces it, like on plain deliveries.
+     */
+    static String resolveKey(S3Destination s3, String streamName, String versionId,
+                             Instant deliveryTime, String defaultExtension) {
         ZonedDateTime time = ZonedDateTime.ofInstant(
                 deliveryTime, resolveZone(s3 == null ? null : s3.getCustomTimeZone()));
         return evaluatePrefix(s3 == null ? null : s3.getPrefix(), time)
                 + objectNameSuffix(streamName, versionId, time)
-                + fileExtension(s3, compression);
+                + fileExtension(s3, defaultExtension);
+    }
+
+    /**
+     * Error-output object key: {@code <evaluated ErrorOutputPrefix><suffix>} with no
+     * file extension (verified against real AWS for format-conversion failures). The
+     * prefix supports the same expressions as {@code Prefix} plus
+     * {@code !{firehose:error-output-type}}, and unlike the data prefix it gets no
+     * default {@code yyyy/MM/dd/HH/} appended when absent or expressionless.
+     */
+    static String resolveErrorKey(S3Destination s3, String streamName, String versionId,
+                                  Instant deliveryTime, String errorOutputType) {
+        ZonedDateTime time = ZonedDateTime.ofInstant(
+                deliveryTime, resolveZone(s3 == null ? null : s3.getCustomTimeZone()));
+        String prefix = s3 == null ? null : s3.getErrorOutputPrefix();
+        StringBuilder out = new StringBuilder();
+        Matcher matcher = EXPRESSION.matcher(prefix == null ? "" : prefix);
+        while (matcher.find()) {
+            String replacement = "firehose".equals(matcher.group("namespace"))
+                    && "error-output-type".equals(matcher.group("argument"))
+                    ? errorOutputType
+                    : evaluateExpression(matcher, time);
+            matcher.appendReplacement(out, Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(out);
+        return out + objectNameSuffix(streamName, versionId, time);
     }
 
     /**
@@ -61,9 +96,9 @@ final class S3ObjectKeyResolver {
      * means "not specified" (both verified against real AWS). It changes only the
      * key, never how the body is compressed.
      */
-    private static String fileExtension(S3Destination s3, FirehoseCompression compression) {
+    private static String fileExtension(S3Destination s3, String defaultExtension) {
         String fileExtension = s3 == null ? null : s3.getFileExtension();
-        return fileExtension == null || fileExtension.isEmpty() ? compression.extension() : fileExtension;
+        return fileExtension == null || fileExtension.isEmpty() ? defaultExtension : fileExtension;
     }
 
     static String evaluatePrefix(String prefix, ZonedDateTime time) {

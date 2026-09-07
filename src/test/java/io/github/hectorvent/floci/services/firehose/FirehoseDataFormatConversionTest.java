@@ -58,6 +58,8 @@ class FirehoseDataFormatConversionTest {
     private static final String DESTINATION_ID = "destinationId-000000000001";
 
     private FirehoseService service;
+    private FirehoseParquetConverter parquetConverter;
+    private S3Service s3Service;
 
     @BeforeEach
     void setUp() {
@@ -78,8 +80,11 @@ class FirehoseDataFormatConversionTest {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
         when(regionResolver.getAccountId()).thenReturn("000000000000");
-        service = new FirehoseService(storageFactory, Mockito.mock(S3Service.class),
-                Mockito.mock(KinesisService.class), regionResolver, new MutableClock(), config);
+        parquetConverter = Mockito.mock(FirehoseParquetConverter.class);
+        s3Service = Mockito.mock(S3Service.class);
+        service = new FirehoseService(storageFactory, s3Service,
+                Mockito.mock(KinesisService.class), regionResolver, new MutableClock(), config,
+                parquetConverter);
     }
 
     private static SchemaConfiguration schema() {
@@ -509,6 +514,41 @@ class FirehoseDataFormatConversionTest {
         assertEquals("UNCOMPRESSED", stored.getCompressionFormat());
         assertEquals("db", stored.getDataFormatConversionConfiguration()
                 .getSchemaConfiguration().getDatabaseName());
+    }
+
+    /** Conversion-enabled flushes route through the converter instead of the raw concat path. */
+    @Test
+    void flushDelegatesConversionEnabledStreamsToTheConverter() {
+        Mockito.when(parquetConverter.deliver(any(), anyString(), any(), any()))
+                .thenReturn(new FirehoseParquetConverter.Outcome(1, 0, "data/key.parquet", null));
+        service.createDeliveryStream("stream", destination(s3 -> {}));
+        service.putRecord("stream", record("{\"ticker\": \"AAA\"}"));
+
+        service.flush("stream");
+
+        Mockito.verify(parquetConverter).deliver(any(), Mockito.eq("results"), any(), any());
+        Mockito.verify(s3Service, Mockito.never()).putObject(anyString(), anyString(),
+                any(byte[].class), anyString(), Mockito.anyMap(), any());
+    }
+
+    @Test
+    void flushKeepsTheRawPathForDisabledConversion() {
+        service.createDeliveryStream("stream", destination(s3 ->
+                s3.getDataFormatConversionConfiguration().setEnabled(false)));
+        service.putRecord("stream", record("{\"ticker\": \"AAA\"}"));
+
+        service.flush("stream");
+
+        Mockito.verify(parquetConverter, Mockito.never()).deliver(any(), anyString(), any(), any());
+        Mockito.verify(s3Service).putObject(Mockito.eq("results"), anyString(),
+                any(byte[].class), anyString(), Mockito.anyMap(), any());
+    }
+
+    private static io.github.hectorvent.floci.services.firehose.model.Record record(String json) {
+        io.github.hectorvent.floci.services.firehose.model.Record record =
+                new io.github.hectorvent.floci.services.firehose.model.Record();
+        record.setData(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return record;
     }
 
     @Test

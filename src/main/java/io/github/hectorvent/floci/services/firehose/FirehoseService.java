@@ -100,6 +100,7 @@ public class FirehoseService implements ResourceProvider {
     // Values are replaced whole, never mutated in place, so a flusher that snapshots one
     // commits exactly the position that snapshot covered.
     private final Map<String, Map<String, String>> pendingSourceIterators = new ConcurrentHashMap<>();
+    private final FirehoseParquetConverter parquetConverter;
     private final Clock clock;
     private final long tickIntervalSeconds;
     private final int flushRecordCount;
@@ -184,7 +185,8 @@ public class FirehoseService implements ResourceProvider {
 
     @Inject
     public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
-                           RegionResolver regionResolver, Clock clock, EmulatorConfig config) {
+                           RegionResolver regionResolver, Clock clock, EmulatorConfig config,
+                           FirehoseParquetConverter parquetConverter) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.sourceIteratorStore = storageFactory.create("firehose", "source-iterators.json",
@@ -192,6 +194,7 @@ public class FirehoseService implements ResourceProvider {
         this.s3Service = s3Service;
         this.kinesisService = kinesisService;
         this.regionResolver = regionResolver;
+        this.parquetConverter = parquetConverter;
         this.clock = clock;
         this.tickIntervalSeconds = Math.max(1, config.services().firehose().tickIntervalSeconds());
         this.flushRecordCount = Math.max(0, config.services().firehose().flushRecordCount());
@@ -325,7 +328,6 @@ public class FirehoseService implements ResourceProvider {
         streamPut(streamKey, description);
         buffers.put(streamKey, Collections.synchronizedList(new ArrayList<>()));
         LOG.infov("Created Firehose delivery stream: {0}", name);
-        warnIfConversionEnabled(name, s3Config);
         return arn;
     }
 
@@ -376,26 +378,6 @@ public class FirehoseService implements ResourceProvider {
         stream.setLastUpdateTimestamp(java.time.Instant.now());
         streamPut(streamKey, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
-        warnIfConversionEnabled(name, stream.s3Destination());
-    }
-
-    /**
-     * Says, where the configuration is set, that conversion will not be applied. Fires
-     * on every create and on every update that leaves conversion enabled, including an
-     * update about something else, so a caller who keeps changing the destination keeps
-     * being told.
-     *
-     * Deliberately not in the flush path: that runs on every buffered delivery and on
-     * every retry after a failed write, so warning there floods the log and needs a
-     * per-stream marker whose lifetime has to track creates and deletes. Create and
-     * update are caller-driven and rare by comparison, and they are the moments a
-     * caller can act on the warning anyway.
-     */
-    private static void warnIfConversionEnabled(String name, S3Destination s3) {
-        if (s3 != null && s3.isDataFormatConversionEnabled()) {
-            LOG.warnv("Delivery stream {0} enables data format conversion, which Floci does not"
-                    + " apply yet; its records will be delivered unconverted", name);
-        }
     }
 
     public void startDeliveryStreamEncryption(String name, String keyType, String keyArn) {
@@ -865,6 +847,16 @@ public class FirehoseService implements ResourceProvider {
         try {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
+            if (s3 != null && s3.isDataFormatConversionEnabled()) {
+                ensureBucket(bucket);
+                FirehoseParquetConverter.Outcome outcome =
+                        parquetConverter.deliver(stream, bucket, toFlush, clock.instant());
+                LOG.infov("Converted {0} records ({1} failed) from stream {2} to s3://{3}/{4}",
+                        outcome.convertedRecords(), outcome.failedRecords(), streamName, bucket,
+                        outcome.dataKey() != null ? outcome.dataKey() : outcome.errorKey());
+                commitSourceIterators(streamName, checkpoint);
+                return;
+            }
             FirehoseCompression compression =
                     FirehoseCompression.forDelivery(s3 == null ? null : s3.getCompressionFormat());
             String key = S3ObjectKeyResolver.resolveKey(s3, stream.getDeliveryStreamName(),

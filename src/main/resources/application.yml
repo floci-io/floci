@@ -396,6 +396,7 @@ floci:
       enabled: true
       tick-interval-seconds: 10
       flush-record-count: 0
+      staging-bucket: floci-firehose-staging
     kms:
       enabled: true
     cognito:
