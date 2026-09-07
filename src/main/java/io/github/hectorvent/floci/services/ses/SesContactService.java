@@ -12,15 +12,19 @@ import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
+import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.UnaryOperator;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -31,9 +35,9 @@ import java.util.regex.Pattern;
  * <p>New facet: a multi-store domain — one service owns both stores and the locks that serialize
  * them (contact create/update against contact-list deletion), collapsing two SesService constructor
  * arguments into one. It also owns the list-management contact behaviour used during a send
- * ({@link #getOrAutoCreateContact}, {@link #isListManagementOptedOut}, {@link #unsubscribeContact});
- * the facade's send orchestration ({@code collectListManagementOptOuts}) stays in {@link SesService}
- * and calls into this service, keeping the shared {@code extractEmailAddress} send helper there.
+ * ({@link #getOrAutoCreateContact}, {@link #isListManagementOptedOut}, {@link #unsubscribeContact}),
+ * including {@link #collectListManagementOptOuts}, which resolves a send's opted-out recipients
+ * with the facade's address extractor injected as a callback.
  */
 @ApplicationScoped
 public class SesContactService {
@@ -622,5 +626,53 @@ public class SesContactService {
             prefs.add(new TopicPreference(topicName, status));
         }
         contact.setTopicPreferences(prefs);
+    }
+
+    /**
+     * Resolves the recipients suppressed by SES V2 {@code SendEmail} {@code ListManagementOptions}:
+     * for each envelope recipient that is opted out of the named contact list (or the given topic),
+     * returns a {@code BOUNCE} suppression reason so the shared send path drops the recipient from
+     * the relay and publishes a Bounce event, matching AWS ("SES will issue a bounce event for a
+     * message that is sent to an unsubscribed contact"). Returns an empty map when no
+     * {@code ListManagementOptions} was supplied. The display-name stripping is the facade's shared
+     * send helper, injected as {@code addressExtractor} so this service stays free of facade
+     * dependencies. Throws when the contact list does not exist, so a
+     * bad reference fails the whole send. A recipient that is not yet a contact is created
+     * automatically (matching AWS), then evaluated like any other contact.
+     */
+    public Map<String, String> collectListManagementOptOuts(Collection<String> addresses,
+                                                            ListManagementOptions listManagement, String region,
+                                                            UnaryOperator<String> addressExtractor) {
+        Objects.requireNonNull(addressExtractor, "addressExtractor is required");
+        if (listManagement == null || listManagement.contactListName() == null
+                || listManagement.contactListName().isBlank() || addresses == null || addresses.isEmpty()) {
+            return Map.of();
+        }
+        ContactList list = getContactList(listManagement.contactListName(), region);
+        String topicName = listManagement.topicName();
+        String effectiveTopic = (topicName == null || topicName.isBlank()) ? null : topicName;
+        // Fail fast on a topic that isn't defined on the list rather than silently skipping
+        // suppression (a typo would otherwise send to everyone). AWS does not document this, so the
+        // exact error is best-effort.
+        if (effectiveTopic != null && defaultTopicStatus(list, effectiveTopic) == null) {
+            throw new AwsException("BadRequestException",
+                    "Topic " + effectiveTopic + " does not exist in contact list "
+                            + list.getContactListName() + ".", 400);
+        }
+        Map<String, String> optOuts = new LinkedHashMap<>();
+        for (String address : addresses) {
+            if (address == null || address.isBlank() || optOuts.containsKey(address)) {
+                continue;
+            }
+            String email = addressExtractor.apply(address);
+            if (email == null || email.isBlank()) {
+                continue;
+            }
+            Contact contact = getOrAutoCreateContact(list, email, region);
+            if (isListManagementOptedOut(contact, list, effectiveTopic)) {
+                optOuts.put(address, "BOUNCE");
+            }
+        }
+        return optOuts;
     }
 }

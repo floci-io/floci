@@ -7,7 +7,9 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
+import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
@@ -21,8 +23,10 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
@@ -30,13 +34,13 @@ import java.util.regex.Pattern;
  * split: the store, key derivation, name validation, CRUD, the domain-pure option setters, and the
  * event destinations live here.
  *
- * <p>The boundary follows the cross-domain seams: option validation that reads OTHER domains stays
- * in the facade (tracking options check a verified domain identity, delivery options check a
- * dedicated IP pool), which validates first (or resolves existence through {@link #get}) and then
- * mutates through {@link #save}. The ARN-dispatched configuration-set tagging and the send-time
- * validation ({@link #validateForSending}: existence plus the sending-paused gate) live here; the
- * facade keeps the remaining send-path reads (event publishing, effective suppression reasons)
- * and the tenant delete-guard around {@link #remove}.
+ * <p>The option validation that reads OTHER domains lives here too, with the cross-domain probes
+ * (a verified domain identity for tracking, an existing dedicated IP pool for delivery) injected
+ * as predicates by the facade, so the service owns every validated create and option operation
+ * without gaining a peer-service dependency. The ARN-dispatched configuration-set tagging and the
+ * send-time validation ({@link #validateForSending}: existence plus the sending-paused gate) live
+ * here as well; the facade keeps the send-path reads (event publishing, effective suppression
+ * reasons) and the tenant delete-guard around {@link #remove}.
  */
 @ApplicationScoped
 public class SesConfigurationSetService {
@@ -65,10 +69,43 @@ public class SesConfigurationSetService {
     }
 
     /**
-     * Stores a validated configuration set. The option validation runs in the facade first, since
-     * the cross-domain pieces (tracking's verified-domain check, delivery's dedicated-pool check)
-     * can't live here, so this owns only the duplicate check, the timestamp, and the write.
+     * v1 CreateConfigurationSet / v2 CreateConfigurationSet: the full probe-confirmed validation
+     * sequence (name, tags, suppression reasons, tracking, delivery, VDM) followed by the write.
+     * The two cross-domain probes arrive as predicates from the facade.
      */
+    public ConfigurationSet createConfigurationSet(ConfigurationSet configSet, String region,
+                                                   Predicate<String> verifiedDomainIdentity,
+                                                   Predicate<String> dedicatedIpPoolExists) {
+        if (configSet == null) {
+            throw new AwsException("InvalidParameterValue",
+                    "ConfigurationSetName is required.", 400);
+        }
+        validateConfigurationSetName(configSet.getName());
+        SesTags.validate(configSet.getTags());
+        if (configSet.getSuppressionOptions() != null
+                && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
+            for (String reason : configSet.getSuppressionOptions().getSuppressedReasons()) {
+                if (reason == null) {
+                    throw new AwsException("BadRequestException",
+                            invalidSuppressionReasonMessage(null), 400);
+                }
+                if (!isValidSuppressionReason(reason)) {
+                    throw new AwsException("BadRequestException",
+                            "1 validation error detected: Value at "
+                                    + "'suppressionOptions.suppressedReasons' failed to satisfy "
+                                    + "constraint: Member must satisfy constraint: "
+                                    + "[Member must satisfy enum value set: [BOUNCE, COMPLAINT]]",
+                            400);
+                }
+            }
+        }
+        validateTrackingOptions(configSet.getTrackingOptions(), verifiedDomainIdentity);
+        validateDeliveryOptions(configSet.getDeliveryOptions(), dedicatedIpPoolExists);
+        validateVdmOptions(configSet.getVdmOptions());
+        return create(configSet, region);
+    }
+
+    /** The raw duplicate check, timestamp, and write behind the validated create above. */
     public ConfigurationSet create(ConfigurationSet configSet, String region) {
         String key = configSetKey(region, configSet.getName());
         if (configSetStore.get(key).isPresent()) {
@@ -131,6 +168,147 @@ public class SesConfigurationSetService {
         }
     }
 
+    // The cross-domain probes (a verified domain identity for tracking, an existing dedicated IP
+    // pool for delivery) are injected as predicates by the facade, so this service stays free of
+    // peer-service dependencies while owning the full probe-confirmed validation sequences.
+    private static final Set<String> HTTPS_POLICIES =
+            Set.of("REQUIRE", "REQUIRE_OPEN_ONLY", "OPTIONAL");
+    private static final Set<String> TLS_POLICIES = Set.of("REQUIRE", "OPTIONAL");
+
+
+    void validateTrackingOptions(TrackingOptions options, Predicate<String> verifiedDomainIdentity) {
+        Objects.requireNonNull(verifiedDomainIdentity, "verifiedDomainIdentity probe is required");
+        if (options == null) {
+            return;
+        }
+        String domain = options.getCustomRedirectDomain();
+        String httpsPolicy = options.getHttpsPolicy();
+        // AWS validation order (verified against real AWS 2026-06-17): a present
+        // CustomRedirectDomain must be non-blank, and it is required whenever
+        // HttpsPolicy is set; then the domain must be a verified domain identity
+        // (checked even without HttpsPolicy); then HttpsPolicy must be a valid enum.
+        if ((domain != null && domain.isBlank()) || (httpsPolicy != null && domain == null)) {
+            throw new AwsException("BadRequestException",
+                    "CustomRedirectDomain must be specified.", 400);
+        }
+        if (domain != null && !verifiedDomainIdentity.test(domain)) {
+            throw new AwsException("BadRequestException",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
+        }
+        if (httpsPolicy != null && !HTTPS_POLICIES.contains(httpsPolicy)) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'httpsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]", 400);
+        }
+    }
+
+    void validateDeliveryOptions(DeliveryOptions options, Predicate<String> dedicatedIpPoolExists) {
+        Objects.requireNonNull(dedicatedIpPoolExists, "dedicatedIpPoolExists probe is required");
+        if (options == null) {
+            return;
+        }
+        if (options.getTlsPolicy() != null && !TLS_POLICIES.contains(options.getTlsPolicy())) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'tlsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]", 400);
+        }
+        // AWS rejects a blank SendingPoolName outright, and a non-existent
+        // dedicated IP pool (both verified against real AWS 2026-06-17). The
+        // pool must have been created via CreateDedicatedIpPool.
+        if (options.getSendingPoolName() != null) {
+            if (options.getSendingPoolName().isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "sendingPoolName can't be blank.", 400);
+            }
+            if (!dedicatedIpPoolExists.test(options.getSendingPoolName())) {
+                throw new AwsException("BadRequestException",
+                        "SendingPool <" + options.getSendingPoolName() + "> doesn't exist", 400);
+            }
+        }
+        // AWS constrains MaxDeliverySeconds to [300, 50400] (max verified against
+        // real AWS 2026-06-17; min follows the same smithy range-constraint shape).
+        if (options.getMaxDeliverySeconds() != null) {
+            long maxDeliverySeconds = options.getMaxDeliverySeconds();
+            if (maxDeliverySeconds < 300) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value greater than or equal to 300", 400);
+            }
+            if (maxDeliverySeconds > 50400) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value less than or equal to 50400", 400);
+            }
+        }
+    }
+
+    void requireVerifiedRedirectDomain(String domain, Predicate<String> verifiedDomainIdentity) {
+        Objects.requireNonNull(verifiedDomainIdentity, "verifiedDomainIdentity probe is required");
+        if (domain == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'trackingOptions' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (domain.isBlank()) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "At least one field of TrackingOptions must contain a value.", 400);
+        }
+        if (!verifiedDomainIdentity.test(domain)) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
+        }
+    }
+
+    /** v2 PutConfigurationSetTrackingOptions: validated replace of the tracking options. */
+    public void setTrackingOptions(String configSetName, TrackingOptions options, String region,
+                                   Predicate<String> verifiedDomainIdentity) {
+        ConfigurationSet cs = get(configSetName, region);
+        validateTrackingOptions(options, verifiedDomainIdentity);
+        cs.setTrackingOptions(options);
+        save(cs, region);
+        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    /** v2 PutConfigurationSetDeliveryOptions: validated replace of the delivery options. */
+    public void setDeliveryOptions(String configSetName, DeliveryOptions options, String region,
+                                   Predicate<String> dedicatedIpPoolExists) {
+        ConfigurationSet cs = get(configSetName, region);
+        validateDeliveryOptions(options, dedicatedIpPoolExists);
+        cs.setDeliveryOptions(options);
+        save(cs, region);
+        LOG.infov("Updated DeliveryOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    /** v1 CreateConfigurationSetTrackingOptions: rejects a set that already has a redirect domain. */
+    public void createTrackingOptions(String configSetName, String customRedirectDomain, String region,
+                                      Predicate<String> verifiedDomainIdentity) {
+        requireVerifiedRedirectDomain(customRedirectDomain, verifiedDomainIdentity);
+        ConfigurationSet cs = get(configSetName, region);
+        if (cs.getTrackingOptions() != null && cs.getTrackingOptions().getCustomRedirectDomain() != null) {
+            throw new AwsException("TrackingOptionsAlreadyExistsException",
+                    "Configuration set <" + configSetName + "> already has tracking options.", 400);
+        }
+        TrackingOptions options = new TrackingOptions();
+        options.setCustomRedirectDomain(customRedirectDomain);
+        cs.setTrackingOptions(options);
+        save(cs, region);
+        LOG.infov("Created TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    /** v1 UpdateConfigurationSetTrackingOptions: requires existing tracking options. */
+    public void updateTrackingOptions(String configSetName, String customRedirectDomain, String region,
+                                      Predicate<String> verifiedDomainIdentity) {
+        requireVerifiedRedirectDomain(customRedirectDomain, verifiedDomainIdentity);
+        ConfigurationSet cs = get(configSetName, region);
+        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
+            throw new AwsException("TrackingOptionsDoesNotExistException",
+                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
+        }
+        cs.getTrackingOptions().setCustomRedirectDomain(customRedirectDomain);
+        save(cs, region);
+        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateConfigurationSet.Tags}. */
     public List<Tag> listTags(String name, String region) {
         return new ArrayList<>(requireForTags(name, region).getTags());
@@ -166,7 +344,7 @@ public class SesConfigurationSetService {
         return configSetStore.get(configSetKey(region, name));
     }
 
-    /** Persists a configuration set the facade mutated (the cross-domain option setters). */
+    /** Persists a configuration set mutated by an orchestration that holds the loaded record. */
     public void save(ConfigurationSet configSet, String region) {
         configSetStore.put(configSetKey(region, configSet.getName()), configSet);
     }
@@ -220,7 +398,7 @@ public class SesConfigurationSetService {
         LOG.infov("Updated VdmOptions on configuration set {0} in region {1}", configSetName, region);
     }
 
-    static void validateVdmOptions(VdmOptions options) {
+    private static void validateVdmOptions(VdmOptions options) {
         if (options == null) {
             return;
         }
@@ -284,11 +462,11 @@ public class SesConfigurationSetService {
         }
     }
 
-    static boolean isValidSuppressionReason(String reason) {
+    private static boolean isValidSuppressionReason(String reason) {
         return "BOUNCE".equals(reason) || "COMPLAINT".equals(reason);
     }
 
-    static String invalidSuppressionReasonMessage(String reason) {
+    private static String invalidSuppressionReasonMessage(String reason) {
         return "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].";
     }
 
@@ -460,7 +638,7 @@ public class SesConfigurationSetService {
         return count;
     }
 
-    static void validateConfigurationSetName(String name) {
+    private static void validateConfigurationSetName(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue",
                     "ConfigurationSetName is required.", 400);

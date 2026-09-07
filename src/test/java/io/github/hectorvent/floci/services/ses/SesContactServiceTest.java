@@ -4,12 +4,14 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
+import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -69,5 +71,25 @@ class SesContactServiceTest {
         service.unsubscribeContact(LIST, "bye@example.com", null, REGION);
         Contact c = service.getContact(LIST, "bye@example.com", REGION).contact();
         assertTrue(service.isListManagementOptedOut(c, list, null));
+    }
+
+    @Test
+    void collectListManagementOptOuts_usesInjectedExtractor_flagsOptedOut() {
+        // Sports defaults to OPT_OUT (see setUp), so an auto-created contact is opted out of it.
+        Map<String, String> optOuts = service.collectListManagementOptOuts(
+                List.of("Alice <alice@example.com>", "", "Bob <bob@example.com>"),
+                new ListManagementOptions(LIST, "Sports"), REGION,
+                address -> address.substring(address.indexOf('<') + 1, address.indexOf('>')));
+        // The ORIGINAL envelope strings key the result; the extractor only feeds the contact lookup.
+        assertEquals(Map.of("Alice <alice@example.com>", "BOUNCE", "Bob <bob@example.com>", "BOUNCE"),
+                optOuts);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.collectListManagementOptOuts(
+                List.of("alice@example.com"), new ListManagementOptions(LIST, "ghost-topic"),
+                REGION, address -> address));
+        assertEquals("Topic ghost-topic does not exist in contact list news.", e.getMessage());
+
+        assertTrue(service.collectListManagementOptOuts(
+                List.of("alice@example.com"), null, REGION, address -> address).isEmpty());
     }
 }
