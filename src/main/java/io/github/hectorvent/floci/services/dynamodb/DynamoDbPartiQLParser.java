@@ -58,11 +58,13 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    sealed interface PVal permits PVal.Str, PVal.Num, PVal.Bool, PVal.Null {
+    sealed interface PVal permits PVal.Str, PVal.Num, PVal.Bool, PVal.Null, PVal.Av {
         record Str(String v)       implements PVal {}
         record Num(String v)       implements PVal {}
         record Bool(boolean v)     implements PVal {}
         record Null()              implements PVal {}
+        // A parameter of a type with no literal syntax, kept as its wire node.
+        record Av(String type, JsonNode node) implements PVal {}
     }
 
     sealed interface Cond permits Cond.Eq, Cond.Cmp, Cond.Between, Cond.BeginsWith {
@@ -257,6 +259,30 @@ public class DynamoDbPartiQLParser {
         return conds;
     }
 
+    // Types a parameter can carry that no PartiQL literal can express.
+    private static final List<String> NON_LITERAL_TYPES = List.of("B", "SS", "NS", "BS", "L", "M");
+
+    // S, N and B are the only types DynamoDB gives an ordering.
+    private static final Set<String> ORDERED_TYPES = Set.of("S", "N", "B");
+
+    private static String typeCode(PVal val) {
+        return switch (val) {
+            case PVal.Str ignored  -> "S";
+            case PVal.Num ignored  -> "N";
+            case PVal.Bool ignored -> "BOOL";
+            case PVal.Null ignored -> "NULL";
+            case PVal.Av av        -> av.type();
+        };
+    }
+
+    private static void requireOrdered(String op, PVal val) {
+        String type = typeCode(val);
+        if (!ORDERED_TYPES.contains(type)) {
+            throw validationEx("Incorrect operand type for operator or function; "
+                    + "operator or function: " + op + ", operand type: " + type);
+        }
+    }
+
     private Cond parseCond() {
         if (peek().type() == TType.IDENT && "begins_with".equalsIgnoreCase(peek().value())) {
             advance();
@@ -273,11 +299,19 @@ public class DynamoDbPartiQLParser {
             PVal lo = parseValue();
             consume(TType.AND);
             PVal hi = parseValue();
+            requireOrdered("BETWEEN", lo);
+            requireOrdered("BETWEEN", hi);
             return new Cond.Between(attr, lo, hi);
         }
         String op = parseOp();
         PVal val = parseValue();
-        return "=".equals(op) ? new Cond.Eq(attr, val) : new Cond.Cmp(attr, op, val);
+        if ("=".equals(op)) {
+            return new Cond.Eq(attr, val);
+        }
+        if (!"<>".equals(op)) {
+            requireOrdered(op, val);
+        }
+        return new Cond.Cmp(attr, op, val);
     }
 
     private String parseOp() {
@@ -317,6 +351,9 @@ public class DynamoDbPartiQLParser {
         if (p.has("N"))    return new PVal.Num(p.get("N").asText());
         if (p.has("BOOL")) return new PVal.Bool(p.get("BOOL").asBoolean());
         if (p.has("NULL")) return new PVal.Null();
+        for (String type : NON_LITERAL_TYPES) {
+            if (p.has(type)) return new PVal.Av(type, p);
+        }
         throw validationEx("Unsupported parameter type in parameters array");
     }
 

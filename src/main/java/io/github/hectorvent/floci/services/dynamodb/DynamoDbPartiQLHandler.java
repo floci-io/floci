@@ -389,14 +389,13 @@ class DynamoDbPartiQLHandler {
     }
 
     JsonNode toTypedNode(PVal val) {
-        ObjectNode node = mapper.createObjectNode();
-        switch (val) {
-            case PVal.Str s  -> node.put("S", s.v());
-            case PVal.Num n  -> node.put("N", DynamoDbNumberUtils.validateAndNormalize(n.v()));
-            case PVal.Bool b -> node.put("BOOL", b.v());
-            case PVal.Null ignored -> node.put("NULL", true);
-        }
-        return node;
+        return switch (val) {
+            case PVal.Str s  -> mapper.createObjectNode().put("S", s.v());
+            case PVal.Num n  -> mapper.createObjectNode().put("N", DynamoDbNumberUtils.validateAndNormalize(n.v()));
+            case PVal.Bool b -> mapper.createObjectNode().put("BOOL", b.v());
+            case PVal.Null ignored -> mapper.createObjectNode().put("NULL", true);
+            case PVal.Av av -> av.node();
+        };
     }
 
     private ObjectNode emptyItemsResponse() {
