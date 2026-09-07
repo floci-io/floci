@@ -22,75 +22,128 @@ class Inspector2OrganizationConfigurationTest {
         assumeFalse(TestFixtures.isRealAws(), "Avoids changing Amazon Inspector organization settings in real AWS");
 
         try (OrganizationsClient organizations = TestFixtures.organizationsClient()) {
-            ensureOrganization(organizations);
-            String adminAccount = createMemberAccount(organizations, "inspector-admin");
-            String memberAccount = createMemberAccount(organizations, "inspector-member");
+            boolean createdOrganization = ensureOrganization(organizations);
+            String adminAccount = null;
+            String memberAccount = null;
+            boolean delegatedAdminEnabled = false;
 
-            try (Inspector2Client management = TestFixtures.inspector2Client(MANAGEMENT_ACCOUNT);
-                 Inspector2Client administrator = TestFixtures.inspector2Client(adminAccount)) {
-                assertThat(management.listDelegatedAdminAccounts(request -> {}).delegatedAdminAccounts()).isEmpty();
+            try {
+                adminAccount = createMemberAccount(organizations, "inspector-admin");
+                memberAccount = createMemberAccount(organizations, "inspector-member");
+                String delegatedAdminAccount = adminAccount;
+                String inspectedMemberAccount = memberAccount;
 
-                var enabled = management.enableDelegatedAdminAccount(request -> request
-                        .delegatedAdminAccountId(adminAccount));
-                assertThat(enabled.delegatedAdminAccountId()).isEqualTo(adminAccount);
+                try (Inspector2Client management = TestFixtures.inspector2Client(MANAGEMENT_ACCOUNT);
+                     Inspector2Client administrator = TestFixtures.inspector2Client(delegatedAdminAccount)) {
+                    assertThat(management.listDelegatedAdminAccounts(request -> {}).delegatedAdminAccounts()).isEmpty();
 
-                assertThat(management.listDelegatedAdminAccounts(request -> {}).delegatedAdminAccounts())
-                        .singleElement()
-                        .satisfies(account -> {
-                            assertThat(account.accountId()).isEqualTo(adminAccount);
-                            assertThat(account.statusAsString()).isEqualTo("ENABLED");
-                        });
+                    var enabled = management.enableDelegatedAdminAccount(request -> request
+                            .delegatedAdminAccountId(delegatedAdminAccount));
+                    delegatedAdminEnabled = true;
+                    assertThat(enabled.delegatedAdminAccountId()).isEqualTo(delegatedAdminAccount);
 
-                var enableMember = administrator.enable(request -> request
-                        .accountIds(memberAccount)
-                        .resourceTypes(ResourceScanType.EC2));
-                assertThat(enableMember.accounts()).singleElement().satisfies(account -> {
-                    assertThat(account.accountId()).isEqualTo(memberAccount);
-                    assertThat(account.resourceStatus().ec2AsString()).isEqualTo("ENABLING");
-                    assertThat(account.resourceStatus().ecrAsString()).isEqualTo("DISABLED");
-                });
+                    assertThat(management.listDelegatedAdminAccounts(request -> {}).delegatedAdminAccounts())
+                            .singleElement()
+                            .satisfies(account -> {
+                                assertThat(account.accountId()).isEqualTo(delegatedAdminAccount);
+                                assertThat(account.statusAsString()).isEqualTo("ENABLED");
+                            });
 
-                var firstStatus = administrator.batchGetAccountStatus(request -> request.accountIds(memberAccount));
-                assertThat(firstStatus.accounts()).singleElement().satisfies(account -> {
-                    assertThat(account.accountId()).isEqualTo(memberAccount);
-                    assertThat(account.state().statusAsString()).isEqualTo("ENABLING");
-                    assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("ENABLING");
-                    assertThat(account.resourceState().ecr().statusAsString()).isEqualTo("DISABLED");
-                });
-                var converged = administrator.batchGetAccountStatus(request -> request.accountIds(memberAccount));
-                assertThat(converged.accounts()).singleElement().satisfies(account -> {
-                    assertThat(account.state().statusAsString()).isEqualTo("ENABLED");
-                    assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("ENABLED");
-                    assertThat(account.resourceState().ecr().statusAsString()).isEqualTo("DISABLED");
-                });
+                    var enableMember = administrator.enable(request -> request
+                            .accountIds(inspectedMemberAccount)
+                            .resourceTypes(ResourceScanType.EC2));
+                    assertThat(enableMember.accounts()).singleElement().satisfies(account -> {
+                        assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
+                        assertThat(account.resourceStatus().ec2AsString()).isEqualTo("ENABLING");
+                        assertThat(account.resourceStatus().ecrAsString()).isEqualTo("DISABLED");
+                    });
 
-                var updated = administrator.updateOrganizationConfiguration(request -> request
-                        .autoEnable(AutoEnable.builder()
-                                .ec2(true)
-                                .ecr(true)
-                                .lambda(false)
-                                .lambdaCode(false)
-                                .codeRepository(true)
-                                .build()));
-                assertThat(updated.autoEnable().ec2()).isTrue();
-                assertThat(updated.autoEnable().ecr()).isTrue();
-                assertThat(updated.autoEnable().codeRepository()).isTrue();
+                    var firstStatus = administrator.batchGetAccountStatus(
+                            request -> request.accountIds(inspectedMemberAccount));
+                    assertThat(firstStatus.accounts()).singleElement().satisfies(account -> {
+                        assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
+                        assertThat(account.state().statusAsString()).isEqualTo("ENABLING");
+                        assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("ENABLING");
+                        assertThat(account.resourceState().ecr().statusAsString()).isEqualTo("DISABLED");
+                    });
+                    var converged = administrator.batchGetAccountStatus(
+                            request -> request.accountIds(inspectedMemberAccount));
+                    assertThat(converged.accounts()).singleElement().satisfies(account -> {
+                        assertThat(account.state().statusAsString()).isEqualTo("ENABLED");
+                        assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("ENABLED");
+                        assertThat(account.resourceState().ecr().statusAsString()).isEqualTo("DISABLED");
+                    });
 
-                var described = administrator.describeOrganizationConfiguration(request -> {});
-                assertThat(described.autoEnable().codeRepository()).isTrue();
+                    var updated = administrator.updateOrganizationConfiguration(request -> request
+                            .autoEnable(AutoEnable.builder()
+                                    .ec2(true)
+                                    .ecr(true)
+                                    .lambda(false)
+                                    .lambdaCode(false)
+                                    .codeRepository(true)
+                                    .build()));
+                    assertThat(updated.autoEnable().ec2()).isTrue();
+                    assertThat(updated.autoEnable().ecr()).isTrue();
+                    assertThat(updated.autoEnable().codeRepository()).isTrue();
 
-                var disabled = management.disableDelegatedAdminAccount(request -> request
-                        .delegatedAdminAccountId(adminAccount));
-                assertThat(disabled.delegatedAdminAccountId()).isEqualTo(adminAccount);
+                    var described = administrator.describeOrganizationConfiguration(request -> {});
+                    assertThat(described.autoEnable().codeRepository()).isTrue();
+
+                    var disabled = management.disableDelegatedAdminAccount(request -> request
+                            .delegatedAdminAccountId(delegatedAdminAccount));
+                    delegatedAdminEnabled = false;
+                    assertThat(disabled.delegatedAdminAccountId()).isEqualTo(delegatedAdminAccount);
+                }
+            } finally {
+                if (delegatedAdminEnabled) {
+                    disableDelegatedAdminBestEffort(adminAccount);
+                }
+                removeAccountBestEffort(organizations, memberAccount);
+                removeAccountBestEffort(organizations, adminAccount);
+                if (createdOrganization) {
+                    deleteOrganizationBestEffort(organizations);
+                }
             }
         }
     }
 
-    private static void ensureOrganization(OrganizationsClient organizations) {
+    private static boolean ensureOrganization(OrganizationsClient organizations) {
         try {
             organizations.createOrganization(request -> request.featureSet("ALL"));
+            return true;
         } catch (AlreadyInOrganizationException e) {
             LOG.debugf(e, "Default compatibility account already belongs to an AWS organization");
+            return false;
+        }
+    }
+
+    private static void disableDelegatedAdminBestEffort(String accountId) {
+        if (accountId == null) {
+            return;
+        }
+        try (Inspector2Client management = TestFixtures.inspector2Client(MANAGEMENT_ACCOUNT)) {
+            management.disableDelegatedAdminAccount(request -> request.delegatedAdminAccountId(accountId));
+        } catch (RuntimeException e) {
+            LOG.warnf(e, "Inspector2 compatibility cleanup could not disable delegated administrator %s", accountId);
+        }
+    }
+
+    private static void removeAccountBestEffort(OrganizationsClient organizations, String accountId) {
+        if (accountId == null) {
+            return;
+        }
+        try {
+            organizations.removeAccountFromOrganization(request -> request.accountId(accountId));
+        } catch (RuntimeException e) {
+            LOG.warnf(e, "Inspector2 compatibility cleanup could not remove account %s", accountId);
+        }
+    }
+
+    private static void deleteOrganizationBestEffort(OrganizationsClient organizations) {
+        try {
+            organizations.deleteOrganization();
+        } catch (RuntimeException e) {
+            LOG.warnf(e, "Inspector2 compatibility cleanup could not delete the temporary organization");
         }
     }
 
