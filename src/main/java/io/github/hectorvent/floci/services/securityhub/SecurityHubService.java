@@ -50,7 +50,12 @@ public class SecurityHubService implements Resettable {
     }
 
     public SecurityHubState organizationAdminState(String region) {
-        requireCallerManagementAccount();
+        String callerAccountId = regionResolver.getAccountId();
+        String managementAccountId = organizationsService.findManagementAccountForResource(callerAccountId)
+                .orElseThrow(() -> invalidAccess("Only the organization management account can perform this operation."));
+        if (!callerAccountId.equals(managementAccountId)) {
+            throw invalidAccess("Only the organization management account can perform this operation.");
+        }
         return state(region);
     }
 
@@ -754,6 +759,10 @@ public class SecurityHubService implements Resettable {
 
     private static AwsException invalid(String message) {
         return new AwsException("InvalidInputException", message, 400);
+    }
+
+    private static AwsException invalidAccess(String message) {
+        return new AwsException("InvalidAccessException", message, 401);
     }
 
     private static AwsException conflict(String message) {

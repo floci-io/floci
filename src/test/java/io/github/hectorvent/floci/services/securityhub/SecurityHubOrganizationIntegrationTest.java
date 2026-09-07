@@ -75,6 +75,8 @@ class SecurityHubOrganizationIntegrationTest {
         given().contentType("application/json").header("Authorization", auth(administrator))
                 .body("{\"AdminAccountId\":\"" + administrator + "\"}").post("/organization/admin/enable")
                 .then().statusCode(403).body("__type", equalTo("AccessDeniedException"));
+        given().header("Authorization", auth(administrator)).get("/organization/admin")
+                .then().statusCode(401).body("__type", equalTo("InvalidAccessException"));
         given().contentType("application/json").header("Authorization", auth(management))
                 .body("{\"AdminAccountId\":\"" + outsider + "\"}").post("/organization/admin/enable")
                 .then().statusCode(400).body("__type", equalTo("InvalidInputException"));
