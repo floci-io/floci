@@ -233,6 +233,16 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
                     supportedIdentityProviders, tokenValidityUnits, writeAttributes,
                     refreshTokenRotation, enableTokenRevocation);
         } else {
+            // AWS client ids are random, so a replacement never collides with the client it replaces.
+            // Under Floci's floci:override-cognito-client-id tag the id follows the name, and a
+            // create with the prior id would overwrite the prior client with no way back, so the
+            // update is refused before anything changes rather than replaced in name only.
+            if (prior != null && prior.getClientId().equals(
+                    cognitoService.deterministicClientIdFor(userPoolId, clientName))) {
+                throw new AwsException("ValidationError", "Replacing user pool client " + prior.getClientId()
+                        + " would reuse its id under the pool's floci:override-cognito-client-id override;"
+                        + " give the client a different ClientName or remove the override.", 400);
+            }
             client = cognitoService.createUserPoolClient(
                     userPoolId, clientName, generateSecret, allowedOAuthFlowsUserPoolClient,
                     allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,

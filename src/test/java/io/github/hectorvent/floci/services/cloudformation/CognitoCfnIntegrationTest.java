@@ -37,7 +37,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <p>The client case moves an {@code AWS::Cognito::UserPoolClient} between pools and flips
  * {@code GenerateSecret}, its two create-only properties: each is a replacement whose displaced client
  * is removed once the update completes, while a renamed client is updated in place. A replacement
- * without a secret leaves no stale {@code ClientSecret} behind.
+ * without a secret leaves no stale {@code ClientSecret} behind. Under Floci's deterministic client-id
+ * override a replacement that would reuse the prior id is refused and the stack rolls back intact.
  */
 @QuarkusTest
 class CognitoCfnIntegrationTest {
@@ -237,6 +238,58 @@ class CognitoCfnIntegrationTest {
         assertDomainIsGone(PREFIX_DOMAIN);
     }
 
+    private static final String OVERRIDE_STACK = "cognito-cfn-override-it";
+
+    /**
+     * A client in a pool whose clients take their id from their name, through Floci's reserved
+     * override tag. The pool lives outside the stack: an in-place pool update has no rollback in
+     * the engine yet, and this case is about the client.
+     */
+    private static String overrideClientTemplate(String poolId, boolean generateSecret) {
+        return """
+            {
+              "Resources": {
+                "Client": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {"UserPoolId": "%s", "ClientName": "override-web", "GenerateSecret": %s}
+                }
+              },
+              "Outputs": {"ClientId": {"Value": {"Ref": "Client"}}}
+            }
+            """.formatted(poolId, generateSecret);
+    }
+
+    @Test
+    void aReplacementThatWouldReuseADeterministicClientIdRollsTheUpdateBackWithThePriorClientIntact() throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+            {"PoolName": "cognito-cfn-override-it", "UserPoolTags": {"floci:override-cognito-client-id": "use-name"}}
+            """).path("UserPool").path("Id").asText();
+        cloudFormation(OVERRIDE_STACK, "CreateStack", overrideClientTemplate(poolId, false));
+
+        String stacks = describeStacks(OVERRIDE_STACK, "CREATE_COMPLETE");
+        assertEquals("override-web", outputValue(stacks, "ClientId"), "the override makes the id the name");
+        assertClientInPool(poolId, "override-web", "override-web");
+
+        // GenerateSecret is createOnly, but the replacement would be created under the same id and
+        // overwrite the client it replaces, so the update is refused and the stack rolls back.
+        cloudFormation(OVERRIDE_STACK, "UpdateStack", overrideClientTemplate(poolId, true));
+
+        stacks = describeStacks(OVERRIDE_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        String events = describeStackEvents(OVERRIDE_STACK);
+        assertTrue(events.contains("would reuse its id under the pool"), events);
+        assertEquals("override-web", outputValue(stacks, "ClientId"));
+        cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"override-web\"}")
+            .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientName", equalTo("override-web"))
+            .body("UserPoolClient.ClientSecret", nullValue());
+
+        cloudFormation(OVERRIDE_STACK, "DeleteStack", null);
+        awaitStackDeleted(OVERRIDE_STACK);
+        assertClientIsGone(poolId, "override-web");
+        cognitoAction("DeleteUserPool", "{\"UserPoolId\": \"" + poolId + "\"}").then().statusCode(200);
+    }
+
     @Test
     void clientCreateOnlyChangesReplaceItAndARenameUpdatesItInPlace() throws Exception {
         cloudFormation(CLIENT_STACK, "CreateStack", clientTemplate("PoolA", false, "web"));
@@ -324,6 +377,16 @@ class CognitoCfnIntegrationTest {
             request.formParam("TemplateBody", templateBody);
         }
         request.when().post("/").then().statusCode(200);
+    }
+
+    private static String describeStackEvents(String stack) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stack)
+        .when().post("/").then().statusCode(200)
+            .extract().asString();
     }
 
     private static String describeStacks(String stack, String expectedStatus) {

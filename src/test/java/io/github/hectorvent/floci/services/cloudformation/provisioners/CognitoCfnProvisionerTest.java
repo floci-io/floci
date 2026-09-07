@@ -622,6 +622,40 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
+    void aReplacementThatWouldReuseThePriorClientIdIsRefusedBeforeAnythingChanges() {
+        when(cognito.describeUserPoolClient("web")).thenReturn(client("web", POOL_ID, "web", null));
+        when(cognito.deterministicClientIdFor(POOL_ID, "web")).thenReturn("web");
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId("web");
+        ObjectNode props = mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web")
+                .put("GenerateSecret", true);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("web")));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verifyNoClientCreate();
+        verifyNoClientUpdate();
+        assertEquals("web", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void aReplacementWhoseDerivedIdDiffersProceeds() {
+        when(cognito.describeUserPoolClient("web")).thenReturn(client("web", POOL_ID, "web", null));
+        when(cognito.deterministicClientIdFor(POOL_ID, "web-v2")).thenReturn("web-v2");
+        stubClientCreate(client("web-v2", POOL_ID, "web-v2", "s3cr3t"));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId("web");
+        ObjectNode props = mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web-v2")
+                .put("GenerateSecret", true);
+
+        provisioner.provision(r, props, ctx("web"));
+
+        assertEquals("web-v2", r.getPhysicalId());
+        assertEquals("web", provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
     void replacedUserPoolClientIsDeletedWhenTheUpdateCompletes() {
         when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client(CLIENT_ID, POOL_ID, "web", null));
         stubClientCreate(client("replacement-client", "us-east-1_OtherPool", "web", null));
