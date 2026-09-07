@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -9,7 +10,7 @@ import java.util.zip.CRC32;
 
 public class AwsEventStreamEncoder {
 
-    public static byte[] encodeMessage(LinkedHashMap<String, String> headers, byte[] payload) throws Exception {
+    public static byte[] encodeMessage(LinkedHashMap<String, String> headers, byte[] payload) throws IOException {
         byte[] headersBytes = encodeHeaders(headers);
         int totalLen = 4 + 4 + 4 + headersBytes.length + payload.length + 4;
 
@@ -35,7 +36,7 @@ public class AwsEventStreamEncoder {
         return buf.toByteArray();
     }
 
-    private static byte[] encodeHeaders(LinkedHashMap<String, String> headers) throws Exception {
+    private static byte[] encodeHeaders(LinkedHashMap<String, String> headers) throws IOException {
         ByteArrayOutputStream h = new ByteArrayOutputStream();
         for (Map.Entry<String, String> e : headers.entrySet()) {
             byte[] name = e.getKey().getBytes(StandardCharsets.UTF_8);

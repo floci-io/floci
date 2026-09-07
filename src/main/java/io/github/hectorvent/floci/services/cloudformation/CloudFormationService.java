@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -166,6 +167,38 @@ public class CloudFormationService implements ResourceProvider {
         return stack != null ? stack.getParameters() : Map.of();
     }
 
+    /**
+     * The status of a stack, or {@code null} when no stack of that name exists in the region.
+     * Unlike {@link #describeStacks}, asking about a stack that is not there is not an error:
+     * StackSet deployment uses this to decide what to do with an instance before it acts on it.
+     */
+    String stackStatus(String stackName, String region) {
+        Stack stack = resolveStack(stackName, region);
+        return stack != null ? stack.getStatus() : null;
+    }
+
+    /**
+     * Whether a stack in this status refuses an update, on the two grounds AWS refuses one.
+     *
+     * <p>A status ending in {@code _IN_PROGRESS} says an operation owns the stack: a create, an
+     * update, a rollback or the cleanup phase of a committed update. AWS refuses to start a second
+     * one over it, and offers nothing that finishes a phase whose process is gone - DeleteStack is
+     * the only way out of one. Refusing keeps every abandoned phase out of the next update's
+     * transaction.
+     *
+     * <p>{@code ROLLBACK_COMPLETE} is terminal for a different reason: a create that failed rolled
+     * its resources back, so the stack holds the name and nothing else, and only DeleteStack frees
+     * it. The CDK CLI keys on this state and tells the user to delete the stack; a client that is
+     * accepted here instead proceeds against a stack AWS would have rejected. It is matched exactly
+     * rather than by suffix, because {@code UPDATE_ROLLBACK_COMPLETE} ends the same way and is a
+     * perfectly updatable stack: it is where an update that failed and rolled back settles, and
+     * retrying the update is how it is repaired.
+     */
+    static boolean refusesUpdate(String status) {
+        return status != null
+                && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status));
+    }
+
     // ── CreateChangeSet ───────────────────────────────────────────────────────
 
     public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
@@ -291,6 +324,14 @@ public class CloudFormationService implements ResourceProvider {
                 if (isCreateType && !reusableReviewPlaceholder) {
                     throw new AwsException("AlreadyExistsException",
                             "Stack [" + stackName + "] already exists", 400);
+                }
+                // The message is the one real CloudFormation emits, down to its own "can not"
+                // spelling and the stack id carried as "Stack:<arn>" with no space: clients match
+                // on this string.
+                if (!isCreateType && refusesUpdate(existing.getStatus())) {
+                    throw new AwsException("ValidationError",
+                            "Stack:" + existing.getStackId() + " is in " + existing.getStatus()
+                                    + " state and can not be updated.", 400);
                 }
                 target = existing;
             }
@@ -1202,7 +1243,7 @@ public class CloudFormationService implements ResourceProvider {
                 List<UpdateCleanupFailure> cleanupFailures =
                         new ArrayList<>(deleteRemovedOrConditionFalseResources(
                                 stack, resources, conditions, region));
-                cleanupFailures.addAll(finishCommittedResourceCleanup(stack));
+                cleanupFailures.addAll(finishCommittedResourceCleanup(stack, region));
                 finishCommittedStackUpdate(stack, cleanupFailures);
                 return;
             }
@@ -1293,9 +1334,16 @@ public class CloudFormationService implements ResourceProvider {
         persistStack(stack);
     }
 
-    private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack) {
+    private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack, String region) {
         List<UpdateCleanupFailure> failures = new ArrayList<>();
-        for (StackResource resource : stack.getResources().values()) {
+        // Dependents go before what they depend on, as when the stack is deleted: a displaced
+        // listener has to go before the displaced target group it still forwards to, or that
+        // delete fails ResourceInUse three times and leaves the group behind. The template's
+        // order, not the map's: a resource a later update added sits after the resources that
+        // depend on it, so reversing the map would delete it first.
+        List<StackResource> resources = resourcesInCreationOrder(stack, region);
+        Collections.reverse(resources);
+        for (StackResource resource : resources) {
             String cleanupPhysicalId = provisioner.updateCleanupPhysicalId(resource);
             if (cleanupPhysicalId != null) {
                 addEvent(
@@ -1307,8 +1355,7 @@ public class CloudFormationService implements ResourceProvider {
                         null);
             }
             while (true) {
-                CloudFormationResourceProvisioner.UpdateCleanupResult result =
-                        provisioner.completeUpdate(resource);
+                UpdateCleanupResult result = provisioner.completeUpdate(resource);
                 if (!result.applicable()) {
                     break;
                 }
@@ -1740,12 +1787,51 @@ public class CloudFormationService implements ResourceProvider {
         return failures;
     }
 
+    /**
+     * The stack's resources in the order the current template creates them, for a delete that walks
+     * them backwards. The resource map keeps insertion order, and a resource added by a later
+     * update sits after the resources that depend on it, so reversing the map would delete it
+     * first: a certificate still used by a user pool domain, for one. Resources the template no
+     * longer names, left behind by a failed cleanup, sort first here so they are deleted last,
+     * after anything that might still use them. Insertion order is the fallback when the template
+     * cannot be read.
+     */
+    private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
+        List<StackResource> ordered = new ArrayList<>(stack.getResources().values());
+        try {
+            JsonNode template = parseTemplate(stack.getTemplateBody());
+            JsonNode resources = template.path("Resources");
+            if (!resources.isObject()) {
+                return ordered;
+            }
+            Map<String, Boolean> conditions = resolveConditions(
+                    template, stack.getParameters(), stack, region, regionResolver.getAccountId());
+            List<String> creationOrder = topologicalSort(resources, conditions);
+            Map<String, Integer> rank = new HashMap<>();
+            for (int i = 0; i < creationOrder.size(); i++) {
+                rank.put(creationOrder.get(i), i);
+            }
+            ordered.sort(Comparator.comparingInt(r -> rank.getOrDefault(r.getLogicalId(), -1)));
+        } catch (Exception e) {
+            LOG.debugv("Deleting stack {0} in insertion order, its template could not be ordered: {1}",
+                    stack.getStackName(), e.getMessage());
+        }
+        return ordered;
+    }
+
     private void deleteStackResources(Stack stack, String region) {
         try {
-            List<StackResource> resources = new ArrayList<>(stack.getResources().values());
-            Collections.reverse(resources); // Delete in reverse order
+            List<StackResource> resources = resourcesInCreationOrder(stack, region);
+            Collections.reverse(resources); // Dependents go before what they depend on
 
             List<String> failedResources = new ArrayList<>();
+            // The walk below addresses each resource by its physical id, which names the entity the
+            // last update left in place. An entity displaced by a replacement whose cleanup phase
+            // never ended is named only by the cleanup the resource still carries, so the stack
+            // deletes that one too: nothing else ever will.
+            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack, region)) {
+                failedResources.add(displacedFailure.logicalId());
+            }
             for (StackResource resource : resources) {
                 // CREATE_COMPLETE/UPDATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous
                 // delete left the resource behind (e.g. the bucket was non-empty); AWS re-attempts

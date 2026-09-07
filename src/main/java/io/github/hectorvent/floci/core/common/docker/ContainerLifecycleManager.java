@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import com.github.dockerjava.api.DockerClient;
@@ -21,9 +22,15 @@ import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -102,14 +109,50 @@ public class ContainerLifecycleManager {
      * @return the container ID
      */
     public String create(ContainerSpec spec) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image());
+        return create(spec, resolvedImage, null);
+    }
+
+    /**
+     * Creates a container for a specific Docker platform.
+     *
+     * @param spec the container specification
+     * @param platform Docker platform, such as {@code linux/arm64}
+     * @return the container ID
+     */
+    public String create(ContainerSpec spec, String platform) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image(), platform);
+        return create(spec, resolvedImage, platform);
+    }
+
+    private String create(ContainerSpec spec, String resolvedImage, String platform) {
         LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
-        imageCacheService.ensureImageExists(spec.image());
-
+        // Built once: a dynamic port binding allocates its host port here.
         HostConfig hostConfig = buildHostConfig(spec);
+        Optional<Path> caBundle = ContainerCaBundle.hostPath(config);
+        if (caBundle.isEmpty()) {
+            return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
+        }
+        String containerId = createContainer(spec, resolvedImage, platform, hostConfig,
+                ContainerCaBundle.appendEnv(spec.env()));
+        if (copyCaBundle(containerId, caBundle.get())) {
+            return containerId;
+        }
+        // SSL_CERT_FILE and friends replace the image's trust store, so they must never name a
+        // file that is not there. Start over without them: the container keeps its own trust.
+        dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+        return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
+    }
 
-        CreateContainerCmd createCmd = dockerClient.createContainerCmd(spec.image())
+    private String createContainer(ContainerSpec spec, String resolvedImage, String platform,
+                                   HostConfig hostConfig, List<String> env) {
+        CreateContainerCmd createCmd = dockerClient.createContainerCmd(resolvedImage)
                 .withHostConfig(hostConfig);
+
+        if (platform != null && !platform.isBlank()) {
+            createCmd.withPlatform(platform);
+        }
 
         if (spec.name() != null) {
             createCmd.withName(spec.name());
@@ -117,8 +160,8 @@ public class ContainerLifecycleManager {
         if (spec.user() != null && !spec.user().isBlank()) {
             createCmd.withUser(spec.user());
         }
-        if (spec.env() != null && !spec.env().isEmpty()) {
-            createCmd.withEnv(spec.env());
+        if (env != null && !env.isEmpty()) {
+            createCmd.withEnv(env);
         }
         if (spec.cmd() != null && !spec.cmd().isEmpty()) {
             createCmd.withCmd(spec.cmd());
@@ -141,6 +184,38 @@ public class ContainerLifecycleManager {
         String containerId = response.getId();
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
+    }
+
+    /**
+     * Copies the CA bundle into the created, not yet started, container so runtimes that read
+     * {@code SSL_CERT_FILE} and friends at init find it. A copy rather than a bind mount because
+     * when Floci itself runs in Docker its persistent path is not a host path the daemon can mount.
+     * Returns false, after logging why, when the copy failed; an image without {@code /etc} is the
+     * expected reason, and the caller then recreates the container without the trust variables.
+     */
+    private boolean copyCaBundle(String containerId, Path bundle) {
+        try {
+            byte[] content = Files.readAllBytes(bundle);
+            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
+                TarArchiveEntry entry = new TarArchiveEntry(ContainerCaBundle.FILE_NAME);
+                entry.setSize(content.length);
+                tar.putArchiveEntry(entry);
+                tar.write(content);
+                tar.closeArchiveEntry();
+            }
+            dockerClient.copyArchiveToContainerCmd(containerId)
+                    .withRemotePath(ContainerCaBundle.CONTAINER_DIR)
+                    .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
+                    .exec();
+            LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv(e, "Could not copy the CA bundle into container {0}; creating it again without the trust "
+                    + "variables, so it keeps its own trust store and will not trust Floci HTTPS: {1}",
+                    containerId, e.getMessage());
+            return false;
+        }
     }
 
     /**

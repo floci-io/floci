@@ -88,6 +88,9 @@ floci:
     presign-secret: test-secret
 
   security:
+    extra-cors-allowed-origins: ${EXTRA_CORS_ALLOWED_ORIGINS:}
+    extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
+    extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
 
   init-hooks:
@@ -127,6 +130,8 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      honour-architectures: false
+      zip-max-entries: 100000
       # aws-config-path:
       hot-reload:
         enabled: true
@@ -343,11 +348,13 @@ floci:
       enabled: true
     iot:
       enabled: true
+      rule-sql-strict: false
       mqtt:
         enabled: true
         auto-start: false
         host: 127.0.0.1
         port: 1883
+        tls-port: 8883
     iotdata:
       enabled: true
     cloudhsmv2:
@@ -368,11 +375,22 @@ floci:
       enabled: true
     ssoadmin:
       enabled: true
+    macie2:
+      enabled: true
+    account:
+      enabled: true
+    accessanalyzer:
+      enabled: true
+    identitystore:
+      enabled: true
     controltower:
       enabled: true
+      seed-landing-zone: true
     route53resolver:
       enabled: true
     connect:
+      enabled: true
+    cognitoidentity:
       enabled: true
     aps:
       enabled: true

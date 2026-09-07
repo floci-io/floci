@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A TCP proxy server that enables HTTP and HTTPS on the same port (LocalStack parity).
@@ -58,6 +59,25 @@ public class TlsProxyServer {
     private final int httpBackendPort;
     private final int httpsBackendPort;
     private final List<NetServer> proxyServers = new ArrayList<>();
+    /**
+     * Ports whose bind definitively failed. Absent means bound, or not resolved yet: callers
+     * default to treating the port as the proxy's until the outcome is known, which is what stops
+     * an ELBv2 listener racing the proxy for it during start-up.
+     */
+    // Package-private for TlsProxyServerReservedPortTest, which needs to stage a failed bind.
+    final Set<Integer> failedPorts = ConcurrentHashMap.newKeySet();
+    /**
+     * Notified with a port the proxy has just given up on. A listener that yielded while the bind
+     * was still unresolved has no other way to learn the port came free, and would otherwise stay
+     * registered with nothing serving it.
+     */
+    private final List<java.util.function.IntConsumer> portReleasedHandlers = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** Registers a callback invoked when a bind fails and the port stops being reserved. */
+    public void onPortReleased(java.util.function.IntConsumer handler) {
+        portReleasedHandlers.add(handler);
+        failedPorts.forEach(handler::accept);
+    }
     private NetClient client;
 
     @Inject
@@ -91,12 +111,15 @@ public class TlsProxyServer {
             proxyServers.add(server);
             server.listen().onComplete(ar -> {
                 if (ar.succeeded()) {
+                    failedPorts.remove(port);
                     LOG.infov("TLS proxy: listening on port {0} (HTTP→{1}, HTTPS→{2})",
                             String.valueOf(port), String.valueOf(httpBackendPort), String.valueOf(httpsBackendPort));
                 } else if (port == config.port()) {
                     LOG.errorv("TLS proxy: failed to start on public port {0}: {1}",
                             String.valueOf(port), ar.cause().getMessage());
                 } else {
+                    failedPorts.add(port);
+                    portReleasedHandlers.forEach(h -> h.accept(port));
                     // The extra AWS-HTTPS port (443 by default) is privileged; binding it fails in
                     // unprivileged environments (e.g. CI/test). Non-fatal — HTTPS on that port is
                     // simply unavailable. Set floci.tls.aws-https-port=0 to skip the attempt.
@@ -106,6 +129,18 @@ public class TlsProxyServer {
                 }
             });
         }
+    }
+
+    /**
+     * Whether the proxy holds, or is still expected to hold, {@code port}.
+     *
+     * <p>False once a bind has definitively failed. That is not fatal for the AWS-HTTPS port: it is
+     * privileged, so binding it fails in unprivileged environments and HTTPS there is simply
+     * unavailable. Anything that yields ports to the proxy has to consult this rather than
+     * configuration alone, or a port the proxy never acquired ends up served by nobody.
+     */
+    public boolean reservesPort(int port) {
+        return config.tls().enabled() && listenPorts().contains(port) && !failedPorts.contains(port);
     }
 
     /**

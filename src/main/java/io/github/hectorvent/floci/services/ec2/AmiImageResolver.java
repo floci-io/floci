@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -37,16 +38,33 @@ public class AmiImageResolver {
         }
 
         return imageCatalog.findByIdOrAlias(imageId)
-                .map(image -> new ResolvedAmiImage(
-                        image.dockerImage,
-                        image.guestRuntime == null || image.guestRuntime.isBlank()
-                                ? ResolvedAmiImage.DEFAULT_RUNTIME
-                                : image.guestRuntime,
-                        Boolean.TRUE.equals(image.cloudInit)))
+                .map(image -> resolveCatalogImage(image))
                 .orElseGet(() -> {
                     LOG.warnv("Unknown AMI ID {0}; falling back to default image {1}",
                             imageId, imageCatalog.defaultDockerImage());
                     return ResolvedAmiImage.minimal(imageCatalog.defaultDockerImage());
                 });
+    }
+
+    private ResolvedAmiImage resolveCatalogImage(Ec2ImageCatalog.CatalogImage image) {
+        if ("windows".equalsIgnoreCase(image.platform)) {
+            throw new AwsException("UnsupportedOperation",
+                    "Windows AMI execution is not supported by Floci's Linux container runtime.", 400);
+        }
+        return new ResolvedAmiImage(
+                image.dockerImage,
+                image.guestRuntime == null || image.guestRuntime.isBlank()
+                        ? ResolvedAmiImage.DEFAULT_RUNTIME
+                        : image.guestRuntime,
+                Boolean.TRUE.equals(image.cloudInit),
+                dockerPlatform(image.architecture));
+    }
+
+    private static String dockerPlatform(String architecture) {
+        return switch (architecture) {
+            case "arm64" -> "linux/arm64";
+            case "x86_64" -> "linux/amd64";
+            default -> null;
+        };
     }
 }

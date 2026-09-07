@@ -76,6 +76,31 @@
         <dependency>
           <groupId>io.quarkus</groupId>
           <artifactId>quarkus-rest-jackson</artifactId>
+          <!-- brotli4j resolves a JNI jar for the build host's platform (native-osx-aarch64 on a
+               Mac, native-linux-* in CI); Floci never enables Brotli HTTP compression. Maven
+               wildcards match a whole artifactId only, hence the explicit list. -->
+          <exclusions>
+            <exclusion>
+              <groupId>com.aayushatharva.brotli4j</groupId>
+              <artifactId>native-osx-aarch64</artifactId>
+            </exclusion>
+            <exclusion>
+              <groupId>com.aayushatharva.brotli4j</groupId>
+              <artifactId>native-osx-x86_64</artifactId>
+            </exclusion>
+            <exclusion>
+              <groupId>com.aayushatharva.brotli4j</groupId>
+              <artifactId>native-linux-aarch64</artifactId>
+            </exclusion>
+            <exclusion>
+              <groupId>com.aayushatharva.brotli4j</groupId>
+              <artifactId>native-linux-x86_64</artifactId>
+            </exclusion>
+            <exclusion>
+              <groupId>com.aayushatharva.brotli4j</groupId>
+              <artifactId>native-windows-x86_64</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
         <!-- YAML config support -->
         <dependency>
@@ -275,6 +300,20 @@
             <groupId>io.apicurio</groupId>
             <artifactId>apicurio-registry-schema-util-protobuf</artifactId>
             <version>${apicurio.version}</version>
+            <exclusions>
+                <!-- Glue schema-registry protobuf validation. Wire's schema parser drags in
+                     KotlinPoet, which exists to generate Kotlin source and pulls kotlin-reflect
+                     behind it. Floci only parses and canonicalizes .proto schemas. ICU4J comes
+                     along the same path and is only used by Wire's code generator too. -->
+                <exclusion>
+                    <groupId>com.squareup</groupId>
+                    <artifactId>kotlinpoet-jvm</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.ibm.icu</groupId>
+                    <artifactId>icu4j</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Testing -->

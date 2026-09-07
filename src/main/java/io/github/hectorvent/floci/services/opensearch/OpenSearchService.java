@@ -146,7 +146,9 @@ public class OpenSearchService implements ResourceProvider {
             domain.setProcessing(false);
         } else {
             domain.setProcessing(true);
-            domainManager.startDomain(domain);
+            if (!domainManager.tryStartDomain(domain)) {
+                domain.setProcessing(false);
+            }
         }
 
         domainStore.put(domainName, domain);

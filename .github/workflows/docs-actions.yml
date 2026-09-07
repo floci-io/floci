@@ -11,7 +11,8 @@ on:
     paths:
       - 'src/main/**'
       - 'src/test/resources/cloudformation/**'
-      - 'docs/services/**'
+      - 'docs/**'
+      - 'mkdocs.yml'
       - 'tools/docs/**'
       - 'Makefile'
       - '.github/workflows/docs-actions.yml'
@@ -21,7 +22,8 @@ on:
     paths:
       - 'src/main/**'
       - 'src/test/resources/cloudformation/**'
-      - 'docs/services/**'
+      - 'docs/**'
+      - 'mkdocs.yml'
       - 'tools/docs/**'
       - 'Makefile'
       - '.github/workflows/docs-actions.yml'
@@ -35,7 +37,7 @@ concurrency:
 
 jobs:
   action-tables:
-    name: Action tables in sync
+    name: Docs in sync
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -47,10 +49,13 @@ jobs:
           python-version: "3.x"
 
       - name: Install tooling deps
-        run: pip install -r tools/docs/requirements.txt
+        run: pip install -r tools/docs/requirements.txt -r docs/requirements.txt
 
       - name: Run action-table tests
         run: make docs-test
 
       - name: Check action tables are in sync
         run: make docs-check
+
+      - name: Build docs (strict)
+        run: mkdocs build --strict --site-dir /tmp/site

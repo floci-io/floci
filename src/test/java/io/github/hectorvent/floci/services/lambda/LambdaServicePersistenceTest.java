@@ -38,11 +38,14 @@ class LambdaServicePersistenceTest {
 
         LambdaService first = serviceWithStorage(store, storage);
         first.createFunction(REGION, baseRequest("versioned-fn"));
-        assertEquals("1", first.publishVersion(REGION, "versioned-fn", null).getVersion());
-        assertEquals("2", first.publishVersion(REGION, "versioned-fn", null).getVersion());
+        // Distinct descriptions so each call is a real publish. PublishVersion no longer creates a
+        // version when nothing has changed since the last one (#2822), and this test is about the
+        // version counter surviving a restart, not about that de-duplication.
+        assertEquals("1", first.publishVersion(REGION, "versioned-fn", "one").getVersion());
+        assertEquals("2", first.publishVersion(REGION, "versioned-fn", "two").getVersion());
 
         LambdaService reloaded = serviceWithStorage(store, storage);
-        LambdaFunction third = reloaded.publishVersion(REGION, "versioned-fn", null);
+        LambdaFunction third = reloaded.publishVersion(REGION, "versioned-fn", "three");
         assertEquals("3", third.getVersion());
         assertTrue(third.getFunctionArn().endsWith(":3"));
     }

@@ -3,6 +3,8 @@ package com.floci.test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.account.AccountClient;
+import software.amazon.awssdk.services.accessanalyzer.AccessAnalyzerClient;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
 import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
@@ -30,8 +32,12 @@ import software.amazon.awssdk.services.redshift.RedshiftClient;
 import software.amazon.awssdk.services.guardduty.GuardDutyClient;
 import software.amazon.awssdk.services.fis.FisClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
+import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
+import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
+import software.amazon.awssdk.services.macie2.Macie2Client;
 import software.amazon.awssdk.services.rum.RumClient;
 import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.endpoints.Endpoint;
 import software.amazon.awssdk.services.s3control.S3ControlClient;
@@ -67,6 +73,7 @@ import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.bedrockagentcore.BedrockAgentCoreClient;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.BedrockAgentCoreControlClient;
+import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeAsyncClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.codebuild.CodeBuildClient;
 import software.amazon.awssdk.services.codedeploy.CodeDeployClient;
@@ -273,6 +280,50 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static AccountClient accountClient() {
+        return AccountClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static AccessAnalyzerClient accessAnalyzerClient() {
+        return AccessAnalyzerClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static SsoAdminClient ssoAdminClient() {
+        return SsoAdminClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static IdentitystoreClient identityStoreClient() {
+        return IdentitystoreClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static Macie2Client macie2Client() {
+        return macie2Client("test");
+    }
+
+    public static Macie2Client macie2Client(String accountId) {
+        return Macie2Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
     public static SsmClient ssmClient() {
         return SsmClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -311,6 +362,19 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .forcePathStyle(true)
+                .build();
+    }
+
+    /** Async client with the Java-based multipart support enabled (5 MiB threshold and parts), for the transfer manager. */
+    public static S3AsyncClient s3MultipartAsyncClient() {
+        long fiveMiB = 5L * 1024 * 1024;
+        return S3AsyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .forcePathStyle(true)
+                .multipartEnabled(true)
+                .multipartConfiguration(b -> b.thresholdInBytes(fiveMiB).minimumPartSizeInBytes(fiveMiB))
                 .build();
     }
 
@@ -667,10 +731,15 @@ public final class TestFixtures {
     }
 
     public static Route53Client route53Client() {
+        return route53Client("test");
+    }
+
+    public static Route53Client route53Client(String accessKeyId) {
         return Route53Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(accessKeyId, "test")))
                 .build();
     }
 
@@ -816,10 +885,15 @@ public final class TestFixtures {
     }
 
     public static Ec2Client ec2Client() {
+        return ec2Client("test");
+    }
+
+    public static Ec2Client ec2Client(String accessKeyId) {
         return Ec2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(accessKeyId, "test")))
                 .build();
     }
 
@@ -908,6 +982,16 @@ public final class TestFixtures {
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static BedrockRuntimeAsyncClient bedrockRuntimeAsyncClient() {
+        return BedrockRuntimeAsyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .httpClientBuilder(NettyNioAsyncHttpClient.builder()
+                        .protocol(Protocol.HTTP1_1))
                 .build();
     }
 

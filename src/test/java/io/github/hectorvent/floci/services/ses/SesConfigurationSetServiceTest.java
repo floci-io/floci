@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.Tag;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -99,5 +100,23 @@ class SesConfigurationSetServiceTest {
         assertTrue(SesConfigurationSetService.isValidName("my-cs"));
         assertFalse(SesConfigurationSetService.isValidName("bad name!"));
         assertFalse(SesConfigurationSetService.isValidName(null));
+    }
+
+    @Test
+    void tagOps_lifecycle_notFoundMessage() {
+        service.create(cs("my-cs"), REGION);
+        service.tag("my-cs", REGION, List.of(new Tag("team", "floci"), new Tag("env", "dev")));
+        assertEquals(2, service.listTags("my-cs", REGION).size());
+
+        // Re-tagging an existing key replaces its value; untagging a missing key is a silent success.
+        service.tag("my-cs", REGION, List.of(new Tag("env", "prod")));
+        service.untag("my-cs", REGION, List.of("team", "ghost-key"));
+        List<Tag> tags = service.listTags("my-cs", REGION);
+        assertEquals(1, tags.size());
+        assertEquals("env", tags.get(0).key());
+        assertEquals("prod", tags.get(0).value());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listTags("ghost", REGION));
+        assertEquals("No ConfigurationSet present with name: ghost", e.getMessage());
     }
 }

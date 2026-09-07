@@ -105,6 +105,75 @@ immediately.
 > disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
 > than being rejected with `403`.
 
+### Custom Domain Names
+
+A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDomainName` is
+`<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
+itself is routed through the domain's base path mappings to the mapped REST API stage. An
+`EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
+CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. Moving a
+domain between the two types with `UpdateDomainName` creates or drops the distribution.
+`GetDomainName` returns the `domainNameArn`, the `endpointConfiguration`, both certificate ARNs
+and the `tags`. Tags are managed through `TagResource`, `UntagResource` and `GetTags` on
+`arn:aws:apigateway:<region>::/domainnames/<domain>`. A second mapping on a base path that
+already has one is a `ConflictException`. A `PRIVATE` endpoint type is refused: private custom
+domains are not emulated. Mutual TLS, ownership verification certificates, routing modes and
+endpoint access modes are accepted and ignored.
+
+With TLS enabled, `CreateDomainName` also adds the domain to Floci's server certificate, so
+`https://<domain>` verifies against the ACM chain without a restart. The name must sit under a
+local suffix such as `localhost.floci.io`; see [TLS](../configuration/tls.md).
+
+Templates can create domains and mappings with `AWS::ApiGateway::DomainName` and
+`AWS::ApiGateway::BasePathMapping`; see [CloudFormation](cloudformation.md).
+
+### IAM Authorization (`AWS_IAM`) {#iam-authorization}
+
+A method (v1) or route (v2) whose `authorizationType` is `AWS_IAM` requires a SigV4-signed caller.
+Before the integration runs, the signature is verified against the request as it arrived (method,
+path, query string, the headers named in `SignedHeaders`, and the SHA-256 of the body). Both
+placements AWS accepts are honoured: an `Authorization` header and a presigned query string
+(`X-Amz-Algorithm=AWS4-HMAC-SHA256`). The credential must be scoped to the `execute-api` service.
+
+Temporary credentials must also present the session token they were issued with, as
+`X-Amz-Security-Token` (a header, or a query parameter on a presigned request). The token is
+compared against the value recorded when STS minted the credential, so a missing or fabricated one
+is rejected: the secret alone is not the whole credential. Whether the token is covered by
+`SignedHeaders` is not required either way, since SigV4 leaves that service-specific.
+
+Rejections are `403`, and never reach the integration:
+
+| Condition | REST (v1) `message` / `x-amzn-ErrorType` | HTTP API (v2) |
+|---|---|---|
+| No SigV4 credentials at all | `Missing Authentication Token` / `MissingAuthenticationTokenException` | `Forbidden` |
+| Credentials present but incomplete, or scoped to another service | `Incomplete Signature` / `IncompleteSignatureException` | `Forbidden` |
+| Access key the emulator never issued | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
+| Temporary credential presenting no `X-Amz-Security-Token`, or one that is not the token it was issued | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
+| `X-Amz-Date` outside the 5-minute window, or a presigned URL past `X-Amz-Expires` | `Signature expired` / `InvalidSignatureException` | `Forbidden` |
+| Signature mismatch | `The request signature we calculated does not match…` / `InvalidSignatureException` | `Forbidden` |
+
+A verified caller reaches the integration as `requestContext.identity.{accessKey, accountId, caller,
+user, userArn}` on a REST proxy event, and as `requestContext.authorizer.iam` on an HTTP API 2.0
+event.
+
+Sign with any access key the emulator has issued (`CreateAccessKey`, or the temporary credentials
+from `AssumeRole`), or with the well-known local-dev `test`/`test` pair that Floci accepts across
+S3, RDS, and ElastiCache. No other unregistered key is accepted: an unknown key cannot sign for
+itself. Any AWS SDK sends the session token automatically, so temporary credentials need no special
+handling; a hand-rolled signer must include it.
+
+> [!NOTE]
+> A session minted before Floci recorded session tokens (one restored from a persisted store
+> written by an earlier version) has no issued token to compare against. Such a credential must
+> still present a token, but its value cannot be checked. Re-minting it with `AssumeRole` restores
+> the full check.
+
+> [!NOTE]
+> Floci authenticates the caller but does not authorize the call: it does not evaluate
+> `execute-api:Invoke` against the caller's IAM policies or a resource policy, so any validly
+> signed, known caller is let through. `principalOrgId` and `cognitoIdentity` are always null -
+> Organizations membership and identity-pool federation are not modelled.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
@@ -225,6 +294,10 @@ curl http://{apiId}.execute-api.localhost.floci.io:4566/{path}
 
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
+
+Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import resolves from an
+`awsSigv4` security scheme: require a signed caller; see
+[IAM Authorization](#iam-authorization).
 
 ### Supported Operations
 

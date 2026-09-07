@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,13 +40,18 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
+        return ctx(null);
+    }
+
+    /** An update-path context carries the physical id the previous provision assigned. */
+    private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
     private StackResource resource(String logicalId) {
@@ -92,6 +98,25 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     }
 
     @Test
+    void withoutNameKeepsTheGeneratedNameAcrossUpdates() {
+        // Name is createOnly in the registry schema: provision runs again on every UpdateStack, and
+        // generating unconditionally would create a second group under a new name each time.
+        when(schedulerService.createScheduleGroup(anyString(), any(), eq("us-east-1")))
+                .thenAnswer(inv -> group(inv.getArgument(0), Map.of()));
+        StackResource created = resource("MyGroup");
+        provisioner.provision(created, mapper.createObjectNode(), ctx());
+        String generatedName = created.getPhysicalId();
+        when(schedulerService.getScheduleGroup(generatedName, "us-east-1"))
+                .thenReturn(group(generatedName, Map.of()));
+
+        StackResource updated = resource("MyGroup");
+        provisioner.provision(updated, mapper.createObjectNode(), ctx(generatedName));
+
+        assertEquals(generatedName, updated.getPhysicalId());
+        verify(schedulerService, times(1)).createScheduleGroup(anyString(), any(), anyString());
+    }
+
+    @Test
     void passesResolvedTagsToCreateScheduleGroup() {
         when(schedulerService.createScheduleGroup(eq("my-group"), any(), eq("us-east-1")))
                 .thenReturn(group("my-group", Map.of("Env", "prod")));
@@ -106,20 +131,35 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     }
 
     @Test
+    void aGroupDeletedOutOfBandFailsTheUpdate() {
+        // The reuse path reads the group this resource already owns. If it was deleted outside the
+        // stack, the not-found error reaches the caller and the update fails, as CloudFormation
+        // does; the old create-then-adopt path silently recreated it instead.
+        when(schedulerService.getScheduleGroup("my-group", "us-east-1"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "ScheduleGroup not found: my-group", 404));
+        StackResource r = resource("MyGroup");
+        ObjectNode props = mapper.createObjectNode().put("Name", "my-group");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx("my-group")));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+        verify(schedulerService, never()).createScheduleGroup(anyString(), any(), anyString());
+    }
+
+    @Test
     void sameStackRetryAdoptsExistingGroup() {
-        // The physical id already recorded on this resource (from an earlier attempt) matches the
-        // name this attempt resolves to, so a ConflictException on create means this attempt's own
-        // group already exists - adopt it instead of failing the stack.
-        when(schedulerService.createScheduleGroup(eq("my-group"), any(), eq("us-east-1")))
-                .thenThrow(new AwsException("ConflictException", "already exists", 409));
+        // The physical id the previous provision assigned matches the name this one resolves to, so
+        // this logical resource's own group already exists: reconcile it instead of calling create,
+        // which would answer ConflictException and fail the stack.
         when(schedulerService.getScheduleGroup("my-group", "us-east-1"))
                 .thenReturn(group("my-group", Map.of()));
         StackResource r = resource("MyGroup");
-        r.setPhysicalId("my-group");
         ObjectNode props = mapper.createObjectNode().put("Name", "my-group");
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, ctx("my-group"));
 
+        verify(schedulerService, never()).createScheduleGroup(anyString(), any(), anyString());
         assertEquals("my-group", r.getPhysicalId());
         assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule-group/my-group",
                 r.getAttributes().get("Arn"));
@@ -185,17 +225,14 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     void sameStackRetryRemovesTagsDroppedFromTheTemplate() {
         // pgermosen review on PR #2796: the retry path only ever added tags on conflict, so a tag
         // removed from the template stayed on the live resource across every subsequent update.
-        when(schedulerService.createScheduleGroup(eq("my-group"), any(), eq("us-east-1")))
-                .thenThrow(new AwsException("ConflictException", "already exists", 409));
         when(schedulerService.getScheduleGroup("my-group", "us-east-1"))
                 .thenReturn(group("my-group", Map.of("Old", "value", "Keep", "same")));
         StackResource r = resource("MyGroup");
-        r.setPhysicalId("my-group");
         ObjectNode props = mapper.createObjectNode().put("Name", "my-group");
         ObjectNode tag = mapper.createObjectNode().put("Key", "Keep").put("Value", "same");
         props.set("Tags", mapper.createArrayNode().add(tag));
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, ctx("my-group"));
 
         verify(schedulerService).untagScheduleGroup(eq("my-group"), eq("us-east-1"),
                 argThat(keys -> keys.size() == 1 && keys.contains("Old")));
@@ -206,15 +243,12 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     void sameStackRetryWithEmptyTemplateTagsRemovesAllExistingTags() {
         // The Tags property emptied entirely on the template is the same case as a dropped key,
         // just for every key at once - the whole existing tag set must come off.
-        when(schedulerService.createScheduleGroup(eq("my-group"), any(), eq("us-east-1")))
-                .thenThrow(new AwsException("ConflictException", "already exists", 409));
         when(schedulerService.getScheduleGroup("my-group", "us-east-1"))
                 .thenReturn(group("my-group", Map.of("Old", "value")));
         StackResource r = resource("MyGroup");
-        r.setPhysicalId("my-group");
         ObjectNode props = mapper.createObjectNode().put("Name", "my-group");
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, ctx("my-group"));
 
         verify(schedulerService).untagScheduleGroup(eq("my-group"), eq("us-east-1"),
                 argThat(keys -> keys.size() == 1 && keys.contains("Old")));
@@ -224,16 +258,13 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     @Test
     void sameStackRetryWithUnresolvableTagsDoesNotUntagExistingTags() {
         // A malformed Tags value must not be mistaken for an empty desired tag set.
-        when(schedulerService.createScheduleGroup(eq("my-group"), any(), eq("us-east-1")))
-                .thenThrow(new AwsException("ConflictException", "already exists", 409));
         when(schedulerService.getScheduleGroup("my-group", "us-east-1"))
                 .thenReturn(group("my-group", Map.of("Old", "value")));
         StackResource r = resource("MyGroup");
-        r.setPhysicalId("my-group");
         ObjectNode props = mapper.createObjectNode().put("Name", "my-group");
         props.put("Tags", "not-a-list");
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, ctx("my-group"));
 
         verify(schedulerService, never()).untagScheduleGroup(anyString(), anyString(), any());
         verify(schedulerService, never()).tagScheduleGroup(anyString(), anyString(), any());
@@ -241,15 +272,12 @@ class SchedulerScheduleGroupCfnProvisionerTest {
 
     @Test
     void sameStackRetryWithNoTagChangesDoesNotCallUntagOrTag() {
-        when(schedulerService.createScheduleGroup(eq("my-group"), any(), eq("us-east-1")))
-                .thenThrow(new AwsException("ConflictException", "already exists", 409));
         when(schedulerService.getScheduleGroup("my-group", "us-east-1"))
                 .thenReturn(group("my-group", Map.of()));
         StackResource r = resource("MyGroup");
-        r.setPhysicalId("my-group");
         ObjectNode props = mapper.createObjectNode().put("Name", "my-group");
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, ctx("my-group"));
 
         verify(schedulerService, never()).untagScheduleGroup(anyString(), anyString(), any());
         verify(schedulerService, never()).tagScheduleGroup(anyString(), anyString(), any());

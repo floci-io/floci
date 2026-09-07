@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lakeformation;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lakeformation.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -53,6 +54,56 @@ public class LakeFormationService {
                 request.getWithFederation()
         );
         return new RegisterResourceResponse();
+    }
+
+    public UpdateResourceResponse updateResource(String region, UpdateResourceRequest request) {
+        validateResourceArn(request.getResourceArn());
+        validateRoleArn(request.getRoleArn());
+
+        storage.updateResource(
+                region,
+                request.getResourceArn(),
+                request.getRoleArn(),
+                request.getExpectedResourceOwnerAccount(),
+                request.getHybridAccessEnabled(),
+                request.getWithFederation()
+        );
+        return new UpdateResourceResponse();
+    }
+
+    private static void validateResourceArn(String resourceArn) {
+        if (resourceArn == null) {
+            throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
+        }
+        try {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(resourceArn);
+            if (parsed.partition().isBlank() || parsed.service().isBlank() || parsed.resource().isBlank()
+                    || resourceArn.chars().anyMatch(Character::isWhitespace)) {
+                throw new IllegalArgumentException("Invalid resource ARN");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidInputException", "ResourceArn must be a valid ARN", 400);
+        }
+    }
+
+    private static void validateRoleArn(String roleArn) {
+        if (roleArn == null) {
+            throw new AwsException("InvalidInputException", "RoleArn is required", 400);
+        }
+        try {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(roleArn);
+            if (parsed.partition().isBlank()
+                    || !"iam".equals(parsed.service())
+                    || !parsed.region().isEmpty()
+                    || parsed.accountId().isBlank()
+                    || !parsed.resource().startsWith("role/")
+                    || parsed.resource().length() == "role/".length()
+                    || roleArn.chars().anyMatch(Character::isWhitespace)) {
+                throw new IllegalArgumentException("Invalid IAM role ARN");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidInputException", "RoleArn must be a valid IAM role ARN", 400);
+        }
     }
 
     public DeregisterResourceResponse deregisterResource(String region, DeregisterResourceRequest request) {

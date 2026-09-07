@@ -6,6 +6,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -17,6 +18,7 @@ import org.jboss.logging.Logger;
 import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -66,6 +68,14 @@ public class ApiGatewayService {
     private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
+    /**
+     * Guards every change to a custom domain or a base path mapping. The stores hand out live
+     * objects, so a patch or a tag write is a read-modify-write; two of them on one domain at the
+     * same time would drop one another's changes or corrupt the tag map. One lock for both kinds
+     * also keeps a mapping from being created under a domain that is being deleted at that moment.
+     */
+    private final Object domainNameLock = new Object();
+    private final TlsCertificateManager certificateManager;
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
@@ -73,7 +83,9 @@ public class ApiGatewayService {
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
 
     @Inject
-    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config) {
+    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
+                             TlsCertificateManager certificateManager) {
+        this.certificateManager = certificateManager;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -984,6 +996,29 @@ public class ApiGatewayService {
         return key;
     }
 
+    /**
+     * Replaces an API key's tags wholesale. CloudFormation drives a resource's tags to the
+     * template's desired state on update, so a dropped key has to disappear, which the additive
+     * TagResource shape cannot express.
+     */
+    public ApiKey replaceApiKeyTags(String region, String apiKeyId, Map<String, String> tags) {
+        ApiKey key = getApiKey(region, apiKeyId);
+        // A reserved tag is an id override and only means something at create time, so adding or
+        // changing one here is refused. One the key already carries from its creation may stay, or
+        // a template that pins an id could never change any other tag afterwards.
+        Map<String, String> changed = new HashMap<>();
+        tags.forEach((tagKey, value) -> {
+            if (!Objects.equals(value, key.getTags().get(tagKey))) {
+                changed.put(tagKey, value);
+            }
+        });
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(changed);
+        key.setTags(new HashMap<>(tags));
+        key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
+        return key;
+    }
+
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
@@ -1285,21 +1320,22 @@ public class ApiGatewayService {
     public CustomDomain createDomainName(String region, Map<String, Object> request) {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
-
-        // AWS enforces global uniqueness of custom domain names across all regions
-        boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
-        if (exists) {
-            throw new AwsException("BadRequestException",
-                    "The domain name you provided already exists.", 400);
+        String endpointType = endpointTypeOf(request);
+        if (!"REGIONAL".equals(endpointType) && !"EDGE".equals(endpointType)) {
+            // Private custom domains are not emulated; anything else would be a domain that is
+            // neither regional nor edge-optimized, which nothing here could route or describe.
+            throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + endpointType, 400);
         }
 
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(domainName);
         domain.setCertificateName((String) request.get("certificateName"));
         domain.setCertificateArn((String) request.get("certificateArn"));
+        domain.setRegionalCertificateName((String) request.get("regionalCertificateName"));
+        domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
         domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
-        domain.setEndpointConfigurationType(endpointTypeOf(request));
+        applyEndpointType(domain, endpointType);
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
         domain.setDomainNameStatus("AVAILABLE");
@@ -1309,9 +1345,38 @@ public class ApiGatewayService {
             domain.setTags(copied);
         }
 
-        domainStore.put(domainKey(region, domainName), domain);
+        // AWS enforces global uniqueness of custom domain names across all regions. The check and
+        // the store are one step, so two concurrent creates of one name cannot both succeed.
+        synchronized (domainNameLock) {
+            boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
+            if (exists) {
+                throw new AwsException("BadRequestException",
+                        "The domain name you provided already exists.", 400);
+            }
+            domainStore.put(domainKey(region, domainName), domain);
+        }
+        // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
+        certificateManager.ensureHost(domainName);
         LOG.infov("Created custom domain {0} in {1}", domainName, region);
         return domain;
+    }
+
+    /**
+     * An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
+     * distribution's name in the fixed CloudFront hosted zone AWS documents for every region. A
+     * regional domain has none, so a move to {@code REGIONAL} drops the distribution again while a
+     * move to {@code EDGE} puts one in front of the domain, as the migration does on AWS.
+     */
+    private static void applyEndpointType(CustomDomain domain, String endpointType) {
+        domain.setEndpointConfigurationType(endpointType);
+        if (!"EDGE".equals(endpointType)) {
+            domain.setDistributionDomainName(null);
+            domain.setDistributionHostedZoneId(null);
+        } else if (domain.getDistributionDomainName() == null) {
+            domain.setDistributionDomainName(
+                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + ".cloudfront.net");
+            domain.setDistributionHostedZoneId("Z2FDTNDATAQYW2");
+        }
     }
 
     /**
@@ -1344,14 +1409,22 @@ public class ApiGatewayService {
     }
 
     public void deleteDomainName(String region, String domainName) {
-        getDomainName(region, domainName);
-        domainStore.delete(domainKey(region, domainName));
-        // Delete associated mappings
-        String prefix = region + "::" + domainName + "::";
-        basePathMappingStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(basePathMappingStore::delete);
+        synchronized (domainNameLock) {
+            getDomainName(region, domainName);
+            domainStore.delete(domainKey(region, domainName));
+            // Delete associated mappings
+            String prefix = region + "::" + domainName + "::";
+            basePathMappingStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(basePathMappingStore::delete);
+        }
     }
 
     public CustomDomain updateDomainName(String region, String domainName, List<Map<String, String>> patchOperations) {
+        synchronized (domainNameLock) {
+            return applyDomainNamePatch(region, domainName, patchOperations);
+        }
+    }
+
+    private CustomDomain applyDomainNamePatch(String region, String domainName, List<Map<String, String>> patchOperations) {
         String domainKey = domainKey(region, domainName);
         CustomDomain domain = getDomainName(region, domainName);
         if (domain == null) {
@@ -1386,7 +1459,7 @@ public class ApiGatewayService {
                 // Check if value is required for the specific path
                 if ("/certificateName".equals(path) || "/certificateArn".equals(path)
                     || "/regionalCertificateName".equals(path) || "/regionalCertificateArn".equals(path)
-                    || "/securityPolicy".equals(path) || "/endpointConfiguration/types/REGIONAL".equals(path)) {
+                    || "/securityPolicy".equals(path) || path.startsWith("/endpointConfiguration/types/")) {
                     throw new AwsException("BadRequestException", "Value is required for path: " + path, 400);
                 }
             }
@@ -1401,7 +1474,13 @@ public class ApiGatewayService {
                 newRegionalCertificateArn = value;
             } else if ("/securityPolicy".equals(path)) {
                 newSecurityPolicy = value;
-            } else if ("/endpointConfiguration/types/REGIONAL".equals(path)) {
+            } else if (path.startsWith("/endpointConfiguration/types/")) {
+                // The path names the type the domain has now; the value names the one it should get.
+                if (!path.equals("/endpointConfiguration/types/" + newEndpointConfigurationType)) {
+                    throw new AwsException("BadRequestException", "Invalid patch path " + path
+                            + ": the path must name the domain's current endpoint type, "
+                            + newEndpointConfigurationType, 400);
+                }
                 if (!"REGIONAL".equals(value) && !"EDGE".equals(value)) {
                     throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + value, 400);
                 }
@@ -1415,7 +1494,7 @@ public class ApiGatewayService {
         domain.setRegionalCertificateName(newRegionalCertificateName);
         domain.setRegionalCertificateArn(newRegionalCertificateArn);
         domain.setSecurityPolicy(newSecurityPolicy);
-        domain.setEndpointConfigurationType(newEndpointConfigurationType);
+        applyEndpointType(domain, newEndpointConfigurationType);
         domainStore.put(domainKey, domain);
         return domain;
     }
@@ -1433,13 +1512,19 @@ public class ApiGatewayService {
     }
 
     public BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request) {
-        getDomainName(region, domainName);
         String basePath = canonicalBasePath((String) request.get("basePath"));
         String apiId = (String) request.get("restApiId");
         String stage = (String) request.get("stage");
 
         BasePathMapping mapping = new BasePathMapping(basePath, apiId, stage);
-        basePathMappingStore.put(mappingKey(region, domainName, basePath), mapping);
+        synchronized (domainNameLock) {
+            getDomainName(region, domainName);
+            String key = mappingKey(region, domainName, basePath);
+            if (basePathMappingStore.get(key).isPresent()) {
+                throw new AwsException("ConflictException", "Base path already exists for this domain name", 409);
+            }
+            basePathMappingStore.put(key, mapping);
+        }
         LOG.infov("Created mapping for {0} path={1} -> API {2}", domainName, basePath, apiId);
         return mapping;
     }
@@ -1472,9 +1557,11 @@ public class ApiGatewayService {
     }
 
     public void deleteBasePathMapping(String region, String domainName, String basePath) {
-        getBasePathMapping(region, domainName, basePath);
-        String path = (basePath == null || basePath.isEmpty() || "/" .equals(basePath)) ? "(none)" : basePath;
-        basePathMappingStore.delete(mappingKey(region, domainName, path));
+        synchronized (domainNameLock) {
+            getBasePathMapping(region, domainName, basePath);
+            String path = (basePath == null || basePath.isEmpty() || "/" .equals(basePath)) ? "(none)" : basePath;
+            basePathMappingStore.delete(mappingKey(region, domainName, path));
+        }
     }
 
     /**
@@ -1507,13 +1594,22 @@ public class ApiGatewayService {
      */
     public void deleteBasePathMappingRecord(String region, String domainName, String storedBasePath) {
         String key = mappingKey(region, domainName, storedBasePath == null ? "" : storedBasePath);
-        if (basePathMappingStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException", "Base path mapping not found", 404);
+        synchronized (domainNameLock) {
+            if (basePathMappingStore.get(key).isEmpty()) {
+                throw new AwsException("NotFoundException", "Base path mapping not found", 404);
+            }
+            basePathMappingStore.delete(key);
         }
-        basePathMappingStore.delete(key);
     }
 
     public BasePathMapping updateBasePathMapping(String region, String domainName, String basePath, List<Map<String, String>> patchOperations) {
+        synchronized (domainNameLock) {
+            return applyBasePathMappingPatch(region, domainName, basePath, patchOperations);
+        }
+    }
+
+    private BasePathMapping applyBasePathMappingPatch(String region, String domainName, String basePath,
+                                                      List<Map<String, String>> patchOperations) {
         String normalizedPath = (basePath == null || basePath.isEmpty() || "/".equals(basePath)) ? "(none)" : basePath;
 
         BasePathMapping mapping = getBasePathMapping(region, domainName, basePath);
@@ -1869,6 +1965,42 @@ public class ApiGatewayService {
         RestApi api = getRestApi(region, apiId);
         tagKeys.forEach(api.getTags()::remove);
         apiStore.put(apiKey(region, apiId), api);
+    }
+
+    public Map<String, String> getDomainNameTags(String region, String domainName) {
+        synchronized (domainNameLock) {
+            Map<String, String> tags = getDomainName(region, domainName).getTags();
+            return tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+        }
+    }
+
+    /**
+     * Both tag writes replace the domain's tag map instead of changing it in place: the store hands
+     * out the live object, and a GetDomainName in flight on another thread may be iterating the map
+     * it was handed. The lock orders the writers; the fresh map keeps the readers safe.
+     */
+    public void tagDomainName(String region, String domainName, Map<String, String> tags) {
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            Map<String, String> merged = domain.getTags() == null
+                    ? new LinkedHashMap<>() : new LinkedHashMap<>(domain.getTags());
+            merged.putAll(tags);
+            domain.setTags(merged);
+            domainStore.put(domainKey(region, domainName), domain);
+        }
+    }
+
+    public void untagDomainName(String region, String domainName, List<String> tagKeys) {
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            if (domain.getTags() != null) {
+                Map<String, String> remaining = new LinkedHashMap<>(domain.getTags());
+                tagKeys.forEach(remaining::remove);
+                domain.setTags(remaining);
+                domainStore.put(domainKey(region, domainName), domain);
+            }
+        }
     }
 
     // ──────────────────────────── OpenAPI Import ────────────────────────────

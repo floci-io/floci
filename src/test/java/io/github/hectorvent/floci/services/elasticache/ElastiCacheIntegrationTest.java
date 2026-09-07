@@ -17,6 +17,8 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 
+import org.jboss.logging.Logger;
+
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.equalTo;
@@ -25,6 +27,8 @@ import static org.hamcrest.Matchers.notNullValue;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElastiCacheIntegrationTest {
+
+    private static final Logger LOG = Logger.getLogger(ElastiCacheIntegrationTest.class);
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260412/us-east-1/elasticache/aws4_request";
@@ -201,34 +205,58 @@ class ElastiCacheIntegrationTest {
     @Test
     @Order(10)
     void crossGroupAuthIsRejected() throws Exception {
-        // Create a second group and verify the user (associated with GROUP_ID only) cannot auth
-        crossGroupPort = given()
-                .formParam("Action", "CreateReplicationGroup")
-                .formParam("ReplicationGroupId", CROSS_GROUP_ID)
-                .formParam("ReplicationGroupDescription", "Cross-group isolation test")
-                .formParam("AuthToken", CROSS_GROUP_AUTH_TOKEN)
+        // Ensure user exists if this test is run in isolation
+        try {
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", USER_ID)
+                .formParam("UserName", USER_NAME)
+                .formParam("AuthenticationMode.Type", "password")
+                .formParam("AuthenticationMode.Passwords.member.1", INITIAL_PASSWORD)
+                .formParam("AccessString", "on ~* +@all")
                 .header("Authorization", AUTH_HEADER)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-            .extract()
-                .xmlPath()
-                .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
+                .post("/");
+        } catch (Exception e) {
+            // User already created when tests run in full class order; tolerated in isolation
+            LOG.debugv(e, "User creation tolerated during crossGroupAuthIsRejected isolation setup");
+        }
 
-        // User associated with GROUP_ID should be rejected on CROSS_GROUP_ID
-        String reply = sendCommand(crossGroupPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
-        assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", reply);
+        // Create a second group and verify the user (associated with GROUP_ID only) cannot auth
+        try {
+            crossGroupPort = given()
+                    .formParam("Action", "CreateReplicationGroup")
+                    .formParam("ReplicationGroupId", CROSS_GROUP_ID)
+                    .formParam("ReplicationGroupDescription", "Cross-group isolation test")
+                    .formParam("AuthToken", CROSS_GROUP_AUTH_TOKEN)
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                .extract()
+                    .xmlPath()
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
 
-        // Clean up the cross-group
-        given()
-            .formParam("Action", "DeleteReplicationGroup")
-            .formParam("ReplicationGroupId", CROSS_GROUP_ID)
-            .header("Authorization", AUTH_HEADER)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+            // User associated with GROUP_ID should be rejected on CROSS_GROUP_ID
+            String reply = sendCommand(crossGroupPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
+            assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", reply);
+        } finally {
+            // Clean up the cross-group without masking test assertions if creation/auth failed
+            try {
+                int status = given()
+                    .formParam("Action", "DeleteReplicationGroup")
+                    .formParam("ReplicationGroupId", CROSS_GROUP_ID)
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .getStatusCode();
+                if (status != 200 && status != 404) {
+                    LOG.warnv("Cross-group cleanup returned unexpected status {0}", status);
+                }
+            } catch (Exception e) {
+                LOG.debugv(e, "Cross-group cleanup failed during teardown");
+            }
+        }
     }
 
     @Test
@@ -336,7 +364,7 @@ class ElastiCacheIntegrationTest {
                     equalTo(GROUP_ID + "-reused"));
     }
 
-    private static boolean isDockerAvailable() {
+    static boolean isDockerAvailable() {
         try {
             Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
                     .redirectErrorStream(true)

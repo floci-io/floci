@@ -280,6 +280,63 @@ class LakeFormationIntegrationTest {
     }
 
     @Test
+    void updateResourcePreservesOmittedValuesAndIsRegionScoped() {
+        String arn = "arn:aws:s3:::update-resource-bucket";
+        String initialRole = "arn:aws:iam::111122223333:role/initial";
+        String updatedRole = "arn:aws:iam::111122223333:role/updated";
+        String secondRegionHeader = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20201022/us-west-2/lakeformation/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn + "\",\"RoleArn\":\"" + initialRole + "\",\"WithFederation\":true}")
+        .when()
+            .post("/RegisterResource")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", secondRegionHeader)
+            .body("{\"ResourceArn\":\"" + arn + "\",\"RoleArn\":\"" + initialRole + "\",\"WithFederation\":false}")
+        .when()
+            .post("/RegisterResource")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn + "\",\"RoleArn\":\"" + updatedRole + "\"}")
+        .when()
+            .post("/UpdateResource")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn + "\"}")
+        .when()
+            .post("/DescribeResource")
+        .then()
+            .statusCode(200)
+            .body("ResourceInfo.RoleArn", equalTo(updatedRole))
+            .body("ResourceInfo.WithFederation", equalTo(true));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", secondRegionHeader)
+            .body("{\"ResourceArn\":\"" + arn + "\"}")
+        .when()
+            .post("/DescribeResource")
+        .then()
+            .statusCode(200)
+            .body("ResourceInfo.RoleArn", equalTo(initialRole))
+            .body("ResourceInfo.WithFederation", equalTo(false));
+    }
+
+    @Test
     void listAndDeleteLFTag() {
         // Create tag
         given()

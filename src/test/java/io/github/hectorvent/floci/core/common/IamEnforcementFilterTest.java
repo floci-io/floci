@@ -256,7 +256,7 @@ class IamEnforcementFilterTest {
     @Test
     void filterPassesS3ListBucketConditionContext() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        Map<String, String> conditions = Map.of("s3:prefix", "my_namespace/table/");
+        Map<String, List<String>> conditions = Map.of("s3:prefix", List.of("my_namespace/table/"));
 
         String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260706/us-east-1/s3/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";

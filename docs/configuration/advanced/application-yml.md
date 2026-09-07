@@ -95,7 +95,7 @@ floci:
     enabled: false                           # FLOCI_TLS_ENABLED — enable HTTPS on all endpoints
     # cert-path: ""                          # FLOCI_TLS_CERT_PATH — PEM certificate file path
     # key-path: ""                           # FLOCI_TLS_KEY_PATH — PEM private key file path
-    self-signed: true                        # FLOCI_TLS_SELF_SIGNED — auto-generate cert when no paths provided
+    self-signed: true                        # FLOCI_TLS_SELF_SIGNED: auto-generate a cert signed by the local CA when no paths provided
 
   protocols:
     max-request-size: 2048                   # FLOCI_PROTOCOLS_MAX_REQUEST_SIZE — max HTTP request body size in MB (legacy: floci.max-request-size / FLOCI_MAX_REQUEST_SIZE)
@@ -132,11 +132,13 @@ floci:
       enabled: true
       ephemeral: false                        # true = remove container after each invocation
       ecr-base-uri: public.ecr.aws            # Registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
+      honour-architectures: false             # true = select the declared Lambda Docker architecture
       default-memory-mb: 128
       default-timeout-seconds: 3
       runtime-api-base-port: 12000            # Port range for Lambda Runtime API
       runtime-api-max-port: 12499             # One port per running container = concurrency ceiling
       code-path: ./data/lambda-code           # Where ZIP archives are stored
+      zip-max-entries: 100000                  # Maximum ZIP entries extracted per deployment package
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300     # Remove idle containers after this
       region-concurrency-limit: 1000          # Concurrent executions ceiling per region
@@ -274,6 +276,7 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname                     # hostname | path
+      prefer-local-images: true
 ```
 
 ### Initialization hooks
@@ -312,8 +315,15 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_SES_SMTP_USER`                     | *(unset)*        | SMTP authentication username                                  |
 | `FLOCI_SERVICES_SES_SMTP_PASS`                     | *(unset)*        | SMTP authentication password                                  |
 | `FLOCI_SERVICES_SES_SMTP_STARTTLS`                 | `DISABLED`       | STARTTLS mode: `DISABLED`, `OPTIONAL`, or `REQUIRED`          |
+| `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES`       | `false`          | Select the declared Lambda architecture for Docker image pulls and containers |
+| `FLOCI_SERVICES_LAMBDA_ZIP_MAX_ENTRIES`            | `100000`         | Maximum number of entries accepted in a Lambda ZIP archive |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED`         | `false`          | Enable bind-mount hot-reload mode (`S3Bucket=hot-reload`)     |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS`   | *(unset)*        | Comma-separated list of host paths allowed as bind-mount roots; unset = any absolute path |
+
+Enable `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES` only when the Docker host can run the
+function architecture. Foreign architectures require Docker Desktop support or host emulation
+such as `binfmt_misc` with QEMU. Floci does not fall back to the host architecture when this
+setting is enabled.
 
 Per-queue SQS redrive policy (`maxReceiveCount`) is configured at queue creation time via `SetQueueAttributes` / `CreateQueue`, not as a global default.
 

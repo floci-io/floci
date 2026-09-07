@@ -267,10 +267,7 @@ public class CloudFormationTemplateEngine {
             return out;
         }
         if (node.isArray()) {
-            for (JsonNode item : node) {
-                out.add(resolve(item));
-            }
-            return out;
+            return resolveListElements(node);
         }
         if (node.isObject()) {
             if (node.has("Fn::If")) {
@@ -291,6 +288,69 @@ public class CloudFormationTemplateEngine {
             out.addAll(Arrays.asList(scalar.split(",", -1)));
         }
         return out;
+    }
+
+    /**
+     * Expands a literal array's elements, recursing into any element that is itself a
+     * list-valued intrinsic ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}, or an
+     * {@code Fn::If} evaluating to one) so it contributes its own elements rather than one
+     * comma-joined string. Unlike {@link #resolveStringList}, this keeps blank entries: a
+     * literal array is positional (consumed by {@code Fn::Select} via {@link #resolveList}),
+     * so dropping a blank element ahead of the selected index would shift every later index.
+     */
+    private List<String> resolveListElements(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode element : node) {
+            if (isListValuedIntrinsic(element)) {
+                out.addAll(resolveList(element));
+            } else {
+                out.add(resolve(element));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Resolves a node to a flat list of strings, expanding list-valued intrinsics
+     * ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}, or an {@code Fn::If} evaluating
+     * to one) whether the node itself is one or they appear as elements of a literal array,
+     * and dropping blank entries.
+     *
+     * <p>Provisioners read list properties (SubnetIds, VPCZoneIdentifier, …) with this so a
+     * cross-stack {@code Fn::Split} over {@code Fn::ImportValue} — the shape CDK emits when a
+     * VPC exports its subnet ids as one comma-joined value — resolves to the real ids instead
+     * of a single comma-joined string or an empty list (issue #2937).
+     */
+    public List<String> resolveStringList(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return out;
+        }
+        if (node.isArray()) {
+            out.addAll(resolveListElements(node));
+        } else {
+            out.addAll(resolveList(node));
+        }
+        out.removeIf(value -> value == null || value.isBlank());
+        return out;
+    }
+
+    private boolean isListValuedIntrinsic(JsonNode node) {
+        if (node == null) {
+            return false;
+        }
+        if (node.isArray()) {
+            return true;
+        }
+        if (node.isObject()) {
+            if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
+                return true;
+            }
+            if (node.has("Fn::If")) {
+                return isListValuedIntrinsic(selectIfBranch(node.get("Fn::If")));
+            }
+        }
+        return false;
     }
 
     private List<String> resolveSplit(JsonNode split) {

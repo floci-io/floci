@@ -34,7 +34,12 @@ docs-check: ## CI gate: regenerate and fail if anything is stale, unregistered, 
 	}
 	@$(PYTHON) tools/docs/check_service_matrix.py --strict || { \
 		echo ""; \
-		echo "error: a registered service has no row in docs/services/index.md (see warnings above)."; \
+		echo "error: the Service Matrix in docs/services/index.md is out of sync (see warnings above)."; \
+		exit 1; \
+	}
+	@! grep -rn -- '-jvm' docs README.md CONTRIBUTING.md || { \
+		echo ""; \
+		echo "error: docs name a '-jvm' image tag; release.yml publishes only x.y.z, latest and their -compat twins."; \
 		exit 1; \
 	}
 

@@ -11,6 +11,8 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
@@ -58,7 +60,8 @@ public class CognitoUserInfoController {
 
     @GET
     @Path("/cognito-idp/oauth2/userInfo")
-    public Response userInfo(@HeaderParam("Authorization") String authorization) {
+    public Response userInfo(@HeaderParam("Authorization") String authorization,
+                             @Context ContainerRequestContext requestContext) {
         if (authorization == null || authorization.isBlank()
                 || !authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
             return bearerError(401, "invalid_token", "Bearer token required");
@@ -87,6 +90,10 @@ public class CognitoUserInfoController {
         String poolId = poolIdFromIssuer(iss);
         if (poolId == null) {
             return bearerError(401, "invalid_token", "Cannot derive user pool from iss: " + iss);
+        }
+        String domainPoolId = (String) requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY);
+        if (domainPoolId != null && !domainPoolId.equals(poolId)) {
+            return bearerError(401, "invalid_token", "Token was not issued by the user pool of this domain");
         }
 
         CognitoUser user;

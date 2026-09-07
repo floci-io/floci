@@ -225,7 +225,8 @@ class EcsServiceTaskOwnershipTest {
                 mock(EcsContainerManager.class),
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory());
+                new InMemoryStorageFactory(),
+                null);
         service.initializeStorage();
         return service;
     }

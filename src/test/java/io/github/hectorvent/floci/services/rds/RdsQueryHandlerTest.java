@@ -99,6 +99,37 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_defaultParameterGroupNameUsesHyphenAndMajorOnlyForAuroraPostgresql() {
+        DbInstance instance = makeInstance("aurora-pg");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        instance.setEngineIdentifier("aurora-postgresql");
+        instance.setEngineVersion("16.3");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupName>default.aurora-postgresql16</DBParameterGroupName>"),
+                "Expected hyphenated aurora-postgresql with major-only version, got: " + body);
+        assertFalse(body.contains("aurora_postgresql"), "Parameter group name must not contain underscores");
+    }
+
+    @Test
+    void describeDbInstances_defaultParameterGroupNameUsesMajorMinorForAuroraMysql() {
+        DbInstance instance = makeInstance("aurora-my");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.MYSQL);
+        instance.setEngineIdentifier("aurora-mysql");
+        instance.setEngineVersion("8.0.36");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupName>default.aurora-mysql8.0</DBParameterGroupName>"),
+                "AWS uses major.minor for the MySQL family, got: " + body);
+    }
+
+    @Test
     void describeDbInstances_filterByDirectIdentifier() {
         DbInstance instance = makeInstance("mydb");
         when(service.listDbInstances("mydb", null)).thenReturn(List.of(instance));
@@ -224,7 +255,7 @@ class RdsQueryHandlerTest {
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbCluster("mycluster", "us-west-2")).thenReturn(cluster);
         when(service.modifyDbCluster("mycluster", null, null,
-                null, null, null, "us-west-2"))
+                null, null, null, null, null, "us-west-2"))
                 .thenReturn(cluster);
 
         handler.handle("DescribeDBInstances", params(), "us-west-2");
@@ -250,7 +281,73 @@ class RdsQueryHandlerTest {
         verify(service).getDbCluster("mycluster", "us-west-2");
         verify(service).deleteDbCluster("mycluster", "us-west-2");
         verify(service).modifyDbCluster("mycluster", null, null,
-                null, null, null, "us-west-2");
+                null, null, null, null, null, "us-west-2");
+    }
+
+    @Test
+    void createDbClusterPassesManagedMasterUserSecretOptions() {
+        DbCluster cluster = makeCluster("mycluster");
+        cluster.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!cluster-ABC");
+        cluster.setMasterUserSecretStatus("active");
+        cluster.setMasterUserSecretKmsKeyId("kms-key-1");
+        when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
+                eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
+                isNull(), isNull(), eq(false), any(),
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1")))
+                .thenReturn(cluster);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "omni_admin");
+        p.add("DatabaseName", "omni");
+        p.add("ManageMasterUserPassword", "true");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<MasterUserSecret>"));
+        assertTrue(body.contains("<SecretArn>arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!cluster-ABC</SecretArn>"));
+        assertTrue(body.contains("<SecretStatus>active</SecretStatus>"));
+        assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
+        verify(service).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
+                eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
+                isNull(), isNull(), eq(false), any(),
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"));
+    }
+
+    @Test
+    void createDbClusterWithoutManagedSecretOmitsMasterUserSecretElement() {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull()))
+                .thenReturn(cluster);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        String body = (String) response.getEntity();
+        assertFalse(body.contains("<MasterUserSecret>"));
+    }
+
+    @Test
+    void modifyDbClusterPassesManagedMasterUserSecretOptions() {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), any()))
+                .thenReturn(cluster);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("ManageMasterUserPassword", "true");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+        handler.handle("ModifyDBCluster", p);
+
+        verify(service).modifyDbCluster(eq("mycluster"), isNull(), isNull(),
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), any());
     }
 
     @Test
@@ -2353,5 +2450,28 @@ class RdsQueryHandlerTest {
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
                 isNull(), isNull(), captor.capture());
         assertEquals(new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true), captor.getValue());
+    }
+
+    @Test
+    void unhandledExceptionRendersXmlInternalFailure() {
+        when(service.createDbInstance(any(), any(), any(), any(), any(), any(),
+                any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
+                anyBoolean(), any(), any(), any(), any(), any(), anyBoolean(), any()))
+                .thenThrow(new RuntimeException("Docker daemon connection failed"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("DBInstanceClass", "db.t3.micro");
+
+        Response response = handler.handle("CreateDBInstance", p);
+        assertEquals(500, response.getStatus());
+        assertEquals("application/xml", response.getMediaType().toString());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ErrorResponse xmlns=\"http://rds.amazonaws.com/doc/2014-10-31/\">"), body);
+        assertTrue(body.contains("<Type>Receiver</Type>"), body);
+        assertTrue(body.contains("<Code>InternalFailure</Code>"), body);
+        assertTrue(body.contains("<Message>Unexpected error: Docker daemon connection failed</Message>"), body);
     }
 }

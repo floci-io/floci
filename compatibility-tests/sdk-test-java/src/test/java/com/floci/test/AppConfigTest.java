@@ -204,8 +204,8 @@ class AppConfigTest {
 
     @Test
     @Order(12)
-    @DisplayName("Poll interval: requested 60s but emulator returns 15s (known deviation from AWS)")
-    void requiredMinimumPollIntervalIsAcceptedButNotEnforced() {
+    @DisplayName("Poll interval: requested minimum is returned to the client")
+    void requiredMinimumPollIntervalIsReturned() {
         var sessionResponse = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
                 .applicationIdentifier(applicationId)
                 .environmentIdentifier(environmentId)
@@ -218,16 +218,14 @@ class AppConfigTest {
                 .configurationToken(intervalSessionToken)
                 .build());
 
-        // Emulator always returns 15s regardless of the requested interval.
-        // AWS would return the requested 60s. Pinning current emulator behavior.
-        assertThat(firstResponse.nextPollIntervalInSeconds()).isEqualTo(15);
+        assertThat(firstResponse.nextPollIntervalInSeconds()).isEqualTo(60);
         assertThat(firstResponse.nextPollConfigurationToken()).isNotNull();
 
         GetLatestConfigurationResponse secondResponse = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
                 .configurationToken(firstResponse.nextPollConfigurationToken())
                 .build());
 
-        assertThat(secondResponse.nextPollIntervalInSeconds()).isEqualTo(15);
+        assertThat(secondResponse.nextPollIntervalInSeconds()).isEqualTo(60);
         assertThat(secondResponse.nextPollConfigurationToken()).isNotNull();
     }
 

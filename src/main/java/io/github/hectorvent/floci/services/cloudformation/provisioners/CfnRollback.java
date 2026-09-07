@@ -28,6 +28,41 @@ public final class CfnRollback {
      */
     public static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
 
+    /**
+     * Carries the reason a provisioner's own restoration attempt did not complete after a failed
+     * update. {@code CloudFormationService} copies it onto the committed resource so the rollback
+     * walker reports UPDATE_ROLLBACK_FAILED with that reason instead of claiming the prior entity
+     * is live. Lives here for the same reason as the marker above.
+     */
+    public static final String UPDATE_ROLLBACK_FAILURE_ATTR = "__FlociUpdateRollbackFailure";
+
+    /**
+     * Holds the configuration a pipe carried before the update in flight mutated it, so a failed
+     * stack update can put it back. Written by {@code PipesCfnProvisioner} before its first
+     * mutating call and spent by its {@code rollbackUpdate}. Lives here beside the other rollback
+     * markers rather than on the provisioner, so the marker names stay in one place.
+     */
+    public static final String PIPE_UPDATE_SNAPSHOT_ATTR = "__FlociPipeUpdateSnapshot";
+
+    /**
+     * Holds the pipe a rename displaced: the name it still lives under, the region that addresses
+     * it, how many times deleting it has been attempted, and when the replacement was created.
+     * Written by {@code PipesCfnProvisioner} when it creates the replacement, and spent by whichever
+     * end the update reaches: {@code completeUpdate} deletes the displaced pipe once the update has
+     * committed, and {@code rollbackUpdate} points the resource back at it and deletes the
+     * replacement when the update fails instead.
+     */
+    public static final String PIPE_RENAME_CLEANUP_ATTR = "__FlociPipeRenameCleanup";
+
+    /**
+     * Holds the entity a replacing update displaced, for provisioners whose replacement needs no
+     * rollback snapshot: the prior physical id, its resource type and region, and how many times
+     * deleting it has been attempted. Written by {@link ReplacementCleanup#record} when a
+     * provision leaves the resource with a new physical id, and spent by {@code completeUpdate}
+     * once the update has committed.
+     */
+    public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
+
     private CfnRollback() {
     }
 

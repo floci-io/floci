@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.eclipse.microprofile.config.spi.ConfigSource;
 import org.jboss.logging.Logger;
 
@@ -19,7 +18,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.security.Security;
 
 /**
  * A MicroProfile {@link ConfigSource} that dynamically provides Quarkus TLS/SSL
@@ -32,9 +30,13 @@ import java.security.Security;
  * would be too late.
  *
  * <p>
- * When TLS is enabled with self-signed mode, the certificate is generated
- * using the ACM {@link CertificateGenerator} and persisted under
- * {@code {persistent-path}/tls/} for reuse across restarts.
+ * When TLS is enabled without a user certificate, the server certificate is a leaf issued by
+ * {@link FlociCertificateAuthority} and persisted under {@code {persistent-path}/tls/}. Clients
+ * trust the CA ({@code floci-root-ca.crt}, or {@code GET /_floci/ca.pem}), never the leaf.
+ *
+ * <p>
+ * It also writes {@link ContainerCaBundle}, the trust bundle every container Floci launches
+ * receives, next to the certificates.
  *
  * <p>
  * Both HTTP and HTTPS are served simultaneously (LocalStack parity).
@@ -43,9 +45,9 @@ public class TlsConfigSource implements ConfigSource {
 
     private static final Logger LOG = Logger.getLogger(TlsConfigSource.class);
 
-    private static final String SELF_SIGNED_CERT_NAME = "floci-selfsigned.crt";
-    private static final String SELF_SIGNED_KEY_NAME = "floci-selfsigned.key";
-    private static final String SELF_SIGNED_METADATA_NAME = "floci-selfsigned.metadata.json";
+    private static final String SERVER_CERT_NAME = "floci-server.crt";
+    private static final String SERVER_KEY_NAME = "floci-server.key";
+    private static final String SERVER_METADATA_NAME = "floci-server.metadata.json";
     private static final String TLS_DIR = "tls";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -56,56 +58,63 @@ public class TlsConfigSource implements ConfigSource {
             "*.execute-api.localhost.floci.io",
             "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
 
+    private static volatile Path resolvedTlsDir;
+
     private final Map<String, String> properties = new HashMap<>();
 
+    /**
+     * The TLS directory the most recent bootstrap used, or null when that bootstrap ran with TLS
+     * off. With a user-provided certificate it holds the container CA bundle and, once
+     * {@code GET /_floci/ca.pem} is called, the local CA; in self-signed mode the CA and the leaf
+     * as well. Reset on every construction so a later boot in the same JVM never sees a stale
+     * value.
+     */
+    static Path resolvedTlsDir() {
+        return resolvedTlsDir;
+    }
+
     public TlsConfigSource() {
+        resolvedTlsDir = null;
         String enabled = resolveProperty("floci.tls.enabled", "false");
         if (!"true".equalsIgnoreCase(enabled)) {
-            LOG.debug("TLS disabled — TlsConfigSource inactive");
+            LOG.debug("TLS disabled, TlsConfigSource inactive");
             return;
         }
-
-        // BouncyCastle may not be registered yet — this ConfigSource runs before CDI (@Startup beans)
-        // and before quarkus-security's runtime provider registration. Register it up front so BOTH
-        // certificate parsing (isSelfSigned/parseCertificate) and generation work; otherwise
-        // parseCertificate fails "no such provider: BC", isSelfSigned returns false, and the persisted
-        // self-signed certificate is needlessly regenerated on every restart.
-        ensureBouncyCastleRegistered();
 
         String certPath = resolveProperty("floci.tls.cert-path", "");
         String keyPath = resolveProperty("floci.tls.key-path", "");
         String selfSigned = resolveProperty("floci.tls.self-signed", "true");
         String persistentPath = resolveProperty("floci.storage.persistent-path", "./data");
+        Path tlsDir = Path.of(persistentPath, TLS_DIR);
+        resolvedTlsDir = tlsDir;
 
+        Path trustAnchor;
         if (!certPath.isBlank() && !keyPath.isBlank()) {
             validateFileExists(certPath, "TLS certificate");
             validateFileExists(keyPath, "TLS private key");
             LOG.infov("TLS: using user-provided certificate: {0}", certPath);
+            trustAnchor = Path.of(certPath);
         } else if ("true".equalsIgnoreCase(selfSigned)) {
-            Path tlsDir = Path.of(persistentPath, TLS_DIR);
-            Path certFile = tlsDir.resolve(SELF_SIGNED_CERT_NAME);
-            Path keyFile = tlsDir.resolve(SELF_SIGNED_KEY_NAME);
+            Path certFile = tlsDir.resolve(SERVER_CERT_NAME);
+            Path keyFile = tlsDir.resolve(SERVER_KEY_NAME);
+            FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
+            trustAnchor = ca.certificatePath();
 
-            // Check if certificate files exist and configuration hasn't changed
             if (Files.exists(certFile) && Files.exists(keyFile)) {
-                // Extract current hostname configuration
-                List<String> customHostnames = extractCustomHostnames();
-                List<String> currentHostnames = new ArrayList<>();
-                currentHostnames.addAll(DEFAULT_SAN_HOSTNAMES);
-                currentHostnames.addAll(customHostnames);
-                
-                // Regenerate when the hostname config changed, or when the existing certificate
-                // is a legacy non-self-signed cert (issuer != subject) — those cannot serve as a
-                // trust anchor for clients that install them, so an upgrade must replace them.
-                if (hostnameConfigChanged(tlsDir, currentHostnames) || !isSelfSigned(certFile)) {
-                    generateSelfSignedCert(tlsDir, certFile, keyFile);
+                List<String> currentHostnames = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
+                currentHostnames.addAll(extractCustomHostnames());
+
+                // Regenerate when the hostname config changed, when the existing leaf was not
+                // issued by the current CA (a pre-CA self-signed cert, or the CA was regenerated),
+                // or when it is outside its validity window (the leaf lives 365 days, dev data
+                // directories longer).
+                if (hostnameConfigChanged(tlsDir, currentHostnames) || !isValidLocalLeaf(ca, certFile)) {
+                    generateServerCert(tlsDir, certFile, keyFile, ca);
                 } else {
-                    // Configuration unchanged - reuse existing certificate
-                    LOG.infov("TLS: reusing existing self-signed certificate: {0}", certFile);
+                    LOG.infov("TLS: reusing existing server certificate: {0}", certFile);
                 }
             } else {
-                // Certificate files don't exist - generate new certificate
-                generateSelfSignedCert(tlsDir, certFile, keyFile);
+                generateServerCert(tlsDir, certFile, keyFile, ca);
             }
 
             certPath = certFile.toAbsolutePath().toString();
@@ -116,8 +125,12 @@ public class TlsConfigSource implements ConfigSource {
                             + "Set FLOCI_TLS_CERT_PATH + FLOCI_TLS_KEY_PATH, or enable FLOCI_TLS_SELF_SIGNED.");
         }
 
-        properties.put("quarkus.http.ssl.certificate.files", certPath);
-        properties.put("quarkus.http.ssl.certificate.key-files", keyPath);
+        writeContainerCaBundle(tlsDir, trustAnchor);
+
+        // The default entry of the Quarkus TLS registry. The HTTP server reads it when no
+        // quarkus.http.tls-configuration-name is set, and the registry can reload it at runtime.
+        properties.put("quarkus.tls.key-store.pem.0.cert", certPath);
+        properties.put("quarkus.tls.key-store.pem.0.key", keyPath);
         // When TLS is enabled, Quarkus HTTP and HTTPS run on internal ports.
         // A TlsProxyServer (NetServer) listens on the public Floci port (4566)
         // and does protocol detection to route HTTP and HTTPS to the correct backend.
@@ -126,7 +139,7 @@ public class TlsConfigSource implements ConfigSource {
         properties.put("quarkus.http.port", "4510");
         properties.put("quarkus.http.ssl-port", "4511");
 
-        LOG.infov("TLS: HTTPS enabled — proxy will listen on port {0} (HTTP+HTTPS), cert={1}",
+        LOG.infov("TLS: HTTPS enabled, proxy will listen on port {0} (HTTP+HTTPS), cert={1}",
                 resolveProperty("floci.port", "4566"), certPath);
     }
 
@@ -171,38 +184,89 @@ public class TlsConfigSource implements ConfigSource {
         return defaultValue;
     }
 
-    private static void ensureBouncyCastleRegistered() {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(new BouncyCastleProvider());
+    private void generateServerCert(Path tlsDir, Path certFile, Path keyFile, FlociCertificateAuthority ca) {
+        try {
+            Files.createDirectories(tlsDir);
+            List<String> configured = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
+            configured.addAll(extractCustomHostnames());
+            List<String> learned = readLearnedHostnames(tlsDir, certFile);
+            List<String> allSans = new ArrayList<>(configured);
+            for (String name : learned) {
+                if (!allSans.contains(name)) {
+                    allSans.add(name);
+                }
+            }
+
+            CertificateGenerator.GeneratedCertificate generated = ca.issueServerCertificate("localhost", allSans,
+                    KeyAlgorithm.RSA_2048, null);
+
+            Files.writeString(certFile, generated.certificatePem());
+            FlociCertificateAuthority.writePrivateKey(keyFile, generated.privateKeyPem());
+
+            LOG.infov("TLS: generated server certificate {0} issued by {1}", certFile,
+                    ca.certificate().getSubjectX500Principal().getName());
+            persistMetadata(tlsDir, configured, learned);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to write TLS server certificate", e);
         }
     }
 
-    private void generateSelfSignedCert(Path tlsDir, Path certFile, Path keyFile) {
+    /**
+     * Hostnames {@link TlsCertificateManager} added at runtime. A boot that regenerates the
+     * certificate (changed configuration, expired or foreign leaf) must keep serving them. The
+     * served certificate is the source of truth: a SAN it carries beyond the metadata's configured
+     * list was learned by a reissue whose metadata write did not complete, and is kept too.
+     */
+    private List<String> readLearnedHostnames(Path tlsDir, Path certFile) {
+        Path metadataFile = tlsDir.resolve(SERVER_METADATA_NAME);
+        if (!Files.exists(metadataFile)) {
+            return List.of();
+        }
         try {
-            Files.createDirectories(tlsDir);
-            ensureBouncyCastleRegistered();
-
-            // Extract custom hostnames and combine with defaults
-            List<String> customHostnames = extractCustomHostnames();
-            List<String> allSans = new ArrayList<>();
-            allSans.addAll(DEFAULT_SAN_HOSTNAMES);
-            allSans.addAll(customHostnames);
-
-            CertificateGenerator gen = new CertificateGenerator();
-            CertificateGenerator.GeneratedCertificate generated = gen.generateSelfSignedCertificate(
-                    "localhost",
-                    allSans,
-                    KeyAlgorithm.RSA_2048);
-
-            Files.writeString(certFile, generated.certificatePem());
-            Files.writeString(keyFile, generated.privateKeyPem());
-
-            LOG.infov("TLS: generated self-signed certificate: {0}", certFile);
-
-            // Persist metadata for change detection on restart
-            persistMetadata(tlsDir, allSans);
+            CertificateMetadata metadata = OBJECT_MAPPER.readValue(Files.readString(metadataFile), CertificateMetadata.class);
+            Set<String> learned = new LinkedHashSet<>(metadata.getLearnedHostnames());
+            if (metadata.getHostnames() != null && Files.exists(certFile)) {
+                Set<String> configured = new LinkedHashSet<>(metadata.getHostnames());
+                for (String san : servedSans(certFile)) {
+                    if (!configured.contains(san)) {
+                        learned.add(san);
+                    }
+                }
+            }
+            return new ArrayList<>(learned);
         } catch (IOException e) {
-            throw new IllegalStateException("Failed to write self-signed TLS certificate", e);
+            LOG.warnv("TLS: could not read learned hostnames from {0} ({1}); the new certificate starts without them",
+                    metadataFile, e.getMessage());
+            return List.of();
+        }
+    }
+
+    private static List<String> servedSans(Path certFile) {
+        List<String> sans = new ArrayList<>();
+        try {
+            X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
+            if (cert.getSubjectAlternativeNames() != null) {
+                for (List<?> entry : cert.getSubjectAlternativeNames()) {
+                    sans.add(String.valueOf(entry.get(1)));
+                }
+            }
+        } catch (Exception e) {
+            LOG.debugv("TLS: could not read the SAN list of {0} ({1}); learned names come from the metadata only",
+                    certFile, e.getMessage());
+        }
+        return sans;
+    }
+
+    /**
+     * Containers Floci launches get this bundle copied in (Docker) or mounted (Kubernetes). A
+     * failure here must not stop Floci: log it, and containers simply will not trust Floci HTTPS
+     * until a boot manages to write it.
+     */
+    private static void writeContainerCaBundle(Path tlsDir, Path trustAnchor) {
+        try {
+            ContainerCaBundle.write(tlsDir, trustAnchor);
+        } catch (Exception e) {
+            LOG.warnv(e, "TLS: could not write the container CA bundle under {0}: {1}", tlsDir, e.getMessage());
         }
     }
 
@@ -214,16 +278,21 @@ public class TlsConfigSource implements ConfigSource {
     }
 
     /**
-     * Returns {@code true} if the certificate at {@code certFile} is genuinely self-signed
-     * (issuer == subject) and therefore usable as a trust anchor. Legacy Floci certs carried a
-     * cosmetic Amazon issuer DN and return {@code false} here, triggering regeneration on upgrade.
+     * Returns {@code true} if the certificate at {@code certFile} was issued by the current local
+     * CA and is inside its validity window. A pre-CA self-signed leaf, a leaf from a regenerated
+     * CA, an expired leaf or an unreadable file all return {@code false} and are replaced.
      */
-    private boolean isSelfSigned(Path certFile) {
+    private boolean isValidLocalLeaf(FlociCertificateAuthority ca, Path certFile) {
         try {
             X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
-            return cert.getIssuerX500Principal().equals(cert.getSubjectX500Principal());
+            if (!ca.isIssuedByUs(cert)) {
+                LOG.infov("TLS: existing server certificate was not issued by the local CA; regenerating");
+                return false;
+            }
+            cert.checkValidity();
+            return true;
         } catch (Exception e) {
-            LOG.warnv("TLS: could not inspect existing certificate ({0}); regenerating", e.getMessage());
+            LOG.warnv("TLS: existing server certificate unusable ({0}); regenerating", e.getMessage());
             return false;
         }
     }
@@ -279,17 +348,20 @@ public class TlsConfigSource implements ConfigSource {
 
     /**
      * Persists certificate metadata to enable change detection on restart.
-     * Writes metadata to {tls-dir}/floci-selfsigned.metadata.json.
+     * Writes metadata to {tls-dir}/floci-server.metadata.json.
      * 
      * @param tlsDir The TLS directory where metadata should be written
-     * @param hostnames List of hostnames included in the certificate SANs
+     * @param hostnames List of configured hostnames included in the certificate SANs
+     * @param learnedHostnames Hostnames added at runtime, also in the SANs but kept apart so a
+     *                         configuration change is still detected by comparing {@code hostnames}
      */
-    private void persistMetadata(Path tlsDir, List<String> hostnames) {
-        Path metadataFile = tlsDir.resolve(SELF_SIGNED_METADATA_NAME);
+    private void persistMetadata(Path tlsDir, List<String> hostnames, List<String> learnedHostnames) {
+        Path metadataFile = tlsDir.resolve(SERVER_METADATA_NAME);
         try {
             String version = resolveFlociVersion();
             CertificateMetadata metadata = CertificateMetadata.create(hostnames, version);
-            
+            metadata.setLearnedHostnames(learnedHostnames);
+
             String json = OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata);
             
             Files.writeString(metadataFile, json);
@@ -322,7 +394,7 @@ public class TlsConfigSource implements ConfigSource {
      * @return true if configuration changed or metadata missing, false if same
      */
     private boolean hostnameConfigChanged(Path tlsDir, List<String> currentHostnames) {
-        Path metadataFile = tlsDir.resolve(SELF_SIGNED_METADATA_NAME);
+        Path metadataFile = tlsDir.resolve(SERVER_METADATA_NAME);
         
         // If metadata doesn't exist, trigger regeneration
         if (!Files.exists(metadataFile)) {

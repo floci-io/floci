@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.rds.proxy.PostgresProtocolHandler;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -32,6 +33,7 @@ public class RedshiftAuthProxy {
     private final RdsSigV4Validator sigV4;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final RdsAuthProxy.PasswordValidator passwordValidator;
+    private final S3Service s3Service;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -39,7 +41,8 @@ public class RedshiftAuthProxy {
     public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
                              String masterUsername, String masterPassword, String dbName,
                              RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
-                             RdsAuthProxy.PasswordValidator passwordValidator) {
+                             RdsAuthProxy.PasswordValidator passwordValidator,
+                             S3Service s3Service) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -49,6 +52,7 @@ public class RedshiftAuthProxy {
         this.sigV4 = sigV4;
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
+        this.s3Service = s3Service;
     }
 
     public void start(int proxyPort) throws IOException {
@@ -138,11 +142,14 @@ public class RedshiftAuthProxy {
             backend = new Socket(backendHost, backendPort);
             backend.setTcpNoDelay(true);
             // iamEnabled = false: the SigV4 branch inside authenticate is never taken.
-            Socket activeClient = PostgresProtocolHandler.authenticate(
-                    client, backend, masterUsername, masterPassword, dbName,
-                    false, sigV4, tlsCertificates, passwordValidator::validate);
-            if (activeClient != null) {
-                PostgresProtocolHandler.bridge(activeClient, backend);
+            PostgresProtocolHandler.AuthenticatedSession session =
+                    PostgresProtocolHandler.authenticate(
+                            client, backend, masterUsername, masterPassword, dbName,
+                            false, sigV4, tlsCertificates, passwordValidator::validate);
+            if (session != null) {
+                // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
+                // PostgreSQL backend on the way through; every other message is relayed verbatim.
+                new RedshiftInterceptingBridge(session.client(), backend, s3Service).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());

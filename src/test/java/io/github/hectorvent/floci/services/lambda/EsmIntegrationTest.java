@@ -899,6 +899,62 @@ class EsmIntegrationTest {
             .body("message", containsString("only supported for Amazon Kinesis"));
     }
 
+    // ──────────────────────────── Self-Managed Kafka ESM ────────────────────────────
+
+    @Test
+    @Order(80)
+    void createSelfManagedKafkaEventSourceMapping() {
+        // Create Self-Managed Apache Kafka ESM with SelfManagedEventSource, Topics, and StartingPosition
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "SelfManagedEventSource": {
+                        "Endpoints": {
+                            "KAFKA_BOOTSTRAP_SERVERS": ["b-1.example.com:9092", "b-2.example.com:9092"]
+                        }
+                    },
+                    "Topics": ["orders", "payments"],
+                    "StartingPosition": "TRIM_HORIZON"
+                }
+                """.formatted(FUNCTION_NAME))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("UUID", notNullValue())
+            .body("State", equalTo("Enabled"))
+            .body("$", not(hasKey("EventSourceArn")))
+            .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
+                    hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
+            .body("Topics", hasItems("orders", "payments"))
+            .body("StartingPosition", equalTo("TRIM_HORIZON"))
+        .extract()
+            .path("UUID");
+
+        // Verify GET by UUID
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("UUID", equalTo(uuid))
+            .body("$", not(hasKey("EventSourceArn")))
+            .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
+                    hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
+            .body("Topics", hasItems("orders", "payments"))
+            .body("StartingPosition", equalTo("TRIM_HORIZON"));
+
+        // Verify DELETE by UUID
+        given()
+        .when()
+            .delete(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(202)
+            .body("UUID", equalTo(uuid));
+    }
+
     // ──────────────────────────── Multi-account ESM ────────────────────────────
 
     /**
@@ -1020,5 +1076,242 @@ class EsmIntegrationTest {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    // ──────────────────────────── FilterCriteria ────────────────────────────
+
+    /** Embeds a raw JSON pattern as a properly-escaped JSON string value in a request body. */
+    private static String jsonString(String raw) {
+        return "\"" + raw.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** Builds {@code n} comma-separated {@code {"Pattern": <raw>}} filter entries for a Filters array. */
+    private static String repeatFilter(String rawPattern, int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append("{ \"Pattern\": ").append(jsonString(rawPattern)).append(" }");
+        }
+        return sb.toString();
+    }
+
+    @Test
+    @Order(76)
+    void createEventSourceMappingWithFilterCriteriaRoundTrips() {
+        String pattern = "{\"body\":{\"type\":[\"order\"]}}";
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "BatchSize": 5,
+                    "FilterCriteria": { "Filters": [ { "Pattern": %s } ] }
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN, jsonString(pattern)))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("FilterCriteria.Filters[0].Pattern", equalTo(pattern))
+        .extract()
+            .path("UUID");
+
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("FilterCriteria.Filters[0].Pattern", equalTo(pattern));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(77)
+    void responseOmitsFilterCriteriaWhenUnset() {
+        // The original bug's wire symptom was FilterCriteria: null; AWS omits the key entirely when unset.
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "BatchSize": 2
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("$", not(hasKey("FilterCriteria")))
+        .extract()
+            .path("UUID");
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(78)
+    void updateEventSourceMappingAddsReplacesAndClearsFilterCriteria() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "BatchSize": 2 }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+
+        // Add
+        String first = "{\"body\":{\"type\":[\"order\"]}}";
+        given().contentType("application/json")
+            .body("{ \"FilterCriteria\": { \"Filters\": [ { \"Pattern\": " + jsonString(first) + " } ] } }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202).body("FilterCriteria.Filters[0].Pattern", equalTo(first));
+
+        // Replace whole set
+        String second = "{\"body\":{\"type\":[\"refund\"]}}";
+        given().contentType("application/json")
+            .body("{ \"FilterCriteria\": { \"Filters\": [ { \"Pattern\": " + jsonString(second) + " } ] } }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FilterCriteria.Filters.size()", equalTo(1))
+            .body("FilterCriteria.Filters[0].Pattern", equalTo(second));
+
+        // Clear with empty object
+        given().contentType("application/json").body("{ \"FilterCriteria\": {} }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202).body("$", not(hasKey("FilterCriteria")));
+
+        // Re-add, then clear with empty Filters array
+        given().contentType("application/json")
+            .body("{ \"FilterCriteria\": { \"Filters\": [ { \"Pattern\": " + jsonString(first) + " } ] } }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+        given().contentType("application/json").body("{ \"FilterCriteria\": { \"Filters\": [] } }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202).body("$", not(hasKey("FilterCriteria")));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(79)
+    void createEventSourceMappingRejectsInvalidFilterCriteria() {
+        // malformed JSON pattern
+        given().contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s",
+                  "FilterCriteria": { "Filters": [ { "Pattern": %s } ] } }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN, jsonString("{oops")))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(400);
+
+        // scalar (non-array/object) value: a silent drop-all pattern
+        given().contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s",
+                  "FilterCriteria": { "Filters": [ { "Pattern": %s } ] } }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN, jsonString("{\"eventName\":\"INSERT\"}")))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(400);
+
+        // FilterCriteria not an object
+        given().contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "FilterCriteria": "nope" }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(400);
+
+        // more than 5 filters
+        String sixFilters = repeatFilter("{\"a\":[1]}", 6);
+        given().contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s",
+                  "FilterCriteria": { "Filters": [ %s ] } }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN, sixFilters))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(400);
+
+        // pattern longer than 4096 chars
+        String oversized = "{\"a\":[\"" + "x".repeat(4087) + "\"]}"; // 4097 chars
+        given().contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s",
+                  "FilterCriteria": { "Filters": [ { "Pattern": %s } ] } }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN, jsonString(oversized)))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(400);
+    }
+
+    @Test
+    @Order(80)
+    void updateEventSourceMappingRejectsInvalidFilterCriteria() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "BatchSize": 2 }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+
+        given().contentType("application/json")
+            .body("{ \"FilterCriteria\": { \"Filters\": [ { \"Pattern\": " + jsonString("{oops") + " } ] } }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400);
+
+        // FilterCriteria not an object
+        given().contentType("application/json").body("{ \"FilterCriteria\": \"nope\" }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400);
+
+        // more than 5 filters
+        given().contentType("application/json")
+            .body("{ \"FilterCriteria\": { \"Filters\": [ " + repeatFilter("{\"a\":[1]}", 6) + " ] } }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400);
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(81)
+    void listEventSourceMappingsEchoesFilterCriteria() {
+        String pattern = "{\"body\":{\"type\":[\"order\"]}}";
+        String uuidWith = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "BatchSize": 3,
+                    "FilterCriteria": { "Filters": [ { "Pattern": %s } ] }
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN, jsonString(pattern)))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+
+        String uuidWithout = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "BatchSize": 4 }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings?FunctionName=" + FUNCTION_ARN)
+        .then()
+            .statusCode(200)
+            .body("EventSourceMappings.find { it.UUID == '" + uuidWith + "' }.FilterCriteria.Filters[0].Pattern",
+                    equalTo(pattern))
+            .body("EventSourceMappings.find { it.UUID == '" + uuidWithout + "' }.FilterCriteria",
+                    nullValue());
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuidWith).then().statusCode(202);
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuidWithout).then().statusCode(202);
     }
 }

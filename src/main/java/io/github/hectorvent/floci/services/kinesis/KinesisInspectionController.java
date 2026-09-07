@@ -104,7 +104,7 @@ public class KinesisInspectionController {
             node.put("StreamCreationTimestamp", stream.getStreamCreationTimestamp().toString());
         }
         node.put("OpenShardCount", stream.getShards().stream().filter(s -> !s.isClosed()).count());
-        node.put("RecordCount", stream.getShards().stream().mapToInt(s -> s.getRecords().size()).sum());
+        node.put("RecordCount", stream.getShards().stream().mapToInt(KinesisShard::recordCount).sum());
         ArrayNode enhancedMonitoring = node.putArray("EnhancedMonitoring");
         Set<String> metrics = stream.getEnhancedMonitoringMetrics();
         if (metrics != null) {
@@ -130,7 +130,7 @@ public class KinesisInspectionController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ShardId", shard.getShardId());
         node.put("Closed", shard.isClosed());
-        node.put("RecordCount", shard.getRecords().size());
+        node.put("RecordCount", shard.recordCount());
         if (shard.getParentShardId() != null) {
             node.put("ParentShardId", shard.getParentShardId());
         }

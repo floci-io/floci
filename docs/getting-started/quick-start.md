@@ -29,14 +29,14 @@ This guide gets Floci running and verifies that AWS CLI commands work against it
     docker compose up -d
     ```
 
-=== "JVM"
+=== "Compat (+ AWS CLI + boto3)"
 
-    Use `latest-jvm` if you need broader platform compatibility:
+    Use `latest-compat` if you need the AWS CLI and boto3 inside the container:
 
     ```yaml
     services:
       floci:
-        image: floci/floci:latest-jvm
+        image: floci/floci:latest-compat
         ports:
           - "4566:4566"
         volumes:

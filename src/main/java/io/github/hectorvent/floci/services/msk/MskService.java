@@ -162,8 +162,12 @@ public class MskService implements ResourceProvider {
         if (config.services().msk().mock()) {
             cluster.setState(ClusterState.ACTIVE);
             cluster.setBootstrapBrokers("localhost:9092");
-        } else {
-            redpandaManager.startContainer(cluster);
+        } else if (!redpandaManager.tryStartContainer(cluster)) {
+            LOG.warnv("MSK cluster {0} created without a backing Kafka broker: no Docker daemon "
+                    + "is reachable. Metadata operations work; producing and consuming do not "
+                    + "until a daemon appears.", clusterName);
+            cluster.setState(ClusterState.ACTIVE);
+            cluster.setBootstrapBrokers("localhost:9092");
         }
 
         storage.put(clusterArn, cluster);

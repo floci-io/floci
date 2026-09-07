@@ -14,12 +14,14 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * Covers CreateUserPoolDomain/DescribeUserPoolDomain/DeleteUserPoolDomain (lex00/floci#63)
- * for both an Amazon Cognito prefix domain and a custom domain fronted by an ACM certificate.
+ * Covers CreateUserPoolDomain/DescribeUserPoolDomain/UpdateUserPoolDomain/DeleteUserPoolDomain (lex00/floci#63)
+ * for both an Amazon Cognito prefix domain and a custom domain fronted by an ACM certificate, including
+ * the certificate's InUseBy bookkeeping in ACM.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -28,8 +30,10 @@ class CognitoUserPoolDomainIntegrationTest {
     private static String poolId;
     private static String prefixDomain;
     private static String customDomain;
-    private static final String CERTIFICATE_ARN =
-            "arn:aws:acm:us-east-1:000000000000:certificate/" + UUID.randomUUID();
+    private static String CERTIFICATE_ARN;
+    private static String RENEWED_CERTIFICATE_ARN;
+    private static final String AWS_CERTIFICATE_MESSAGE = "The specified SSL certificate doesn't exist, "
+            + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain.";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -47,6 +51,25 @@ class CognitoUserPoolDomainIntegrationTest {
         poolId = poolResponse.path("UserPool").path("Id").asText();
         prefixDomain = "floci-test-" + UUID.randomUUID().toString().substring(0, 8);
         customDomain = "auth-" + UUID.randomUUID().toString().substring(0, 8) + ".example.com";
+        CERTIFICATE_ARN = requestCertificate(customDomain);
+        RENEWED_CERTIFICATE_ARN = requestCertificate(customDomain);
+    }
+
+    private static String requestCertificate(String domainName) throws Exception {
+        return RestAssuredJsonUtils.awsActionJson("CertificateManager", "RequestCertificate", """
+                {
+                  "DomainName": "%s",
+                  "ValidationMethod": "DNS"
+                }
+                """.formatted(domainName)).path("CertificateArn").asText();
+    }
+
+    private static io.restassured.response.Response acm(String action, String certificateArn) {
+        return RestAssuredJsonUtils.awsAction("CertificateManager", action, """
+                {
+                  "CertificateArn": "%s"
+                }
+                """.formatted(certificateArn));
     }
 
     @Test
@@ -142,6 +165,84 @@ class CognitoUserPoolDomainIntegrationTest {
 
     @Test
     @Order(8)
+    void certificateInUseByTheDomainCannotBeDeleted() {
+        acm("DescribeCertificate", CERTIFICATE_ARN)
+                .then()
+                .statusCode(200)
+                .body("Certificate.InUseBy.size()", equalTo(1))
+                .body("Certificate.InUseBy[0]", startsWith("arn:aws:cloudfront::"));
+
+        acm("DeleteCertificate", CERTIFICATE_ARN)
+                .then()
+                .statusCode(409)
+                .body("__type", equalTo("ResourceInUseException"));
+    }
+
+    @Test
+    @Order(9)
+    void updateCustomDomainReplacesTheCertificateAndKeepsTheCloudFrontDistribution() throws Exception {
+        String cloudFront = cognitoJson("DescribeUserPoolDomain", """
+                {
+                  "Domain": "%s"
+                }
+                """.formatted(customDomain)).path("DomainDescription").path("CloudFrontDistribution").asText();
+
+        JsonNode response = cognitoJson("UpdateUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "%s",
+                  "CustomDomainConfig": {
+                    "CertificateArn": "%s"
+                  },
+                  "ManagedLoginVersion": 2
+                }
+                """.formatted(customDomain, poolId, RENEWED_CERTIFICATE_ARN));
+
+        // As on AWS, the distribution survives a certificate change, so a DNS alias stays valid.
+        assertEquals(cloudFront, response.path("CloudFrontDomain").asText());
+        assertEquals(2, response.path("ManagedLoginVersion").asInt());
+
+        JsonNode description = cognitoJson("DescribeUserPoolDomain", """
+                {
+                  "Domain": "%s"
+                }
+                """.formatted(customDomain)).path("DomainDescription");
+        assertEquals(RENEWED_CERTIFICATE_ARN, description.path("CustomDomainConfig").path("CertificateArn").asText());
+        assertEquals(cloudFront, description.path("CloudFrontDistribution").asText());
+        assertEquals(2, description.path("ManagedLoginVersion").asInt());
+    }
+
+    @Test
+    @Order(10)
+    void updateMovesTheRegistrationToTheRenewedCertificate() {
+        acm("DescribeCertificate", CERTIFICATE_ARN)
+                .then()
+                .statusCode(200)
+                .body("Certificate.InUseBy.size()", equalTo(0));
+        acm("DescribeCertificate", RENEWED_CERTIFICATE_ARN)
+                .then()
+                .statusCode(200)
+                .body("Certificate.InUseBy.size()", equalTo(1));
+    }
+
+    @Test
+    @Order(11)
+    void updateDomainOfAnotherPoolIsNotFound() {
+        cognitoAction("UpdateUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "us-east-1_missing",
+                  "CustomDomainConfig": {
+                    "CertificateArn": "%s"
+                  }
+                }
+                """.formatted(customDomain, CERTIFICATE_ARN))
+                .then()
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(12)
     void createCustomDomainWithoutCertificateArnFails() {
         cognitoAction("CreateUserPoolDomain", """
                 {
@@ -156,7 +257,25 @@ class CognitoUserPoolDomainIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(13)
+    void createCustomDomainWithUnknownCertificateFails() {
+        cognitoAction("CreateUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "%s",
+                  "CustomDomainConfig": {
+                    "CertificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/%s"
+                  }
+                }
+                """.formatted("unknown-" + UUID.randomUUID().toString().substring(0, 8) + ".example.com", poolId, UUID.randomUUID()))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo(AWS_CERTIFICATE_MESSAGE));
+    }
+
+    @Test
+    @Order(14)
     void deleteCustomDomainThenDescribeIsNotFound() {
         cognitoAction("DeleteUserPoolDomain", """
                 {
@@ -178,7 +297,20 @@ class CognitoUserPoolDomainIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(15)
+    void deletingTheDomainReleasesTheCertificate() {
+        acm("DescribeCertificate", RENEWED_CERTIFICATE_ARN)
+                .then()
+                .statusCode(200)
+                .body("Certificate.InUseBy.size()", equalTo(0));
+
+        acm("DeleteCertificate", RENEWED_CERTIFICATE_ARN)
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
+    @Order(16)
     void deleteUserPoolWithDomainIsRejected() throws Exception {
         // The DeleteUserPool API reference's own example documents this refusal verbatim.
         String blockingDomain = "floci-block-" + UUID.randomUUID().toString().substring(0, 8);
@@ -211,7 +343,7 @@ class CognitoUserPoolDomainIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(17)
     void deleteUserPoolSucceedsOnceDomainIsGone() {
         cognitoAction("DeleteUserPool", """
                 {

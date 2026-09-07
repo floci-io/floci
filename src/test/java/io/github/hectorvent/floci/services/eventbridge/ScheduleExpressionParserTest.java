@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.DayOfWeek;
 import java.time.ZonedDateTime;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -123,11 +124,15 @@ class ScheduleExpressionParserTest {
 
     @Test
     void getNextFireTimeWeekdays() {
+        // AWS day-of-week is 1-7 = SUN-SAT, so Monday to Friday is 2-6.
         ZonedDateTime from = ZonedDateTime.parse("2026-03-23T08:00:00Z");
-        ZonedDateTime next = ScheduleExpressionParser.getNextFireTime("cron(0 9-17 * * 1-5 *)", from);
+        ZonedDateTime next = ScheduleExpressionParser.getNextFireTime("cron(0 9-17 * * 2-6 *)", from);
 
         assertNotNull(next);
         assertTrue(next.getHour() >= 9 && next.getHour() <= 17);
+        assertTrue(next.getDayOfWeek().getValue() >= DayOfWeek.MONDAY.getValue()
+                        && next.getDayOfWeek().getValue() <= DayOfWeek.FRIDAY.getValue(),
+                "expected a weekday but got " + next);
     }
 
     @Test
@@ -135,10 +140,52 @@ class ScheduleExpressionParserTest {
         ZonedDateTime from = ZonedDateTime.parse("2026-03-01T02:00:00Z");
         ZonedDateTime next = ScheduleExpressionParser.getNextFireTime("cron(30 2 ? * 2#1 *)", from);
 
-        assertNotNull(next);
-        assertEquals(2, next.getHour());
-        assertEquals(30, next.getMinute());
-        assertEquals(2, next.getDayOfWeek().getValue());
+        assertEquals(ZonedDateTime.parse("2026-03-02T02:30:00Z"), next);
+        assertEquals(DayOfWeek.MONDAY, next.getDayOfWeek());
+    }
+
+    // ──────────────────────────── Day-of-week numbering (AWS 1-7 = SUN-SAT) ────────────────────────────
+
+    /** 2026-03-01 is a Sunday, so it doubles as the day the "from" instant lands on. */
+    private static final ZonedDateTime SUNDAY_2026_03_01_02_00 = ZonedDateTime.parse("2026-03-01T02:00:00Z");
+
+    @Test
+    void dayOfWeekOneIsSunday() {
+        assertEquals(ZonedDateTime.parse("2026-03-01T12:00:00Z"),
+                ScheduleExpressionParser.getNextFireTime("cron(0 12 ? * 1 *)", SUNDAY_2026_03_01_02_00));
+    }
+
+    @Test
+    void dayOfWeekTwoIsMonday() {
+        assertEquals(ZonedDateTime.parse("2026-03-02T12:00:00Z"),
+                ScheduleExpressionParser.getNextFireTime("cron(0 12 ? * 2 *)", SUNDAY_2026_03_01_02_00));
+    }
+
+    @Test
+    void dayOfWeekSevenIsSaturdayAndIsAccepted() {
+        assertEquals(ZonedDateTime.parse("2026-03-07T12:00:00Z"),
+                ScheduleExpressionParser.getNextFireTime("cron(0 12 ? * 7 *)", SUNDAY_2026_03_01_02_00));
+    }
+
+    @Test
+    void dayOfWeekNamesAgreeWithTheirNumbers() {
+        assertEquals(
+                ScheduleExpressionParser.getNextFireTime("cron(0 12 ? * 2 *)", SUNDAY_2026_03_01_02_00),
+                ScheduleExpressionParser.getNextFireTime("cron(0 12 ? * MON *)", SUNDAY_2026_03_01_02_00));
+    }
+
+    @Test
+    void lastWeekdayOfMonthUsesAwsNumbering() {
+        // AWS documents cron(15 10 ? * 6L 2022-2023) as the last Friday of the month.
+        // The last Friday of March 2026 is the 27th.
+        assertEquals(ZonedDateTime.parse("2026-03-27T10:15:00Z"),
+                ScheduleExpressionParser.getNextFireTime("cron(15 10 ? * 6L *)", SUNDAY_2026_03_01_02_00));
+    }
+
+    @Test
+    void dayOfWeekZeroIsRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ScheduleExpressionParser.getNextFireTime("cron(0 12 ? * 0 *)", SUNDAY_2026_03_01_02_00));
     }
 
     @Test

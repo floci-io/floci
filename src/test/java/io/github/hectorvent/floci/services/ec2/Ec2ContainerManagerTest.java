@@ -10,6 +10,8 @@ import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.command.ListContainersCmd;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -35,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -65,6 +68,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
+import com.github.dockerjava.api.command.PingCmd;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 
 class Ec2ContainerManagerTest {
 
@@ -161,6 +168,42 @@ class Ec2ContainerManagerTest {
     @Test
     void userDataExecutionCommandRunsScriptDirectlySoShebangIsHonored() {
         assertArrayEquals(new String[]{"/tmp/user-data.sh"}, Ec2ContainerManager.userDataExecutionCommand());
+    }
+
+    @Test
+    void userDataOutputSummaryRetainsBoundedTailAndReportsTruncation() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(8);
+        output.write("0123456789".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("(output truncated; showing last 8 bytes)\n23456789",
+                Ec2ContainerManager.summarizeUserDataOutput(output));
+    }
+
+    @Test
+    void userDataOutputSummaryRetainsTailAcrossFrames() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(8);
+        output.write("1234".getBytes(StandardCharsets.UTF_8));
+        output.write("567890".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("(output truncated; showing last 8 bytes)\n34567890",
+                Ec2ContainerManager.summarizeUserDataOutput(output));
+    }
+
+    @Test
+    void userDataOutputSummaryPreservesOutputWithinLimit() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(8);
+        output.write("🙂".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("🙂", Ec2ContainerManager.summarizeUserDataOutput(output));
+    }
+
+    @Test
+    void userDataOutputSummaryStartsAtUtf8CharacterBoundary() throws Exception {
+        Ec2ContainerManager.BoundedOutput output = new Ec2ContainerManager.BoundedOutput(4);
+        output.write("🙂YZ".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("(output truncated; showing last 4 bytes)\nYZ",
+                Ec2ContainerManager.summarizeUserDataOutput(output));
     }
 
     @Test
@@ -538,6 +581,8 @@ class Ec2ContainerManagerTest {
         Ec2ContainerManager.containerBridgeIpAttempts = 1;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;
         LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.create(any(ContainerSpec.class), eq("linux/arm64")))
+                .thenReturn(TEST_CONTAINER_ID);
         InspectContainerCmd inspect = mock(InspectContainerCmd.class);
         InspectContainerResponse withIp = inspectResponse("172.18.0.11");
         when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
@@ -546,7 +591,8 @@ class Ec2ContainerManagerTest {
         Instance instance = instance("i-systemd");
 
         harness.manager.launch(instance,
-                new ResolvedAmiImage("floci/ami-ubuntu:24.04-arm64", ResolvedAmiImage.SYSTEMD_RUNTIME, true),
+                new ResolvedAmiImage("floci/ami-ubuntu:24.04-arm64", ResolvedAmiImage.SYSTEMD_RUNTIME, true,
+                        "linux/arm64"),
                 null,
                 "us-west-2");
 
@@ -554,6 +600,7 @@ class Ec2ContainerManagerTest {
         verify(harness.builder).withCmd(List.of("/sbin/init"));
         verify(harness.builder).withCgroupnsMode("host");
         verify(harness.builder).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+        verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
     }
 
     @Test
@@ -937,6 +984,7 @@ class Ec2ContainerManagerTest {
         when(ec2.imdsPort()).thenReturn(9169);
 
         DockerClient dockerClient = mock(DockerClient.class);
+        stubDockerPing(dockerClient, true);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
@@ -956,7 +1004,137 @@ class Ec2ContainerManagerTest {
                 regionResolver,
                 mock(ContainerNetworkReachability.class));
         return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
-                portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
+                portAllocator, portForwardManager, config, new CopyOnWriteArrayList<>());
+    }
+
+    // ── startup reconciliation of EC2 containers orphaned by a previous run ──────
+
+    @Test
+    void launchStampsTheOwnerPortLabelOnTheInstanceContainer() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        when(harness.config.port()).thenReturn(4680);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.12");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        Instance instance = instance("i-owned");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        // Without this label the reconciler cannot tell one emulator's containers from another's
+        // on a shared Docker daemon, so it could only ever be unsafe or a no-op.
+        verify(harness.builder).withLabels(Map.of(Ec2ContainerManager.LABEL_OWNER_PORT, "4680"));
+    }
+
+    @Test
+    void reconcileOrphanedContainersRemovesOnlyThisProcessesUnrecordedContainers() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        stubContainerListing(harness.dockerClient,
+                labelled("c-orphan", "4680", "us-east-1", "i-orphan"),
+                labelled("c-live", "4680", "us-east-1", "i-live"),
+                labelled("c-sibling", "4620", "us-east-1", "i-sibling"));
+
+        // Only i-live still has a record. i-sibling belongs to the Floci on :4620 sharing this
+        // daemon and must not be touched, however orphaned it looks from here.
+        int removed = harness.manager.reconcileOrphanedContainers(
+                (region, instanceId) -> "i-live".equals(instanceId));
+
+        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
+        verify(harness.lifecycleManager, never()).removeIfExists("c-live");
+        verify(harness.lifecycleManager).removeIfExists("c-orphan");
+        assertEquals(1, removed);
+    }
+
+    @Test
+    void reconcileOrphanedContainersLeavesStoppedInstancesAlone() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        stubContainerListing(harness.dockerClient, labelled("c-stopped", "4680", "us-east-1", "i-stopped"));
+
+        // Floci stops every running container on shutdown and keeps the id; the record comes
+        // back as `stopped`, which stillDeclared answers true for. Sweeping these would break
+        // stop/start across a restart.
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> true);
+
+        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        assertEquals(0, removed);
+    }
+
+    @Test
+    void reconcileOrphanedContainersIgnoresContainersPredatingTheOwnerLabel() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        Container unowned = mock(Container.class);
+        when(unowned.getLabels()).thenReturn(Map.of(
+                Ec2ContainerManager.LABEL_SERVICE, Ec2ContainerManager.SERVICE_VALUE,
+                Ec2ContainerManager.LABEL_REGION, "us-east-1",
+                Ec2ContainerManager.LABEL_RESOURCE_ID, "i-legacy"));
+        stubContainerListing(harness.dockerClient, unowned);
+
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
+
+        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        assertEquals(0, removed);
+    }
+
+    @Test
+    void reconcileOrphanedContainersSparesAnotherNamespacesContainerOnTheSamePort() {
+        // Two Flocis can share a daemon on the same internal port and are separated only by the
+        // resource namespace. Keying ownership on the port alone made each reap the other's live
+        // containers; the owner label carries the namespace so a sibling's container is not ours.
+        LaunchHarness harness = reconcileHarness(true, 4566, "alpha");
+        stubContainerListing(harness.dockerClient,
+                labelled("c-ours", "alpha/4566", "us-east-1", "i-ours"),
+                labelled("c-sibling", "beta/4566", "us-east-1", "i-sibling"));
+
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
+
+        assertEquals(1, removed);
+        verify(harness.lifecycleManager).removeIfExists("c-ours");
+        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
+    }
+
+    @Test
+    void reconcileOrphanedContainersDoesNothingWhenDisabled() {
+        LaunchHarness harness = reconcileHarness(false, 4680);
+
+        assertEquals(0, harness.manager.reconcileOrphanedContainers((region, instanceId) -> false));
+
+        verify(harness.dockerClient, never()).listContainersCmd();
+    }
+
+    private static Container labelled(String containerId, String ownerPort, String region, String instanceId) {
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(containerId);
+        when(container.getLabels()).thenReturn(Map.of(
+                Ec2ContainerManager.LABEL_SERVICE, Ec2ContainerManager.SERVICE_VALUE,
+                Ec2ContainerManager.LABEL_OWNER_PORT, ownerPort,
+                Ec2ContainerManager.LABEL_REGION, region,
+                Ec2ContainerManager.LABEL_RESOURCE_ID, instanceId));
+        return container;
+    }
+
+    private static void stubContainerListing(DockerClient dockerClient, Container... containers) {
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        when(listCmd.exec()).thenReturn(new ArrayList<>(Arrays.asList(containers)));
+    }
+
+    private static LaunchHarness reconcileHarness(boolean reconcileEnabled, int ownerPort) {
+        LaunchHarness harness = launchHarness();
+        when(harness.config.port()).thenReturn(ownerPort);
+        when(harness.config.services().ec2().reconcileContainersOnStartup()).thenReturn(reconcileEnabled);
+        return harness;
+    }
+
+    private static LaunchHarness reconcileHarness(boolean reconcileEnabled, int ownerPort, String namespace) {
+        LaunchHarness harness = reconcileHarness(reconcileEnabled, ownerPort);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(docker.resourceNamespace()).thenReturn(Optional.ofNullable(namespace));
+        when(harness.config.docker()).thenReturn(docker);
+        return harness;
     }
 
     /**
@@ -999,6 +1177,65 @@ class Ec2ContainerManagerTest {
         assertTrue(condition.getAsBoolean(), "condition was not met before timeout");
     }
 
+    @Test
+    void launchRunsInstanceAsMetadataOnlyWhenNoDockerDaemonIsReachable() throws Exception {
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient(), false);
+
+        Instance instance = instance("i-nodocker");
+
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertEquals("running", instance.getState().getName());
+        assertNull(instance.getDockerContainerId());
+        verify(harness.lifecycleManager(), never()).create(any(ContainerSpec.class));
+        verify(harness.metadataServer(), never()).registerContainer(anyString(), anyString(), any());
+    }
+
+    @Test
+    void launchDegradesToRunningWhenDockerDisappearsMidLaunch() throws Exception {
+        LaunchHarness harness = launchHarness();
+        PingCmd ping = mock(PingCmd.class);
+        when(harness.dockerClient().pingCmd()).thenReturn(ping);
+        doNothing().doThrow(new RuntimeException("No such file or directory")).when(ping).exec();
+        when(harness.lifecycleManager().create(any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("No such file or directory"));
+
+        Instance instance = instance("i-dockergone");
+
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void metadataOnlyInstanceStopsStartsAndTerminatesWithoutAContainer() throws Exception {
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient(), false);
+        Instance instance = instance("i-lifecycle");
+
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+        assertEquals("running", instance.getState().getName());
+
+        harness.manager().stop(instance);
+        assertEquals("stopped", instance.getState().getName());
+
+        harness.manager().start(instance);
+        assertEquals("running", instance.getState().getName());
+
+        harness.manager().terminate(instance);
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    /** Stubs the daemon reachability probe every launch makes before touching Docker. */
+    private static void stubDockerPing(DockerClient dockerClient, boolean reachable) {
+        PingCmd ping = mock(PingCmd.class);
+        when(dockerClient.pingCmd()).thenReturn(ping);
+        if (!reachable) {
+            doThrow(new RuntimeException("No such file or directory")).when(ping).exec();
+        }
+    }
+
     private record LaunchHarness(Ec2ContainerManager manager,
                                  ContainerLifecycleManager lifecycleManager,
                                  DockerClient dockerClient,
@@ -1007,6 +1244,7 @@ class Ec2ContainerManagerTest {
                                  ContainerBuilder.Builder builder,
                                  PortAllocator portAllocator,
                                  Ec2PortForwardManager portForwardManager,
+                                 EmulatorConfig config,
                                  List<String[]> executedCommands) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();

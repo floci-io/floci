@@ -24,15 +24,47 @@ The proxy is a transparent byte relay, so the host-facing proxy port range is un
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `CreateDBCluster` | Create a Neptune cluster and start a Gremlin Server container |
+| `CreateDBCluster` | Create a Neptune cluster (tags, placement, backup, protection and log-export settings included) and start a graph database container |
 | `DescribeDBClusters` | List clusters and their connection details |
 | `DeleteDBCluster` | Stop and remove a cluster |
-| `ModifyDBCluster` | Update cluster settings |
+| `ModifyDBCluster` | Update cluster settings, including deletion protection, backup retention, log exports and security groups |
+| `AddRoleToDBCluster` | Associate an IAM role with a cluster (listed under `AssociatedRoles`) |
+| `RemoveRoleFromDBCluster` | Disassociate an IAM role from a cluster |
+| `DescribeGlobalClusters` | Always an empty list; global clusters are not modelled |
 | `CreateDBInstance` | Add an instance to a cluster |
 | `DescribeDBInstances` | List instances |
 | `DeleteDBInstance` | Remove an instance from a cluster |
 | `ModifyDBInstance` | Update instance settings |
+| `ListTagsForResource` | List the tags on a cluster or instance by ARN |
+| `AddTagsToResource` | Add or overwrite tags on a cluster or instance |
+| `RemoveTagsFromResource` | Remove tags from a cluster or instance by key |
 <!-- floci:actions:end -->
+
+## Terraform and the `aws_neptune_cluster` resource
+
+`DescribeDBClusters` returns every field the Terraform AWS provider's `aws_neptune_cluster` resource reads back, with the values the request set and the AWS defaults otherwise, so a `terraform plan` straight after `terraform apply` reports no changes:
+
+- `StorageEncrypted` defaults to `false`, as on AWS; pass `StorageEncrypted=true` (and optionally `KmsKeyId`) to encrypt.
+- `AvailabilityZones` echoes the requested zones and otherwise contains the emulator's default zone.
+- `BackupRetentionPeriod` (default 1), `PreferredBackupWindow`, `PreferredMaintenanceWindow`, `DBSubnetGroup` (default `default`), `DBClusterParameterGroup` (default `default.neptune<major>.<minor>` for the engine version), `DeletionProtection`, `CopyTagsToSnapshot`, `StorageType`, `EnabledCloudwatchLogsExports`, `VpcSecurityGroups`, `ServerlessV2ScalingConfiguration` and `AssociatedRoles` are all stored and read back.
+- Deleting a cluster with `DeletionProtection` enabled fails with `InvalidParameterCombination`, as on AWS.
+- Tags given on create are readable through `ListTagsForResource`, and the provider's tag updates go through `AddTagsToResource` and `RemoveTagsFromResource`.
+- `DescribeGlobalClusters` answers with an empty list, which is what the provider's read needs when the cluster is not part of a global cluster.
+
+### The `aws_neptune_cluster_instance` resource
+
+`DescribeDBInstances` reads back the fields the provider's `aws_neptune_cluster_instance` resource manages, so an instance plan is clean after apply too:
+
+- `AutoMinorVersionUpgrade` (default `true`), `PromotionTier` (default `1`), `PubliclyAccessible` (default `false`), `AvailabilityZone`, `DBParameterGroups` (default `default.neptune<major>.<minor>`), `DBSubnetGroup` (default `default`), `PreferredBackupWindow` and `PreferredMaintenanceWindow` are stored on create, updated by `ModifyDBInstance` and read back.
+- `StorageEncrypted`, `KmsKeyId` and `StorageType` are the cluster's values.
+- The first instance created in a cluster is the writer in `DBClusterMembers`; later instances are readers, and deleting the writer promotes the next member.
+- Instance tags are readable through `ListTagsForResource` with the instance ARN.
+
+An instance answers on its cluster's port. Terraform's instance `port` attribute defaults to `8182`, so set it to the cluster's port when the cluster does not use `8182`.
+
+### Port
+
+A requested `Port` is honoured when it is free and inside the proxy port range (`8182`-`8282` by default); otherwise the cluster gets the next free port in the range and `DescribeDBClusters` reports that port. Terraform's `port` attribute defaults to `8182`, so the first cluster is a clean match. For a second cluster set `port` explicitly (for example `port = 8183`) so the plan stays clean, because two clusters cannot share one host port.
 
 ## Configuration
 

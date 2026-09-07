@@ -118,7 +118,7 @@ public class WafV2Handler {
     }
 
     private Response handleGetWebAcl(JsonNode request) {
-        WebAcl acl = service.getWebAcl(text(request, "Scope"), text(request, "Id"));
+        WebAcl acl = service.getWebAcl(text(request, "Scope"), text(request, "Id"), text(request, "Name"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("WebACL", webAclNode(acl));
         response.put("LockToken", acl.getLockToken());
@@ -138,12 +138,13 @@ public class WafV2Handler {
         changes.setAssociationConfig(rawObject(request.path("AssociationConfig")));
         changes.setDataProtectionConfig(rawObject(request.path("DataProtectionConfig")));
         String next = service.updateWebAcl(changes, text(request, "Scope"),
-                text(request, "Id"), text(request, "LockToken"));
+                text(request, "Id"), text(request, "Name"), text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode().put("NextLockToken", next)).build();
     }
 
     private Response handleDeleteWebAcl(JsonNode request) {
-        service.deleteWebAcl(text(request, "Scope"), text(request, "Id"), text(request, "LockToken"));
+        service.deleteWebAcl(text(request, "Scope"), text(request, "Id"), text(request, "Name"),
+                text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -173,7 +174,7 @@ public class WafV2Handler {
     }
 
     private Response handleGetIpSet(JsonNode request) {
-        IpSet ipSet = service.getIpSet(text(request, "Scope"), text(request, "Id"));
+        IpSet ipSet = service.getIpSet(text(request, "Scope"), text(request, "Id"), text(request, "Name"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("IPSet", ipSetNode(ipSet));
         response.put("LockToken", ipSet.getLockToken());
@@ -183,12 +184,13 @@ public class WafV2Handler {
     private Response handleUpdateIpSet(JsonNode request) {
         String next = service.updateIpSet(text(request, "Scope"), text(request, "Id"),
                 text(request, "Description"), stringList(request.path("Addresses")),
-                text(request, "LockToken"));
+                text(request, "Name"), text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode().put("NextLockToken", next)).build();
     }
 
     private Response handleDeleteIpSet(JsonNode request) {
-        service.deleteIpSet(text(request, "Scope"), text(request, "Id"), text(request, "LockToken"));
+        service.deleteIpSet(text(request, "Scope"), text(request, "Id"), text(request, "Name"),
+                text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -218,7 +220,8 @@ public class WafV2Handler {
     }
 
     private Response handleGetRegexPatternSet(JsonNode request) {
-        RegexPatternSet set = service.getRegexPatternSet(text(request, "Scope"), text(request, "Id"));
+        RegexPatternSet set = service.getRegexPatternSet(text(request, "Scope"), text(request, "Id"),
+                text(request, "Name"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("RegexPatternSet", regexSetNode(set));
         response.put("LockToken", set.getLockToken());
@@ -228,12 +231,13 @@ public class WafV2Handler {
     private Response handleUpdateRegexPatternSet(JsonNode request) {
         String next = service.updateRegexPatternSet(text(request, "Scope"), text(request, "Id"),
                 text(request, "Description"), regexList(request.path("RegularExpressionList")),
-                text(request, "LockToken"));
+                text(request, "Name"), text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode().put("NextLockToken", next)).build();
     }
 
     private Response handleDeleteRegexPatternSet(JsonNode request) {
-        service.deleteRegexPatternSet(text(request, "Scope"), text(request, "Id"), text(request, "LockToken"));
+        service.deleteRegexPatternSet(text(request, "Scope"), text(request, "Id"), text(request, "Name"),
+                text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -265,7 +269,7 @@ public class WafV2Handler {
     }
 
     private Response handleGetRuleGroup(JsonNode request) {
-        RuleGroup group = service.getRuleGroup(text(request, "Scope"), text(request, "Id"));
+        RuleGroup group = service.getRuleGroup(text(request, "Scope"), text(request, "Id"), text(request, "Name"));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("RuleGroup", ruleGroupNode(group));
         response.put("LockToken", group.getLockToken());
@@ -279,12 +283,13 @@ public class WafV2Handler {
         changes.setVisibilityConfig(rawObject(request.path("VisibilityConfig")));
         changes.setCustomResponseBodies(rawObject(request.path("CustomResponseBodies")));
         String next = service.updateRuleGroup(changes, text(request, "Scope"),
-                text(request, "Id"), text(request, "LockToken"));
+                text(request, "Id"), text(request, "Name"), text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode().put("NextLockToken", next)).build();
     }
 
     private Response handleDeleteRuleGroup(JsonNode request) {
-        service.deleteRuleGroup(text(request, "Scope"), text(request, "Id"), text(request, "LockToken"));
+        service.deleteRuleGroup(text(request, "Scope"), text(request, "Id"), text(request, "Name"),
+                text(request, "LockToken"));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

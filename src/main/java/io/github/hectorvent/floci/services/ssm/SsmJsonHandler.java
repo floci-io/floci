@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
+import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -23,6 +24,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -80,9 +82,14 @@ public class SsmJsonHandler {
             // Document share permissions
             case "ModifyDocumentPermission" -> handleModifyDocumentPermission(request, region);
             case "DescribeDocumentPermission" -> handleDescribeDocumentPermission(request, region);
-            // Read-only list operations (resources not modeled: empty results)
             case "ListDocuments" -> handleListDocuments(request, region);
+            // Associations
+            case "CreateAssociation" -> handleCreateAssociation(request, region);
+            case "UpdateAssociation" -> handleUpdateAssociation(request, region);
+            case "DescribeAssociation" -> handleDescribeAssociation(request, region);
+            case "DeleteAssociation" -> handleDeleteAssociation(request, region);
             case "ListAssociations" -> handleListAssociations(request, region);
+            // Read-only list operations (resources not modeled: empty results)
             case "DescribeMaintenanceWindows" -> handleDescribeMaintenanceWindows(request, region);
             // Agent registration (internal, not in public SDK)
             case "UpdateInstanceInformation" -> handleUpdateInstanceInformation(request, region);
@@ -418,11 +425,25 @@ public class SsmJsonHandler {
         String name = requireDocumentNameOrArn(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
+        String requestedVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
+        String effectiveVersion = String.valueOf(document.getDocumentVersion());
+        String effectiveContent = document.getContent();
+
+        if (requestedVersion != null && !requestedVersion.isBlank()
+                && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
+            if (!document.hasRetainedContent(requestedVersion)) {
+                throw new AwsException("InvalidDocumentVersion",
+                        "The document version is not valid or does not exist.", 400);
+            }
+            effectiveVersion = requestedVersion;
+            effectiveContent = document.getContentForVersion(requestedVersion);
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Name", document.getName());
         response.put("DocumentType", document.getDocumentType());
-        response.put("DocumentVersion", String.valueOf(document.getDocumentVersion()));
-        response.put("Content", document.getContent());
+        response.put("DocumentVersion", effectiveVersion);
+        response.put("Content", effectiveContent);
         response.put("Status", document.getStatus());
         return Response.ok(response).build();
     }
@@ -514,17 +535,355 @@ public class SsmJsonHandler {
     }
 
     private Response handleListDocuments(JsonNode request, String region) {
-        // SSM documents are not modeled: return an empty list.
+        Map<String, List<String>> filters = new HashMap<>();
+        if (request.has("Filters") && request.path("Filters").isArray()) {
+            for (JsonNode f : request.path("Filters")) {
+                String key = f.path("Key").asText("");
+                List<String> values = new ArrayList<>();
+                if (f.has("Values") && f.path("Values").isArray()) {
+                    f.path("Values").forEach(v -> values.add(v.asText()));
+                } else if (f.has("Value")) {
+                    values.add(f.path("Value").asText());
+                }
+                if (!key.isEmpty() && !values.isEmpty()) {
+                    filters.computeIfAbsent(key, k -> new ArrayList<>()).addAll(values);
+                }
+            }
+        }
+        if (request.has("DocumentFilterList") && request.path("DocumentFilterList").isArray()) {
+            for (JsonNode f : request.path("DocumentFilterList")) {
+                String key = f.has("key") ? f.path("key").asText("") : f.path("Key").asText("");
+                List<String> values = new ArrayList<>();
+                if (f.has("Values") && f.path("Values").isArray()) {
+                    f.path("Values").forEach(v -> values.add(v.asText()));
+                } else if (f.has("value")) {
+                    values.add(f.path("value").asText());
+                } else if (f.has("Value")) {
+                    values.add(f.path("Value").asText());
+                }
+                if (!key.isEmpty() && !values.isEmpty()) {
+                    filters.computeIfAbsent(key, k -> new ArrayList<>()).addAll(values);
+                }
+            }
+        }
+
+        List<SsmDocument> documents = ssmService.listDocuments(region, filters.isEmpty() ? null : filters);
+
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("DocumentIdentifiers", objectMapper.createArrayNode());
+        ArrayNode docArray = objectMapper.createArrayNode();
+        for (SsmDocument d : documents) {
+            ObjectNode docNode = objectMapper.createObjectNode();
+            docNode.put("Name", d.getName());
+            if (d.getCreatedDate() != null) {
+                docNode.put("CreatedDate", d.getCreatedDate().toEpochMilli() / 1000.0);
+            }
+            docNode.put("DocumentType", d.getDocumentType());
+            docNode.put("DocumentVersion", String.valueOf(d.getDocumentVersion()));
+            if (d.getOwner() != null) {
+                docNode.put("Owner", d.getOwner());
+            }
+            if (d.getPlatformTypes() != null) {
+                ArrayNode platforms = objectMapper.createArrayNode();
+                d.getPlatformTypes().forEach(platforms::add);
+                docNode.set("PlatformTypes", platforms);
+            }
+            if (d.getSchemaVersion() != null) {
+                docNode.put("SchemaVersion", d.getSchemaVersion());
+            }
+            if (d.getDocumentFormat() != null) {
+                docNode.put("DocumentFormat", d.getDocumentFormat());
+            }
+            docArray.add(docNode);
+        }
+        response.set("DocumentIdentifiers", docArray);
         return Response.ok(response).build();
     }
 
+    private List<SsmAssociation.Target> parseTargets(JsonNode request) {
+        if (!request.hasNonNull("Targets") || !request.path("Targets").isArray()) {
+            return null;
+        }
+        List<SsmAssociation.Target> targets = new ArrayList<>();
+        for (JsonNode t : request.path("Targets")) {
+            String key = t.path("Key").asText();
+            List<String> values = new ArrayList<>();
+            if (t.has("Values") && t.path("Values").isArray()) {
+                t.path("Values").forEach(v -> values.add(v.asText()));
+            }
+            targets.add(new SsmAssociation.Target(key, values));
+        }
+        return targets;
+    }
+
+    private Map<String, List<String>> parseParameters(JsonNode request) {
+        if (!request.hasNonNull("Parameters") || !request.path("Parameters").isObject()) {
+            return null;
+        }
+        Map<String, List<String>> parameters = new HashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = request.path("Parameters").fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            List<String> values = new ArrayList<>();
+            if (entry.getValue().isArray()) {
+                entry.getValue().forEach(v -> values.add(v.asText()));
+            } else if (entry.getValue().isTextual()) {
+                values.add(entry.getValue().asText());
+            }
+            parameters.put(entry.getKey(), values);
+        }
+        return parameters;
+    }
+
+    private Response handleCreateAssociation(JsonNode request, String region) {
+        JsonNode nameNode = request.path("Name");
+        if (!nameNode.isTextual() || nameNode.asText().isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'name' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+        String name = nameNode.asText();
+
+        String associationName = request.hasNonNull("AssociationName") ? request.path("AssociationName").asText() : null;
+        String documentVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
+        String instanceId = request.hasNonNull("InstanceId") ? request.path("InstanceId").asText() : null;
+        String scheduleExpression = request.hasNonNull("ScheduleExpression") ? request.path("ScheduleExpression").asText() : null;
+        String maxErrors = request.hasNonNull("MaxErrors") ? request.path("MaxErrors").asText() : null;
+        String maxConcurrency = request.hasNonNull("MaxConcurrency") ? request.path("MaxConcurrency").asText() : null;
+        String complianceSeverity = request.hasNonNull("ComplianceSeverity") ? request.path("ComplianceSeverity").asText() : null;
+
+        List<SsmAssociation.Target> targets = parseTargets(request);
+        Map<String, List<String>> parameters = parseParameters(request);
+
+        boolean hasInstanceId = instanceId != null && !instanceId.isBlank();
+        boolean hasTargets = targets != null && !targets.isEmpty();
+        if (!hasInstanceId && !hasTargets) {
+            throw new AwsException("ValidationException",
+                    "Either InstanceId or Targets must be specified.", 400);
+        }
+
+        SsmAssociation assoc = ssmService.createAssociation(
+                name, associationName, documentVersion, instanceId, targets, parameters, scheduleExpression,
+                maxErrors, maxConcurrency, complianceSeverity, region);
+
+        return Response.ok(associationDescriptionResponse(assoc)).build();
+    }
+
+    private Response handleUpdateAssociation(JsonNode request, String region) {
+        String associationId = request.hasNonNull("AssociationId") ? request.path("AssociationId").asText() : null;
+        if (associationId == null || associationId.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'associationId' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+
+        String associationName = request.hasNonNull("AssociationName") ? request.path("AssociationName").asText() : null;
+        String documentVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
+        String scheduleExpression = request.hasNonNull("ScheduleExpression") ? request.path("ScheduleExpression").asText() : null;
+        String maxErrors = request.hasNonNull("MaxErrors") ? request.path("MaxErrors").asText() : null;
+        String maxConcurrency = request.hasNonNull("MaxConcurrency") ? request.path("MaxConcurrency").asText() : null;
+        String complianceSeverity = request.hasNonNull("ComplianceSeverity") ? request.path("ComplianceSeverity").asText() : null;
+        List<SsmAssociation.Target> targets = parseTargets(request);
+        Map<String, List<String>> parameters = parseParameters(request);
+
+        SsmAssociation assoc = ssmService.updateAssociation(
+                associationId, associationName, documentVersion, targets, parameters, scheduleExpression,
+                maxErrors, maxConcurrency, complianceSeverity, region);
+
+        return Response.ok(associationDescriptionResponse(assoc)).build();
+    }
+
     private Response handleListAssociations(JsonNode request, String region) {
-        // SSM associations are not modeled: return an empty list.
+        Map<String, List<String>> filters = new HashMap<>();
+        if (request.has("AssociationFilterList") && request.path("AssociationFilterList").isArray()) {
+            for (JsonNode f : request.path("AssociationFilterList")) {
+                String key = f.has("key") ? f.path("key").asText("") : f.path("Key").asText("");
+                List<String> values = new ArrayList<>();
+                if (f.has("value")) {
+                    values.add(f.path("value").asText());
+                } else if (f.has("Value")) {
+                    values.add(f.path("Value").asText());
+                } else if (f.has("Values") && f.path("Values").isArray()) {
+                    f.path("Values").forEach(v -> values.add(v.asText()));
+                }
+                if (!key.isEmpty() && !values.isEmpty()) {
+                    filters.computeIfAbsent(key, k -> new ArrayList<>()).addAll(values);
+                }
+            }
+        }
+
+        List<SsmAssociation> associations = ssmService.listAssociations(region, filters);
+
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Associations", objectMapper.createArrayNode());
+        ArrayNode associationsArray = objectMapper.createArrayNode();
+        for (SsmAssociation assoc : associations) {
+            associationsArray.add(associationSummaryToNode(assoc));
+        }
+        response.set("Associations", associationsArray);
         return Response.ok(response).build();
+    }
+
+    private Response handleDescribeAssociation(JsonNode request, String region) {
+        String associationId = request.hasNonNull("AssociationId") ? request.path("AssociationId").asText() : null;
+        String name = request.hasNonNull("Name") ? request.path("Name").asText() : null;
+        String instanceId = request.hasNonNull("InstanceId") ? request.path("InstanceId").asText() : null;
+
+        boolean hasAssocId = associationId != null && !associationId.isBlank();
+        boolean hasNameAndInstance = (name != null && !name.isBlank()) && (instanceId != null && !instanceId.isBlank());
+        if (!hasAssocId && !hasNameAndInstance) {
+            throw new AwsException("ValidationException",
+                    "Either AssociationId or both Name and InstanceId must be specified.", 400);
+        }
+
+        SsmAssociation assoc = ssmService.describeAssociation(associationId, name, instanceId, region);
+        return Response.ok(associationDescriptionResponse(assoc)).build();
+    }
+
+    private Response handleDeleteAssociation(JsonNode request, String region) {
+        String associationId = request.hasNonNull("AssociationId") ? request.path("AssociationId").asText() : null;
+        String name = request.hasNonNull("Name") ? request.path("Name").asText() : null;
+        String instanceId = request.hasNonNull("InstanceId") ? request.path("InstanceId").asText() : null;
+
+        boolean hasAssocId = associationId != null && !associationId.isBlank();
+        boolean hasNameAndInstance = (name != null && !name.isBlank()) && (instanceId != null && !instanceId.isBlank());
+        if (!hasAssocId && !hasNameAndInstance) {
+            throw new AwsException("ValidationException",
+                    "Either AssociationId or both Name and InstanceId must be specified.", 400);
+        }
+
+        ssmService.deleteAssociation(associationId, name, instanceId, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private ArrayNode targetsToArray(List<SsmAssociation.Target> targets) {
+        ArrayNode targetsArray = objectMapper.createArrayNode();
+        for (SsmAssociation.Target t : targets) {
+            ObjectNode targetNode = objectMapper.createObjectNode();
+            targetNode.put("Key", t.getKey());
+            ArrayNode valuesArray = objectMapper.createArrayNode();
+            if (t.getValues() != null) {
+                t.getValues().forEach(valuesArray::add);
+            }
+            targetNode.set("Values", valuesArray);
+            targetsArray.add(targetNode);
+        }
+        return targetsArray;
+    }
+
+    private ObjectNode associationSummaryToNode(SsmAssociation assoc) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (assoc.getAssociationId() != null) {
+            node.put("AssociationId", assoc.getAssociationId());
+        }
+        if (assoc.getName() != null) {
+            node.put("Name", assoc.getName());
+        }
+        if (assoc.getAssociationName() != null) {
+            node.put("AssociationName", assoc.getAssociationName());
+        }
+        if (assoc.getAssociationVersion() != null) {
+            node.put("AssociationVersion", assoc.getAssociationVersion());
+        }
+        if (assoc.getDocumentVersion() != null) {
+            node.put("DocumentVersion", assoc.getDocumentVersion());
+        }
+        if (assoc.getInstanceId() != null) {
+            node.put("InstanceId", assoc.getInstanceId());
+        }
+        if (assoc.getTargets() != null) {
+            node.set("Targets", targetsToArray(assoc.getTargets()));
+        }
+        if (assoc.getOverview() != null) {
+            ObjectNode overviewNode = objectMapper.createObjectNode();
+            overviewNode.put("Status", assoc.getOverview().getStatus());
+            overviewNode.put("DetailedStatus", assoc.getOverview().getDetailedStatus());
+            node.set("Overview", overviewNode);
+        }
+        if (assoc.getScheduleExpression() != null) {
+            node.put("ScheduleExpression", assoc.getScheduleExpression());
+        }
+        if (assoc.getLastExecutionDate() != null) {
+            node.put("LastExecutionDate", assoc.getLastExecutionDate().toEpochMilli() / 1000.0);
+        }
+        return node;
+    }
+
+    private ObjectNode associationDescriptionResponse(SsmAssociation assoc) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode desc = objectMapper.createObjectNode();
+
+        if (assoc.getAssociationId() != null) {
+            desc.put("AssociationId", assoc.getAssociationId());
+        }
+        if (assoc.getName() != null) {
+            desc.put("Name", assoc.getName());
+        }
+        if (assoc.getAssociationName() != null) {
+            desc.put("AssociationName", assoc.getAssociationName());
+        }
+        if (assoc.getDocumentVersion() != null) {
+            desc.put("DocumentVersion", assoc.getDocumentVersion());
+        }
+        if (assoc.getInstanceId() != null) {
+            desc.put("InstanceId", assoc.getInstanceId());
+        }
+        if (assoc.getAssociationVersion() != null) {
+            desc.put("AssociationVersion", assoc.getAssociationVersion());
+        }
+        if (assoc.getTargets() != null) {
+            desc.set("Targets", targetsToArray(assoc.getTargets()));
+        }
+        if (assoc.getParameters() != null) {
+            ObjectNode paramsNode = objectMapper.createObjectNode();
+            for (Map.Entry<String, List<String>> entry : assoc.getParameters().entrySet()) {
+                ArrayNode valuesArray = objectMapper.createArrayNode();
+                if (entry.getValue() != null) {
+                    entry.getValue().forEach(valuesArray::add);
+                }
+                paramsNode.set(entry.getKey(), valuesArray);
+            }
+            desc.set("Parameters", paramsNode);
+        }
+        if (assoc.getScheduleExpression() != null) {
+            desc.put("ScheduleExpression", assoc.getScheduleExpression());
+        }
+        if (assoc.getStatus() != null) {
+            ObjectNode statusNode = objectMapper.createObjectNode();
+            statusNode.put("Name", assoc.getStatus().getName());
+            if (assoc.getStatus().getMessage() != null) {
+                statusNode.put("Message", assoc.getStatus().getMessage());
+            }
+            if (assoc.getStatus().getDate() != null) {
+                statusNode.put("Date", assoc.getStatus().getDate().toEpochMilli() / 1000.0);
+            }
+            if (assoc.getStatus().getAdditionalInfo() != null) {
+                statusNode.put("AdditionalInfo", assoc.getStatus().getAdditionalInfo());
+            }
+            desc.set("Status", statusNode);
+        }
+        if (assoc.getOverview() != null) {
+            ObjectNode overviewNode = objectMapper.createObjectNode();
+            overviewNode.put("Status", assoc.getOverview().getStatus());
+            overviewNode.put("DetailedStatus", assoc.getOverview().getDetailedStatus());
+            desc.set("Overview", overviewNode);
+        }
+        if (assoc.getCreatedDate() != null) {
+            desc.put("Date", assoc.getCreatedDate().toEpochMilli() / 1000.0);
+        }
+        if (assoc.getLastExecutionDate() != null) {
+            desc.put("LastExecutionDate", assoc.getLastExecutionDate().toEpochMilli() / 1000.0);
+        }
+        if (assoc.getComplianceSeverity() != null) {
+            desc.put("ComplianceSeverity", assoc.getComplianceSeverity());
+        }
+        if (assoc.getMaxConcurrency() != null) {
+            desc.put("MaxConcurrency", assoc.getMaxConcurrency());
+        }
+        if (assoc.getMaxErrors() != null) {
+            desc.put("MaxErrors", assoc.getMaxErrors());
+        }
+
+        response.set("AssociationDescription", desc);
+        return response;
     }
 
     private Response handleDescribeMaintenanceWindows(JsonNode request, String region) {
@@ -839,12 +1198,26 @@ public class SsmJsonHandler {
         String name = requireDocumentNameOrArn(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
+        String requestedVersion = request.hasNonNull("DocumentVersion") ? request.path("DocumentVersion").asText() : null;
+        String effectiveVersion = String.valueOf(document.getDocumentVersion());
+        String effectiveContent = document.getContent();
+
+        if (requestedVersion != null && !requestedVersion.isBlank()
+                && !"$LATEST".equals(requestedVersion) && !"$DEFAULT".equals(requestedVersion)) {
+            if (!document.hasRetainedContent(requestedVersion)) {
+                throw new AwsException("InvalidDocumentVersion",
+                        "The document version is not valid or does not exist.", 400);
+            }
+            effectiveVersion = requestedVersion;
+            effectiveContent = document.getContentForVersion(requestedVersion);
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode documentNode = objectMapper.createObjectNode();
         documentNode.put("Name", document.getName());
         documentNode.put("DocumentType", document.getDocumentType());
-        documentNode.put("DocumentVersion", String.valueOf(document.getDocumentVersion()));
-        documentNode.put("Content", document.getContent());
+        documentNode.put("DocumentVersion", effectiveVersion);
+        documentNode.put("Content", effectiveContent);
         documentNode.put("Status", document.getStatus());
         if (document.getCreatedDate() != null) {
             documentNode.put("CreatedDate", document.getCreatedDate().toString());

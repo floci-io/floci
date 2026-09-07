@@ -160,6 +160,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. |
+| CreateFleet | Creates an instant local fleet from launch-template configurations and on-demand or spot overrides. DryRun returns the AWS-compatible `DryRunOperation` error without launching instances. |
 | DescribeInstances | Lists or returns stored EC2 instances. |
 | TerminateInstances | Terminates instances and updates their stored lifecycle state. |
 | StartInstances | Starts stopped instances and their local runtime when applicable. |
@@ -467,6 +468,26 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | DescribeNatGateways | Lists or returns stored NAT gateways. |
 | DeleteNatGateway | Deletes a NAT gateway record. |
 
+### Capacity Reservations
+
+| Action | Description |
+|--------|-------------|
+| CreateCapacityReservation | Reserves EC2 instance capacity in a specific Availability Zone. |
+| DescribeCapacityReservations | Lists or returns stored Capacity Reservations. |
+| ModifyCapacityReservation | Updates `InstanceCount`, `EndDate`, `EndDateType` or `InstanceMatchCriteria` in place. |
+| CancelCapacityReservation | Marks a Capacity Reservation `cancelled` and its available count `0`, matching real AWS's retain-but-cancel behaviour rather than deleting the record. |
+
+`InstanceType`, `InstancePlatform` and `InstanceCount` are required, matching the AWS API, and
+one of `AvailabilityZone` or `AvailabilityZoneId` must be given; a request missing any of
+these is rejected with `MissingParameter`. `InstanceCount` must be greater than `0` on create
+and on modify, otherwise `InvalidParameterValue`. `InstanceMatchCriteria` defaults to `open`,
+`Tenancy` defaults to `default` and `EndDateType` defaults to `unlimited`. Creation is
+synchronous: the reservation comes back `active` on the create response rather than passing
+through `payment-pending`/`assessing`. `DescribeCapacityReservations` supports the
+`availability-zone`, `end-date-type`, `instance-match-criteria`, `instance-platform`,
+`instance-type`, `state` and `tenancy` filters alongside the shared `tag:`, `tag-key` and
+`tag-value` filters.
+
 ### Elastic IPs
 
 | Action | Description |
@@ -654,6 +675,7 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
 | `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
+| `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, remove instance containers this Floci left on the daemon whose record did not survive the restart or came back terminated; stopped instances are never swept |
 
 ## Requirements
 

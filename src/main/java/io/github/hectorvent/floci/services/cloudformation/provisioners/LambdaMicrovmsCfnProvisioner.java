@@ -56,22 +56,25 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionImage(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "Name");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), 64, false);
-        }
+        // Name is a createOnlyProperty and the physical id, so an unnamed image keeps the name it
+        // already had across updates instead of a fresh one each time provision runs.
+        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
         String codeArtifactUri = null;
         if (props != null && props.has("CodeArtifact") && props.get("CodeArtifact").has("Uri")) {
             codeArtifactUri = ctx.engine().resolve(props.get("CodeArtifact").get("Uri"));
         }
-        LambdaMicrovmsService.MicrovmImage image = microvmsService.createImage(
-                ctx.region(),
-                ctx.accountId(),
-                name,
-                ctx.resolveOptional(props, "BaseImageArn"),
-                ctx.resolveOptional(props, "BuildRoleArn"),
-                codeArtifactUri,
-                ctx.resolveOptional(props, "Description"));
+        String baseImageArn = ctx.resolveOptional(props, "BaseImageArn");
+        String buildRoleArn = ctx.resolveOptional(props, "BuildRoleArn");
+        String description = ctx.resolveOptional(props, "Description");
+        // provision is also the update path. With the name stable, the second UpdateStack reaches
+        // the service with an image that exists; the registry schema's update handler is
+        // UpdateMicrovmImage, so reconcile through updateImage rather than mint a version through
+        // createImage. A replacing update derives a different name and still creates.
+        LambdaMicrovmsService.MicrovmImage image = ctx.reusesPriorEntity(name)
+                ? microvmsService.updateImage(ctx.region(), name, baseImageArn, buildRoleArn,
+                        codeArtifactUri, description)
+                : microvmsService.createImage(ctx.region(), ctx.accountId(), name, baseImageArn,
+                        buildRoleArn, codeArtifactUri, description);
         r.setPhysicalId(image.name);
         r.getAttributes().put("ImageArn", image.imageArn);
         r.getAttributes().put("Arn", image.imageArn);

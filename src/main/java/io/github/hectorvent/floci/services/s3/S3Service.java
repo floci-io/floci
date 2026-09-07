@@ -457,10 +457,10 @@ public class S3Service implements Resettable, ResourceProvider {
             object.getMetadata().putAll(metadata);
         }
         object.setStorageClass(ObjectAttributeName.normalizeStorageClass(effectiveOptions.getStorageClass()));
-        String validatedChecksumAlgorithm = validateAndNormalizeChecksumAlgorithm(effectiveOptions.getChecksumAlgorithm());
+        ChecksumAlgorithm validatedChecksumAlgorithm = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
         S3Checksum resolvedChecksum = checksum != null ? copyChecksum(checksum)
                 : effectiveOptions.getClientChecksum() != null ? copyChecksum(effectiveOptions.getClientChecksum())
-                : buildChecksum(data, parts, false, validatedChecksumAlgorithm);
+                : S3Checksum.fullObject(validatedChecksumAlgorithm, data);
         object.setChecksum(resolvedChecksum);
         object.setParts(copyParts(parts));
         object.setContentEncoding(effectiveOptions.getContentEncoding());
@@ -612,6 +612,21 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeGetObject(bucketName, key, null, RequestAuthorization.unsigned());
     }
 
+    /** Authorize an unsigned {@code s3:ListBucket}; see {@link #authorizeAnonymousGetObject}. */
+    public void authorizeAnonymousListBucket(String bucketName) {
+        authorizeListBucket(bucketName, RequestAuthorization.unsigned());
+    }
+
+    /** Authorize an unsigned {@code s3:PutObject}; see {@link #authorizeAnonymousGetObject}. */
+    public void authorizeAnonymousPutObject(String bucketName, String key) {
+        authorizePutObject(bucketName, key, RequestAuthorization.unsigned());
+    }
+
+    /** Authorize an unsigned {@code s3:DeleteObject}; see {@link #authorizeAnonymousGetObject}. */
+    public void authorizeAnonymousDeleteObject(String bucketName, String key) {
+        authorizeDeleteObject(bucketName, key, null, RequestAuthorization.unsigned());
+    }
+
     public void authorizeCloudFrontOacGetObject(
             String bucketName, String key, String distributionArn) {
         authorizeCloudFrontGetObject(
@@ -680,6 +695,35 @@ public class S3Service implements Resettable, ResourceProvider {
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
         String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
+    }
+
+    void authorizeBucketWrite(String bucketName, String action, RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+
+        authorizeSignedRequest(authorization);
+        RequestAuthorization requestAuthorization = authorization != null
+                ? authorization
+                : RequestAuthorization.unsigned();
+        if (requestAuthorization.signed()) {
+            return;
+        }
+
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+        S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
+                S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, bucketArn);
+        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.ALLOW) {
+            return;
+        }
+
+        throw new AwsException("AccessDenied", "Access Denied", 403);
     }
 
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
@@ -1029,9 +1073,9 @@ public class S3Service implements Resettable, ResourceProvider {
             result.setObjectSize(object.getSize());
         }
         if (attributes.contains(ObjectAttributeName.CHECKSUM)) {
-            result.setChecksum(copyChecksum(object.getChecksum()));
+            result.setChecksum(object.getChecksum() == null ? null : object.getChecksum().forObjectAttributes());
         }
-        if (attributes.contains(ObjectAttributeName.OBJECT_PARTS)) {
+        if (attributes.contains(ObjectAttributeName.OBJECT_PARTS) && object.getParts() != null && !object.getParts().isEmpty()) {
             result.setObjectParts(buildObjectParts(object, maxParts, partNumberMarker));
         }
 
@@ -1052,9 +1096,16 @@ public class S3Service implements Resettable, ResourceProvider {
         return object;
     }
 
+    // AWS lists part-level checksums only for composite objects; a full-object multipart object
+    // reports its part count alone.
     private GetObjectAttributesParts buildObjectParts(S3Object object, Integer maxParts, Integer partNumberMarker) {
         List<Part> sortedParts = new ArrayList<>(copyParts(object.getParts()));
         sortedParts.sort(Comparator.comparingInt(Part::getPartNumber));
+        if (object.getChecksum() == null || object.getChecksum().getChecksumType() != ChecksumType.COMPOSITE) {
+            GetObjectAttributesParts countOnly = new GetObjectAttributesParts();
+            countOnly.setPartsCount(sortedParts.size());
+            return countOnly;
+        }
 
         int max = (maxParts == null || maxParts <= 0) ? 1000 : maxParts;
         int marker = Math.max(partNumberMarker != null ? partNumberMarker : 0, 0);
@@ -1065,6 +1116,7 @@ public class S3Service implements Resettable, ResourceProvider {
         List<Part> returnedParts = visibleParts.stream().limit(max).toList();
 
         GetObjectAttributesParts result = new GetObjectAttributesParts();
+        result.setPartChecksumsAvailable(true);
         result.setMaxParts(max);
         result.setPartNumberMarker(marker);
         result.setParts(returnedParts);
@@ -1780,7 +1832,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     // --- Metrics Configurations ---
 
-    private static final String METRICS_XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+    private static final String S3_XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 
     /**
      * Stores a CloudWatch request metrics configuration under {@code id}, replacing any
@@ -1811,7 +1863,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (innerXml == null) {
             throw noSuchMetricsConfiguration();
         }
-        return METRICS_XML_DECLARATION + new XmlBuilder()
+        return S3_XML_DECLARATION + new XmlBuilder()
                 .start("MetricsConfiguration", AwsNamespaces.S3)
                 .raw(innerXml)
                 .end("MetricsConfiguration")
@@ -1833,7 +1885,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .start("MetricsConfiguration")
                 .raw(configurations.get(id))
                 .end("MetricsConfiguration"));
-        return METRICS_XML_DECLARATION + xml
+        return S3_XML_DECLARATION + xml
                 .elem("IsTruncated", false)
                 .end("ListMetricsConfigurationsResult")
                 .build();
@@ -1876,6 +1928,88 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static AwsException noSuchMetricsConfiguration() {
+        return new AwsException("NoSuchConfiguration", "The specified configuration does not exist.", 404);
+    }
+
+    // --- Intelligent-Tiering Configurations ---
+
+    /**
+     * Stores an Intelligent-Tiering configuration under {@code id}, replacing any configuration
+     * already stored under it. floci records the configuration and returns it; no objects are
+     * transitioned between tiers because of it.
+     */
+    public void putBucketIntelligentTieringConfiguration(String bucketName, String id, String innerXml) {
+        Bucket bucket = requireBucket(bucketName);
+        // Read-modify-write of the bucket record, so it takes the same monitor as the other
+        // bucket-scoped mutations: without it two concurrent puts of different ids both start from
+        // the same map and one of the configurations is lost.
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            Map<String, String> configurations = bucket.getIntelligentTieringConfigurations() != null
+                    ? new java.util.LinkedHashMap<>(bucket.getIntelligentTieringConfigurations())
+                    : new java.util.LinkedHashMap<>();
+            configurations.put(id, innerXml);
+            bucket.setIntelligentTieringConfigurations(configurations);
+            bucketStore.put(bucketName, bucket);
+        }
+        LOG.debugv("Put intelligent-tiering configuration {0} on bucket: {1}", id, bucketName);
+    }
+
+    public String getBucketIntelligentTieringConfiguration(String bucketName, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        String innerXml = bucket.getIntelligentTieringConfigurations() == null
+                ? null : bucket.getIntelligentTieringConfigurations().get(id);
+        if (innerXml == null) {
+            throw noSuchIntelligentTieringConfiguration();
+        }
+        return S3_XML_DECLARATION + new XmlBuilder()
+                .start("IntelligentTieringConfiguration", AwsNamespaces.S3)
+                .raw(innerXml)
+                .end("IntelligentTieringConfiguration")
+                .build();
+    }
+
+    /**
+     * Lists every Intelligent-Tiering configuration on the bucket. AWS pages these with a
+     * continuation token; floci returns them all in one unpaged response, ordered by id so that
+     * the listing is stable.
+     */
+    public String listBucketIntelligentTieringConfigurations(String bucketName) {
+        Bucket bucket = requireBucket(bucketName);
+        Map<String, String> configurations = bucket.getIntelligentTieringConfigurations() != null
+                ? bucket.getIntelligentTieringConfigurations() : Map.of();
+
+        XmlBuilder xml = new XmlBuilder().start("ListBucketIntelligentTieringConfigurationsResult",
+                AwsNamespaces.S3);
+        configurations.keySet().stream().sorted().forEach(id -> xml
+                .start("IntelligentTieringConfiguration")
+                .raw(configurations.get(id))
+                .end("IntelligentTieringConfiguration"));
+        return S3_XML_DECLARATION + xml
+                .elem("IsTruncated", false)
+                .end("ListBucketIntelligentTieringConfigurationsResult")
+                .build();
+    }
+
+    public void deleteBucketIntelligentTieringConfiguration(String bucketName, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        // Same monitor as the put: the existence check and the write have to be one step, or a
+        // concurrent put of another id is dropped by the write that follows it.
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            Map<String, String> configurations = bucket.getIntelligentTieringConfigurations();
+            if (configurations == null || !configurations.containsKey(id)) {
+                throw noSuchIntelligentTieringConfiguration();
+            }
+            Map<String, String> remaining = new java.util.LinkedHashMap<>(configurations);
+            remaining.remove(id);
+            bucket.setIntelligentTieringConfigurations(remaining);
+            bucketStore.put(bucketName, bucket);
+        }
+        LOG.debugv("Deleted intelligent-tiering configuration {0} from bucket: {1}", id, bucketName);
+    }
+
+    private static AwsException noSuchIntelligentTieringConfiguration() {
         return new AwsException("NoSuchConfiguration", "The specified configuration does not exist.", 404);
     }
 
@@ -2028,6 +2162,17 @@ public class S3Service implements Resettable, ResourceProvider {
                                                    String contentDisposition, String serverSideEncryption, String acl,
                                                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
                                                    String checksumAlgorithm, Map<String, String> tagging) {
+        return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
+                serverSideEncryption, acl, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
+                checksumAlgorithm, null, tagging);
+    }
+
+    public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
+                                                   Map<String, String> metadata, String storageClass,
+                                                   String contentDisposition, String serverSideEncryption, String acl,
+                                                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
+                                                   String checksumAlgorithm, String checksumType,
+                                                   Map<String, String> tagging) {
         ensureBucketExists(bucket);
         if (acl != null && !acl.isBlank()) {
             cannedObjectAclXml(acl);
@@ -2047,7 +2192,14 @@ public class S3Service implements Resettable, ResourceProvider {
             upload.setSseCustomerKeyMd5(customerKey.keyMd5());
         }
         upload.setAcl(acl);
-        upload.setChecksumAlgorithm(validateAndNormalizeChecksumAlgorithm(checksumAlgorithm));
+        ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(checksumAlgorithm);
+        ChecksumType requestedChecksumType = ChecksumType.fromWireValue(checksumType);
+        if (requestedChecksumType != null && algorithm == null) {
+            throw new AwsException("InvalidRequest",
+                    "The x-amz-checksum-type header can only be used with the x-amz-checksum-algorithm header.", 400);
+        }
+        upload.setChecksumAlgorithm(algorithm);
+        upload.setChecksumType(algorithm == null ? null : algorithm.multipartType(requestedChecksumType));
         if (tagging != null && !tagging.isEmpty()) {
             upload.setTagging(new HashMap<>(tagging));
         }
@@ -2073,6 +2225,13 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String uploadPart(String bucket, String key, String uploadId, int partNumber, byte[] data,
                              String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
+        return storePart(bucket, key, uploadId, partNumber, data, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5)
+                .getETag();
+    }
+
+    /** Stores one part and returns it, with the ETag and the checksum the upload's algorithm gives it. */
+    public Part storePart(String bucket, String key, String uploadId, int partNumber, byte[] data,
+                          String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)) {
             throw new AwsException("NoSuchUpload",
@@ -2097,10 +2256,10 @@ public class S3Service implements Resettable, ResourceProvider {
 
         String eTag = computeETag(data);
         Part part = new Part(partNumber, eTag, data.length);
-        part.setChecksum(buildChecksum(data, List.of(part), true, upload.getChecksumAlgorithm()));
+        part.setChecksum(S3Checksum.of(upload.getChecksumAlgorithm(), data));
         upload.getParts().put(partNumber, part);
         LOG.debugv("Uploaded part {0} for upload {1} ({2} bytes)", partNumber, uploadId, data.length);
-        return eTag;
+        return part;
     }
 
     public String uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
@@ -2140,19 +2299,32 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
                                             String checksumType, S3Checksum expectedChecksum) {
+        return completeMultipartUpload(bucket, key, uploadId, partNumbers, Map.of(), checksumType, expectedChecksum);
+    }
+
+    public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
+                                            Map<Integer, S3Checksum> partChecksums,
+                                            String checksumType, S3Checksum expectedChecksum) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)) {
             throw new AwsException("NoSuchUpload",
                     "The specified multipart upload does not exist.", 404);
         }
 
-        // Verify all requested parts exist
+        ChecksumAlgorithm algorithm = upload.getChecksumAlgorithm() != null ? upload.getChecksumAlgorithm() : ChecksumAlgorithm.CRC64NVME;
+        ChecksumType storedChecksumType = upload.getChecksumType() != null ? upload.getChecksumType() : ChecksumType.FULL_OBJECT;
+
+        // Verify all requested parts exist and carry the checksums the upload requires
         for (int num : partNumbers) {
-            if (!upload.getParts().containsKey(num)) {
+            Part part = upload.getParts().get(num);
+            if (part == null) {
                 throw new AwsException("InvalidPart",
                         "One or more of the specified parts could not be found. Part " + num + " is missing.", 400);
             }
+            validatePartChecksum(upload.getChecksumAlgorithm(), storedChecksumType, num, part, partChecksums.get(num));
         }
+
+        validateCompleteChecksumType(algorithm, storedChecksumType, ChecksumType.fromWireValue(checksumType));
 
         // Concatenate parts in order
         try {
@@ -2170,21 +2342,18 @@ public class S3Service implements Resettable, ResourceProvider {
 
             byte[] allData = combined.toByteArray();
 
-            boolean fullObjectChecksumRequested = "FULL_OBJECT".equalsIgnoreCase(checksumType)
-                    && expectedChecksum != null && expectedChecksum.hasAnyValue();
-            if (fullObjectChecksumRequested) {
-                validateFullObjectChecksum(allData, expectedChecksum);
-            }
-
             // Composite ETag: MD5 of concatenated part MD5s, suffixed with part count
             String compositeETag = "\"" + bytesToHex(md.digest()) + "-" + partNumbers.size() + "\"";
 
             List<Part> completedParts = partNumbers.stream()
                     .map(num -> copyPart(upload.getParts().get(num)))
                     .toList();
-            S3Checksum checksum = buildChecksum(allData, completedParts, true, upload.getChecksumAlgorithm());
-            if (fullObjectChecksumRequested) {
-                checksum.setChecksumType("FULL_OBJECT");
+            S3Checksum checksum = storedChecksumType == ChecksumType.COMPOSITE
+                    ? S3Checksum.composite(algorithm, completedParts.stream()
+                            .map(part -> part.getChecksum().valueFor(algorithm)).toList())
+                    : S3Checksum.fullObject(algorithm, allData);
+            if (expectedChecksum != null && expectedChecksum.hasAnyValue()) {
+                validateExpectedChecksum(checksum, expectedChecksum);
             }
             S3Object object = storeObject(bucket, key, allData, upload.getContentType(), upload.getMetadata(),
                     checksum, completedParts,
@@ -2233,6 +2402,10 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public MultipartUpload listParts(String bucket, String key, String uploadId) {
+        return getMultipartUpload(bucket, key, uploadId);
+    }
+
+    public MultipartUpload getMultipartUpload(String bucket, String key, String uploadId) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)) {
             throw new AwsException("NoSuchUpload",
@@ -3239,57 +3412,62 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    public static String validateAndNormalizeChecksumAlgorithm(String algorithm) {
-        if (algorithm == null || algorithm.isBlank()) {
-            return null;
+    private static void validateCompleteChecksumType(ChecksumAlgorithm algorithm, ChecksumType storedType,
+                                                     ChecksumType requestedType) {
+        if (requestedType == null) {
+            return;
         }
-        String normalized = algorithm.trim().toUpperCase(java.util.Locale.ROOT);
-        if (normalized.equals("CRC32") || normalized.equals("CRC32C") || normalized.equals("SHA1") || normalized.equals("SHA256") || normalized.equals("CRC64NVME")) {
-            return normalized;
-        }
-        if (normalized.equals("SHA512") || normalized.equals("MD5") || normalized.equals("XXHASH3") || normalized.equals("XXHASH64") || normalized.equals("XXHASH128")) {
-            throw new AwsException("InvalidRequest", "The checksum algorithm you specified is a valid AWS checksum algorithm, but is not currently supported by Floci (supported: CRC32, CRC32C, CRC64NVME, SHA1, SHA256).", 400);
-        }
-        throw new AwsException("InvalidArgument", "The checksum algorithm you specified is not supported.", 400);
-    }
-
-    private static void validateFullObjectChecksum(byte[] data, S3Checksum expected) {
-        if (expected.getChecksumSHA1() != null || expected.getChecksumSHA256() != null) {
+        if (requestedType == ChecksumType.FULL_OBJECT && !algorithm.supports(ChecksumType.FULL_OBJECT)) {
             throw new AwsException("InvalidRequest",
-                    "The FULL_OBJECT checksum type is not supported with the SHA1 or SHA256 checksum algorithm. "
-                            + "Full object checksums are only supported with the CRC32, CRC32C, and CRC64NVME checksum algorithms.",
-                    400);
+                    "The algorithm type you specified in x-amz-checksum- header is invalid.", 400);
         }
-        if (expected.getChecksumCRC32() != null && !expected.getChecksumCRC32().equals(S3Checksum.crc32Base64(data))) {
-            throw new AwsException("BadDigest", "The CRC32 checksum you specified did not match the payload.", 400);
-        }
-        if (expected.getChecksumCRC32C() != null && !expected.getChecksumCRC32C().equals(S3Checksum.crc32cBase64(data))) {
-            throw new AwsException("BadDigest", "The CRC32C checksum you specified did not match the payload.", 400);
-        }
-        if (expected.getChecksumCRC64NVME() != null
-                && !expected.getChecksumCRC64NVME().equals(S3Checksum.crc64NvmeBase64(data))) {
-            throw new AwsException("BadDigest", "The CRC64NVME checksum you specified did not match the payload.", 400);
+        if (requestedType != storedType) {
+            throw new AwsException("InvalidRequest",
+                    "The upload was created using the " + storedType + " checksum mode. "
+                            + "The complete request must use the same checksum mode.", 400);
         }
     }
 
-    private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload) {
-        return buildChecksum(data, parts, multipartUpload, null);
+    // As on S3: a COMPOSITE upload needs the checksum of every part in the request body, a checksum for
+    // another algorithm is a BadDigest, a wrong value an InvalidPart. FULL_OBJECT uploads need none.
+    private static void validatePartChecksum(ChecksumAlgorithm declared, ChecksumType storedType, int partNumber,
+                                             Part uploaded, S3Checksum expected) {
+        if (expected == null || !expected.hasAnyValue()) {
+            if (declared != null && storedType == ChecksumType.COMPOSITE) {
+                throw new AwsException("InvalidRequest", "The upload was created using a " + declared.wireValue()
+                        + " checksum. The complete request must include the checksum for each part. It was missing for part "
+                        + partNumber + " in the request.", 400);
+            }
+            return;
+        }
+        ChecksumAlgorithm algorithm = declared != null && expected.valueFor(declared) != null ? declared : expected.algorithm();
+        if (declared != null && algorithm != declared) {
+            throw new AwsException("BadDigest", "The " + algorithm.wireValue() + " you specified for part " + partNumber
+                    + " did not match what we received.", 400);
+        }
+        if (!expected.valueFor(algorithm).equals(uploaded.getChecksum().valueFor(algorithm))) {
+            throw new AwsException("InvalidPart",
+                    "One or more of the specified parts could not be found.  The part may not have been uploaded, "
+                            + "or the specified entity tag may not match the part's entity tag.", 400);
+        }
     }
 
-    private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload, String algorithm) {
-        S3Checksum checksum = new S3Checksum();
-        String algo = (algorithm != null) ? algorithm.toUpperCase() : "CRC64NVME";
-        switch (algo) {
-            case "CRC32"     -> checksum.setChecksumCRC32(S3Checksum.crc32Base64(data));
-            case "CRC32C"    -> checksum.setChecksumCRC32C(S3Checksum.crc32cBase64(data));
-            case "SHA1"      -> checksum.setChecksumSHA1(S3Checksum.sha1Base64(data));
-            case "SHA256"    -> checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
-            default          -> checksum.setChecksumCRC64NVME(S3Checksum.crc64NvmeBase64(data));
+    // AWS accepts a composite value with or without its "-N" suffix, but a wrong suffix is a BadDigest.
+    private static void validateExpectedChecksum(S3Checksum computed, S3Checksum expected) {
+        for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
+            String expectedValue = expected.valueFor(algorithm);
+            if (expectedValue == null) {
+                continue;
+            }
+            String computedValue = computed.valueFor(algorithm);
+            boolean matches = expectedValue.equals(computedValue)
+                    || (computed.getChecksumType() == ChecksumType.COMPOSITE
+                            && expectedValue.equals(S3Checksum.withoutPartCount(computedValue)));
+            if (!matches) {
+                throw new AwsException("BadDigest", "The " + algorithm.wireValue()
+                        + " you specified did not match the calculated checksum.", 400);
+            }
         }
-        checksum.setChecksumType(multipartUpload || (parts != null && parts.size() > 1)
-                ? "COMPOSITE"
-                : "FULL_OBJECT");
-        return checksum;
     }
 
     private static S3Object copyObject(S3Object source) {
@@ -3324,17 +3502,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static S3Checksum copyChecksum(S3Checksum source) {
-        if (source == null) {
-            return null;
-        }
-        S3Checksum copy = new S3Checksum();
-        copy.setChecksumCRC32(source.getChecksumCRC32());
-        copy.setChecksumCRC32C(source.getChecksumCRC32C());
-        copy.setChecksumCRC64NVME(source.getChecksumCRC64NVME());
-        copy.setChecksumSHA1(source.getChecksumSHA1());
-        copy.setChecksumSHA256(source.getChecksumSHA256());
-        copy.setChecksumType(source.getChecksumType());
-        return copy;
+        return source == null ? null : source.copy();
     }
 
     private static List<Part> copyParts(List<Part> sourceParts) {
@@ -3382,6 +3550,10 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new AwsException("NoSuchBucket",
                     "The specified bucket does not exist.", 404);
         }
+    }
+
+    public boolean bucketExists(String bucketName) {
+        return resolveBucket(bucketName).isPresent();
     }
 
     /**
@@ -3749,14 +3921,20 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? effectiveOptions.getReplacementTagging()
                 : source.getTags();
 
+        // A copy is written as one object without a part manifest; a composite source gets a
+        // full-object checksum recomputed with its algorithm, as AWS does.
         S3Checksum effectiveChecksum = source.getChecksum();
-        String copyChecksumAlgorithm = validateAndNormalizeChecksumAlgorithm(effectiveOptions.getChecksumAlgorithm());
+        ChecksumAlgorithm copyChecksumAlgorithm = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
+        if (copyChecksumAlgorithm == null && effectiveChecksum != null
+                && effectiveChecksum.getChecksumType() == ChecksumType.COMPOSITE) {
+            copyChecksumAlgorithm = effectiveChecksum.algorithm();
+        }
         if (copyChecksumAlgorithm != null) {
             effectiveChecksum = null;
         }
 
         S3Object copy = storeObject(destBucket, destKey, source.getData(), effectiveContentType, metadata,
-                effectiveChecksum, copyChecksumAlgorithm != null ? null : source.getParts(),
+                effectiveChecksum, null,
                 new PutObjectOptions()
                         .withStorageClass(effectiveStorageClass)
                         .withContentEncoding(effectiveContentEncoding)
@@ -3772,9 +3950,10 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withGrantFullControl(effectiveOptions.getGrantFullControl())
                         .withGrantReadAcp(effectiveOptions.getGrantReadAcp())
                         .withGrantWriteAcp(effectiveOptions.getGrantWriteAcp())
-                        .withChecksumAlgorithm(copyChecksumAlgorithm)
+                        .withChecksumAlgorithm(copyChecksumAlgorithm != null ? copyChecksumAlgorithm.name() : null)
                         .withTagging(effectiveTags));
-        copy.setETag(source.getETag());
+        // A copy is written as one object, so it keeps the ETag storeObject computed (the MD5 of the
+        // whole content) instead of the source's, which for a multipart source ends in "-N". As on S3.
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
         fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
         return copy;

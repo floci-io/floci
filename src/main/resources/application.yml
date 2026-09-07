@@ -17,8 +17,6 @@ quarkus:
       max-body-size: ${floci.protocols.max-request-size}M
   datasource:
     active: false
-  security:
-     security-providers: BC
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
@@ -61,23 +59,17 @@ quarkus:
         - org/xerial/snappy/native/Linux/s390x/**
         - org/xerial/snappy/native/Linux/x86/**
         - org/xerial/snappy/native/Linux/x86_64-musl/**
+    # No --allow-incomplete-classpath and no --report-unsupported-elements-at-runtime: both have
+    # been no-ops since GraalVM 22.1 (incomplete classpaths are the default, and Quarkus passes
+    # --link-at-build-time itself, so a reachable class missing from the classpath fails the build).
     additional-build-args:
-      - --report-unsupported-elements-at-runtime
-      - --allow-incomplete-classpath
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$Default
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV
-      - --initialize-at-run-time=org.bouncycastle.crypto.prng.SP800SecureRandom
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.rsa.KeyPairGeneratorSpi
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.x509.CertificateFactory
-      - --initialize-at-run-time=io.github.hectorvent.floci.core.common.BouncyCastleInitializer
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.ses.SesService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
@@ -211,10 +203,10 @@ floci:
   security:
     # Comma-separated browser origins allowed by the global CORS filter.
     # Env var: EXTRA_CORS_ALLOWED_ORIGINS=http://localhost:3000
-    # extra-cors-allowed-origins:
+    extra-cors-allowed-origins: ${EXTRA_CORS_ALLOWED_ORIGINS:}
     # Extra request/response CORS header names for browser clients.
-    # extra-cors-allowed-headers:
-    # extra-cors-expose-headers:
+    extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
+    extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
     # Grant Private Network Access preflights (Access-Control-Allow-Private-Network)
     # so a page on a public/secure origin can reach this loopback backend.
@@ -224,7 +216,7 @@ floci:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""                     # FLOCI_TLS_KEY_PATH (PEM private key file)
-    self-signed: true                  # FLOCI_TLS_SELF_SIGNED — auto-generate a self-signed cert if no cert-path provided
+    self-signed: true                  # FLOCI_TLS_SELF_SIGNED: auto-generate a server cert signed by Floci's local CA if no cert-path provided
     aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
 
   protocols:
@@ -266,6 +258,7 @@ floci:
       enabled: true
       ephemeral: false
       ecr-base-uri: public.ecr.aws            # FLOCI_SERVICES_LAMBDA_ECR_BASE_URI — registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
+      honour-architectures: false             # Select the Lambda architecture for Docker pull and create
       default-memory-mb: 128
       default-timeout-seconds: 3
       # 500 ports, not the former 100 (9200-9299): one port is held per running Lambda
@@ -276,6 +269,7 @@ floci:
       runtime-api-base-port: 12000
       runtime-api-max-port: 12499
       code-path: ./data/lambda-code
+      zip-max-entries: 100000
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300
       region-concurrency-limit: 1000
@@ -437,6 +431,10 @@ floci:
     ec2:
       enabled: true
       imds-port: 9169
+      # Sweep EC2 containers left on the daemon by a previous run that died mid-launch or
+      # mid-terminate (SIGKILL, OOM, docker kill), which no surviving record refers to.
+      # Scoped to this deployment's own containers; stopped instances are never swept.
+      reconcile-containers-on-startup: true
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
       publish-security-group-ports: true
@@ -467,6 +465,7 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname
+      prefer-local-images: true
     ui:
       enabled: true
       image: "floci/floci-ui:latest"
@@ -540,6 +539,7 @@ floci:
       enabled: true
     route53:
       enabled: true
+      vpc-association-control-plane-delay-ms: 0
     transfer:
       enabled: true
     textract:
@@ -585,11 +585,13 @@ floci:
       enabled: true
     iot:
       enabled: true
+      rule-sql-strict: false
       mqtt:
         enabled: true
         auto-start: false
         host: 0.0.0.0
         port: 1883
+        tls-port: 8883
     iotdata:
       enabled: true
     cloudhsmv2:
@@ -611,11 +613,22 @@ floci:
       enabled: true
     ssoadmin:
       enabled: true
+    macie2:
+      enabled: true
+    account:
+      enabled: true
+    accessanalyzer:
+      enabled: true
+    identitystore:
+      enabled: true
     controltower:
       enabled: true
+      seed-landing-zone: false
     route53resolver:
       enabled: true
     connect:
+      enabled: true
+    cognitoidentity:
       enabled: true
     aps:
       enabled: true

@@ -341,11 +341,13 @@ public class LambdaController {
         return Response.status(202).entity(buildEsmResponse(esm)).build();
     }
 
-    private Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
+    Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("UUID", esm.getUuid());
         node.put("FunctionArn", esm.getFunctionArn());
-        node.put("EventSourceArn", esm.getEventSourceArn());
+        if (esm.getEventSourceArn() != null) {
+            node.put("EventSourceArn", esm.getEventSourceArn());
+        }
         node.put("BatchSize", esm.getBatchSize());
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
@@ -370,6 +372,19 @@ public class LambdaController {
             onFailure.put("Destination", esm.getDestinationConfig().getOnFailure().getDestination());
         }
 
+        if (esm.getSelfManagedEventSource() != null) {
+            node.set("SelfManagedEventSource", objectMapper.valueToTree(esm.getSelfManagedEventSource()));
+        }
+
+        if (esm.getTopics() != null && !esm.getTopics().isEmpty()) {
+            ArrayNode topicsNode = node.putArray("Topics");
+            esm.getTopics().forEach(topicsNode::add);
+        }
+
+        if (esm.getSourceAccessConfigurations() != null && !esm.getSourceAccessConfigurations().isEmpty()) {
+            node.set("SourceAccessConfigurations", objectMapper.valueToTree(esm.getSourceAccessConfigurations()));
+        }
+
         if (esm.getFunctionResponseTypes() != null) {
             esm.getFunctionResponseTypes().forEach(responseTypes::add);
         }
@@ -380,6 +395,15 @@ public class LambdaController {
         if (maxConcurrency != null) {
             ObjectNode scaling = node.putObject("ScalingConfig");
             scaling.put("MaximumConcurrency", maxConcurrency.intValue());
+        }
+        // Only emit FilterCriteria when filters are configured: AWS omits the field
+        // entirely (rather than returning null or an empty object) when no filter is set.
+        if (esm.getFilterCriteria() != null && !esm.getFilterCriteria().getFilters().isEmpty()) {
+            ObjectNode filterCriteria = node.putObject("FilterCriteria");
+            ArrayNode filters = filterCriteria.putArray("Filters");
+            for (EventSourceMapping.Filter filter : esm.getFilterCriteria().getFilters()) {
+                filters.addObject().put("Pattern", filter.getPattern());
+            }
         }
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);

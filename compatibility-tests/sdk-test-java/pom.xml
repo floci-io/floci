@@ -90,6 +90,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3-transfer-manager</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3control</artifactId>
         </dependency>
         <dependency>
@@ -230,6 +234,31 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>organizations</artifactId>
         </dependency>
+        <!-- IAM Identity Center (SSO Admin) client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssoadmin</artifactId>
+        </dependency>
+        <!-- Identity Store client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>identitystore</artifactId>
+        </dependency>
+        <!-- Amazon Macie client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>macie2</artifactId>
+        </dependency>
+        <!-- AWS Account Management client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>account</artifactId>
+        </dependency>
+        <!-- IAM Access Analyzer client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>accessanalyzer</artifactId>
+        </dependency>
         <!-- Cloud Map (servicediscovery) client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -332,6 +361,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>bedrockagentcore</artifactId>
+        </dependency>
+        <!-- Bedrock Runtime client (Converse/ConverseStream) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockruntime</artifactId>
         </dependency>
         <!-- AWS IoT client -->
         <dependency>
@@ -458,6 +492,13 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <!-- JBoss Logging for test diagnostics, matching the repository logging convention -->
+        <dependency>
+            <groupId>org.jboss.logging</groupId>
+            <artifactId>jboss-logging</artifactId>
+            <version>3.6.3.Final</version>
+            <scope>test</scope>
         </dependency>
         <!-- JUnit 5 -->
         <dependency>

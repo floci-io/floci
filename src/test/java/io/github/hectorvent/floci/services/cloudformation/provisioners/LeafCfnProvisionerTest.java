@@ -11,9 +11,6 @@ import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
-import io.github.hectorvent.floci.services.pipes.PipesService;
-import io.github.hectorvent.floci.services.pipes.model.DesiredState;
-import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -166,7 +163,20 @@ class LeafCfnProvisionerTest {
 
             verify(ssm).putParameter("/app/db", "secret", "String", null, true, REGION);
             assertEquals("/app/db", r.getPhysicalId());
-            assertEquals(Map.of("Name", "/app/db", "Type", "String", "Value", "secret"), r.getAttributes());
+            assertEquals(Map.of("Name", "/app/db", "Type", "String", "Value", "secret",
+                    "Arn", "arn:aws:ssm:us-east-1:000000000000:parameter/app/db"), r.getAttributes());
+        }
+
+        @Test
+        void arnOfANameWithoutALeadingSlashStillHasTheParameterPrefix() {
+            // AWS ARNs are always arn:...:parameter/<name>; a name without a leading slash gets the
+            // slash inserted, a name with one is not doubled.
+            StackResource r = resource("Param", "AWS::SSM::Parameter");
+            provisioner.provision(r, props("""
+                    {"Name": "db-host", "Value": "localhost"}
+                    """), ctx);
+
+            assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/db-host", r.getAttributes().get("Arn"));
         }
 
         @Test
@@ -282,49 +292,6 @@ class LeafCfnProvisionerTest {
         void deleteForcesRemovalSoANonEmptyRepositoryStillGoes() {
             provisioner.delete("AWS::ECR::Repository", "app", REGION);
             verify(ecr).deleteRepository("app", null, true, REGION);
-        }
-    }
-
-    @Nested
-    class Pipes {
-
-        private final PipesService pipes = mock(PipesService.class);
-        private final PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes);
-
-        @Test
-        void refIsThePipeNameAndGetAttExposesArn() {
-            Pipe pipe = new Pipe();
-            pipe.setArn("arn:aws:pipes:us-east-1:000000000000:pipe/p");
-            when(pipes.createPipe(eq("p"), eq("src"), eq("tgt"), eq("role"), any(),
-                    eq(DesiredState.RUNNING), any(), any(), any(), any(), any(), eq(REGION)))
-                    .thenReturn(pipe);
-
-            StackResource r = resource("Pipe", "AWS::Pipes::Pipe");
-            provisioner.provision(r, props("""
-                    {"Name": "p", "Source": "src", "Target": "tgt", "RoleArn": "role"}
-                    """), ctx);
-
-            assertEquals("p", r.getPhysicalId());
-            assertEquals("arn:aws:pipes:us-east-1:000000000000:pipe/p", r.getAttributes().get("Arn"));
-        }
-
-        @Test
-        void desiredStateStoppedIsHonouredAndAnythingElseRuns() {
-            Pipe pipe = new Pipe();
-            when(pipes.createPipe(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                    any(), any())).thenReturn(pipe);
-
-            provisioner.provision(resource("Pipe", "AWS::Pipes::Pipe"), props("""
-                    {"Name": "p", "DesiredState": "STOPPED"}
-                    """), ctx);
-            verify(pipes).createPipe(any(), any(), any(), any(), any(), eq(DesiredState.STOPPED),
-                    any(), any(), any(), any(), any(), any());
-        }
-
-        @Test
-        void deleteReachesTheService() {
-            provisioner.delete("AWS::Pipes::Pipe", "p", REGION);
-            verify(pipes).deletePipe("p", REGION);
         }
     }
 

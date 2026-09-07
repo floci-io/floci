@@ -31,6 +31,10 @@ public class EventSourceMapping {
     private ScalingConfig scalingConfig;
     private Boolean bisectBatchOnFunctionError;
     private DestinationConfig destinationConfig;
+    private FilterCriteria filterCriteria;
+    private Map<String, Object> selfManagedEventSource;
+    private List<String> topics = new ArrayList<>();
+    private List<Map<String, Object>> sourceAccessConfigurations = new ArrayList<>();
 
     public EventSourceMapping() {
     }
@@ -115,6 +119,38 @@ public class EventSourceMapping {
         this.destinationConfig = destinationConfig;
     }
 
+    public FilterCriteria getFilterCriteria() {
+        return filterCriteria;
+    }
+
+    public void setFilterCriteria(FilterCriteria filterCriteria) {
+        this.filterCriteria = filterCriteria;
+    }
+
+    public Map<String, Object> getSelfManagedEventSource() {
+        return selfManagedEventSource;
+    }
+
+    public void setSelfManagedEventSource(Map<String, Object> selfManagedEventSource) {
+        this.selfManagedEventSource = selfManagedEventSource;
+    }
+
+    public List<String> getTopics() {
+        return topics;
+    }
+
+    public void setTopics(List<String> topics) {
+        this.topics = topics != null ? topics : new ArrayList<>();
+    }
+
+    public List<Map<String, Object>> getSourceAccessConfigurations() {
+        return sourceAccessConfigurations;
+    }
+
+    public void setSourceAccessConfigurations(List<Map<String, Object>> sourceAccessConfigurations) {
+        this.sourceAccessConfigurations = sourceAccessConfigurations != null ? sourceAccessConfigurations : new ArrayList<>();
+    }
+
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class DestinationConfig {
@@ -146,6 +182,40 @@ public class EventSourceMapping {
 
         public void setDestination(String destination) {
             this.destination = destination;
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class FilterCriteria {
+        private List<Filter> filters = new ArrayList<>();
+
+        public FilterCriteria() {
+        }
+
+        public List<Filter> getFilters() {
+            return filters;
+        }
+
+        public void setFilters(List<Filter> filters) {
+            this.filters = filters != null ? filters : new ArrayList<>();
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Filter {
+        private String pattern;
+
+        public Filter() {
+        }
+
+        public String getPattern() {
+            return pattern;
+        }
+
+        public void setPattern(String pattern) {
+            this.pattern = pattern;
         }
     }
 }

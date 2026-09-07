@@ -9,9 +9,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -39,14 +38,10 @@ public class SchedulerScheduleGroupCfnProvisioner implements CfnResourceProvisio
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "Name");
-        if (name == null || name.isBlank()) {
-            // No explicit name and this resource already has a physical id: keep it across updates
-            // instead of generating a fresh random one each retry, same as LogGroup/Queue do.
-            name = r.getPhysicalId() != null
-                    ? r.getPhysicalId()
-                    : ctx.generatePhysicalName(r.getLogicalId(), 64, false);
-        }
+        // Name is a createOnlyProperty in the registry schema, so an unnamed group keeps the name
+        // it already had across updates instead of getting a fresh random one each time provision
+        // runs. Read from the context, not the resource: provision assigns the new id as it works.
+        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
         // Preserve live tags when a present property still cannot resolve to a tag list.
         boolean hasTagsProperty = props != null && props.has("Tags");
         JsonNode tagsNode = hasTagsProperty ? ctx.engine().resolveNode(props.get("Tags")) : null;
@@ -62,32 +57,27 @@ public class SchedulerScheduleGroupCfnProvisioner implements CfnResourceProvisio
         }
 
         ScheduleGroup group;
-        try {
-            group = schedulerService.createScheduleGroup(name, tags, ctx.region());
-        } catch (AwsException e) {
-            if (!"ConflictException".equals(e.getErrorCode()) || !name.equals(r.getPhysicalId())) {
-                throw e;
-            }
-            // Same-stack create-retry: CloudFormation only retries a resource under the physical id
-            // it previously assigned, so a conflict on that exact name means this logical resource's
-            // own group already exists from an earlier attempt. Adopt it instead of failing the whole
-            // stack on a retry of a step that already succeeded.
+        if (ctx.reusesPriorEntity(name)) {
+            // provision is also the update path, and createScheduleGroup answers ConflictException
+            // for a name that exists. The derived name matching the prior physical id means this
+            // logical resource's own group is already there, so reconcile it rather than create:
+            // per the registry schema the update handler is a tag diff and nothing else. A key
+            // dropped from the template (or the whole Tags list emptied, or Tags removed entirely)
+            // must not linger on the live resource. Skipped only when Tags is present but
+            // unresolvable, where untagging every live key would erase tags for a reason unrelated
+            // to what the template asked for.
             group = schedulerService.getScheduleGroup(name, ctx.region());
-            // Reconcile tags both ways: a key dropped from the template (or the whole Tags list
-            // emptied, or Tags removed entirely) must not linger on the live resource, matching how
-            // the same-stack retry path applies every other property change rather than only ever
-            // adding. Skipped only when Tags is present but unresolvable: untagging every
-            // live key there would erase tags for a reason unrelated to what the template asked for.
             if (tagsAreResolvable) {
-                Set<String> staleKeys = new HashSet<>(group.getTags().keySet());
-                staleKeys.removeAll(tags.keySet());
+                List<String> staleKeys = ProvisionContext.staleTagKeys(group.getTags(), tags);
                 if (!staleKeys.isEmpty()) {
-                    schedulerService.untagScheduleGroup(name, ctx.region(), new ArrayList<>(staleKeys));
+                    schedulerService.untagScheduleGroup(name, ctx.region(), staleKeys);
                 }
             }
             if (!tags.isEmpty()) {
                 schedulerService.tagScheduleGroup(name, ctx.region(), tags);
             }
+        } else {
+            group = schedulerService.createScheduleGroup(name, tags, ctx.region());
         }
         r.setPhysicalId(group.getName());
         r.getAttributes().put("Arn", group.getArn());

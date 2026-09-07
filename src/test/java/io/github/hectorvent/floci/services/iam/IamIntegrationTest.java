@@ -1117,4 +1117,54 @@ class IamIntegrationTest {
             .body(containsString("ListPoliciesOmitCheckPolicy"))
             .body(not(containsString("<Description>")));
     }
+
+    @Test
+    void simulatePrincipalPolicyReadsEveryContextKeyValue() {
+        // A ForAnyValue: condition is satisfied only by the SECOND supplied context value,
+        // so a handler that reads only ContextKeyValues.member.1 returns implicitDeny.
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", "multi-context-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260904/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "PutUserPolicy")
+            .formParam("UserName", "multi-context-user")
+            .formParam("PolicyName", "AllowAliceLeadingKeys")
+            .formParam("PolicyDocument", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"ForAnyValue:StringEquals":{"dynamodb:LeadingKeys":["USER_alice"]}}}
+                ]}""")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260904/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "SimulatePrincipalPolicy")
+            .formParam("PolicySourceArn", "arn:aws:iam::000000000000:user/multi-context-user")
+            .formParam("ActionNames.member.1", "dynamodb:GetItem")
+            .formParam("ResourceArns.member.1", "*")
+            .formParam("ContextEntries.member.1.ContextKeyName", "dynamodb:LeadingKeys")
+            .formParam("ContextEntries.member.1.ContextKeyValues.member.1", "USER_bob")
+            .formParam("ContextEntries.member.1.ContextKeyValues.member.2", "USER_alice")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260904/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SimulatePrincipalPolicyResponse.SimulatePrincipalPolicyResult.EvaluationResults"
+                            + ".member.find { it.EvalActionName == 'dynamodb:GetItem' }.EvalDecision",
+                    equalTo("allowed"));
+    }
 }
+

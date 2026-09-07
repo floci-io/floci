@@ -21,10 +21,10 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * WAF v2 management-plane business logic. Resources are identified by the
- * (Scope, Id) pair (storage key {@code scope:id}); Name + Scope find the Id on the
- * duplicate-name check. Updates/deletes enforce the LockToken optimistic-concurrency
- * contract. Recursive rule structures are stored opaquely as raw JSON.
+ * WAF v2 management-plane business logic. Resources are stored by the
+ * (Scope, Id) pair and get, update, and delete operations also validate Name.
+ * Updates/deletes enforce the LockToken optimistic-concurrency contract.
+ * Recursive rule structures are stored opaquely as raw JSON.
  */
 @ApplicationScoped
 public class WafV2Service {
@@ -83,12 +83,12 @@ public class WafV2Service {
         return acl;
     }
 
-    public WebAcl getWebAcl(String scope, String id) {
-        return require(webAclStore, scope, id);
+    public WebAcl getWebAcl(String scope, String id, String name) {
+        return require(webAclStore, scope, id, name);
     }
 
-    public String updateWebAcl(WebAcl changes, String scope, String id, String lockToken) {
-        WebAcl existing = require(webAclStore, scope, id);
+    public String updateWebAcl(WebAcl changes, String scope, String id, String name, String lockToken) {
+        WebAcl existing = require(webAclStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         existing.setDescription(changes.getDescription());
         existing.setDefaultAction(changes.getDefaultAction());
@@ -104,8 +104,8 @@ public class WafV2Service {
         return rotate(existing, webAclStore, scope);
     }
 
-    public void deleteWebAcl(String scope, String id, String lockToken) {
-        WebAcl existing = require(webAclStore, scope, id);
+    public void deleteWebAcl(String scope, String id, String name, String lockToken) {
+        WebAcl existing = require(webAclStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         boolean associated = associationStore.scan(k -> true).stream()
                 .anyMatch(arn -> arn.equals(existing.getArn()));
@@ -140,21 +140,21 @@ public class WafV2Service {
         return ipSet;
     }
 
-    public IpSet getIpSet(String scope, String id) {
-        return require(ipSetStore, scope, id);
+    public IpSet getIpSet(String scope, String id, String name) {
+        return require(ipSetStore, scope, id, name);
     }
 
     public String updateIpSet(String scope, String id, String description,
-                              List<String> addresses, String lockToken) {
-        IpSet existing = require(ipSetStore, scope, id);
+                              List<String> addresses, String name, String lockToken) {
+        IpSet existing = require(ipSetStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         existing.setDescription(description);
         existing.setAddresses(addresses);
         return rotate(existing, ipSetStore, scope);
     }
 
-    public void deleteIpSet(String scope, String id, String lockToken) {
-        IpSet existing = require(ipSetStore, scope, id);
+    public void deleteIpSet(String scope, String id, String name, String lockToken) {
+        IpSet existing = require(ipSetStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         ipSetStore.delete(key(scope, id));
     }
@@ -182,21 +182,21 @@ public class WafV2Service {
         return set;
     }
 
-    public RegexPatternSet getRegexPatternSet(String scope, String id) {
-        return require(regexStore, scope, id);
+    public RegexPatternSet getRegexPatternSet(String scope, String id, String name) {
+        return require(regexStore, scope, id, name);
     }
 
     public String updateRegexPatternSet(String scope, String id, String description,
-                                        List<String> regexList, String lockToken) {
-        RegexPatternSet existing = require(regexStore, scope, id);
+                                        List<String> regexList, String name, String lockToken) {
+        RegexPatternSet existing = require(regexStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         existing.setDescription(description);
         existing.setRegularExpressionList(regexList);
         return rotate(existing, regexStore, scope);
     }
 
-    public void deleteRegexPatternSet(String scope, String id, String lockToken) {
-        RegexPatternSet existing = require(regexStore, scope, id);
+    public void deleteRegexPatternSet(String scope, String id, String name, String lockToken) {
+        RegexPatternSet existing = require(regexStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         regexStore.delete(key(scope, id));
     }
@@ -225,12 +225,12 @@ public class WafV2Service {
         return group;
     }
 
-    public RuleGroup getRuleGroup(String scope, String id) {
-        return require(ruleGroupStore, scope, id);
+    public RuleGroup getRuleGroup(String scope, String id, String name) {
+        return require(ruleGroupStore, scope, id, name);
     }
 
-    public String updateRuleGroup(RuleGroup changes, String scope, String id, String lockToken) {
-        RuleGroup existing = require(ruleGroupStore, scope, id);
+    public String updateRuleGroup(RuleGroup changes, String scope, String id, String name, String lockToken) {
+        RuleGroup existing = require(ruleGroupStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         existing.setDescription(changes.getDescription());
         existing.setRules(changes.getRules());
@@ -239,8 +239,8 @@ public class WafV2Service {
         return rotate(existing, ruleGroupStore, scope);
     }
 
-    public void deleteRuleGroup(String scope, String id, String lockToken) {
-        RuleGroup existing = require(ruleGroupStore, scope, id);
+    public void deleteRuleGroup(String scope, String id, String name, String lockToken) {
+        RuleGroup existing = require(ruleGroupStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
         ruleGroupStore.delete(key(scope, id));
     }
@@ -398,14 +398,22 @@ public class WafV2Service {
         return null;
     }
 
-    private <V> V require(StorageBackend<String, V> store, String scope, String id) {
+    private <V> V require(StorageBackend<String, V> store, String scope, String id, String name) {
         validateScope(scope);
         if (id == null) {
             throw new AwsException("WAFInvalidParameterException", "Id is required.", 400);
         }
-        return store.get(key(scope, id)).orElseThrow(() -> new AwsException(
+        if (name == null || name.isBlank()) {
+            throw new AwsException("WAFInvalidParameterException", "Name is required.", 400);
+        }
+        V resource = store.get(key(scope, id)).orElseThrow(() -> new AwsException(
                 "WAFNonexistentItemException",
                 "AWS WAF couldn't perform the operation because your resource doesn't exist.", 404));
+        if (!name.equals(nameOf(resource))) {
+            throw new AwsException("WAFNonexistentItemException",
+                    "AWS WAF couldn't perform the operation because your resource doesn't exist.", 404);
+        }
+        return resource;
     }
 
     private <V> V findByName(StorageBackend<String, V> store, String scope, String name) {

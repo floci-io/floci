@@ -172,6 +172,18 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstanceRejectsLegacyBareAuroraEngine() {
+        // "aurora" (bare) is the retired Aurora MySQL 5.6 identifier; real AWS no
+        // longer accepts it for new instances/clusters and rejects it outright
+        // rather than silently treating it as aurora-mysql.
+        AwsException invalidEngine = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("mydb", "aurora", "13",
+                        "admin", "password", "dbname", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+        assertEquals("InvalidParameterValue", invalidEngine.getErrorCode());
+    }
+
+    @Test
     void createAndModifyDbInstancePersistVpcSecurityGroups() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -536,6 +548,163 @@ class RdsServiceTest {
                 new Secret.Tag("aws:secretsmanager:owningService", "rds")));
         assertTrue(secretTags.getValue().contains(
                 new Secret.Tag("aws:rds:primaryDBInstanceArn", instance.getDbInstanceArn())));
+    }
+
+    @Test
+    void createDbClusterWithManagedMasterPasswordCreatesSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-ABC");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        DbCluster cluster = service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "omni_admin", null, "omni", false, null, null, null, false, "us-east-1",
+                0.5, 1.0, null, true, "kms-key-1");
+
+        assertEquals("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-ABC",
+                cluster.getMasterUserSecretArn());
+        assertEquals("active", cluster.getMasterUserSecretStatus());
+        assertEquals("kms-key-1", cluster.getMasterUserSecretKmsKeyId());
+        assertNotNull(cluster.getMasterPassword());
+        assertTrue(cluster.getMasterPassword().startsWith("floci-"));
+
+        ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> secretString = ArgumentCaptor.forClass(String.class);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Secret.Tag>> secretTags = ArgumentCaptor.forClass(List.class);
+        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(),
+                eq("kms-key-1"), secretTags.capture(), eq("rds"), eq("us-east-1"));
+        assertTrue(secretName.getValue().startsWith("rds!cluster-"));
+        assertTrue(secretString.getValue().contains("\"username\":\"omni_admin\""));
+        assertTrue(secretString.getValue().contains("\"password\":\"" + cluster.getMasterPassword() + "\""));
+        assertTrue(secretString.getValue().contains("\"dbClusterIdentifier\":\"cluster1\""));
+
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:secretsmanager:owningService", "rds")));
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:rds:primaryDBClusterArn", cluster.getDbClusterArn())));
+    }
+
+    @Test
+    void createDbClusterRollsBackManagedSecretWhenProxyStartupFails() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-RB";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        doThrow(new IllegalStateException("proxy down"))
+                .when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                        any(), any(), any(), any(), any());
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        assertThrows(IllegalStateException.class, () -> service.createDbCluster(
+                "cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null));
+
+        verify(secretsManager).deleteSecret(eq(secretArn), any(), anyBoolean(), eq("us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterRekeysExistingManagedSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-RK";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, "kms-key-1");
+
+        DbCluster cluster = service.modifyDbCluster("cluster1", null, null,
+                null, null, null, true, "kms-key-2", "us-east-1");
+
+        assertEquals("kms-key-2", cluster.getMasterUserSecretKmsKeyId());
+        verify(secretsManager).updateSecret(eq(secretArn), any(), eq("kms-key-2"), eq("us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterEnablingManagedMasterPasswordCreatesSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-MOD");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "omni", false, null);
+
+        DbCluster cluster = service.modifyDbCluster("cluster1", null, null,
+                null, null, null, true, null, "us-east-1");
+
+        assertEquals("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-MOD",
+                cluster.getMasterUserSecretArn());
+        assertEquals("active", cluster.getMasterUserSecretStatus());
+        verify(secretsManager).createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1"));
+    }
+
+    @Test
+    void deleteDbClusterDeletesManagedMasterUserSecret() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-DEL";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null);
+
+        service.deleteDbCluster("cluster1", "us-east-1");
+
+        verify(secretsManager).deleteSecret(eq(secretArn), any(), eq(true), eq("us-east-1"));
+    }
+
+    @Test
+    void backfillMarksMasterUserSecretsOfPersistedClusters() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-BF";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+        service.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", null, "omni", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null);
+
+        service.backfillManagedSecretOwnership();
+
+        verify(secretsManager).markOwnedByService(secretArn, "rds");
     }
 
     @Test
@@ -1000,6 +1169,32 @@ class RdsServiceTest {
         rdsService.addTagsToResource(cluster.getDbClusterArn(), java.util.Map.of("env", "test"));
         assertEquals(java.util.Map.of("env", "test"),
                 rdsService.listTagsForResource(cluster.getDbClusterArn()));
+    }
+
+    @Test
+    void dbProxyTargetGroupTagsRoundTripByArn() {
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        String targetGroupArn = rdsService.describeDbProxyTargetGroups("app-proxy")
+                .iterator().next().getTargetGroupArn();
+
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(targetGroupArn));
+
+        rdsService.addTagsToResource(targetGroupArn, java.util.Map.of("env", "test"));
+        assertEquals(java.util.Map.of("env", "test"),
+                rdsService.listTagsForResource(targetGroupArn));
+
+        rdsService.removeTagsFromResource(targetGroupArn, java.util.List.of("env"));
+        assertEquals(java.util.Map.of(), rdsService.listTagsForResource(targetGroupArn));
+    }
+
+    @Test
+    void dbProxyTargetGroupTagOperationsRejectMissingTargetGroup() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource(
+                        "arn:aws:rds:us-east-1:123456789012:target-group:prx-tg-missing"));
+
+        assertEquals("DBProxyTargetGroupNotFoundFault", exception.getErrorCode());
     }
 
     @Test
@@ -5057,6 +5252,21 @@ class RdsServiceTest {
         // and the tags are what a restart reads back, not a side table
         assertEquals(Map.of("Name", "tagged", "env", "stg", "extra", "yes"),
                 rdsService.getDbSubnetGroup("tagged", "us-east-1").getTags());
+    }
+
+    @Test
+    void createDbSubnetGroupErrorNamesMissingSubnetIds() {
+        String subnetA = "subnet-default-a";
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                rdsService.createDbSubnetGroup("grp", "desc",
+                        List.of(subnetA, "subnet-missing"), "us-east-1"));
+
+        assertEquals("InvalidSubnet", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("subnet-missing"),
+                "message should name the missing id, was: " + ex.getMessage());
+        assertFalse(ex.getMessage().contains(subnetA),
+                "message should not list the id that does exist, was: " + ex.getMessage());
     }
 
     @Test

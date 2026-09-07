@@ -2,15 +2,22 @@ package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.ses.SesService;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -47,17 +54,34 @@ class CognitoLambdaTriggersTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private LambdaService lambdaService;
+    private RegionResolver regionResolver;
     private CognitoService service;
 
     @BeforeEach
     void setUp() {
         lambdaService = mock(LambdaService.class);
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        regionResolver = new RegionResolver("us-east-1", "000000000000");
         service = new CognitoService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), // revokedTokenStore
-                "http://localhost:4566", regionResolver, lambdaService);
+                "http://localhost:4566", regionResolver, lambdaService, mock(AcmService.class));
+    }
+
+    /**
+     * Builds a CognitoService with a real {@link CognitoMessageDispatcher} (backed by the given
+     * mocked {@link SesService}/{@link SnsService}) so tests can assert on the message actually
+     * delivered, not just that dispatch() was called.
+     */
+    private CognitoService createServiceWithMessaging(SesService ses, SnsService sns,
+                                                       VerificationCodeService verificationCodeService) {
+        return new CognitoService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                "http://localhost:4566", regionResolver, lambdaService, mock(AcmService.class),
+                verificationCodeService, new CognitoMessageDispatcher(ses, sns),
+                mock(TlsCertificateManager.class));
     }
 
     private UserPool createPoolWithLambdaConfig(Map<String, Object> lambdaConfig) {
@@ -887,5 +911,175 @@ class CognitoLambdaTriggersTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    // =========================================================================
+    // CustomMessage
+    // =========================================================================
+
+    @Test
+    void customMessageOverridesSignUpVerificationEmail() {
+        SesService ses = mock(SesService.class);
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("246962");
+        CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class), verificationCodeService);
+
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"),
+                any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of(
+                        "emailSubject", "TRIGGER-FIRED",
+                        "emailMessage", "TRIGGER-FIRED code={####}")));
+
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
+
+        verify(ses).sendEmail(
+                anyString(), eq(List.of("spike@example.com")),
+                eq(List.of()), eq(List.of()), eq(List.of()),
+                eq("TRIGGER-FIRED"),
+                eq("TRIGGER-FIRED code=246962"),
+                any(), any(), eq(List.of()), eq(List.of()), any(), anyString());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void customMessageSignUpTriggerReceivesCodeParameterAndUsername() throws Exception {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("246962");
+        CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
+                verificationCodeService);
+
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
+
+        Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
+        assertEquals("CustomMessage_SignUp", event.get("triggerSource"));
+        Map<String, Object> request = (Map<String, Object>) event.get("request");
+        assertEquals("{####}", request.get("codeParameter"));
+        assertEquals("spike", request.get("usernameParameter"));
+    }
+
+    @Test
+    void customMessageLambdaErrorFallsBackToDefaultSignUpMessage() {
+        SesService ses = mock(SesService.class);
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("246962");
+        CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class), verificationCodeService);
+
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"), any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled"));
+
+        // SignUp must still succeed and deliver the default message when CustomMessage errors.
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
+
+        verify(ses).sendEmail(
+                anyString(), eq(List.of("spike@example.com")),
+                any(), any(), any(),
+                eq("Your verification code"),
+                eq("Your verification code is 246962."),
+                any(), any(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void customMessageDoesNotFireWhenNotConfigured() {
+        SesService ses = mock(SesService.class);
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("246962");
+        CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class), verificationCodeService);
+
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "AutoVerifiedAttributes", List.of("email")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
+
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
+        verify(ses).sendEmail(
+                anyString(), eq(List.of("spike@example.com")),
+                any(), any(), any(),
+                eq("Your verification code"),
+                eq("Your verification code is 246962."),
+                any(), any(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void customMessageFiresWithResendCodeTriggerSourceOnResendConfirmationCode() throws Exception {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("111222");
+        CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
+                verificationCodeService);
+
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        svc.resendConfirmationCode(client.getClientId(), "spike");
+
+        Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
+        assertEquals("CustomMessage_ResendCode", event.get("triggerSource"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void customMessageFiresWithForgotPasswordTriggerSourceOnForgotPassword() throws Exception {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.PASSWORD_RESET), any()))
+                .thenReturn("333444");
+        CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
+                verificationCodeService);
+
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        svc.adminCreateUser(pool.getId(), "spike",
+                Map.of("email", "spike@example.com", "email_verified", "true"), null);
+        svc.adminSetUserPassword(pool.getId(), "spike", "Spike@Test1", true);
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        svc.forgotPassword(client.getClientId(), "spike");
+
+        Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
+        assertEquals("CustomMessage_ForgotPassword", event.get("triggerSource"));
     }
 }

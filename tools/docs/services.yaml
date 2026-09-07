@@ -10,6 +10,14 @@
 # the new-service sentinel only fires on genuinely unregistered handlers.
 
 services:
+  - service: account
+    doc: docs/services/account.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/account/AccountController.java, mode: rest }
+  - service: accessanalyzer
+    doc: docs/services/access-analyzer.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/accessanalyzer/AccessAnalyzerController.java, mode: rest }
   - service: acm
     doc: docs/services/acm.md
     sources:
@@ -142,6 +150,13 @@ services:
     doc: docs/services/memorydb.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/memorydb/MemoryDbHandler.java, mode: switch }
+  - service: macie2
+    doc: docs/services/macie2.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/macie2/MacieController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/securityadmin/SecurityAdminController.java, mode: rest }
+    rename_actions:
+      ListAdmin: ListOrganizationAdminAccounts
   - service: neptune
     doc: docs/services/neptune.md
     sources:
@@ -166,6 +181,23 @@ services:
     # SubnetIds / VpcSecurityGroupIds / TagKeys are labels of an inner member-name
     # switch (memberKeyRegex), not actions — same shape as the rds exclusions above.
     exclude_actions: [SubnetIds, VpcSecurityGroupIds, TagKeys]
+  - service: cognitoidentity
+    doc: docs/services/cognitoidentity.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/cognitoidentity/CognitoIdentityJsonHandler.java, mode: switch }
+  - service: route53
+    doc: docs/services/route53.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/route53/Route53Controller.java, mode: rest }
+    # JAX-RS method names use Java casing; map them onto the canonical Route 53 action names.
+    rename_actions:
+      AssociateVpcWithHostedZone: AssociateVPCWithHostedZone
+      DisassociateVpcFromHostedZone: DisassociateVPCFromHostedZone
+      CreateVpcAssociationAuthorization: CreateVPCAssociationAuthorization
+      DeleteVpcAssociationAuthorization: DeleteVPCAssociationAuthorization
+      ListVpcAssociationAuthorizations: ListVPCAssociationAuthorizations
+      ListHostedZonesByVpc: ListHostedZonesByVPC
+      GetDnssec: GetDNSSEC
   - service: route53resolver
     doc: docs/services/route53resolver.md
     sources:
@@ -182,6 +214,14 @@ services:
     doc: docs/services/servicequotas.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/servicequotas/ServiceQuotasJsonHandler.java, mode: switch }
+  - service: ssoadmin
+    doc: docs/services/ssoadmin.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java, mode: switch }
+  - service: identitystore
+    doc: docs/services/identitystore.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/identitystore/IdentityStoreJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:
@@ -203,7 +243,6 @@ services:
 # Switch handlers that exist but are intentionally not yet covered (see reasons).
 # A NEW switch handler not listed here and not registered above fails `--strict`.
 deferred_handlers:
-  - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java }  # single-op Identity Center stub, no standalone doc page yet
   - { path: src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2JsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/applicationautoscaling/ScalingPolicyAlarmActionHandler.java }  # not a JSON/Query action dispatcher — its `case "X" ->` arms are the StepScaling AdjustmentType switch, not AWS actions
   - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)

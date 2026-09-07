@@ -5,14 +5,24 @@ setup() {
     load 'test_helper/common-setup'
     DB_ID="bats-rds-$(unique_name)"
     DB_ID_2="bats-rds-2-$(unique_name)"
+    RDS_CLUSTER_ID="bats-rds-cluster-$(unique_name)"
 }
 
 teardown() {
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID" --skip-final-snapshot >/dev/null 2>&1 || true
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID_2" --skip-final-snapshot >/dev/null 2>&1 || true
+    aws_cmd rds delete-db-cluster --db-cluster-identifier "$RDS_CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
     if [ -n "${MANAGED_SECRET_ARN:-}" ]; then
         aws_cmd secretsmanager delete-secret --secret-id "$MANAGED_SECRET_ARN" \
             --force-delete-without-recovery >/dev/null 2>&1 || true
+    fi
+    # EC2 fixtures of the docdb security-group case, whether or not its assertions passed
+    if [ -n "${SG_ID:-}" ]; then
+        aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
+        aws_cmd ec2 delete-security-group --group-id "$SG_ID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${VPC_ID:-}" ]; then
+        aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
     fi
 }
 
@@ -128,6 +138,27 @@ teardown() {
     [ "$(json_get "$output" '.RotationRules.AutomaticallyAfterDays')" = "7" ]
 }
 
+@test "RDS: Aurora cluster with managed master user password populates MasterUserSecret" {
+    run aws_cmd rds create-db-cluster \
+        --db-cluster-identifier "$RDS_CLUSTER_ID" \
+        --engine aurora-postgresql \
+        --master-username omni_admin \
+        --manage-master-user-password
+    assert_success
+
+    MANAGED_SECRET_ARN=$(json_get "$output" '.DBCluster.MasterUserSecret.SecretArn')
+    [ -n "$MANAGED_SECRET_ARN" ]
+    [ "$(json_get "$output" '.DBCluster.MasterUserSecret.SecretStatus')" = "active" ]
+
+    run aws_cmd rds describe-db-clusters --db-cluster-identifier "$RDS_CLUSTER_ID"
+    assert_success
+    [ "$(json_get "$output" '.DBClusters[0].MasterUserSecret.SecretArn')" = "$MANAGED_SECRET_ARN" ]
+
+    run aws_cmd secretsmanager describe-secret --secret-id "$MANAGED_SECRET_ARN"
+    assert_success
+    [ "$(json_get "$output" '.OwningService')" = "rds" ]
+}
+
 @test "RDS: describe global clusters returns an empty list" {
     run aws_cmd rds describe-global-clusters
     assert_success
@@ -231,6 +262,24 @@ teardown() {
     run aws_cmd docdb describe-db-clusters --db-cluster-identifier "$CLUSTER_ID"
     assert_failure
     assert_output --partial 'DBClusterNotFoundFault'
+}
+
+@test "docdb: a security group that exists is accepted on create" {
+    CLUSTER_ID="bats-docdb-sg-$(unique_name)"
+    run aws_cmd ec2 create-vpc --cidr-block 10.42.0.0/16
+    assert_success
+    VPC_ID=$(json_get "$output" '.Vpc.VpcId')
+    run aws_cmd ec2 create-security-group --group-name "$CLUSTER_ID" --description d --vpc-id "$VPC_ID"
+    assert_success
+    SG_ID=$(json_get "$output" '.GroupId')
+
+    run aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" --engine docdb \
+        --master-username docdbadmin --master-user-password "secret99password" \
+        --vpc-security-group-ids "$SG_ID"
+    assert_success
+    run aws_cmd docdb describe-db-clusters --db-cluster-identifier "$CLUSTER_ID"
+    assert_success
+    assert_output --partial "\"VpcSecurityGroupId\": \"$SG_ID\""
 }
 
 @test "docdb: cluster settings given on create are returned by describe" {

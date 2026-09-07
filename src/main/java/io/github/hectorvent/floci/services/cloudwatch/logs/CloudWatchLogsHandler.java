@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.AccountPolicy;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogDestination;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
@@ -25,11 +27,15 @@ import java.util.Map;
 public class CloudWatchLogsHandler {
 
     private final CloudWatchLogsService logsService;
+    private final CloudWatchLogsCrossAccountService crossAccountService;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public CloudWatchLogsHandler(CloudWatchLogsService logsService, ObjectMapper objectMapper) {
+    public CloudWatchLogsHandler(CloudWatchLogsService logsService,
+                                 CloudWatchLogsCrossAccountService crossAccountService,
+                                 ObjectMapper objectMapper) {
         this.logsService = logsService;
+        this.crossAccountService = crossAccountService;
         this.objectMapper = objectMapper;
     }
 
@@ -60,6 +66,10 @@ public class CloudWatchLogsHandler {
             case "DisassociateKmsKey" -> handleDisassociateKmsKey(request, region);
             case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
             case "DescribeResourcePolicies" -> handleDescribeResourcePolicies(region);
+            case "PutDestination" -> handlePutDestination(request, region);
+            case "PutDestinationPolicy" -> handlePutDestinationPolicy(request, region);
+            case "PutAccountPolicy" -> handlePutAccountPolicy(request, region);
+            case "DescribeAccountPolicies" -> handleDescribeAccountPolicies(request, region);
             case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
             case "StartQuery" -> handleStartQuery(request, region);
             case "GetQueryResults" -> handleGetQueryResults(request, region);
@@ -157,6 +167,74 @@ public class CloudWatchLogsHandler {
         node.put("policyName", policy.getPolicyName());
         node.put("policyDocument", policy.getPolicyDocument());
         node.put("lastUpdatedTime", policy.getLastUpdatedTime());
+        return node;
+    }
+
+    private Response handlePutDestination(JsonNode request, String region) {
+        LogDestination destination = crossAccountService.putDestination(
+                request.path("destinationName").asText(null),
+                request.path("targetArn").asText(null),
+                request.path("roleArn").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("destination", buildDestination(destination));
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutDestinationPolicy(JsonNode request, String region) {
+        crossAccountService.putDestinationPolicy(
+                request.path("destinationName").asText(null),
+                request.path("accessPolicy").asText(null), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutAccountPolicy(JsonNode request, String region) {
+        AccountPolicy policy = crossAccountService.putAccountPolicy(
+                request.path("policyName").asText(null),
+                request.path("policyDocument").asText(null),
+                request.path("policyType").asText(null),
+                request.path("selectionCriteria").asText(null),
+                request.path("scope").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("accountPolicy", buildAccountPolicy(policy));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeAccountPolicies(JsonNode request, String region) {
+        String policyType = request.path("policyType").asText(null);
+        String policyName = request.path("policyName").asText(null);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode policies = response.putArray("accountPolicies");
+        for (AccountPolicy policy : crossAccountService.describeAccountPolicies(policyType, policyName, region)) {
+            policies.add(buildAccountPolicy(policy));
+        }
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode buildDestination(LogDestination destination) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("destinationName", destination.getDestinationName());
+        node.put("targetArn", destination.getTargetArn());
+        node.put("roleArn", destination.getRoleArn());
+        node.put("arn", destination.getArn());
+        node.put("creationTime", destination.getCreationTime());
+        if (destination.getAccessPolicy() != null) {
+            node.put("accessPolicy", destination.getAccessPolicy());
+        }
+        return node;
+    }
+
+    private ObjectNode buildAccountPolicy(AccountPolicy policy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("accountId", policy.getAccountId());
+        node.put("policyName", policy.getPolicyName());
+        node.put("policyDocument", policy.getPolicyDocument());
+        node.put("policyType", policy.getPolicyType());
+        node.put("scope", policy.getScope());
+        node.put("lastUpdatedTime", policy.getLastUpdatedTime());
+        if (policy.getSelectionCriteria() != null) {
+            node.put("selectionCriteria", policy.getSelectionCriteria());
+        }
         return node;
     }
 

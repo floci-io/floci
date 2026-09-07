@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
@@ -12,6 +15,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.HashSet;
@@ -42,7 +47,10 @@ class LambdaServiceTest {
         CodeStore codeStore = new CodeStore(Path.of("target/test-data/lambda-code"));
         ZipExtractor zipExtractor = new ZipExtractor();
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-        service = new LambdaService(store, warmPool, codeStore, zipExtractor, regionResolver);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        service = new LambdaService(store, warmPool, codeStore, zipExtractor, null, regionResolver, storageFactory);
     }
 
     private Map<String, Object> baseRequest(String name) {
@@ -592,6 +600,125 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createFunctionRejectsUnsupportedArchitectureWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("unsupported-create-architecture");
+        request.put("Architectures", List.of("sparc"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertUnsupportedArchitecture(error);
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsMultipleArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("multiple-create-architectures");
+        request.put("Architectures", List.of("arm64", "x86_64"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '[arm64, x86_64]' at 'architectures' "
+                + "failed to satisfy constraint: Member must have length less than or equal to 1",
+                error.getMessage());
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsEmptyArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("empty-create-architectures");
+        request.put("Architectures", List.of());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '[]' at 'architectures' "
+                + "failed to satisfy constraint: Member must have length greater than or equal to 1",
+                error.getMessage());
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsScalarArchitecturesWithoutPersistingFunction() {
+        Map<String, Object> request = baseRequest("scalar-create-architectures");
+        request.put("Architectures", "arm64");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertMalformedArchitectures(error, "arm64");
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void updateFunctionCodeRejectsUnsupportedArchitectureBeforeMutation() {
+        service.createFunction(REGION, baseRequest("unsupported-code-architecture"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "unsupported-code-architecture",
+                        Map.of("ImageUri", "example.invalid/changed:latest",
+                                "Architectures", List.of("sparc"))));
+
+        assertUnsupportedArchitecture(error);
+        LambdaFunction unchanged = service.getFunction(REGION, "unsupported-code-architecture");
+        assertNull(unchanged.getImageUri());
+        assertNull(unchanged.getArchitectures());
+    }
+
+    @Test
+    void updateFunctionCodeRejectsObjectArchitecturesBeforeMutation() {
+        service.createFunction(REGION, baseRequest("object-code-architectures"));
+        String revisionId = service.getFunction(REGION, "object-code-architectures").getRevisionId();
+        Map<String, String> malformedArchitectures = Map.of("Architecture", "arm64");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "object-code-architectures",
+                        Map.of("ImageUri", "example.invalid/changed:latest",
+                                "Architectures", malformedArchitectures)));
+
+        assertMalformedArchitectures(error, malformedArchitectures);
+        LambdaFunction unchanged = service.getFunction(REGION, "object-code-architectures");
+        assertNull(unchanged.getImageUri());
+        assertNull(unchanged.getArchitectures());
+        assertEquals(revisionId, unchanged.getRevisionId());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsUnsupportedArchitectureBeforeMutation() {
+        service.createFunction(REGION, baseRequest("unsupported-config-architecture"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "unsupported-config-architecture",
+                        Map.of("Description", "changed", "Architectures", List.of("sparc"))));
+
+        assertUnsupportedArchitecture(error);
+        LambdaFunction unchanged = service.getFunction(REGION, "unsupported-config-architecture");
+        assertNull(unchanged.getDescription());
+        assertNull(unchanged.getArchitectures());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsScalarArchitecturesBeforeMutation() {
+        service.createFunction(REGION, baseRequest("scalar-config-architectures"));
+        String revisionId = service.getFunction(REGION, "scalar-config-architectures").getRevisionId();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "scalar-config-architectures",
+                        Map.of("Description", "changed", "Architectures", 64)));
+
+        assertMalformedArchitectures(error, 64);
+        LambdaFunction unchanged = service.getFunction(REGION, "scalar-config-architectures");
+        assertNull(unchanged.getDescription());
+        assertNull(unchanged.getArchitectures());
+        assertEquals(revisionId, unchanged.getRevisionId());
+    }
+
+    @Test
     void updateFunctionCodeWithoutArchitecturesKeepsExisting() {
         Map<String, Object> req = baseRequest("arch-keep-fn");
         req.put("Architectures", List.of("arm64"));
@@ -599,6 +726,22 @@ class LambdaServiceTest {
 
         LambdaFunction updated = service.updateFunctionCode(REGION, "arch-keep-fn", Map.of());
         assertEquals(List.of("arm64"), updated.getArchitectures());
+    }
+
+    private static void assertUnsupportedArchitecture(AwsException error) {
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value 'sparc' at 'architectures.1.member' "
+                + "failed to satisfy constraint: Member must satisfy enum value set: [x86_64, arm64]",
+                error.getMessage());
+    }
+
+    private static void assertMalformedArchitectures(AwsException error, Object value) {
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '" + value + "' at 'architectures' "
+                + "failed to satisfy constraint: Member must be a list",
+                error.getMessage());
     }
 
     @Test
@@ -730,6 +873,11 @@ class LambdaServiceTest {
     // ──────────────────────────── Hot-reload ────────────────────────────
 
     private LambdaService serviceWithHotReload(boolean enabled, List<String> allowedPaths) {
+        return serviceWithHotReload(enabled, allowedPaths, ZipExtractor.DEFAULT_MAX_ENTRIES);
+    }
+
+    private LambdaService serviceWithHotReload(boolean enabled, List<String> allowedPaths,
+                                               int zipMaxEntries) {
         EmulatorConfig cfg = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig svc = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambdaCfg = mock(EmulatorConfig.LambdaServiceConfig.class);
@@ -740,6 +888,7 @@ class LambdaServiceTest {
         when(lambdaCfg.hotReload()).thenReturn(hr);
         when(lambdaCfg.defaultTimeoutSeconds()).thenReturn(3);
         when(lambdaCfg.defaultMemoryMb()).thenReturn(128);
+        when(lambdaCfg.zipMaxEntries()).thenReturn(zipMaxEntries);
         when(hr.enabled()).thenReturn(enabled);
         when(hr.allowedPaths()).thenReturn(allowedPaths == null ? Optional.empty() : Optional.of(allowedPaths));
 
@@ -749,6 +898,32 @@ class LambdaServiceTest {
         ZipExtractor zipExtractor = new ZipExtractor();
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         return new LambdaService(store, warmPool, codeStore, zipExtractor, cfg, regionResolver);
+    }
+
+    @Test
+    void createFunctionRejectsConfiguredZipEntryLimit() throws Exception {
+        LambdaService limited = serviceWithHotReload(true, null, 2);
+        Map<String, Object> request = baseRequest("zip-entry-limit");
+        request.put("Code", Map.of("ZipFile", createZipBase64("index.js", "one.js", "two.js")));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> limited.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("more than the configured 2 entries"));
+    }
+
+    @Test
+    void createFunctionRejectsOversizedDirectZipUploadWithAwsError() {
+        Map<String, Object> request = baseRequest("oversized-zip");
+        byte[] oversized = new byte[(int) ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES + 1];
+        request.put("Code", Map.of("ZipFile", Base64.getEncoder().encodeToString(oversized)));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("RequestEntityTooLargeException", error.getErrorCode());
+        assertEquals(413, error.getHttpStatus());
     }
 
     @Test
@@ -1013,5 +1188,396 @@ class LambdaServiceTest {
             release.countDown();
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_success() {
+        service.createFunction(REGION, baseRequest("kafka-fn"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                ),
+                "SourceAccessConfigurations", List.of(
+                        Map.of("Type", "SASL_SCRAM_256_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:my-secret")
+                )
+        ));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, request);
+
+        assertNotNull(esm);
+        assertNotNull(esm.getUuid());
+        assertNull(esm.getEventSourceArn());
+        assertEquals(List.of("my-topic"), esm.getTopics());
+        assertNotNull(esm.getSelfManagedEventSource());
+        assertEquals(1, esm.getSourceAccessConfigurations().size());
+        assertEquals("Enabled", esm.getState());
+        assertTrue(esm.isEnabled());
+
+        // Verify update
+        EventSourceMapping updated = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of("updated-topic")
+        ));
+        assertEquals(List.of("updated-topic"), updated.getTopics());
+
+        // Verify delete
+        service.deleteEventSourceMapping(esm.getUuid());
+        assertThrows(AwsException.class, () -> service.getEventSourceMapping(esm.getUuid()));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_missingTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-missing-topics"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-missing-topics",
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Topics"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_missingBootstrapServers_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-missing-servers"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-missing-servers",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of()
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("KAFKA_BOOTSTRAP_SERVERS"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_atTimestamp_succeeds() {
+        service.createFunction(REGION, baseRequest("kafka-fn-at-timestamp"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-at-timestamp",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                ),
+                "StartingPosition", "AT_TIMESTAMP",
+                "StartingPositionTimestamp", 123456789
+        ));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, request);
+        assertNotNull(esm);
+        assertEquals("AT_TIMESTAMP", esm.getStartingPosition());
+        assertEquals(123456789000L, esm.getStartingPositionTimestamp());
+    }
+
+    @Test
+    void createEventSourceMapping_dynamoDb_atTimestamp_throws() {
+        service.createFunction(REGION, baseRequest("dynamo-fn-at-timestamp"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "dynamo-fn-at-timestamp",
+                "EventSourceArn", "arn:aws:dynamodb:us-east-1:000000000000:table/my-table/stream/2026-01-01T00:00:00.000",
+                "StartingPosition", "AT_TIMESTAMP",
+                "StartingPositionTimestamp", 123456789
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("AT_TIMESTAMP is only supported for Amazon Kinesis"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_crossRegionFunctionArn_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-cross-region"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:kafka-fn-cross-region",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Region 'us-west-2' in ARN does not match request region 'us-east-1'"));
+    }
+
+    @Test
+    void createEventSourceMapping_mixedSources_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-mixed"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-mixed",
+                "EventSourceArn", "arn:aws:sqs:us-east-1:000000000000:my-queue",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Cannot specify both EventSourceArn and SelfManagedEventSource/Topics"));
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_malformedTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-malformed-topics"));
+
+        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+                "FunctionName", "kafka-fn-malformed-topics",
+                "Topics", List.of(123),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createEventSourceMapping(REGION, request));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateEventSourceMapping_malformedTopics_throws() {
+        service.createFunction(REGION, baseRequest("kafka-fn-update-topics"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-fn-update-topics",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of()
+        )));
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "Topics", List.of(456)
+        )));
+    }
+
+    @Test
+    void updateEventSourceMapping_functionTargetValidation() {
+        service.createFunction(REGION, baseRequest("fn-esm-target-1"));
+        service.createFunction(REGION, baseRequest("fn-esm-target-2"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "fn-esm-target-1",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+
+        // Valid function update
+        EventSourceMapping updated = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2"
+        ));
+        assertEquals("fn-esm-target-2", updated.getFunctionName());
+        assertTrue(updated.getFunctionArn().contains("fn-esm-target-2"));
+
+        // Qualified version target update
+        service.publishVersion(REGION, "fn-esm-target-2", "v1");
+        EventSourceMapping updatedVersion = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:1"
+        ));
+        assertEquals("fn-esm-target-2", updatedVersion.getFunctionName());
+        assertTrue(updatedVersion.getFunctionArn().endsWith(":fn-esm-target-2:1"));
+
+        // Qualified alias target update
+        service.createAlias(REGION, "fn-esm-target-2", "live", "1", "production alias", null);
+        EventSourceMapping updatedAlias = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:live"
+        ));
+        assertEquals("fn-esm-target-2", updatedAlias.getFunctionName());
+        assertTrue(updatedAlias.getFunctionArn().endsWith(":fn-esm-target-2:live"));
+
+        // Qualified $LATEST target update
+        EventSourceMapping updatedLatest = service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:$LATEST"
+        ));
+        assertEquals("fn-esm-target-2", updatedLatest.getFunctionName());
+        assertTrue(updatedLatest.getFunctionArn().endsWith(":fn-esm-target-2:$LATEST"));
+
+        // Create ESM with qualified function reference
+        EventSourceMapping esmQualified = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "fn-esm-target-2:live",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of(
+                                "KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")
+                        )
+                )
+        ));
+        assertEquals("fn-esm-target-2", esmQualified.getFunctionName());
+        assertTrue(esmQualified.getFunctionArn().endsWith(":fn-esm-target-2:live"));
+
+        // Non-existent version or alias throws 404
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:99"
+        )));
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "fn-esm-target-2:non-existent-alias"
+        )));
+
+        // Non-existent function throws
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "non-existent-fn"
+        )));
+
+        // Cross-region function ARN throws
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:other-region-fn"
+        )));
+    }
+
+    @Test
+    void functionExists_resolvesQualifiersAndRegions() {
+        service.createFunction(REGION, baseRequest("exists-fn"));
+        service.publishVersion(REGION, "exists-fn", null);
+
+        assertTrue(service.functionExists(REGION, "exists-fn"));
+        assertTrue(service.functionExists(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:exists-fn"));
+        assertTrue(service.functionExists(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:exists-fn:1"));
+
+        assertFalse(service.functionExists(REGION, "ghost-fn"));
+        // A qualified reference to a version that was never published must not pass just
+        // because the base function exists.
+        assertFalse(service.functionExists(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:exists-fn:5"));
+        // An ARN whose region disagrees with the request region does not resolve.
+        assertFalse(service.functionExists(REGION,
+                "arn:aws:lambda:eu-west-1:000000000000:function:exists-fn"));
+    }
+
+    /**
+     * Issue #2958: a published version stored a reference to {@code $LATEST}'s code directory
+     * rather than a copy of the code, and extraction replaces that directory wholesale on every
+     * deploy. A later UpdateFunctionCode therefore rewrote what an already-published version would
+     * run, leaving the version advertising one CodeSha256 over a different build.
+     */
+    @Test
+    void aPublishedVersionKeepsItsOwnCodeWhenLatestIsRedeployed() throws Exception {
+        Map<String, Object> request = baseRequest("version-code-isolation-fn");
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        service.createFunction(REGION, request);
+
+        LambdaFunction v1 = service.publishVersion(REGION, "version-code-isolation-fn", null);
+        Path v1Path = Path.of(v1.getCodeLocalPath());
+        String v1Sha = v1.getCodeSha256();
+
+        assertTrue(Files.isDirectory(v1Path), "a published version must have its own code directory");
+        assertEquals("v1", Files.readString(v1Path.resolve("index.js")).trim());
+
+        // Redeploy $LATEST. Extraction replaces its directory wholesale, which is what used to take
+        // the published version's code with it.
+        service.updateFunctionCode(REGION, "version-code-isolation-fn",
+                Map.of("ZipFile", zipWithBody("v2")));
+
+        LambdaFunction latest = service.getFunction(REGION, "version-code-isolation-fn");
+        assertNotEquals(v1Path.toString(), latest.getCodeLocalPath(),
+                "a version must not share $LATEST's directory");
+        assertEquals("v2",
+                Files.readString(Path.of(latest.getCodeLocalPath()).resolve("index.js")).trim());
+
+        // The version still holds the bytes it was published from, and they still match the hash it
+        // advertises, which is the guarantee that was broken.
+        assertTrue(Files.isDirectory(v1Path), "the version's code must survive a redeploy of $LATEST");
+        assertEquals("v1", Files.readString(v1Path.resolve("index.js")).trim());
+        assertEquals(v1Sha, v1.getCodeSha256());
+    }
+
+    @Test
+    void deletingAFunctionRemovesItsPublishedVersionsCode() throws Exception {
+        Map<String, Object> request = baseRequest("version-code-delete-fn");
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        service.createFunction(REGION, request);
+
+        LambdaFunction v1 = service.publishVersion(REGION, "version-code-delete-fn", null);
+        Path v1Path = Path.of(v1.getCodeLocalPath());
+        assertTrue(Files.isDirectory(v1Path));
+
+        service.deleteFunction(REGION, "version-code-delete-fn");
+
+        assertFalse(Files.exists(v1Path),
+                "a version's code must not outlive the function it belongs to");
+    }
+
+    @Test
+    void deletingOnePublishedVersionReclaimsOnlyThatVersionsCode() throws Exception {
+        Map<String, Object> request = baseRequest("version-code-reclaim-fn");
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        service.createFunction(REGION, request);
+
+        LambdaFunction v1 = service.publishVersion(REGION, "version-code-reclaim-fn", null);
+        service.updateFunctionCode(REGION, "version-code-reclaim-fn",
+                Map.of("ZipFile", zipWithBody("v2")));
+        LambdaFunction v2 = service.publishVersion(REGION, "version-code-reclaim-fn", null);
+
+        Path v1Path = Path.of(v1.getCodeLocalPath());
+        Path v2Path = Path.of(v2.getCodeLocalPath());
+        Path latestPath = Path.of(
+                service.getFunction(REGION, "version-code-reclaim-fn").getCodeLocalPath());
+        assertNotEquals(v1Path, v2Path, "two versions must not share one code directory");
+
+        service.deleteFunction(REGION, "version-code-reclaim-fn", v1.getVersion());
+
+        // Only whole-function delete reclaimed any of this before, so every version ever published
+        // stayed on disk for as long as the data directory lived.
+        assertFalse(Files.exists(v1Path), "the deleted version's code must be reclaimed");
+        assertTrue(Files.isDirectory(v2Path), "a surviving version's code must be left alone");
+        assertEquals("v2", Files.readString(v2Path.resolve("index.js")).trim());
+        assertTrue(Files.isDirectory(latestPath), "$LATEST's code must be left alone");
+    }
+
+    private static String zipWithBody(String body) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write((body + "\n").getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        return Base64.getEncoder().encodeToString(baos.toByteArray());
     }
 }

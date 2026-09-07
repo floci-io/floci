@@ -114,7 +114,8 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in RDS {0}", action);
-            return Response.serverError().entity("Unexpected error: " + e.getMessage()).build();
+            return AwsQueryResponse.error("InternalFailure",
+                    "Unexpected error: " + e.getMessage(), AwsNamespaces.RDS, 500);
         }
     }
 
@@ -452,6 +453,8 @@ public class RdsQueryHandler {
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String availabilityZone = params.getFirst("AvailabilityZone");
         boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
+        boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
+        String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
 
         if (engineVersion == null) {
             engineVersion = defaultEngineVersion(engine);
@@ -465,7 +468,8 @@ public class RdsQueryHandler {
             DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, paramGroupName,
                     dbSubnetGroupName, availabilityZone, multiAz, region,
-                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause);
+                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -567,13 +571,17 @@ public class RdsQueryHandler {
         String newPassword = params.getFirst("MasterUserPassword");
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
+        String manageStr = params.getFirst("ManageMasterUserPassword");
+        Boolean manageMasterUserPassword = manageStr != null ? Boolean.parseBoolean(manageStr) : null;
+        String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
         try {
             Double serverlessV2Min = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MinCapacity");
             Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
-                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause, region);
+                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1376,16 +1384,19 @@ public class RdsQueryHandler {
             return name;
         }
 
-        String engine = instance.getEngine() != null
-                ? instance.getEngine().name().toLowerCase()
-                : "unknown";
-        return "default." + engine + dbEngineMajorVersion(instance);
+        String engine = instanceEngine(instance);
+        return "default." + (engine.isEmpty() ? "unknown" : engine) + dbEngineMajorVersion(instance, engine);
     }
 
-    private static String dbEngineMajorVersion(DbInstance instance) {
+    /**
+     * AWS uses major.minor for the MySQL family's default parameter group name
+     * (e.g. {@code default.aurora-mysql8.0}), but only the major version for the
+     * Postgres family ({@code default.aurora-postgresql16}).
+     */
+    private static String dbEngineMajorVersion(DbInstance instance, String engine) {
         String engineVersion = instance.getEngineVersion();
         if ((engineVersion == null || engineVersion.isBlank()) && instance.getEngine() != null) {
-            engineVersion = defaultEngineVersion(instance.getEngine().name());
+            engineVersion = defaultEngineVersion(engine);
         }
         if (engineVersion == null || engineVersion.isBlank()) {
             return "";
@@ -1396,7 +1407,18 @@ public class RdsQueryHandler {
         while (end < trimmed.length() && Character.isDigit(trimmed.charAt(end))) {
             end++;
         }
-        return end == 0 ? "" : trimmed.substring(0, end);
+        if (end == 0) {
+            return "";
+        }
+        boolean majorMinor = engine.contains("mysql") || engine.equals("mariadb");
+        if (!majorMinor || end >= trimmed.length() || trimmed.charAt(end) != '.') {
+            return trimmed.substring(0, end);
+        }
+        int minorEnd = end + 1;
+        while (minorEnd < trimmed.length() && Character.isDigit(trimmed.charAt(minorEnd))) {
+            minorEnd++;
+        }
+        return minorEnd == end + 1 ? trimmed.substring(0, end) : trimmed.substring(0, minorEnd);
     }
 
     private static void writeTags(XmlBuilder xml, Map<String, String> tags) {
@@ -1451,6 +1473,15 @@ public class RdsQueryHandler {
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
            .elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn());
+        if (c.getMasterUserSecretArn() != null && !c.getMasterUserSecretArn().isBlank()) {
+            xml.start("MasterUserSecret")
+                    .elem("SecretArn", c.getMasterUserSecretArn())
+                    .elem("SecretStatus", c.getMasterUserSecretStatus() == null ? "active" : c.getMasterUserSecretStatus());
+            if (c.getMasterUserSecretKmsKeyId() != null && !c.getMasterUserSecretKmsKeyId().isBlank()) {
+                xml.elem("KmsKeyId", c.getMasterUserSecretKmsKeyId());
+            }
+            xml.end("MasterUserSecret");
+        }
         if (c.getServerlessV2MinCapacity() != null || c.getServerlessV2MaxCapacity() != null) {
             xml.start("ServerlessV2ScalingConfiguration");
             if (c.getServerlessV2MinCapacity() != null) {

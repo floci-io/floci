@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.vertx.core.Vertx;
@@ -18,7 +20,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,6 +52,7 @@ public class SqsEventSourcePoller implements Resettable {
     private final long pollIntervalMs;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
+    private final PipesFilterMatcher filterMatcher;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     // Tracks ESMs with an in-flight poll to prevent concurrent deliveries of the same message
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
@@ -61,7 +67,8 @@ public class SqsEventSourcePoller implements Resettable {
                                 LambdaExecutorService executorService,
                                 LambdaFunctionStore functionStore,
                                 EsmStore esmStore, EmulatorConfig config,
-                                ObjectMapper objectMapper) {
+                                ObjectMapper objectMapper,
+                                PipesFilterMatcher filterMatcher) {
         this.vertx = vertx;
         this.sqsService = sqsService;
         this.executorService = executorService;
@@ -70,6 +77,7 @@ public class SqsEventSourcePoller implements Resettable {
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
         this.baseUrl = config.effectiveBaseUrl();
         this.objectMapper = objectMapper;
+        this.filterMatcher = filterMatcher;
     }
 
     public void startPersistedPollers() {
@@ -153,10 +161,39 @@ public class SqsEventSourcePoller implements Resettable {
                     return;
                 }
 
-                LOG.infov("ESM {0}: received {1} message(s), invoking {2}",
-                        esm.getUuid(), messages.size(), esm.getFunctionName());
+                LOG.infov("ESM {0}: received {1} message(s)", esm.getUuid(), messages.size());
 
-                String eventJson = buildSqsEvent(messages, esm);
+                // Apply FilterCriteria. AWS consumes (permanently deletes) filtered-out SQS messages, so
+                // non-matching messages are deleted immediately: leaving them would redeliver every
+                // visibility window forever and never reach the DLQ. A batch that matches nothing
+                // short-circuits without invoking.
+                List<Message> matched = messages;
+                JsonNode filterParams = EsmFilterCriteriaUtils.matcherSourceParameters(objectMapper, esm.getFilterCriteria());
+                if (filterParams != null) {
+                    List<JsonNode> recordNodes = new ArrayList<>(messages.size());
+                    for (Message m : messages) {
+                        recordNodes.add(buildSqsRecordNode(m, esm));
+                    }
+                    matched = EsmFilterCriteriaUtils.selectMatched(
+                            messages, recordNodes, filterMatcher.applyFilterCriteria(recordNodes, filterParams));
+                    Set<Message> keep = Collections.newSetFromMap(new IdentityHashMap<>());
+                    keep.addAll(matched);
+                    for (Message m : messages) {
+                        if (!keep.contains(m)) {
+                            try {
+                                sqsService.deleteMessage(esm.getQueueUrl(), m.getReceiptHandle(), esm.getRegion());
+                            } catch (Exception e) {
+                                LOG.warnv("ESM {0}: failed to delete filtered-out message {1}: {2}",
+                                        esm.getUuid(), m.getMessageId(), e.getMessage());
+                            }
+                        }
+                    }
+                    if (matched.isEmpty()) {
+                        return;
+                    }
+                }
+
+                String eventJson = buildSqsEvent(matched, esm);
                 LOG.infov("ESM {0}: invoking function {1}", esm.getUuid(), fn.getFunctionName());
                 InvokeResult result;
                 try {
@@ -172,12 +209,14 @@ public class SqsEventSourcePoller implements Resettable {
                 }
 
                 if (result.getFunctionError() == null) {
+                    // Only the delivered (matched) messages are subject to delete/return here; filtered-out
+                    // messages were already deleted above, so a batchItemFailure id that names one is inert.
                     Set<String> failedIds = extractBatchItemFailures(esm, result);
                     List<Message> toDelete = failedIds.isEmpty()
-                            ? messages
-                            : messages.stream().filter(m -> !failedIds.contains(m.getMessageId())).toList();
-                    LOG.infov("ESM {0}: Lambda succeeded, deleting {1} of {2} message(s) ({3} reported as failed)",
-                            esm.getUuid(), toDelete.size(), messages.size(), failedIds.size());
+                            ? matched
+                            : matched.stream().filter(m -> !failedIds.contains(m.getMessageId())).toList();
+                    LOG.infov("ESM {0}: Lambda succeeded, deleting {1} of {2} delivered message(s) ({3} reported as failed)",
+                            esm.getUuid(), toDelete.size(), matched.size(), failedIds.size());
                     for (Message msg : toDelete) {
                         try {
                             sqsService.deleteMessage(esm.getQueueUrl(),
@@ -191,14 +230,14 @@ public class SqsEventSourcePoller implements Resettable {
                     // queue immediately so they can be retried/redriven rather than sitting
                     // in-flight for the full execution-cover visibility window.
                     if (!failedIds.isEmpty()) {
-                        List<Message> toReturn = messages.stream()
+                        List<Message> toReturn = matched.stream()
                                 .filter(m -> failedIds.contains(m.getMessageId())).toList();
                         returnMessagesToQueue(esm, toReturn);
                     }
                 } else {
-                    LOG.warnv("ESM {0}: Lambda returned error [{1}], returning {2} message(s) to queue for retry/redrive",
-                            esm.getUuid(), result.getFunctionError(), messages.size());
-                    returnMessagesToQueue(esm, messages);
+                    LOG.warnv("ESM {0}: Lambda returned error [{1}], returning {2} delivered message(s) to queue for retry/redrive",
+                            esm.getUuid(), result.getFunctionError(), matched.size());
+                    returnMessagesToQueue(esm, matched);
                 }
             } catch (Exception e) {
                 LOG.warnv("ESM {0}: poll/invoke error: {1} ({2})",
@@ -283,51 +322,7 @@ public class SqsEventSourcePoller implements Resettable {
         try {
             var records = objectMapper.createArrayNode();
             for (Message msg : messages) {
-                ObjectNode record = objectMapper.createObjectNode();
-                record.put("messageId", msg.getMessageId());
-                record.put("receiptHandle", msg.getReceiptHandle());
-                record.put("body", msg.getBody());
-                ObjectNode attrs = record.putObject("attributes");
-                attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
-                attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
-                attrs.put("SenderId", AwsArnUtils.accountOrDefault(esm.getEventSourceArn(), "000000000000"));
-                attrs.put("ApproximateFirstReceiveTimestamp",
-                        String.valueOf(msg.getFirstReceiveTimestamp() != null
-                                ? msg.getFirstReceiveTimestamp().toEpochMilli()
-                                : System.currentTimeMillis()));
-                if (msg.getSequenceNumber() > 0) {
-                    attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
-                }
-                if (msg.getMessageGroupId() != null) {
-                    attrs.put("MessageGroupId", msg.getMessageGroupId());
-                }
-                if (msg.getMessageDeduplicationId() != null) {
-                    attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
-                }
-                // Populate messageAttributes from the message model
-                ObjectNode msgAttrs = record.putObject("messageAttributes");
-                if (msg.getMessageAttributes() != null) {
-                    msg.getMessageAttributes().forEach((name, val) -> {
-                        ObjectNode attrNode = msgAttrs.putObject(name);
-                        attrNode.put("dataType", val.getDataType() != null ? val.getDataType() : "String");
-                        if (val.getBinaryValue() != null) {
-                            attrNode.put("binaryValue",
-                                    java.util.Base64.getEncoder().encodeToString(val.getBinaryValue()));
-                        } else if (val.getStringValue() != null) {
-                            attrNode.put("stringValue", val.getStringValue());
-                        }
-                        attrNode.putArray("stringListValues");
-                        attrNode.putArray("binaryListValues");
-                    });
-                }
-                record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
-                if (msg.getMd5OfMessageAttributes() != null) {
-                    record.put("md5OfMessageAttributes", msg.getMd5OfMessageAttributes());
-                }
-                record.put("eventSource", "aws:sqs");
-                record.put("eventSourceARN", esm.getEventSourceArn());
-                record.put("awsRegion", esm.getRegion());
-                records.add(record);
+                records.add(buildSqsRecordNode(msg, esm));
             }
             ObjectNode root = objectMapper.createObjectNode();
             root.set("Records", records);
@@ -335,6 +330,59 @@ public class SqsEventSourcePoller implements Resettable {
         } catch (Exception e) {
             return "{\"Records\":[]}";
         }
+    }
+
+    /**
+     * Builds the single SQS record node: top-level {@code body} plus attributes and metadata. This is both
+     * the delivery record shape and the structure an SQS filter pattern matches against (patterns nest under
+     * {@code body}; the matcher auto-reparses a JSON body).
+     */
+    private ObjectNode buildSqsRecordNode(Message msg, EventSourceMapping esm) {
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("messageId", msg.getMessageId());
+        record.put("receiptHandle", msg.getReceiptHandle());
+        record.put("body", msg.getBody());
+        ObjectNode attrs = record.putObject("attributes");
+        attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
+        attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
+        attrs.put("SenderId", AwsArnUtils.accountOrDefault(esm.getEventSourceArn(), "000000000000"));
+        attrs.put("ApproximateFirstReceiveTimestamp",
+                String.valueOf(msg.getFirstReceiveTimestamp() != null
+                        ? msg.getFirstReceiveTimestamp().toEpochMilli()
+                        : System.currentTimeMillis()));
+        if (msg.getSequenceNumber() > 0) {
+            attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
+        }
+        if (msg.getMessageGroupId() != null) {
+            attrs.put("MessageGroupId", msg.getMessageGroupId());
+        }
+        if (msg.getMessageDeduplicationId() != null) {
+            attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
+        }
+        // Populate messageAttributes from the message model
+        ObjectNode msgAttrs = record.putObject("messageAttributes");
+        if (msg.getMessageAttributes() != null) {
+            msg.getMessageAttributes().forEach((name, val) -> {
+                ObjectNode attrNode = msgAttrs.putObject(name);
+                attrNode.put("dataType", val.getDataType() != null ? val.getDataType() : "String");
+                if (val.getBinaryValue() != null) {
+                    attrNode.put("binaryValue",
+                            java.util.Base64.getEncoder().encodeToString(val.getBinaryValue()));
+                } else if (val.getStringValue() != null) {
+                    attrNode.put("stringValue", val.getStringValue());
+                }
+                attrNode.putArray("stringListValues");
+                attrNode.putArray("binaryListValues");
+            });
+        }
+        record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
+        if (msg.getMd5OfMessageAttributes() != null) {
+            record.put("md5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+        }
+        record.put("eventSource", "aws:sqs");
+        record.put("eventSourceARN", esm.getEventSourceArn());
+        record.put("awsRegion", esm.getRegion());
+        return record;
     }
 
     /**

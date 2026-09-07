@@ -308,6 +308,129 @@ class SesConfigurationSetEventDestinationV1IntegrationTest {
     }
 
     @Test
+    @Order(15)
+    void createConfigurationSetEventDestination_nonXsdEnabled_returnsMalformedInput() {
+        // EventDestination.Enabled follows the same strict xsd 1.1 lexical space as top-level
+        // Query booleans (probed against real AWS 2026-09-05): even "TRUE" is MalformedInput.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestination.Name", "v1-ed-bool-bad")
+            .formParam("EventDestination.Enabled", "TRUE")
+            .formParam("EventDestination.MatchingEventTypes.member.1", "send")
+            .formParam("EventDestination.SNSDestination.TopicARN", TOPIC_ARN_A)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>MalformedInput</Code>"))
+            .body(containsString("boolean must follow xsd1.1 definition"));
+    }
+
+    @Test
+    @Order(16)
+    void createConfigurationSetEventDestination_emptyEnabled_returnsMalformedInput() {
+        // Probed against real AWS 2026-09-05: a present-but-empty nested boolean is the
+        // dedicated "missing value" MalformedInput, same as top-level members.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestination.Name", "v1-ed-bool-empty")
+            .formParam("EventDestination.Enabled", "")
+            .formParam("EventDestination.MatchingEventTypes.member.1", "send")
+            .formParam("EventDestination.SNSDestination.TopicARN", TOPIC_ARN_A)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>MalformedInput</Code>"))
+            .body(containsString("missing value for boolean type"));
+    }
+
+    @Test
+    @Order(17)
+    void createConfigurationSetEventDestination_absentEnabled_defaultsToFalse() {
+        // Probed against real AWS 2026-09-05: an absent nested boolean deserializes to false
+        // and the request proceeds, it is not a validation error.
+        String ed = "v1-ed-bool-absent";
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestination.Name", ed)
+            .formParam("EventDestination.MatchingEventTypes.member.1", "send")
+            .formParam("EventDestination.SNSDestination.TopicARN", TOPIC_ARN_A)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("CreateConfigurationSetEventDestinationResponse"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DescribeConfigurationSet")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("ConfigurationSetAttributeNames.member.1", "eventDestinations")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Name>" + ed + "</Name>"))
+            .body(containsString("<Enabled>false</Enabled>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DeleteConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestinationName", ed)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    @Test
+    @Order(18)
+    void createConfigurationSetEventDestination_numericEnabled_isAccepted() {
+        // xsd 1.1 booleans: "1" is true for nested members too (probed 2026-09-05).
+        String ed = "v1-ed-bool-numeric";
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestination.Name", ed)
+            .formParam("EventDestination.Enabled", "1")
+            .formParam("EventDestination.MatchingEventTypes.member.1", "send")
+            .formParam("EventDestination.SNSDestination.TopicARN", TOPIC_ARN_A)
+        .when().post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DescribeConfigurationSet")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("ConfigurationSetAttributeNames.member.1", "eventDestinations")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Name>" + ed + "</Name>"))
+            .body(containsString("<Enabled>true</Enabled>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "DeleteConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestinationName", ed)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    @Test
     @Order(99)
     void cleanup() {
         given()

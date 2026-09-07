@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
+import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
+import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
@@ -48,6 +50,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -332,6 +335,14 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "metrics")) {
                 return handlePutBucketMetricsConfiguration(bucket, uriInfo, body);
             }
+            // Same fall-through hazard as metrics: an intelligent-tiering PUT must not become a
+            // CreateBucket.
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+                s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
+                return handlePutBucketIntelligentTieringConfiguration(bucket, uriInfo, body);
+            }
 
             String locationConstraint = null;
             if (body != null && body.length > 0) {
@@ -374,7 +385,8 @@ public class S3Controller {
     @DELETE
     @Path("/{bucket}")
     public Response deleteBucket(@PathParam("bucket") String bucket,
-                                  @Context UriInfo uriInfo) {
+                                  @Context UriInfo uriInfo,
+                                  @Context HttpHeaders httpHeaders) {
         try {
             validateRawUri();
             if (hasQueryParam(uriInfo, "tagging")) {
@@ -416,6 +428,15 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "metrics")) {
                 // Likewise this must not fall through to deleting the bucket.
                 s3Service.deleteBucketMetricsConfiguration(bucket, requireMetricsId(uriInfo));
+                return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                // Likewise this must not fall through to deleting the bucket.
+                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+                s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
+                s3Service.deleteBucketIntelligentTieringConfiguration(bucket,
+                        requireIntelligentTieringId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "accelerate")) {
@@ -541,6 +562,17 @@ public class S3Controller {
                 String xml = id != null
                         ? s3Service.getBucketMetricsConfiguration(bucket, id)
                         : s3Service.listBucketMetricsConfigurations(bucket);
+                return Response.ok(xml).type("application/xml").build();
+            }
+            // GetBucketIntelligentTieringConfiguration and ListBucketIntelligentTieringConfigurations
+            // share ?intelligent-tiering and are told apart by the id, which only the
+            // single-configuration read carries.
+            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetIntelligentTieringConfiguration", authorization);
+                String id = uriInfo.getQueryParameters().getFirst("id");
+                String xml = id != null
+                        ? s3Service.getBucketIntelligentTieringConfiguration(bucket, id)
+                        : s3Service.listBucketIntelligentTieringConfigurations(bucket);
                 return Response.ok(xml).type("application/xml").build();
             }
 
@@ -682,11 +714,16 @@ public class S3Controller {
                 }
                 byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
                 validateChecksumHeaders(httpHeaders, partData, getChecksumAlgorithm(httpHeaders));
-                String eTag = s3Service.uploadPart(bucket, key, uploadId, partNumber, partData,
+                Part part = s3Service.storePart(bucket, key, uploadId, partNumber, partData,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
-                Response.ResponseBuilder response = Response.ok().header("ETag", eTag);
+                Response.ResponseBuilder response = Response.ok().header("ETag", part.getETag());
+                // S3 echoes the part checksum only when the upload declared an algorithm.
+                ChecksumAlgorithm declared = s3Service.getMultipartUpload(bucket, key, uploadId).getChecksumAlgorithm();
+                if (declared != null) {
+                    response.header("x-amz-checksum-" + declared.wireValue(), part.getChecksum().valueFor(declared));
+                }
                 appendSseCustomerHeaders(response,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -1237,6 +1274,7 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
                         getChecksumAlgorithm(httpHeaders),
+                        httpHeaders.getHeaderString("x-amz-checksum-type"),
                         parseInlineTaggingHeader(httpHeaders.getHeaderString("x-amz-tagging")));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -1247,6 +1285,10 @@ public class S3Controller {
                         .end("InitiateMultipartUploadResult")
                         .build();
                 Response.ResponseBuilder response = Response.ok(xml);
+                if (upload.getChecksumAlgorithm() != null) {
+                    response.header("x-amz-checksum-algorithm", upload.getChecksumAlgorithm().name());
+                    response.header("x-amz-checksum-type", upload.getChecksumType().name());
+                }
                 appendSseCustomerHeaders(response, upload);
                 return response.build();
             }
@@ -1268,7 +1310,8 @@ public class S3Controller {
 
             if (uploadId != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
-                List<Integer> partNumbers = parseCompleteMultipartBody(new String(body));
+                List<CompletedPart> completedParts = parseCompleteMultipartBody(new String(body, StandardCharsets.UTF_8));
+                List<Integer> partNumbers = completedParts.stream().map(CompletedPart::partNumber).toList();
                 Response preconditionResponse = checkWritePreconditions(bucket, key, ifMatch, ifNoneMatch);
                 if (preconditionResponse != null) {
                     return preconditionResponse;
@@ -1276,7 +1319,7 @@ public class S3Controller {
                 String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
                 S3Checksum expectedChecksum = extractChecksumFromHeaders(httpHeaders);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
-                        checksumType, expectedChecksum);
+                        completedPartChecksums(completedParts), checksumType, expectedChecksum);
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
@@ -1288,6 +1331,7 @@ public class S3Controller {
                         .elem("Bucket", bucket)
                         .elem("Key", key)
                         .elem("ETag", obj.getETag());
+                appendChecksumElements(xmlBuilder, obj.getChecksum());
                 if (obj.getVersionId() != null) {
                     xmlBuilder.elem("VersionId", obj.getVersionId());
                 }
@@ -1439,13 +1483,42 @@ public class S3Controller {
         return Response.ok(xml.build()).build();
     }
 
-    private List<Integer> parseCompleteMultipartBody(String xml) {
-        List<String> parts = XmlParser.extractAll(xml, "PartNumber");
+    private record CompletedPart(int partNumber, S3Checksum checksum) {}
+
+    private List<CompletedPart> parseCompleteMultipartBody(String xml) {
+        List<Map<String, String>> parts = XmlParser.extractGroups(xml, "Part");
         if (parts.isEmpty()) {
-            throw new AwsException("MalformedXML",
-                    "The XML you provided was not well-formed.", 400);
+            throw malformedCompleteMultipartXml();
         }
-        return parts.stream().map(Integer::parseInt).toList();
+        List<CompletedPart> completedParts = new ArrayList<>();
+        for (Map<String, String> part : parts) {
+            int partNumber;
+            try {
+                partNumber = Integer.parseInt(part.getOrDefault("PartNumber", "").trim());
+            } catch (NumberFormatException e) {
+                throw malformedCompleteMultipartXml();
+            }
+            S3Checksum checksum = new S3Checksum();
+            for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
+                checksum.setValueFor(algorithm, part.get("Checksum" + algorithm.name()));
+            }
+            completedParts.add(new CompletedPart(partNumber, checksum.hasAnyValue() ? checksum : null));
+        }
+        return completedParts;
+    }
+
+    private static AwsException malformedCompleteMultipartXml() {
+        return new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+    }
+
+    private Map<Integer, S3Checksum> completedPartChecksums(List<CompletedPart> parts) {
+        Map<Integer, S3Checksum> checksums = new HashMap<>();
+        for (CompletedPart part : parts) {
+            if (part.checksum() != null) {
+                checksums.put(part.partNumber(), part.checksum());
+            }
+        }
+        return checksums;
     }
 
     // --- Versioning Operations ---
@@ -1839,6 +1912,37 @@ public class S3Controller {
         return id;
     }
 
+    // --- Intelligent-Tiering Configurations ---
+
+    private Response handlePutBucketIntelligentTieringConfiguration(String bucket, UriInfo uriInfo,
+                                                                    byte[] body) {
+        String id = requireIntelligentTieringId(uriInfo);
+        String xml = body == null ? null : new String(body, StandardCharsets.UTF_8);
+        S3IntelligentTieringConfiguration configuration =
+                S3IntelligentTieringConfiguration.parse(xml);
+        // AWS rejects a body whose Id disagrees with the id in the query string.
+        if (!id.equals(configuration.id())) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our "
+                            + "published schema", 400);
+        }
+        s3Service.putBucketIntelligentTieringConfiguration(bucket, id, configuration.innerXml());
+        return Response.noContent().build();
+    }
+
+    /**
+     * The id identifies the configuration, so a request without one is refused rather than guessed
+     * at, mirroring the metrics subresource.
+     */
+    private String requireIntelligentTieringId(UriInfo uriInfo) {
+        String id = uriInfo.getQueryParameters().getFirst("id");
+        if (id == null) {
+            throw new AwsException("InvalidArgument",
+                    "The intelligent-tiering configuration id must be specified.", 400);
+        }
+        return id;
+    }
+
     // --- Object Tagging ---
 
     private Response handlePutObjectTagging(String bucket, String key, byte[] body) {
@@ -2123,16 +2227,21 @@ public class S3Controller {
                         .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
                         .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
                         .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp")));
-        String xml = new XmlBuilder()
+        XmlBuilder xmlBuilder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyObjectResult", AwsNamespaces.S3)
                 .elem("LastModified", ISO_FORMAT.format(copy.getLastModified()))
-                .elem("ETag", copy.getETag())
-                .end("CopyObjectResult")
-                .build();
-        Response.ResponseBuilder response = Response.ok(xml);
+                .elem("ETag", copy.getETag());
+        appendChecksumElements(xmlBuilder, copy.getChecksum());
+        String xml = xmlBuilder.end("CopyObjectResult").build();
+        Response.ResponseBuilder response = Response.ok(xml).type(MediaType.APPLICATION_XML);
         appendSseCustomerHeaders(response, copy);
         return response.build();
+    }
+
+    // GetObjectAttributes is the one S3 response whose ETag comes without the surrounding quotes.
+    private static String unquoted(String eTag) {
+        return eTag == null ? null : eTag.replace("\"", "");
     }
 
     private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
@@ -2182,7 +2291,7 @@ public class S3Controller {
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("GetObjectAttributesResponse", AwsNamespaces.S3)
-                .elem("ETag", result.getETag());
+                .elem("ETag", unquoted(result.getETag()));
         appendChecksum(xml, result.getChecksum());
         appendObjectParts(xml, result.getObjectParts());
         if (result.getStorageClass() != null) {
@@ -2207,22 +2316,33 @@ public class S3Controller {
         if (checksum == null || !checksum.hasAnyValue()) {
             return;
         }
-        xml.start("Checksum")
-                .elem("ChecksumCRC32", checksum.getChecksumCRC32())
+        xml.start("Checksum");
+        appendChecksumElements(xml, checksum);
+        xml.end("Checksum");
+    }
+
+    private void appendChecksumElements(XmlBuilder xml, S3Checksum checksum) {
+        if (checksum == null || !checksum.hasAnyValue()) {
+            return;
+        }
+        xml.elem("ChecksumCRC32", checksum.getChecksumCRC32())
                 .elem("ChecksumCRC32C", checksum.getChecksumCRC32C())
                 .elem("ChecksumCRC64NVME", checksum.getChecksumCRC64NVME())
                 .elem("ChecksumSHA1", checksum.getChecksumSHA1())
                 .elem("ChecksumSHA256", checksum.getChecksumSHA256())
-                .elem("ChecksumType", checksum.getChecksumType())
-                .end("Checksum");
+                .elem("ChecksumType", checksum.getChecksumType() != null ? checksum.getChecksumType().name() : null);
     }
 
     private void appendObjectParts(XmlBuilder xml, GetObjectAttributesParts objectParts) {
         if (objectParts == null) {
             return;
         }
-        xml.start("ObjectParts")
-                .elem("IsTruncated", objectParts.isTruncated())
+        xml.start("ObjectParts");
+        if (!objectParts.isPartChecksumsAvailable()) {
+            xml.elem("PartsCount", objectParts.getPartsCount()).end("ObjectParts");
+            return;
+        }
+        xml.elem("IsTruncated", objectParts.isTruncated())
                 .elem("MaxParts", objectParts.getMaxParts())
                 .elem("NextPartNumberMarker", objectParts.getNextPartNumberMarker())
                 .elem("PartNumberMarker", objectParts.getPartNumberMarker());
@@ -2260,6 +2380,9 @@ public class S3Controller {
         if (checksum.getChecksumSHA256() != null) {
             resp.header("x-amz-checksum-sha256", checksum.getChecksumSHA256());
         }
+        if (checksum.getChecksumType() != null && checksum.hasAnyValue()) {
+            resp.header("x-amz-checksum-type", checksum.getChecksumType().name());
+        }
     }
 
     private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders) {
@@ -2292,7 +2415,7 @@ public class S3Controller {
         checksum.setChecksumCRC64NVME(crc64nvme);
         checksum.setChecksumSHA1(sha1);
         checksum.setChecksumSHA256(sha256);
-        checksum.setChecksumType("FULL_OBJECT");
+        checksum.setChecksumType(ChecksumType.FULL_OBJECT);
         return checksum;
     }
 
@@ -2485,6 +2608,18 @@ public class S3Controller {
                 .elem("Message", e.getMessage());
         if (condition != null) {
             xmlBuilder.elem("Condition", condition);
+        }
+        // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
+        // surface which input was rejected. They travel through AwsException.extendedData.
+        if (e.getExtendedData() != null) {
+            Object argumentName = e.getExtendedData().get("ArgumentName");
+            Object argumentValue = e.getExtendedData().get("ArgumentValue");
+            if (argumentName != null) {
+                xmlBuilder.elem("ArgumentName", argumentName.toString());
+            }
+            if (argumentValue != null) {
+                xmlBuilder.elem("ArgumentValue", argumentValue.toString());
+            }
         }
         String xml = xmlBuilder
                 .elem("RequestId", java.util.UUID.randomUUID().toString())

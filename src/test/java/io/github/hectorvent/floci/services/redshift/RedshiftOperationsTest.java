@@ -17,6 +17,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
@@ -110,7 +111,7 @@ public class RedshiftOperationsTest {
     void testClusterAndSnapshotLifecycle() {
         when(containerManager.start(any(), eq("cluster-src"), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439));
-        org.mockito.Mockito.doAnswer(invocation -> {
+        doAnswer(invocation -> {
             Path p = invocation.getArgument(3);
             Files.writeString(p, "-- dump sql table test_data;");
             return null;
@@ -133,7 +134,9 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .contentType("application/xml")
             .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"))
-            .body(containsString("<ClusterStatus>available</ClusterStatus>"));
+            .body(containsString("<ClusterStatus>available</ClusterStatus>"))
+            .body(containsString("<ClusterAvailabilityStatus>Available</ClusterAvailabilityStatus>"))
+            .body(containsString("<AvailabilityZoneRelocationStatus>disabled</AvailabilityZoneRelocationStatus>"));
 
         // 1b. RebootCluster — must preserve data (no Docker volume backs this container)
         when(containerManager.getContainer(any(), eq("cluster-src")))
