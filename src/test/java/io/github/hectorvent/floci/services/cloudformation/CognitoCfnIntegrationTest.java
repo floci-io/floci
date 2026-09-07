@@ -15,6 +15,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -35,7 +36,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <p>The client case moves an {@code AWS::Cognito::UserPoolClient} between pools and flips
  * {@code GenerateSecret}, its two create-only properties: each is a replacement whose displaced client
- * is removed once the update completes, while a renamed client is updated in place.
+ * is removed once the update completes, while a renamed client is updated in place. A replacement
+ * without a secret leaves no stale {@code ClientSecret} behind.
  */
 @QuarkusTest
 class CognitoCfnIntegrationTest {
@@ -277,10 +279,22 @@ class CognitoCfnIntegrationTest {
         assertEquals("web-renamed", outputValue(stacks, "Name"));
         assertClientInPool(poolB, withSecret, "web-renamed");
 
+        // GenerateSecret back to false: a replacement again, and the new client carries no secret.
+        cloudFormation(CLIENT_STACK, "UpdateStack", clientTemplate("PoolB", false, "web-renamed"));
+
+        stacks = describeStacks(CLIENT_STACK, "UPDATE_COMPLETE");
+        String withoutSecret = outputValue(stacks, "ClientId");
+        assertNotEquals(withSecret, withoutSecret, "a GenerateSecret change must be a replacement");
+        assertClientIsGone(poolB, withSecret);
+        cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolB + "\", \"ClientId\": \"" + withoutSecret + "\"}")
+            .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientSecret", nullValue());
+
         cloudFormation(CLIENT_STACK, "DeleteStack", null);
         awaitStackDeleted(CLIENT_STACK);
 
-        assertClientIsGone(poolB, withSecret);
+        assertClientIsGone(poolB, withoutSecret);
         cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolB + "\"}")
             .then()
             .body("__type", equalTo("ResourceNotFoundException"));

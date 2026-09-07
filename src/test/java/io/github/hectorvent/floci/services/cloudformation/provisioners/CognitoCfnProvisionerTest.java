@@ -600,6 +600,28 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
+    void replacingASecretBearingClientWithASecretlessOneDropsTheStaleSecretAndRollbackRestoresIt() {
+        when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client(CLIENT_ID, POOL_ID, "web", "old-secret"));
+        stubClientCreate(client("replacement-client", POOL_ID, "web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId(CLIENT_ID);
+        r.getAttributes().putAll(Map.of("ClientId", CLIENT_ID, "Name", "web", "ClientSecret", "old-secret"));
+        ObjectNode props = mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web")
+                .put("GenerateSecret", false);
+
+        provisioner.provision(r, props, ctx(CLIENT_ID));
+
+        assertEquals("replacement-client", r.getPhysicalId());
+        assertFalse(r.getAttributes().containsKey("ClientSecret"),
+                "the displaced client's secret must not survive the replacement");
+        assertEquals("replacement-client", r.getAttributes().get("ClientId"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals(CLIENT_ID, r.getPhysicalId());
+        assertEquals("old-secret", r.getAttributes().get("ClientSecret"));
+    }
+
+    @Test
     void replacedUserPoolClientIsDeletedWhenTheUpdateCompletes() {
         when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client(CLIENT_ID, POOL_ID, "web", null));
         stubClientCreate(client("replacement-client", "us-east-1_OtherPool", "web", null));

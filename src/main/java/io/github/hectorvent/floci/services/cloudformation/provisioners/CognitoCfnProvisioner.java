@@ -245,8 +245,12 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(client.getClientId());
         r.getAttributes().put("ClientId", client.getClientId());
         r.getAttributes().put("Name", client.getClientName());
+        // The engine hands an update the prior attributes, so a replacement without a secret must
+        // drop the displaced client's, or Fn::GetAtt ClientSecret keeps serving it.
         if (client.getClientSecret() != null) {
             r.getAttributes().put("ClientSecret", client.getClientSecret());
+        } else {
+            r.getAttributes().remove("ClientSecret");
         }
     }
 
