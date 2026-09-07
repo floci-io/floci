@@ -42,19 +42,13 @@ public class SchedulerScheduleGroupCfnProvisioner implements CfnResourceProvisio
         // it already had across updates instead of getting a fresh random one each time provision
         // runs. Read from the context, not the resource: provision assigns the new id as it works.
         String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
-        // Tags wrapped in an intrinsic (e.g. Fn::If choosing between two tag lists) is not resolved
-        // here: the engine collapses a list-valued intrinsic to a string (#2983), so a conditional
-        // list would not arrive as the chosen array. tagsAreResolvable is true both when Tags is
-        // absent (the template genuinely wants no tags) and when it is a plain array (the template's
-        // actual desired tags), and false only when Tags is present but not a plain array, the one
-        // case where the desired state genuinely cannot be read, so the reconcile path below must
-        // not treat "couldn't resolve the intended tags" as "the intended tags are empty" and delete
-        // everything live.
+        // Preserve live tags when a present property still cannot resolve to a tag list.
         boolean hasTagsProperty = props != null && props.has("Tags");
-        boolean tagsAreResolvable = !hasTagsProperty || props.get("Tags").isArray();
+        JsonNode tagsNode = hasTagsProperty ? ctx.engine().resolveNode(props.get("Tags")) : null;
+        boolean tagsAreResolvable = !hasTagsProperty || (tagsNode != null && tagsNode.isArray());
         Map<String, String> tags = new HashMap<>();
         if (hasTagsProperty && tagsAreResolvable) {
-            for (JsonNode tag : props.get("Tags")) {
+            for (JsonNode tag : tagsNode) {
                 String key = ctx.engine().resolve(tag.path("Key"));
                 if (!key.isEmpty()) {
                     tags.put(key, ctx.engine().resolve(tag.path("Value")));

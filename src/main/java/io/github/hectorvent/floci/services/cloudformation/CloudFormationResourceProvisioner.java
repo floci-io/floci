@@ -1120,8 +1120,9 @@ public class CloudFormationResourceProvisioner {
 
     private Map<String, String> resolveAsgTags(JsonNode props, CloudFormationTemplateEngine engine) {
         Map<String, String> tags = new LinkedHashMap<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
+        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
+        if (tagsNode != null && tagsNode.isArray()) {
+            for (JsonNode tag : tagsNode) {
                 String key = engine.resolve(tag.path("Key"));
                 if (!key.isEmpty()) {
                     tags.put(key, engine.resolve(tag.path("Value")));
@@ -1133,8 +1134,9 @@ public class CloudFormationResourceProvisioner {
 
     private Map<String, Boolean> resolveAsgTagPropagation(JsonNode props, CloudFormationTemplateEngine engine) {
         Map<String, Boolean> propagation = new LinkedHashMap<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
+        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
+        if (tagsNode != null && tagsNode.isArray()) {
+            for (JsonNode tag : tagsNode) {
                 String key = engine.resolve(tag.path("Key"));
                 if (!key.isEmpty()) {
                     propagation.put(key, Boolean.parseBoolean(engine.resolve(tag.path("PropagateAtLaunch"))));
@@ -1201,8 +1203,9 @@ public class CloudFormationResourceProvisioner {
         }
 
         List<Tag> tags = new ArrayList<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
+        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
+        if (tagsNode != null && tagsNode.isArray()) {
+            for (JsonNode tag : tagsNode) {
                 String key = engine.resolve(tag.path("Key"));
                 if (!key.isEmpty()) {
                     tags.add(new Tag(key, engine.resolve(tag.path("Value"))));
@@ -1894,6 +1897,16 @@ public class CloudFormationResourceProvisioner {
                 throw e;
             }
             table = dynamoDbService.describeTable(tableName, region);
+        }
+
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+        List<String> staleTags = ProvisionContext.staleTagKeys(
+                dynamoDbService.listTagsOfResource(table.getTableArn(), region), tags);
+        if (!staleTags.isEmpty()) {
+            dynamoDbService.untagResource(table.getTableArn(), staleTags, region);
+        }
+        if (!tags.isEmpty()) {
+            dynamoDbService.tagResource(table.getTableArn(), tags, region);
         }
 
         // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
@@ -4780,6 +4793,7 @@ public class CloudFormationResourceProvisioner {
     }
 
     private Map<String, String> parseCfnTags(JsonNode tagsNode, CloudFormationTemplateEngine engine) {
+        tagsNode = engine.resolveNode(tagsNode);
         Map<String, String> out = new HashMap<>();
         if (tagsNode == null || tagsNode.isNull() || !tagsNode.isArray()) {
             return out;

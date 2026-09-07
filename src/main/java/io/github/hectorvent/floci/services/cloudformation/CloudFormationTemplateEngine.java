@@ -120,10 +120,15 @@ public class CloudFormationTemplateEngine {
             return node;
         }
         if (node.isObject()) {
+            if (node.has("Fn::If")) {
+                return resolveNode(selectIfBranch(node.get("Fn::If")));
+            }
+            if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
+                return objectMapper.valueToTree(resolveList(node));
+            }
             if (node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join") ||
-                    node.has("Fn::Select") || node.has("Fn::If") || node.has("Fn::Base64") ||
-                    node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::Split") ||
-                    node.has("Fn::GetAZs") || node.has("Fn::Cidr") || node.has("Fn::FindInMap")) {
+                    node.has("Fn::Select") || node.has("Fn::Base64") ||
+                    node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::FindInMap")) {
                 return TextNode.valueOf(resolve(node));
             }
             // Plain object — resolve each field
@@ -236,15 +241,7 @@ public class CloudFormationTemplateEngine {
             return "";
         }
         String delimiter = join.get(0).asText("");
-        JsonNode parts = join.get(1);
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.size(); i++) {
-            if (i > 0) {
-                sb.append(delimiter);
-            }
-            sb.append(resolve(parts.get(i)));
-        }
-        return sb.toString();
+        return String.join(delimiter, resolveList(join.get(1)));
     }
 
     private String resolveSelect(JsonNode select) {
@@ -273,6 +270,9 @@ public class CloudFormationTemplateEngine {
             return resolveListElements(node);
         }
         if (node.isObject()) {
+            if (node.has("Fn::If")) {
+                return resolveList(selectIfBranch(node.get("Fn::If")));
+            }
             if (node.has("Fn::GetAZs")) {
                 return resolveAvailabilityZones(node.get("Fn::GetAZs"));
             }
@@ -281,14 +281,6 @@ public class CloudFormationTemplateEngine {
             }
             if (node.has("Fn::Split")) {
                 return resolveSplit(node.get("Fn::Split"));
-            }
-            if (node.has("Fn::If")) {
-                JsonNode ifNode = node.get("Fn::If");
-                if (ifNode.isArray() && ifNode.size() >= 3) {
-                    String conditionName = ifNode.get(0).asText();
-                    boolean condValue = conditions.getOrDefault(conditionName, false);
-                    return resolveList(condValue ? ifNode.get(1) : ifNode.get(2));
-                }
             }
         }
         String scalar = resolve(node);
@@ -355,12 +347,7 @@ public class CloudFormationTemplateEngine {
                 return true;
             }
             if (node.has("Fn::If")) {
-                JsonNode ifNode = node.get("Fn::If");
-                if (ifNode.isArray() && ifNode.size() >= 3) {
-                    String conditionName = ifNode.get(0).asText();
-                    boolean condValue = conditions.getOrDefault(conditionName, false);
-                    return isListValuedIntrinsic(condValue ? ifNode.get(1) : ifNode.get(2));
-                }
+                return isListValuedIntrinsic(selectIfBranch(node.get("Fn::If")));
             }
         }
         return false;
@@ -448,12 +435,16 @@ public class CloudFormationTemplateEngine {
     }
 
     private String resolveIf(JsonNode ifNode) {
+        return resolve(selectIfBranch(ifNode));
+    }
+
+    private JsonNode selectIfBranch(JsonNode ifNode) {
         if (!ifNode.isArray() || ifNode.size() < 3) {
-            return "";
+            return TextNode.valueOf("");
         }
         String conditionName = ifNode.get(0).asText();
         boolean condValue = conditions.getOrDefault(conditionName, false);
-        return resolve(condValue ? ifNode.get(1) : ifNode.get(2));
+        return condValue ? ifNode.get(1) : ifNode.get(2);
     }
 
     private String resolveGetAtt(JsonNode getAtt) {

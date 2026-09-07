@@ -46,6 +46,7 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     /** An update-path context carries the physical id the previous provision assigned. */
     private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
@@ -205,6 +206,7 @@ class SchedulerScheduleGroupCfnProvisionerTest {
         props.set("Tags", mapper.createArrayNode().add(tag));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
@@ -255,19 +257,12 @@ class SchedulerScheduleGroupCfnProvisionerTest {
 
     @Test
     void sameStackRetryWithUnresolvableTagsDoesNotUntagExistingTags() {
-        // Greptile review on PR #2796: the engine's Fn::If support is scalar-only, so a Tags
-        // property wrapped in Fn::If (choosing between two tag lists) does not resolve to an array
-        // here - props.get("Tags").isArray() is false, same as no Tags at all. Before this test, that
-        // made the retry path's tag-diff see an empty desired set and untag every live key, actively
-        // destroying tags a resolvable Tags property never asked to remove.
+        // A malformed Tags value must not be mistaken for an empty desired tag set.
         when(schedulerService.getScheduleGroup("my-group", "us-east-1"))
                 .thenReturn(group("my-group", Map.of("Old", "value")));
         StackResource r = resource("MyGroup");
         ObjectNode props = mapper.createObjectNode().put("Name", "my-group");
-        ObjectNode condition = mapper.createObjectNode();
-        condition.set("Fn::If", mapper.createArrayNode().add("UseProdTags")
-                .add(mapper.createArrayNode()).add(mapper.createArrayNode()));
-        props.set("Tags", condition);
+        props.put("Tags", "not-a-list");
 
         provisioner.provision(r, props, ctx("my-group"));
 

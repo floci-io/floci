@@ -69,11 +69,11 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Copied from {@code CloudFormationResourceProvisioner} rather than delegating to
      * {@link ProvisionContext#resolveTags}, which is not equivalent: it skips a blank key this
-     * keeps, orders entries by insertion rather than hash, and resolves the whole property so an
-     * {@code Fn::If} around the list works. Adopting it here is a behaviour change and belongs in
-     * its own PR; this copy dies when the monolith's last caller migrates.
+     * keeps and orders entries by insertion rather than hash. This copy dies when the monolith's
+     * last caller migrates.
      */
     private Map<String, String> parseCfnTags(JsonNode tagsNode, ProvisionContext ctx) {
+        tagsNode = ctx.engine().resolveNode(tagsNode);
         Map<String, String> out = new HashMap<>();
         if (tagsNode == null || tagsNode.isNull() || !tagsNode.isArray()) {
             return out;

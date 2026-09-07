@@ -498,6 +498,7 @@ public class PipesCfnProvisioner implements CfnResourceProvisioner {
 
     /** See {@code KmsCfnProvisioner#parseCfnTags} for why this is copied rather than shared. */
     private Map<String, String> parseCfnTags(JsonNode tagsNode, ProvisionContext ctx) {
+        tagsNode = ctx.engine().resolveNode(tagsNode);
         Map<String, String> out = new HashMap<>();
         if (tagsNode == null || tagsNode.isNull() || !tagsNode.isArray()) {
             return out;
