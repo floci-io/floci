@@ -640,9 +640,56 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
+    void aReplacementWhoseDerivedIdBelongsToAnotherClientIsRefused() {
+        when(cognito.describeUserPoolClient("web")).thenReturn(client("web", POOL_ID, "web", null));
+        when(cognito.deterministicClientIdFor("us-east-1_OtherPool", "web"))
+                .thenReturn("web");
+        when(cognito.describeUserPoolClient("web")).thenReturn(client("web", POOL_ID, "web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+        r.setPhysicalId("web");
+        // Same name in another pool with the same override: the derived id is the prior's, which
+        // stands for any existing client the store would overwrite.
+        ObjectNode props = mapper.createObjectNode().put("UserPoolId", "us-east-1_OtherPool").put("ClientName", "web");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("web")));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verifyNoClientCreate();
+    }
+
+    @Test
+    void aFreshClientWhoseDerivedIdIsTakenByAnotherClientIsRefused() {
+        when(cognito.deterministicClientIdFor(POOL_ID, "taken")).thenReturn("taken");
+        when(cognito.describeUserPoolClient("taken")).thenReturn(client("taken", "us-east-1_OtherPool", "taken", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "taken"), ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verifyNoClientCreate();
+        assertEquals(null, r.getPhysicalId());
+    }
+
+    @Test
+    void aFreshClientWhoseDerivedIdIsFreeIsCreated() {
+        when(cognito.deterministicClientIdFor(POOL_ID, "web")).thenReturn("web");
+        when(cognito.describeUserPoolClient("web"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+        stubClientCreate(client("web", POOL_ID, "web", null));
+        StackResource r = resource(USER_POOL_CLIENT, "Client");
+
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web"), ctx());
+
+        assertEquals("web", r.getPhysicalId());
+    }
+
+    @Test
     void aReplacementWhoseDerivedIdDiffersProceeds() {
         when(cognito.describeUserPoolClient("web")).thenReturn(client("web", POOL_ID, "web", null));
         when(cognito.deterministicClientIdFor(POOL_ID, "web-v2")).thenReturn("web-v2");
+        when(cognito.describeUserPoolClient("web-v2"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "User pool client not found", 400));
         stubClientCreate(client("web-v2", POOL_ID, "web-v2", "s3cr3t"));
         StackResource r = resource(USER_POOL_CLIENT, "Client");
         r.setPhysicalId("web");

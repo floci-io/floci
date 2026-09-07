@@ -221,7 +221,7 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         // UserPoolId and GenerateSecret are createOnly in the schema: a change to either replaces
         // the client, as on AWS, and the service's own update would refuse the pool move anyway,
         // since a client is only found through the pool that owns it.
-        UserPoolClient prior = ctx.isUpdate() ? priorClient(ctx.priorPhysicalId()) : null;
+        UserPoolClient prior = ctx.isUpdate() ? findClient(ctx.priorPhysicalId()) : null;
         UserPoolClient client;
         if (prior != null && Objects.equals(userPoolId, prior.getUserPoolId())
                 && generateSecret == prior.isGenerateSecret()) {
@@ -233,15 +233,16 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
                     supportedIdentityProviders, tokenValidityUnits, writeAttributes,
                     refreshTokenRotation, enableTokenRevocation);
         } else {
-            // AWS client ids are random, so a replacement never collides with the client it replaces.
-            // Under Floci's floci:override-cognito-client-id tag the id follows the name, and a
-            // create with the prior id would overwrite the prior client with no way back, so the
-            // update is refused before anything changes rather than replaced in name only.
-            if (prior != null && prior.getClientId().equals(
-                    cognitoService.deterministicClientIdFor(userPoolId, clientName))) {
-                throw new AwsException("ValidationError", "Replacing user pool client " + prior.getClientId()
-                        + " would reuse its id under the pool's floci:override-cognito-client-id override;"
-                        + " give the client a different ClientName or remove the override.", 400);
+            // AWS client ids are random, so a create never collides with an existing client. Under
+            // Floci's floci:override-cognito-client-id tag the id follows the name, and the store
+            // would overwrite whichever client already holds it, the one being replaced or any
+            // other, with no way back; so the create is refused before anything changes.
+            String derivedId = cognitoService.deterministicClientIdFor(userPoolId, clientName);
+            if (derivedId != null && findClient(derivedId) != null) {
+                throw new AwsException("ValidationError", "User pool client id " + derivedId
+                        + ", derived from ClientName under the pool's floci:override-cognito-client-id override,"
+                        + " already belongs to an existing client; give the client a different ClientName"
+                        + " or remove the override.", 400);
             }
             client = cognitoService.createUserPoolClient(
                     userPoolId, clientName, generateSecret, allowedOAuthFlowsUserPoolClient,
@@ -296,14 +297,14 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
                 provisioned.getCloudFrontDistribution() == null ? "" : provisioned.getCloudFrontDistribution());
     }
 
-    private UserPoolClient priorClient(String clientId) {
+    private UserPoolClient findClient(String clientId) {
         try {
             return cognitoService.describeUserPoolClient(clientId);
         } catch (AwsException e) {
             if (!NOT_FOUND.equals(e.getErrorCode())) {
                 throw e;
             }
-            LOG.debugv("User pool client {0} is gone; creating it anew", clientId);
+            LOG.debugv("User pool client {0} does not exist", clientId);
             return null;
         }
     }

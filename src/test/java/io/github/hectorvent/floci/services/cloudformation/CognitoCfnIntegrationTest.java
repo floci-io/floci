@@ -38,7 +38,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * {@code GenerateSecret}, its two create-only properties: each is a replacement whose displaced client
  * is removed once the update completes, while a renamed client is updated in place. A replacement
  * without a secret leaves no stale {@code ClientSecret} behind. Under Floci's deterministic client-id
- * override a replacement that would reuse the prior id is refused and the stack rolls back intact.
+ * override a create whose derived id an existing client already holds is refused and the stack rolls
+ * back intact, whether the holder is the client being replaced or one in another stack.
  */
 @QuarkusTest
 class CognitoCfnIntegrationTest {
@@ -276,13 +277,21 @@ class CognitoCfnIntegrationTest {
 
         stacks = describeStacks(OVERRIDE_STACK, "UPDATE_ROLLBACK_COMPLETE");
         String events = describeStackEvents(OVERRIDE_STACK);
-        assertTrue(events.contains("would reuse its id under the pool"), events);
+        assertTrue(events.contains("already belongs to an existing client"), events);
         assertEquals("override-web", outputValue(stacks, "ClientId"));
         cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"override-web\"}")
             .then()
             .statusCode(200)
             .body("UserPoolClient.ClientName", equalTo("override-web"))
             .body("UserPoolClient.ClientSecret", nullValue());
+
+        // A second stack claiming the same derived id must not overwrite the first stack's client.
+        cloudFormation(OVERRIDE_STACK + "-2", "CreateStack", overrideClientTemplate(poolId, false));
+        describeStacks(OVERRIDE_STACK + "-2", "ROLLBACK_COMPLETE");
+        assertClientInPool(poolId, "override-web", "override-web");
+        cloudFormation(OVERRIDE_STACK + "-2", "DeleteStack", null);
+        awaitStackDeleted(OVERRIDE_STACK + "-2");
+        assertClientInPool(poolId, "override-web", "override-web");
 
         cloudFormation(OVERRIDE_STACK, "DeleteStack", null);
         awaitStackDeleted(OVERRIDE_STACK);
