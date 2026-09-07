@@ -242,7 +242,8 @@ public class SesService {
                 collectSuppressedReasons(envelope, effectiveConfigSet, region));
         // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
         // over the list-management BOUNCE and keeps its synthetic event type.
-        collectListManagementOptOuts(envelope, listManagement, region).forEach(suppressedReasons::putIfAbsent);
+        contactService.collectListManagementOptOuts(envelope, listManagement, region,
+                SesService::extractEmailAddress).forEach(suppressedReasons::putIfAbsent);
 
         // A single-recipient list-managed send gets a functional unsubscribe link: the
         // {{amazonSESUnsubscribeUrl}} body placeholder is replaced and the List-Unsubscribe headers
@@ -335,7 +336,8 @@ public class SesService {
                 collectSuppressedReasons(effectiveDestinations, effectiveConfigSet, region));
         // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
         // over the list-management BOUNCE and keeps its synthetic event type.
-        collectListManagementOptOuts(effectiveDestinations, listManagement, region)
+        contactService.collectListManagementOptOuts(effectiveDestinations, listManagement, region,
+                        SesService::extractEmailAddress)
                 .forEach(suppressedReasons::putIfAbsent);
 
         String messageId = UUID.randomUUID().toString();
@@ -876,53 +878,22 @@ public class SesService {
     }
 
     public ConfigurationSet createConfigurationSet(ConfigurationSet configSet, String region) {
-        if (configSet == null) {
-            throw new AwsException("InvalidParameterValue",
-                    "ConfigurationSetName is required.", 400);
-        }
-        SesConfigurationSetService.validateConfigurationSetName(configSet.getName());
-        SesTags.validate(configSet.getTags());
-        if (configSet.getSuppressionOptions() != null
-                && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
-            for (String reason : configSet.getSuppressionOptions().getSuppressedReasons()) {
-                if (reason == null) {
-                    throw new AwsException("BadRequestException",
-                            SesConfigurationSetService.invalidSuppressionReasonMessage(null), 400);
-                }
-                if (!SesConfigurationSetService.isValidSuppressionReason(reason)) {
-                    throw new AwsException("BadRequestException",
-                            "1 validation error detected: Value at "
-                                    + "'suppressionOptions.suppressedReasons' failed to satisfy "
-                                    + "constraint: Member must satisfy constraint: "
-                                    + "[Member must satisfy enum value set: [BOUNCE, COMPLAINT]]",
-                            400);
-                }
-            }
-        }
-        validateTrackingOptions(configSet.getTrackingOptions(), region);
-        validateDeliveryOptions(configSet.getDeliveryOptions(), region);
-        SesConfigurationSetService.validateVdmOptions(configSet.getVdmOptions());
-        return configSetService.create(configSet, region);
+        return configSetService.createConfigurationSet(configSet, region,
+                domain -> isVerifiedDomainIdentity(domain, region),
+                pool -> dedicatedIpPoolExists(pool, region));
     }
 
-    // The tracking and delivery setters stay here: their validation reads other domains (a verified
-    // domain identity, a dedicated IP pool), so the facade resolves existence through the service,
-    // validates, and writes back through save.
+    // The option operations live in the service; the facade only supplies the cross-domain probes
+    // (a verified domain identity, a dedicated IP pool) as predicates.
 
     public void setConfigurationSetTrackingOptions(String configSetName, TrackingOptions options, String region) {
-        ConfigurationSet cs = configSetService.get(configSetName, region);
-        validateTrackingOptions(options, region);
-        cs.setTrackingOptions(options);
-        configSetService.save(cs, region);
-        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+        configSetService.setTrackingOptions(configSetName, options, region,
+                domain -> isVerifiedDomainIdentity(domain, region));
     }
 
     public void setConfigurationSetDeliveryOptions(String configSetName, DeliveryOptions options, String region) {
-        ConfigurationSet cs = configSetService.get(configSetName, region);
-        validateDeliveryOptions(options, region);
-        cs.setDeliveryOptions(options);
-        configSetService.save(cs, region);
-        LOG.infov("Updated DeliveryOptions on configuration set {0} in region {1}", configSetName, region);
+        configSetService.setDeliveryOptions(configSetName, options, region,
+                pool -> dedicatedIpPoolExists(pool, region));
     }
 
     public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
@@ -935,48 +906,16 @@ public class SesService {
                 && "Domain".equals(identity.getIdentityType());
     }
 
-    private void requireVerifiedRedirectDomain(String domain, String region) {
-        if (domain == null) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'trackingOptions' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
-        }
-        if (domain.isBlank()) {
-            throw new AwsException("InvalidTrackingOptions",
-                    "At least one field of TrackingOptions must contain a value.", 400);
-        }
-        if (!isVerifiedDomainIdentity(domain, region)) {
-            throw new AwsException("InvalidTrackingOptions",
-                    "Domain <" + domain + "> is not verified under this account.", 400);
-        }
-    }
-
     public void createConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
                                                       String region) {
-        requireVerifiedRedirectDomain(customRedirectDomain, region);
-        ConfigurationSet cs = configSetService.get(configSetName, region);
-        if (cs.getTrackingOptions() != null && cs.getTrackingOptions().getCustomRedirectDomain() != null) {
-            throw new AwsException("TrackingOptionsAlreadyExistsException",
-                    "Configuration set <" + configSetName + "> already has tracking options.", 400);
-        }
-        TrackingOptions options = new TrackingOptions();
-        options.setCustomRedirectDomain(customRedirectDomain);
-        cs.setTrackingOptions(options);
-        configSetService.save(cs, region);
-        LOG.infov("Created TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+        configSetService.createTrackingOptions(configSetName, customRedirectDomain, region,
+                domain -> isVerifiedDomainIdentity(domain, region));
     }
 
     public void updateConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
                                                       String region) {
-        requireVerifiedRedirectDomain(customRedirectDomain, region);
-        ConfigurationSet cs = configSetService.get(configSetName, region);
-        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
-            throw new AwsException("TrackingOptionsDoesNotExistException",
-                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
-        }
-        cs.getTrackingOptions().setCustomRedirectDomain(customRedirectDomain);
-        configSetService.save(cs, region);
-        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+        configSetService.updateTrackingOptions(configSetName, customRedirectDomain, region,
+                domain -> isVerifiedDomainIdentity(domain, region));
     }
 
     public void deleteConfigurationSetTrackingOptions(String configSetName, String region) {
@@ -989,74 +928,6 @@ public class SesService {
 
     public void setConfigurationSetVdmOptions(String configSetName, VdmOptions options, String region) {
         configSetService.setVdmOptions(configSetName, options, region);
-    }
-
-    private static final java.util.Set<String> HTTPS_POLICIES =
-            java.util.Set.of("REQUIRE", "REQUIRE_OPEN_ONLY", "OPTIONAL");
-    private static final java.util.Set<String> TLS_POLICIES = java.util.Set.of("REQUIRE", "OPTIONAL");
-
-    private void validateTrackingOptions(TrackingOptions options, String region) {
-        if (options == null) {
-            return;
-        }
-        String domain = options.getCustomRedirectDomain();
-        String httpsPolicy = options.getHttpsPolicy();
-        // AWS validation order (verified against real AWS 2026-06-17): a present
-        // CustomRedirectDomain must be non-blank, and it is required whenever
-        // HttpsPolicy is set; then the domain must be a verified domain identity
-        // (checked even without HttpsPolicy); then HttpsPolicy must be a valid enum.
-        if ((domain != null && domain.isBlank()) || (httpsPolicy != null && domain == null)) {
-            throw new AwsException("BadRequestException",
-                    "CustomRedirectDomain must be specified.", 400);
-        }
-        if (domain != null && !isVerifiedDomainIdentity(domain, region)) {
-            throw new AwsException("BadRequestException",
-                    "Domain <" + domain + "> is not verified under this account.", 400);
-        }
-        if (httpsPolicy != null && !HTTPS_POLICIES.contains(httpsPolicy)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'httpsPolicy' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]", 400);
-        }
-    }
-
-    private void validateDeliveryOptions(DeliveryOptions options, String region) {
-        if (options == null) {
-            return;
-        }
-        if (options.getTlsPolicy() != null && !TLS_POLICIES.contains(options.getTlsPolicy())) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tlsPolicy' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]", 400);
-        }
-        // AWS rejects a blank SendingPoolName outright, and a non-existent
-        // dedicated IP pool (both verified against real AWS 2026-06-17). The
-        // pool must have been created via CreateDedicatedIpPool.
-        if (options.getSendingPoolName() != null) {
-            if (options.getSendingPoolName().isBlank()) {
-                throw new AwsException("BadRequestException",
-                        "sendingPoolName can't be blank.", 400);
-            }
-            if (!dedicatedIpPoolExists(options.getSendingPoolName(), region)) {
-                throw new AwsException("BadRequestException",
-                        "SendingPool <" + options.getSendingPoolName() + "> doesn't exist", 400);
-            }
-        }
-        // AWS constrains MaxDeliverySeconds to [300, 50400] (max verified against
-        // real AWS 2026-06-17; min follows the same smithy range-constraint shape).
-        if (options.getMaxDeliverySeconds() != null) {
-            long maxDeliverySeconds = options.getMaxDeliverySeconds();
-            if (maxDeliverySeconds < 300) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
-                                + "Member must have value greater than or equal to 300", 400);
-            }
-            if (maxDeliverySeconds > 50400) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
-                                + "Member must have value less than or equal to 50400", 400);
-            }
-        }
     }
 
     public ConfigurationSet getConfigurationSet(String name, String region) {
@@ -1742,50 +1613,6 @@ public class SesService {
             }
         }
         return result;
-    }
-
-    /**
-     * Resolves the recipients suppressed by SES V2 {@code SendEmail} {@code ListManagementOptions}:
-     * for each envelope recipient that is opted out of the named contact list (or the given topic),
-     * returns a {@code BOUNCE} suppression reason so the shared send path drops the recipient from
-     * the relay and publishes a Bounce event — matching AWS ("SES will issue a bounce event for a
-     * message that is sent to an unsubscribed contact"). Returns an empty map when no
-     * {@code ListManagementOptions} was supplied. Throws when the contact list does not exist, so a
-     * bad reference fails the whole send. A recipient that is not yet a contact is created
-     * automatically (matching AWS), then evaluated like any other contact.
-     */
-    private Map<String, String> collectListManagementOptOuts(Collection<String> addresses,
-                                                             ListManagementOptions listManagement, String region) {
-        if (listManagement == null || listManagement.contactListName() == null
-                || listManagement.contactListName().isBlank() || addresses == null || addresses.isEmpty()) {
-            return Map.of();
-        }
-        ContactList list = contactService.getContactList(listManagement.contactListName(), region);
-        String topicName = listManagement.topicName();
-        String effectiveTopic = (topicName == null || topicName.isBlank()) ? null : topicName;
-        // Fail fast on a topic that isn't defined on the list rather than silently skipping
-        // suppression (a typo would otherwise send to everyone). AWS does not document this, so the
-        // exact error is best-effort.
-        if (effectiveTopic != null && contactService.defaultTopicStatus(list, effectiveTopic) == null) {
-            throw new AwsException("BadRequestException",
-                    "Topic " + effectiveTopic + " does not exist in contact list "
-                            + list.getContactListName() + ".", 400);
-        }
-        Map<String, String> optOuts = new LinkedHashMap<>();
-        for (String address : addresses) {
-            if (address == null || address.isBlank() || optOuts.containsKey(address)) {
-                continue;
-            }
-            String email = extractEmailAddress(address);
-            if (email == null || email.isBlank()) {
-                continue;
-            }
-            Contact contact = contactService.getOrAutoCreateContact(list, email, region);
-            if (contactService.isListManagementOptedOut(contact, list, effectiveTopic)) {
-                optOuts.put(address, "BOUNCE");
-            }
-        }
-        return optOuts;
     }
 
     private static final String UNSUBSCRIBE_PLACEHOLDER = "{{amazonSESUnsubscribeUrl}}";
