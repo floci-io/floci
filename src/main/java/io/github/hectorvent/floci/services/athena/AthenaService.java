@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.athena;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -204,6 +205,36 @@ public class AthenaService {
 
     public void deleteWorkGroup(String name, String region) {
         workGroupStore.delete(workGroupKey(region, name));
+    }
+
+    /**
+     * github.com/floci-io/floci/issues/2791: terraform-provider-aws calls this on every
+     * aws_athena_workgroup refresh, tags or not. Only workgroup ARNs are supported - the
+     * primary workgroup can't be tagged and always answers with an empty list, matching a live
+     * account (CreateWorkGroup already rejects "primary", so it can never carry real tags).
+     */
+    public List<WorkGroupTag> listTagsForResource(String resourceArn) {
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw new AwsException("InvalidRequestException", "ResourceARN is required.", 400);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidRequestException", "Invalid ResourceARN: " + resourceArn, 400);
+        }
+        if (!arn.resource().startsWith("workgroup/")) {
+            throw new AwsException("InvalidRequestException",
+                    "Unsupported resource type for ListTagsForResource: " + resourceArn, 400);
+        }
+        String name = arn.resource().substring("workgroup/".length());
+        if (DEFAULT_WORKGROUP.equals(name)) {
+            return List.of();
+        }
+        WorkGroup workGroup = workGroupStore.get(workGroupKey(arn.region(), name))
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "WorkGroup " + name + " is not found.", 400));
+        return workGroup.getTags();
     }
 
     public List<Map<String, Object>> listWorkGroups(String region) {

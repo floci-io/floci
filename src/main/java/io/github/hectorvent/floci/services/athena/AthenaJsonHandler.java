@@ -94,6 +94,10 @@ public class AthenaJsonHandler {
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
             }
+            case "ListTagsForResource" -> {
+                String resourceArn = request.path("ResourceARN").asText(null);
+                yield Response.ok(Map.of("Tags", athenaService.listTagsForResource(resourceArn))).build();
+            }
             case "DeleteWorkGroup" -> {
                 String wg = request.path("WorkGroup").asText(null);
                 if (wg == null || !wg.matches("[a-zA-Z0-9._-]{1,128}")) {
