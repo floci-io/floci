@@ -625,6 +625,23 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void queryWithTheSortKeyValueOnTheLeft() {
+        var region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o3"), region);
+
+        var exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", mapper.createObjectNode().put("S", "c1"));
+        exprValues.set(":lo", mapper.createObjectNode().put("S", "o2"));
+
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "customerId = :pk AND :lo <= orderId", null, null, region);
+        assertEquals(1, results.items().size());
+        assertEquals("o3", results.items().getFirst().get("orderId").get("S").asText());
+    }
+
+    @Test
     void queryWithBeginsWith() {
         String region = "eu-west-1";
         createOrdersTable(region);
