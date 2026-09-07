@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAut
 import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.ssoadmin.SsoAdminJsonHandler;
 import io.github.hectorvent.floci.services.identitystore.IdentityStoreJsonHandler;
+import io.github.hectorvent.floci.services.budgets.BudgetsJsonHandler;
 import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
@@ -126,6 +127,7 @@ public class AwsJson11Controller {
     private final OrganizationsJsonHandler organizationsJsonHandler;
     private final SsoAdminJsonHandler ssoAdminJsonHandler;
     private final IdentityStoreJsonHandler identityStoreJsonHandler;
+    private final BudgetsJsonHandler budgetsJsonHandler;
     private final ServiceQuotasJsonHandler serviceQuotasJsonHandler;
 
     @Inject
@@ -174,6 +176,7 @@ public class AwsJson11Controller {
                                OrganizationsJsonHandler organizationsJsonHandler,
                                SsoAdminJsonHandler ssoAdminJsonHandler,
                                IdentityStoreJsonHandler identityStoreJsonHandler,
+                               BudgetsJsonHandler budgetsJsonHandler,
                                ServiceQuotasJsonHandler serviceQuotasJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -226,6 +229,7 @@ public class AwsJson11Controller {
         this.organizationsJsonHandler = organizationsJsonHandler;
         this.ssoAdminJsonHandler = ssoAdminJsonHandler;
         this.identityStoreJsonHandler = identityStoreJsonHandler;
+        this.budgetsJsonHandler = budgetsJsonHandler;
         this.serviceQuotasJsonHandler = serviceQuotasJsonHandler;
     }
 
@@ -314,6 +318,7 @@ public class AwsJson11Controller {
                         organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "sso" -> ssoAdminJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "identitystore" -> identityStoreJsonHandler.handle(action, request);
+                case "budgets" -> budgetsJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "servicequotas" -> serviceQuotasJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 default -> null;

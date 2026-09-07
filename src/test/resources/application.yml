@@ -383,6 +383,8 @@ floci:
       enabled: true
     identitystore:
       enabled: true
+    budgets:
+      enabled: true
     controltower:
       enabled: true
       seed-landing-zone: true

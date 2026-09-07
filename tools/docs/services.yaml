@@ -222,6 +222,10 @@ services:
     doc: docs/services/identitystore.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/identitystore/IdentityStoreJsonHandler.java, mode: switch }
+  - service: budgets
+    doc: docs/services/budgets.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/budgets/BudgetsJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:

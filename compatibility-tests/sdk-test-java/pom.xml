@@ -244,6 +244,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>identitystore</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>budgets</artifactId>
+        </dependency>
         <!-- Amazon Macie client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
