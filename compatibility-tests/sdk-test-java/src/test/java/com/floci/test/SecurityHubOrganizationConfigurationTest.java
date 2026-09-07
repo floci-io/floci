@@ -23,7 +23,7 @@ class SecurityHubOrganizationConfigurationTest {
         assumeFalse(TestFixtures.isRealAws(), "Avoids changing Security Hub organization settings in real AWS");
 
         try (OrganizationsClient organizations = TestFixtures.organizationsClient()) {
-            ensureOrganization(organizations);
+            boolean createdOrganization = ensureOrganization(organizations);
             String adminAccount = createMemberAccount(organizations, "securityhub-admin");
             String memberAccount = createMemberAccount(organizations, "securityhub-member");
 
@@ -93,15 +93,23 @@ class SecurityHubOrganizationConfigurationTest {
 
                 assertThat(administrator.listTagsForResource(request -> request.resourceArn(policy.arn())).tags())
                         .containsEntry("env", "test");
+            } finally {
+                organizations.removeAccountFromOrganization(request -> request.accountId(memberAccount));
+                organizations.removeAccountFromOrganization(request -> request.accountId(adminAccount));
+                if (createdOrganization) {
+                    organizations.deleteOrganization();
+                }
             }
         }
     }
 
-    private static void ensureOrganization(OrganizationsClient organizations) {
+    private static boolean ensureOrganization(OrganizationsClient organizations) {
         try {
             organizations.createOrganization(request -> request.featureSet("ALL"));
+            return true;
         } catch (AlreadyInOrganizationException e) {
             LOG.debugf(e, "Default compatibility account already belongs to an AWS organization");
+            return false;
         }
     }
 
