@@ -1105,4 +1105,72 @@ class DynamoDbJsonHandlerTest {
         assertEquals(1, userSegments.get("alice").size(), "All alice items must belong to the exact same segment");
         assertEquals(1, userSegments.get("bob").size(), "All bob items must belong to the exact same segment");
     }
+
+    private ObjectNode updateUserRequest() {
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.set("Key", mapper.createObjectNode().set("userId", attributeValue("S", "u1")));
+        return request;
+    }
+
+    @Test
+    void updateItemUpdatedNewReturnsOnlyTheChangedMapFragment() throws Exception {
+        createUsersTable("eu-west-1");
+        var parent = mapper.createObjectNode();
+        parent.set("keep", attributeValue("S", "k"));
+        parent.set("child", attributeValue("S", "old"));
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        var item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "u1"));
+        item.set("parent", mapper.createObjectNode().set("M", parent));
+        putRequest.set("Item", item);
+        handler.handle("PutItem", putRequest, "eu-west-1");
+
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET parent.child = :v");
+        request.set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":v", attributeValue("S", "new")));
+        request.put("ReturnValues", "UPDATED_NEW");
+
+        var response = handler.handle("UpdateItem", request, "eu-west-1");
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        var attributes = body.get("Attributes");
+        assertEquals("new", attributes.get("parent").get("M").get("child").get("S").asText());
+        assertFalse(attributes.get("parent").get("M").has("keep"));
+    }
+
+    @Test
+    void updateItemRemoveWithUpdatedNewOmitsAttributes() throws Exception {
+        createUsersTable("eu-west-1");
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        var item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "u1"));
+        item.set("y", attributeValue("S", "drop"));
+        putRequest.set("Item", item);
+        handler.handle("PutItem", putRequest, "eu-west-1");
+
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "REMOVE y");
+        request.put("ReturnValues", "UPDATED_NEW");
+
+        var response = handler.handle("UpdateItem", request, "eu-west-1");
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.has("Attributes"));
+    }
+
+    @Test
+    void updateItemReportsOnlyTheFirstInvalidEnum() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("ReturnValues", "INVALID");
+        request.put("ReturnConsumedCapacity", "INVALID");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().startsWith("1 validation error detected:"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("'returnValues'"), ex.getMessage());
+    }
 }

@@ -587,22 +587,20 @@ public class DynamoDbJsonHandler {
         String returnValues = request.path("ReturnValues").asText("NONE");
         String returnValuesOnConditionCheckFailure = request.path("ReturnValuesOnConditionCheckFailure").asText("NONE");
 
-        // Validate ReturnValues + ReturnConsumedCapacity together before table lookup
-        List<String> updValidationErrors = new ArrayList<>();
+        // UpdateItem stops at the first invalid enum and reports one error, unlike PutItem
+        // and DeleteItem which aggregate.
         String rccUpd = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
-        if (rccUpd != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccUpd)) {
-            updValidationErrors.add("Value '" + rccUpd + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
-        }
         if (!VALID_RETURN_VALUES_UPDATE.contains(returnValues)) {
-            updValidationErrors.add("Value '" + returnValues + "' at 'returnValues' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]");
-        }
-        if (!updValidationErrors.isEmpty()) {
-            int n = updValidationErrors.size();
             throw new AwsException("ValidationException",
-                    n + " validation error" + (n > 1 ? "s" : "") + " detected: "
-                    + String.join("; ", updValidationErrors), 400);
+                    "1 validation error detected: Value '" + returnValues + "' at 'returnValues' "
+                    + "failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]", 400);
+        }
+        if (rccUpd != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccUpd)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + rccUpd + "' at 'returnConsumedCapacity' "
+                    + "failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
         }
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
@@ -679,7 +677,11 @@ public class DynamoDbJsonHandler {
             // attributes are excluded - matching AWS behavior where UPDATED_NEW
             // returns only the attributes set by the expression.
             JsonNode baseline = result.oldItem() != null ? result.oldItem() : key;
-            response.set("Attributes", getChangedAttributes(result.newItem(), baseline));
+            var changed = getChangedAttributes(result.newItem(), baseline);
+            // A REMOVE sets nothing to a new value, and AWS then omits Attributes.
+            if (!changed.isEmpty()) {
+                response.set("Attributes", changed);
+            }
         } else if ("UPDATED_OLD".equals(returnValues) && result.oldItem() != null) {
             response.set("Attributes", getChangedAttributes(result.oldItem(), result.newItem()));
         }
@@ -812,7 +814,7 @@ public class DynamoDbJsonHandler {
         } catch (Exception ignored) {}
     }
 
-    private JsonNode getChangedAttributes(JsonNode preferredItem, JsonNode secondaryItem){
+    private ObjectNode getChangedAttributes(JsonNode preferredItem, JsonNode secondaryItem){
         ObjectNode changedAttributes = objectMapper.createObjectNode();
         Iterator<Map.Entry<String, JsonNode>> fields = preferredItem.fields();
         while (fields.hasNext()) {
@@ -823,17 +825,36 @@ public class DynamoDbJsonHandler {
             if (secondaryItem.has(attrName)){
                 JsonNode secondaryValue = secondaryItem.get(attrName);
                 if (!value.equals(secondaryValue)){
-                    changedAttributes.put(attrName, value);
+                    var fragment = changedFragment(value, secondaryValue);
+                    if (fragment != null) {
+                        changedAttributes.set(attrName, fragment);
+                    }
                 }
             }
             else {
-                changedAttributes.put(attrName, value);
+                changedAttributes.set(attrName, value);
             }
         }
         return changedAttributes;
     }
 
     private static final int MAX_TOTAL_SEGMENTS = 1_000_000;
+
+    // UPDATED_NEW and UPDATED_OLD report only the changed part of a map, not the whole
+    // attribute. Returns null when the map changed only by losing an entry, which sets
+    // nothing to a new value.
+    private JsonNode changedFragment(JsonNode value, JsonNode secondaryValue) {
+        if (!value.has("M") || !secondaryValue.has("M")) {
+            return value;
+        }
+        var changed = getChangedAttributes(value.get("M"), secondaryValue.get("M"));
+        if (changed.isEmpty()) {
+            return null;
+        }
+        var fragment = objectMapper.createObjectNode();
+        fragment.set("M", changed);
+        return fragment;
+    }
 
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
