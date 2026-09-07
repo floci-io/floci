@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -10,6 +11,8 @@ import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
@@ -27,8 +30,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -45,6 +51,7 @@ import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -53,8 +60,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -83,6 +92,7 @@ public class DynamoDbService implements ResourceProvider {
     private final StorageBackend<String, TableDefinition> tableStore;
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
     private final StorageBackend<String, ExportDescription> exportStore;
+    private final StorageBackend<String, ImportTableDescription> importStore;
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
@@ -120,22 +130,24 @@ public class DynamoDbService implements ResourceProvider {
                 new TypeReference<Map<String, Map<String, JsonNode>>>() {}),
              storageFactory.create("dynamodb", "dynamodb-exports.json",
                 new TypeReference<Map<String, ExportDescription>>() {}),
+             storageFactory.create("dynamodb", "dynamodb-imports.json",
+                new TypeReference<Map<String, ImportTableDescription>>() {}),
              regionResolver, streamService, kinesisForwarder, s3Service, objectMapper);
     }
 
     /** Package-private constructor for testing. */
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore) {
-        this(tableStore, null, null, new RegionResolver("us-east-1", "000000000000"), null, null, null, null);
+        this(tableStore, null, null, null, new RegionResolver("us-east-1", "000000000000"), null, null, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore, RegionResolver regionResolver) {
-        this(tableStore, null, null, regionResolver, null, null, null, null);
+        this(tableStore, null, null, null, regionResolver, null, null, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
                     StorageBackend<String, Map<String, JsonNode>> itemStore,
                     RegionResolver regionResolver) {
-        this(tableStore, itemStore, null, regionResolver, null, null, null, null);
+        this(tableStore, itemStore, null, null, regionResolver, null, null, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
@@ -143,12 +155,13 @@ public class DynamoDbService implements ResourceProvider {
                     RegionResolver regionResolver,
                     DynamoDbStreamService streamService,
                     KinesisStreamingForwarder kinesisForwarder) {
-        this(tableStore, itemStore, null, regionResolver, streamService, kinesisForwarder, null, null);
+        this(tableStore, itemStore, null, null, regionResolver, streamService, kinesisForwarder, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
                     StorageBackend<String, Map<String, JsonNode>> itemStore,
                     StorageBackend<String, ExportDescription> exportStore,
+                    StorageBackend<String, ImportTableDescription> importStore,
                     RegionResolver regionResolver,
                     DynamoDbStreamService streamService,
                     KinesisStreamingForwarder kinesisForwarder,
@@ -157,12 +170,14 @@ public class DynamoDbService implements ResourceProvider {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
         this.exportStore = exportStore;
+        this.importStore = importStore;
         this.regionResolver = regionResolver;
         this.streamService = streamService;
         this.kinesisForwarder = kinesisForwarder;
         this.s3Service = s3Service;
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
         loadPersistedItems();
+        recoverInterruptedJobs();
     }
 
     private void loadPersistedItems() {
@@ -469,9 +484,9 @@ public class DynamoDbService implements ResourceProvider {
     public void deleteTable(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        if (tableStore.get(storageKey).isEmpty()) {
-            throw resourceNotFoundException(canonicalTableName);
-        }
+        var table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        requireNotCreating(table);
         tableStore.delete(storageKey);
         itemsByTable.remove(scopedItemsKey(storageKey));
         itemLocks.remove(scopedItemsKey(storageKey));
@@ -1635,6 +1650,7 @@ public class DynamoDbService implements ResourceProvider {
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        requireNotCreating(table);
 
         if (readCapacity != null && readCapacity <= 0) {
             throw new AwsException("ValidationException",
@@ -3365,7 +3381,7 @@ public class DynamoDbService implements ResourceProvider {
                 .orElseThrow(() -> resourceNotFoundException(tableName));
 
         long now = Instant.now().getEpochSecond();
-        String exportId = System.currentTimeMillis() + "-" + UUID.randomUUID().toString().replace("-", "");
+        var exportId = newJobId();
         String exportArn = AwsArnUtils.Arn.of("dynamodb", tableRegion, regionResolver.getAccountId(), "table/" + table.getTableName() + "/export/" + exportId).toString();
 
         ExportDescription desc = new ExportDescription();
@@ -3387,13 +3403,16 @@ public class DynamoDbService implements ResourceProvider {
             exportStore.put(exportArn, desc);
         }
 
-        ExportDescription finalDesc = desc;
         ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(scopedItemsKey(storageKey));
         List<JsonNode> snapshot = tableItems != null
                 ? List.copyOf(tableItems.values())
                 : List.of();
 
-        Thread.ofVirtual().start(() -> runExport(finalDesc, snapshot, exportArn));
+        // The worker gets its own copy so the object serialized into this response never
+        // changes underneath the handler, and the request account so its writes land there.
+        var accountId = regionResolver.getAccountId();
+        var worker = objectMapper.convertValue(desc, ExportDescription.class);
+        Thread.ofVirtual().start(() -> RequestScopes.runAs(accountId, () -> runExport(worker, snapshot, exportArn)));
 
         return desc;
     }
@@ -3563,33 +3582,306 @@ public class DynamoDbService implements ResourceProvider {
         if (exportStore == null) {
             return new ListExportsResult(List.of(), null);
         }
-        int limit = maxResults != null ? Math.min(maxResults, 25) : 25;
-
-        List<ExportDescription> all = exportStore.keys().stream()
-                .map(k -> exportStore.get(k).orElse(null))
-                .filter(d -> d != null)
+        var all = exportStore.scan(k -> true).stream()
                 .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
-                .sorted(Comparator.comparing(ExportDescription::getExportArn).reversed())
                 .toList();
+        requirePageSize(maxResults, "maxResults");
+        var page = pageByArn(all, ExportDescription::getExportArn, maxResults, nextToken);
+        return new ListExportsResult(page.items().stream().map(ExportSummary::new).toList(), page.nextToken());
+    }
 
-        int startIdx = 0;
+    private record Page<T>(List<T> items, String nextToken) {}
+
+    private static final int MAX_JOB_PAGE_SIZE = 25;
+
+    private static void requirePageSize(Integer pageSize, String field) {
+        if (pageSize == null) {
+            return;
+        }
+        if (pageSize < 1) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + pageSize + "' at '" + field
+                    + "' failed to satisfy constraint: Member must have value greater than or equal to 1", 400);
+        }
+        if (MAX_JOB_PAGE_SIZE < pageSize) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + pageSize + "' at '" + field
+                    + "' failed to satisfy constraint: Member must have value less than or equal to "
+                    + MAX_JOB_PAGE_SIZE, 400);
+        }
+    }
+
+    private static <T> Page<T> pageByArn(List<T> all, Function<T, String> arnOf, Integer pageSize, String nextToken) {
+        var limit = pageSize != null ? pageSize : MAX_JOB_PAGE_SIZE;
+        var sorted = all.stream().sorted(Comparator.comparing(arnOf).reversed()).toList();
+        var startIdx = 0;
         if (nextToken != null) {
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getExportArn().equals(nextToken)) {
+            for (var i = 0; i < sorted.size(); i++) {
+                if (nextToken.equals(arnOf.apply(sorted.get(i)))) {
                     startIdx = i + 1;
                     break;
                 }
             }
         }
+        var end = Math.min(startIdx + limit, sorted.size());
+        var newNextToken = end < sorted.size() ? arnOf.apply(sorted.get(end - 1)) : null;
+        return new Page<>(sorted.subList(startIdx, end), newNextToken);
+    }
 
-        List<ExportDescription> page = all.subList(startIdx, Math.min(startIdx + limit, all.size()));
-        String newNextToken = (startIdx + limit < all.size()) ? all.get(startIdx + limit - 1).getExportArn() : null;
+    private static String newJobId() {
+        return System.currentTimeMillis() + "-" + UUID.randomUUID().toString().replace("-", "");
+    }
 
-        List<ExportSummary> summaries = page.stream()
-                .map(ExportSummary::new)
+    // --- Import Operations ---
+
+    /**
+     * Checks an ImportTable request before the target table exists, so a rejected request
+     * leaves nothing behind. Returns the import already started with the same ClientToken,
+     * or null when this is a new import.
+     */
+    public ImportTableDescription validateImportRequest(JsonNode request) {
+        if (request.path("S3BucketSource").path("S3Bucket").asText("").isBlank()) {
+            throw new AwsException("ValidationException", "S3BucketSource.S3Bucket is required", 400);
+        }
+        var inputFormat = request.path("InputFormat").asText("");
+        switch (inputFormat) {
+            case "DYNAMODB_JSON" -> { }
+            case "" -> throw new AwsException("ValidationException", "InputFormat is required", 400);
+            case "CSV", "ION" -> throw new AwsException("ValidationException",
+                    "Unsupported InputFormat: " + inputFormat + ". Floci imports DYNAMODB_JSON only", 400);
+            default -> throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + inputFormat
+                    + "' at 'inputFormat' failed to satisfy constraint: Member must satisfy enum value set: [ION, CSV, DYNAMODB_JSON]", 400);
+        }
+        var compression = request.path("InputCompressionType").asText("NONE");
+        switch (compression) {
+            case "NONE", "GZIP" -> { }
+            case "ZSTD" -> throw new AwsException("ValidationException",
+                    "Unsupported InputCompressionType: ZSTD. Floci accepts NONE or GZIP", 400);
+            default -> throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + compression
+                    + "' at 'inputCompressionType' failed to satisfy constraint: Member must satisfy enum value set: [GZIP, ZSTD, NONE]", 400);
+        }
+        DynamoDbTableNames.requireShortName(request.path("TableCreationParameters").path("TableName").asText(null));
+        var clientToken = request.path("ClientToken").asText(null);
+        if (clientToken != null && clientToken.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + clientToken
+                    + "' at 'clientToken' failed to satisfy constraint: Member must have length greater than or equal to 1", 400);
+        }
+        if (clientToken == null || importStore == null) {
+            return null;
+        }
+        var existing = importStore.scan(k -> true).stream()
+                .filter(d -> clientToken.equals(d.getClientToken()))
+                .findFirst()
+                .orElse(null);
+        if (existing != null && !sameImportParameters(existing, request)) {
+            throw new AwsException("ImportConflictException",
+                    "There was a conflict when importing from the specified S3 source. This can occur when "
+                    + "the current import conflicts with a previous import request that had the same client token.", 400);
+        }
+        return existing;
+    }
+
+    private static boolean sameImportParameters(ImportTableDescription existing, JsonNode request) {
+        var options = request.hasNonNull("InputFormatOptions") ? request.get("InputFormatOptions") : null;
+        return Objects.equals(existing.getS3BucketSource(), request.get("S3BucketSource"))
+                && Objects.equals(existing.getInputFormat(), request.path("InputFormat").asText())
+                && Objects.equals(existing.getInputFormatOptions(), options)
+                && Objects.equals(existing.getInputCompressionType(), request.path("InputCompressionType").asText("NONE"))
+                && Objects.equals(existing.getTableCreationParameters(), request.get("TableCreationParameters"));
+    }
+
+    public ImportTableDescription startImport(JsonNode request, TableDefinition table, String region) {
+        var tableName = table.getTableName();
+        var accountId = regionResolver.getAccountId();
+        var importArn = AwsArnUtils.Arn.of("dynamodb", region, accountId,
+                "table/" + tableName + "/import/" + newJobId()).toString();
+
+        var desc = new ImportTableDescription();
+        desc.setImportArn(importArn);
+        desc.setImportStatus("IN_PROGRESS");
+        desc.setTableArn(table.getTableArn());
+        desc.setTableId(table.getTableId());
+        desc.setClientToken(request.path("ClientToken").asText(null));
+        desc.setS3BucketSource(request.get("S3BucketSource"));
+        desc.setInputFormat(request.path("InputFormat").asText());
+        if (request.hasNonNull("InputFormatOptions")) {
+            desc.setInputFormatOptions(request.get("InputFormatOptions"));
+        }
+        desc.setInputCompressionType(request.path("InputCompressionType").asText("NONE"));
+        desc.setTableCreationParameters(request.get("TableCreationParameters"));
+        desc.setCloudWatchLogGroupArn(AwsArnUtils.Arn.of("logs", region, accountId,
+                "log-group:/aws-dynamodb/imports:*").toString());
+        desc.setStartTime(Instant.now().getEpochSecond());
+        if (importStore != null) {
+            importStore.put(importArn, desc);
+        }
+
+        // The worker gets its own copy so the object serialized into this response never
+        // changes underneath the handler, and the request account so its writes land there.
+        var worker = objectMapper.convertValue(desc, ImportTableDescription.class);
+        Thread.ofVirtual().start(() -> RequestScopes.runAs(accountId, () -> runImport(worker, tableName, region)));
+        return desc;
+    }
+
+    void runImport(ImportTableDescription desc, String tableName, String region) {
+        var source = desc.getS3BucketSource();
+        var bucket = source.path("S3Bucket").asText();
+        var prefix = source.path("S3KeyPrefix").asText("");
+        var bucketOwner = source.path("S3BucketOwner").asText(null);
+        try {
+            var objects = RequestScopes.callAs(bucketOwner, () -> s3Service.listObjects(bucket, prefix, null, 0));
+            if (objects.isEmpty()) {
+                failImport(desc, "S3NoSuchKey", "No objects found under s3://" + bucket + "/" + prefix);
+            } else {
+                for (var object : objects) {
+                    try {
+                        importObject(desc, tableName, region, bucket, bucketOwner, object.getKey());
+                    } catch (IOException | RuntimeException e) {
+                        desc.setErrorCount(desc.getErrorCount() + 1);
+                        LOG.warnv("Import {0} skipped object {1}: {2}", desc.getImportArn(), object.getKey(), e.getMessage());
+                    }
+                }
+                desc.setImportStatus("COMPLETED");
+            }
+        } catch (AwsException e) {
+            if ("NoSuchBucket".equals(e.getErrorCode())) {
+                failImport(desc, "S3NoSuchBucket", "The specified bucket does not exist: " + bucket);
+            } else {
+                LOG.errorv(e, "Import failed: {0}", desc.getImportArn());
+                failImport(desc, "S3" + e.getErrorCode(), e.getMessage());
+            }
+        } catch (Exception e) {
+            LOG.errorv(e, "Import failed: {0}", desc.getImportArn());
+            failImport(desc, "UNKNOWN", e.getMessage());
+        }
+        persistItems(regionKey(region, tableName));
+        desc.setEndTime(Instant.now().getEpochSecond());
+        activateTable(tableName, region);
+        if (importStore != null) {
+            importStore.put(desc.getImportArn(), desc);
+        }
+        LOG.infov("Import {0} {1}: imported={2}, errors={3}", desc.getImportArn(),
+                desc.getImportStatus(), desc.getImportedItemCount(), desc.getErrorCount());
+    }
+
+    private void importObject(ImportTableDescription desc, String tableName, String region,
+                              String bucket, String bucketOwner, String key) throws IOException {
+        var size = RequestScopes.callAs(bucketOwner, () -> s3Service.getObjectMetadata(bucket, key, null)).getSize();
+        desc.setProcessedSizeBytes(desc.getProcessedSizeBytes() + size);
+        try (var raw = RequestScopes.callAs(bucketOwner, () -> s3Service.openObjectStream(bucket, key, null));
+             var reader = new BufferedReader(new InputStreamReader(decompress(desc, raw), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                desc.setProcessedItemCount(desc.getProcessedItemCount() + 1);
+                try {
+                    var item = objectMapper.readTree(line).path("Item");
+                    if (!item.isObject()) {
+                        throw new IOException("line has no Item object");
+                    }
+                    putItemInternal(tableName, item, null, null, null, region, "NONE", false, event -> { });
+                    desc.setImportedItemCount(desc.getImportedItemCount() + 1);
+                } catch (IOException | RuntimeException e) {
+                    desc.setErrorCount(desc.getErrorCount() + 1);
+                    LOG.debugv("Import {0} skipped a line of {1}: {2}", desc.getImportArn(), key, e.getMessage());
+                }
+            }
+        }
+    }
+
+    private static InputStream decompress(ImportTableDescription desc, InputStream raw) throws IOException {
+        return "GZIP".equals(desc.getInputCompressionType()) ? new GZIPInputStream(raw) : raw;
+    }
+
+    private static void requireNotCreating(TableDefinition table) {
+        if ("CREATING".equals(table.getTableStatus())) {
+            throw new AwsException("ResourceInUseException",
+                    "Attempt to change a resource which is still in use: Table is being created: "
+                    + table.getTableName(), 400);
+        }
+    }
+
+    private static void failImport(ImportTableDescription desc, String code, String message) {
+        desc.setImportStatus("FAILED");
+        desc.setFailureCode(code);
+        desc.setFailureMessage(message);
+    }
+
+    private void activateTable(String tableName, String region) {
+        var storageKey = regionKey(region, tableName);
+        tableStore.get(storageKey).ifPresent(table -> {
+            if ("CREATING".equals(table.getTableStatus())) {
+                table.setTableStatus("ACTIVE");
+                tableStore.put(storageKey, table);
+            }
+        });
+    }
+
+    /**
+     * A job interrupted by a restart would otherwise stay IN_PROGRESS forever, since no
+     * worker survives the process. An import also leaves its table stuck in CREATING.
+     */
+    private void recoverInterruptedJobs() {
+        var now = Instant.now().getEpochSecond();
+        if (exportStore instanceof AccountAwareStorageBackend<ExportDescription> exports) {
+            for (var entry : exports.scanAllAccountEntries(k -> true)) {
+                var desc = entry.value();
+                if (!"IN_PROGRESS".equals(desc.getExportStatus())) {
+                    continue;
+                }
+                desc.setExportStatus("FAILED");
+                desc.setFailureCode("InterruptedByRestart");
+                desc.setFailureMessage("The emulator restarted before the export finished");
+                desc.setEndTime(now);
+                exports.putForAccount(entry.accountId(), entry.key(), desc);
+            }
+        }
+        if (importStore instanceof AccountAwareStorageBackend<ImportTableDescription> imports) {
+            for (var entry : imports.scanAllAccountEntries(k -> true)) {
+                var desc = entry.value();
+                if (!"IN_PROGRESS".equals(desc.getImportStatus())) {
+                    continue;
+                }
+                failImport(desc, "InterruptedByRestart", "The emulator restarted before the import finished");
+                desc.setEndTime(now);
+                imports.putForAccount(entry.accountId(), entry.key(), desc);
+            }
+        }
+        if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> tables) {
+            for (var entry : tables.scanAllAccountEntries(k -> true)) {
+                var table = entry.value();
+                if ("CREATING".equals(table.getTableStatus())) {
+                    table.setTableStatus("ACTIVE");
+                    tables.putForAccount(entry.accountId(), entry.key(), table);
+                }
+            }
+        }
+    }
+
+    public ImportTableDescription describeImport(String importArn) {
+        return Optional.ofNullable(importStore)
+                .flatMap(store -> store.get(importArn))
+                .orElseThrow(() -> new AwsException("ImportNotFoundException",
+                        "The specified import was not found.", 400));
+    }
+
+    public record ListImportsResult(List<ImportSummary> importSummaryList, String nextToken) {}
+
+    public ListImportsResult listImports(String tableArn, Integer pageSize, String nextToken) {
+        if (importStore == null) {
+            return new ListImportsResult(List.of(), null);
+        }
+        var all = importStore.scan(k -> true).stream()
+                .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
                 .toList();
-
-        return new ListExportsResult(summaries, newNextToken);
+        requirePageSize(pageSize, "pageSize");
+        var page = pageByArn(all, ImportTableDescription::getImportArn, pageSize, nextToken);
+        return new ListImportsResult(page.items().stream().map(ImportSummary::new).toList(), page.nextToken());
     }
 
     @Override

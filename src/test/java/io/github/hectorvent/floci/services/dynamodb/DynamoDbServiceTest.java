@@ -2,26 +2,35 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -30,6 +39,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class DynamoDbServiceTest {
 
@@ -3659,5 +3669,287 @@ class DynamoDbServiceTest {
         verify(mockItemStore, never())
                 .put(any(), any());
         assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    // --- ImportTable ---
+
+    private DynamoDbService serviceWithS3(S3Service s3, StorageBackend<String, ImportTableDescription> importStore) {
+        return new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), null, importStore,
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3, mapper);
+    }
+
+    private void createUsersTableInCreating(DynamoDbService svc) {
+        svc.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1").setTableStatus("CREATING");
+    }
+
+    private ImportTableDescription importDescription(String bucket, String prefix, String compression) {
+        var desc = new ImportTableDescription();
+        desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/1-abc");
+        var source = mapper.createObjectNode();
+        source.put("S3Bucket", bucket);
+        source.put("S3KeyPrefix", prefix);
+        desc.setS3BucketSource(source);
+        desc.setInputCompressionType(compression);
+        return desc;
+    }
+
+    private ObjectNode importRequest(String tableName, String inputFormat) {
+        var request = mapper.createObjectNode();
+        request.putObject("S3BucketSource").put("S3Bucket", "bucket").put("S3KeyPrefix", "imp/");
+        request.put("InputFormat", inputFormat);
+        request.putObject("TableCreationParameters").put("TableName", tableName);
+        return request;
+    }
+
+    private static byte[] gzip(String text) throws Exception {
+        var out = new ByteArrayOutputStream();
+        try (var gz = new GZIPOutputStream(out)) {
+            gz.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+        return out.toByteArray();
+    }
+
+    private static S3Object s3Object(String key, byte[] data) {
+        return new S3Object("bucket", key, data, "application/octet-stream");
+    }
+
+    private static S3Service s3With(S3Object... objects) {
+        var s3 = mock(S3Service.class);
+        when(s3.listObjects("bucket", "imp/", null, 0)).thenReturn(List.of(objects));
+        for (var object : objects) {
+            when(s3.getObjectMetadata("bucket", object.getKey(), null)).thenReturn(object);
+            when(s3.openObjectStream("bucket", object.getKey(), null))
+                    .thenAnswer(invocation -> new ByteArrayInputStream(object.getData()));
+        }
+        return s3;
+    }
+
+    @Test
+    void runImport_loadsGzipLinesAndCountsBadOnes() throws Exception {
+        var object = s3Object("imp/part-0.json.gz",
+                gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\nnot json\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n"));
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        var svc = serviceWithS3(s3With(object), importStore);
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "GZIP");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(3L, desc.getProcessedItemCount());
+        assertEquals(2L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+        assertTrue(desc.getProcessedSizeBytes() > 0);
+        assertNotNull(desc.getEndTime());
+        assertEquals("COMPLETED", importStore.get(desc.getImportArn()).orElseThrow().getImportStatus());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+        assertEquals("u2", svc.getItem("Users", item("userId", "u2"), "us-east-1").get("userId").get("S").asText());
+    }
+
+    @Test
+    void runImport_persistsLoadedItems() {
+        var object = s3Object("imp/data.json",
+                "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n".getBytes(StandardCharsets.UTF_8));
+        var itemStore = new InMemoryStorage<String, Map<String, JsonNode>>();
+        var svc = new DynamoDbService(new InMemoryStorage<>(), itemStore, null, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3With(object), mapper);
+        createUsersTableInCreating(svc);
+
+        svc.runImport(importDescription("bucket", "imp/", "NONE"), "Users", "us-east-1");
+
+        assertEquals(1, itemStore.scan(k -> true).size());
+        assertEquals(2, itemStore.scan(k -> true).getFirst().size());
+    }
+
+    @Test
+    void runImport_unreadableObject_isCountedAndTheRestIsLoaded() throws Exception {
+        var data = s3Object("imp/data.json.gz", gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n"));
+        var manifest = s3Object("imp/manifest-summary.json", "{}".getBytes(StandardCharsets.UTF_8));
+        var svc = serviceWithS3(s3With(data, manifest), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "GZIP");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_malformedAttributeValue_isCountedNotFatal() {
+        var object = s3Object("imp/data.json",
+                ("{\"Item\":{\"userId\":{\"S\":\"u1\"},\"m\":{\"M\":\"not a map\"}}}\n"
+                + "{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n").getBytes(StandardCharsets.UTF_8));
+        var svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+    }
+
+    @Test
+    void runImport_missingBucket_failsWithS3NoSuchBucket() {
+        var s3 = mock(S3Service.class);
+        when(s3.listObjects("missing", "imp/", null, 0))
+                .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("missing", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3NoSuchBucket", desc.getFailureCode());
+        assertNotNull(desc.getEndTime());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_otherS3Error_reportsAnS3FailureCode() {
+        var s3 = mock(S3Service.class);
+        when(s3.listObjects("bucket", "imp/", null, 0))
+                .thenThrow(new AwsException("AccessDenied", "Access Denied", 403));
+        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3AccessDenied", desc.getFailureCode());
+    }
+
+    @Test
+    void deleteTable_whileCreating_returnsResourceInUseException() {
+        createUsersTableInCreating(service);
+
+        var e = assertThrows(AwsException.class, () -> service.deleteTable("Users", "us-east-1"));
+
+        assertEquals("ResourceInUseException", e.getErrorCode());
+        assertEquals("CREATING", service.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void updateTable_whileCreating_returnsResourceInUseException() {
+        createUsersTableInCreating(service);
+
+        var e = assertThrows(AwsException.class, () -> service.updateTable("Users", 10L, 10L, "us-east-1"));
+
+        assertEquals("ResourceInUseException", e.getErrorCode());
+    }
+
+    @Test
+    void validateImportRequest_rejectsUnsupportedFormatWithoutUnsupportedOperationWording() {
+        var e = assertThrows(AwsException.class,
+                () -> service.validateImportRequest(importRequest("Users", "CSV")));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertTrue(e.getMessage().contains("CSV"));
+        assertFalse(e.getMessage().toLowerCase().contains("not supported"));
+    }
+
+    @Test
+    void validateImportRequest_blankClientToken_returnsValidationException() {
+        var request = importRequest("Users", "DYNAMODB_JSON");
+        request.put("ClientToken", "");
+
+        var e = assertThrows(AwsException.class, () -> service.validateImportRequest(request));
+
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void validateImportRequest_sameClientToken_returnsExistingImport() {
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        var request = importRequest("Users", "DYNAMODB_JSON");
+        request.put("ClientToken", "token-1");
+        var existing = importDescription("bucket", "imp/", "NONE");
+        existing.setClientToken("token-1");
+        existing.setInputFormat("DYNAMODB_JSON");
+        existing.setTableCreationParameters(request.get("TableCreationParameters"));
+        importStore.put(existing.getImportArn(), existing);
+        var svc = serviceWithS3(mock(S3Service.class), importStore);
+
+        assertSame(existing, svc.validateImportRequest(request));
+    }
+
+    @Test
+    void validateImportRequest_sameClientTokenDifferentParameters_returnsImportConflictException() {
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        var existing = importDescription("bucket", "imp/", "NONE");
+        existing.setClientToken("token-1");
+        existing.setInputFormat("DYNAMODB_JSON");
+        existing.setTableCreationParameters(mapper.createObjectNode().put("TableName", "Users"));
+        importStore.put(existing.getImportArn(), existing);
+        var svc = serviceWithS3(mock(S3Service.class), importStore);
+        var request = importRequest("Other", "DYNAMODB_JSON");
+        request.put("ClientToken", "token-1");
+
+        var e = assertThrows(AwsException.class, () -> svc.validateImportRequest(request));
+
+        assertEquals("ImportConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void listImports_pageSizeBelowOne_returnsValidationException() {
+        var svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+
+        var e = assertThrows(AwsException.class, () -> svc.listImports(null, 0, null));
+
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listImports_walksPagesByNextToken() {
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        for (var i = 1; i <= 3; i++) {
+            var desc = importDescription("bucket", "imp/", "NONE");
+            desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/" + i + "-abc");
+            importStore.put(desc.getImportArn(), desc);
+        }
+        var svc = serviceWithS3(mock(S3Service.class), importStore);
+
+        var first = svc.listImports(null, 2, null);
+        var second = svc.listImports(null, 2, first.nextToken());
+
+        assertEquals(2, first.importSummaryList().size());
+        assertNotNull(first.nextToken());
+        assertEquals(1, second.importSummaryList().size());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void constructor_failsInterruptedJobsAndActivatesCreatingTables() {
+        var resolver = new RegionResolver("us-east-1", "000000000000");
+        var tables = new AccountAwareStorageBackend<TableDefinition>(new InMemoryStorage<>(), null, "000000000000");
+        var exports = new AccountAwareStorageBackend<ExportDescription>(new InMemoryStorage<>(), null, "000000000000");
+        var imports = new AccountAwareStorageBackend<ImportTableDescription>(new InMemoryStorage<>(), null, "000000000000");
+        var before = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+                resolver, null, null, mock(S3Service.class), mapper);
+        createUsersTableInCreating(before);
+        var importDesc = importDescription("bucket", "imp/", "NONE");
+        importDesc.setImportStatus("IN_PROGRESS");
+        imports.put(importDesc.getImportArn(), importDesc);
+        var exportDesc = new ExportDescription();
+        exportDesc.setExportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/export/1-abc");
+        exportDesc.setExportStatus("IN_PROGRESS");
+        exports.put(exportDesc.getExportArn(), exportDesc);
+
+        var restarted = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+                resolver, null, null, mock(S3Service.class), mapper);
+
+        assertEquals("ACTIVE", restarted.describeTable("Users", "us-east-1").getTableStatus());
+        assertEquals("FAILED", restarted.describeImport(importDesc.getImportArn()).getImportStatus());
+        assertEquals("InterruptedByRestart", restarted.describeImport(importDesc.getImportArn()).getFailureCode());
+        assertEquals("FAILED", restarted.describeExport(exportDesc.getExportArn()).getExportStatus());
     }
 }
