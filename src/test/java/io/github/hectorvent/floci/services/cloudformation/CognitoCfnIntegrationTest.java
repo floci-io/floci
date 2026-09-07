@@ -14,6 +14,8 @@ import static io.github.hectorvent.floci.testing.RestAssuredJsonUtils.awsAction;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -31,6 +33,13 @@ import static org.junit.jupiter.api.Assertions.fail;
  * that deleting the stack removes the domain before the pool that owns it and the certificate after
  * the domain that uses it. A prefix domain, which
  * has no distribution of its own, resolves the attribute to an empty string rather than the literal.
+ *
+ * <p>The client case moves an {@code AWS::Cognito::UserPoolClient} between pools and flips
+ * {@code GenerateSecret}, its two create-only properties: each is a replacement whose displaced client
+ * is removed once the update completes, while a renamed client is updated in place. A replacement
+ * without a secret leaves no stale {@code ClientSecret} behind. Under Floci's deterministic client-id
+ * override a create whose derived id an existing client already holds is refused and the stack rolls
+ * back intact, whether the holder is the client being replaced or one in another stack.
  */
 @QuarkusTest
 class CognitoCfnIntegrationTest {
@@ -42,6 +51,29 @@ class CognitoCfnIntegrationTest {
     private static final String DOMAIN = "auth.cognito-cfn-it.example.com";
     private static final String REPLACEMENT_DOMAIN = "login.cognito-cfn-it.example.com";
     private static final String PREFIX_DOMAIN = "cognito-cfn-it-prefix";
+    private static final String CLIENT_STACK = "cognito-cfn-client-it";
+
+    private static String clientTemplate(String poolLogicalId, boolean generateSecret, String clientName) {
+        return """
+            {
+              "Resources": {
+                "PoolA": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cognito-cfn-client-it-a"}},
+                "PoolB": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cognito-cfn-client-it-b"}},
+                "Client": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {"UserPoolId": {"Ref": "%s"}, "ClientName": "%s", "GenerateSecret": %s}
+                }
+              },
+              "Outputs": {
+                "PoolA": {"Value": {"Ref": "PoolA"}},
+                "PoolB": {"Value": {"Ref": "PoolB"}},
+                "ClientId": {"Value": {"Ref": "Client"}},
+                "Name": {"Value": {"Fn::GetAtt": ["Client", "Name"]}},
+                "ProviderName": {"Value": {"Fn::GetAtt": ["PoolA", "ProviderName"]}}
+              }
+            }
+            """.formatted(poolLogicalId, clientName, generateSecret);
+    }
 
     /**
      * The certificate carries the logical id so a rotation can add a new certificate resource and
@@ -207,6 +239,143 @@ class CognitoCfnIntegrationTest {
         assertDomainIsGone(PREFIX_DOMAIN);
     }
 
+    private static final String OVERRIDE_STACK = "cognito-cfn-override-it";
+
+    /**
+     * A client in a pool whose clients take their id from their name, through Floci's reserved
+     * override tag. The pool lives outside the stack: an in-place pool update has no rollback in
+     * the engine yet, and this case is about the client.
+     */
+    private static String overrideClientTemplate(String poolId, boolean generateSecret) {
+        return """
+            {
+              "Resources": {
+                "Client": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {"UserPoolId": "%s", "ClientName": "override-web", "GenerateSecret": %s}
+                }
+              },
+              "Outputs": {"ClientId": {"Value": {"Ref": "Client"}}}
+            }
+            """.formatted(poolId, generateSecret);
+    }
+
+    @Test
+    void aReplacementThatWouldReuseADeterministicClientIdRollsTheUpdateBackWithThePriorClientIntact() throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+            {"PoolName": "cognito-cfn-override-it", "UserPoolTags": {"floci:override-cognito-client-id": "use-name"}}
+            """).path("UserPool").path("Id").asText();
+        cloudFormation(OVERRIDE_STACK, "CreateStack", overrideClientTemplate(poolId, false));
+
+        String stacks = describeStacks(OVERRIDE_STACK, "CREATE_COMPLETE");
+        assertEquals("override-web", outputValue(stacks, "ClientId"), "the override makes the id the name");
+        assertClientInPool(poolId, "override-web", "override-web");
+
+        // GenerateSecret is createOnly, but the replacement would be created under the same id and
+        // overwrite the client it replaces, so the update is refused and the stack rolls back.
+        cloudFormation(OVERRIDE_STACK, "UpdateStack", overrideClientTemplate(poolId, true));
+
+        stacks = describeStacks(OVERRIDE_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        String events = describeStackEvents(OVERRIDE_STACK);
+        assertTrue(events.contains("already belongs to an existing client"), events);
+        assertEquals("override-web", outputValue(stacks, "ClientId"));
+        cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"override-web\"}")
+            .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientName", equalTo("override-web"))
+            .body("UserPoolClient.ClientSecret", nullValue());
+
+        // A second stack claiming the same derived id must not overwrite the first stack's client.
+        cloudFormation(OVERRIDE_STACK + "-2", "CreateStack", overrideClientTemplate(poolId, false));
+        describeStacks(OVERRIDE_STACK + "-2", "ROLLBACK_COMPLETE");
+        assertClientInPool(poolId, "override-web", "override-web");
+        cloudFormation(OVERRIDE_STACK + "-2", "DeleteStack", null);
+        awaitStackDeleted(OVERRIDE_STACK + "-2");
+        assertClientInPool(poolId, "override-web", "override-web");
+
+        cloudFormation(OVERRIDE_STACK, "DeleteStack", null);
+        awaitStackDeleted(OVERRIDE_STACK);
+        assertClientIsGone(poolId, "override-web");
+        cognitoAction("DeleteUserPool", "{\"UserPoolId\": \"" + poolId + "\"}").then().statusCode(200);
+    }
+
+    @Test
+    void clientCreateOnlyChangesReplaceItAndARenameUpdatesItInPlace() throws Exception {
+        cloudFormation(CLIENT_STACK, "CreateStack", clientTemplate("PoolA", false, "web"));
+
+        String stacks = describeStacks(CLIENT_STACK, "CREATE_COMPLETE");
+        String poolA = outputValue(stacks, "PoolA");
+        String poolB = outputValue(stacks, "PoolB");
+        String clientId = outputValue(stacks, "ClientId");
+        assertEquals("web", outputValue(stacks, "Name"));
+        assertEquals("cognito-idp.us-east-1.amazonaws.com/" + poolA, outputValue(stacks, "ProviderName"));
+        assertClientInPool(poolA, clientId, "web");
+
+        // UserPoolId is createOnly: the client is created in the new pool and the old one removed.
+        cloudFormation(CLIENT_STACK, "UpdateStack", clientTemplate("PoolB", false, "web"));
+
+        stacks = describeStacks(CLIENT_STACK, "UPDATE_COMPLETE");
+        String moved = outputValue(stacks, "ClientId");
+        assertNotEquals(clientId, moved, "a pool move must be a replacement");
+        assertClientInPool(poolB, moved, "web");
+        assertClientIsGone(poolA, clientId);
+
+        // GenerateSecret is createOnly too: the replacement has a secret, the displaced client goes.
+        cloudFormation(CLIENT_STACK, "UpdateStack", clientTemplate("PoolB", true, "web"));
+
+        stacks = describeStacks(CLIENT_STACK, "UPDATE_COMPLETE");
+        String withSecret = outputValue(stacks, "ClientId");
+        assertNotEquals(moved, withSecret, "a GenerateSecret change must be a replacement");
+        assertClientInPool(poolB, withSecret, "web");
+        assertClientIsGone(poolB, moved);
+        cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolB + "\", \"ClientId\": \"" + withSecret + "\"}")
+            .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientSecret", notNullValue());
+
+        // ClientName is updatable: same client, new name.
+        cloudFormation(CLIENT_STACK, "UpdateStack", clientTemplate("PoolB", true, "web-renamed"));
+
+        stacks = describeStacks(CLIENT_STACK, "UPDATE_COMPLETE");
+        assertEquals(withSecret, outputValue(stacks, "ClientId"), "a rename must update the client in place");
+        assertEquals("web-renamed", outputValue(stacks, "Name"));
+        assertClientInPool(poolB, withSecret, "web-renamed");
+
+        // GenerateSecret back to false: a replacement again, and the new client carries no secret.
+        cloudFormation(CLIENT_STACK, "UpdateStack", clientTemplate("PoolB", false, "web-renamed"));
+
+        stacks = describeStacks(CLIENT_STACK, "UPDATE_COMPLETE");
+        String withoutSecret = outputValue(stacks, "ClientId");
+        assertNotEquals(withSecret, withoutSecret, "a GenerateSecret change must be a replacement");
+        assertClientIsGone(poolB, withSecret);
+        cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolB + "\", \"ClientId\": \"" + withoutSecret + "\"}")
+            .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientSecret", nullValue());
+
+        cloudFormation(CLIENT_STACK, "DeleteStack", null);
+        awaitStackDeleted(CLIENT_STACK);
+
+        assertClientIsGone(poolB, withoutSecret);
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolB + "\"}")
+            .then()
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static void assertClientInPool(String poolId, String clientId, String name) {
+        cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+            .then()
+            .statusCode(200)
+            .body("UserPoolClient.UserPoolId", equalTo(poolId))
+            .body("UserPoolClient.ClientName", equalTo(name));
+    }
+
+    private static void assertClientIsGone(String poolId, String clientId) {
+        cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+            .then()
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     private static void cloudFormation(String stack, String action, String templateBody) {
         RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
@@ -217,6 +386,16 @@ class CognitoCfnIntegrationTest {
             request.formParam("TemplateBody", templateBody);
         }
         request.when().post("/").then().statusCode(200);
+    }
+
+    private static String describeStackEvents(String stack) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stack)
+        .when().post("/").then().statusCode(200)
+            .extract().asString();
     }
 
     private static String describeStacks(String stack, String expectedStatus) {

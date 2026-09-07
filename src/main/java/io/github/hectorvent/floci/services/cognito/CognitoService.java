@@ -255,6 +255,9 @@ public class CognitoService implements ResourceProvider {
         UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
         populateUserPool(updatedPool, request);
+        if (request.get("PoolName") instanceof String poolName && !poolName.isBlank()) {
+            updatedPool.setName(poolName);
+        }
 
         updatedPool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         poolStore.put(id, updatedPool);
@@ -572,7 +575,7 @@ public class CognitoService implements ResourceProvider {
                                                Boolean enableTokenRevocation) {
 
         UserPool userPool = describeUserPool(userPoolId);
-        String clientId = UUID.randomUUID().toString().replace("-", "").substring(0, 26);
+        String clientId = clientIdFor(userPool, clientName);
         List<String> normalizedAllowedOAuthFlows = normalizeStringList(allowedOAuthFlows);
         List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
         List<String> normalizedCallbackUrls = normalizeStringList(callbackURLs);
@@ -599,15 +602,6 @@ public class CognitoService implements ResourceProvider {
         );
 
         UserPoolClient client = new UserPoolClient();
-        if (userPool.getClientIdOverride() != null) {
-            if (userPool.getClientIdOverride().equalsIgnoreCase("use-name")) {
-                clientId = clientName;
-            } else if (userPool.getClientIdOverride().startsWith("append-to-name:")) {
-                clientId = clientName + userPool.getClientIdOverride().substring(15);
-            } else if (userPool.getClientIdOverride().startsWith("prepend-to-name:")) {
-                clientId = userPool.getClientIdOverride().substring(16) + clientName;
-            }
-        }
         client.setClientId(clientId);
         client.setUserPoolId(userPoolId);
         client.setClientName(clientName);
@@ -657,12 +651,41 @@ public class CognitoService implements ResourceProvider {
     }
 
     public UserPoolClient describeUserPoolClient(String userPoolId, String clientId) {
-        UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+        UserPoolClient client = describeUserPoolClient(clientId);
         if (!client.getUserPoolId().equals(userPoolId)) {
             throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
         }
         return client;
+    }
+
+    /**
+     * The id a client created now with this name in this pool would get: derived from the name when
+     * the pool carries the {@code floci:override-cognito-client-id} tag, otherwise null because it
+     * would be random. Lets a caller that must not overwrite an existing client check first.
+     */
+    public String deterministicClientIdFor(String userPoolId, String clientName) {
+        UserPool userPool = describeUserPool(userPoolId);
+        return userPool.getClientIdOverride() == null ? null : clientIdFor(userPool, clientName);
+    }
+
+    private static String clientIdFor(UserPool userPool, String clientName) {
+        String override = userPool.getClientIdOverride();
+        if (override != null) {
+            if (override.equalsIgnoreCase("use-name")) {
+                return clientName;
+            } else if (override.startsWith("append-to-name:")) {
+                return clientName + override.substring(15);
+            } else if (override.startsWith("prepend-to-name:")) {
+                return override.substring(16) + clientName;
+            }
+        }
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 26);
+    }
+
+    /** By id alone, for callers that hold only the client id, such as a CloudFormation stack resource. */
+    public UserPoolClient describeUserPoolClient(String clientId) {
+        return clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
     }
 
     public List<UserPoolClient> listUserPoolClients(String userPoolId) {

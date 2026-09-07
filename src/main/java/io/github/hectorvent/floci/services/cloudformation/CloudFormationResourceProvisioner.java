@@ -87,9 +87,6 @@ import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
-import io.github.hectorvent.floci.services.cognito.CognitoService;
-import io.github.hectorvent.floci.services.cognito.model.UserPool;
-import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
@@ -213,8 +210,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::Batch::JobQueue",
             "AWS::CloudFormation::CustomResource",
             "AWS::CloudFront::Distribution",
-            "AWS::Cognito::UserPool",
-            "AWS::Cognito::UserPoolClient",
             "AWS::DynamoDB::GlobalTable",
             "AWS::DynamoDB::Table",
             "AWS::EC2::EIP",
@@ -272,7 +267,6 @@ public class CloudFormationResourceProvisioner {
     private final EventBridgeService eventBridgeService;
     private final ApiGatewayService apiGatewayService;
     private final ApiGatewayV2Service apiGatewayV2Service;
-    private final CognitoService cognitoService;
     private final LambdaLayerService lambdaLayerService;
     private final ObjectMapper objectMapper;
     private final CustomResourceResponseStore customResourceResponseStore;
@@ -304,7 +298,6 @@ public class CloudFormationResourceProvisioner {
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
                                              PipesService pipesService,
-                                             CognitoService cognitoService,
                                              LambdaLayerService lambdaLayerService,
                                              ObjectMapper objectMapper,
                                              CustomResourceResponseStore customResourceResponseStore,
@@ -334,7 +327,6 @@ public class CloudFormationResourceProvisioner {
         this.eventBridgeService = eventBridgeService;
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
-        this.cognitoService = cognitoService;
         this.lambdaLayerService = lambdaLayerService;
         this.objectMapper = objectMapper;
         this.customResourceResponseStore = customResourceResponseStore;
@@ -430,10 +422,6 @@ public class CloudFormationResourceProvisioner {
                                 region,
                                 accountId,
                                 stackName);
-                case "AWS::Cognito::UserPool" ->
-                        provisionCognitoUserPool(resource, properties, engine, region, accountId, stackName);
-                case "AWS::Cognito::UserPoolClient" ->
-                        provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
                 case "Custom::DynamoDBReplica" -> provisionDynamoDbReplica(resource, properties, engine, region);
@@ -718,8 +706,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
             case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
             case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
-            case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
-            case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
             case "AWS::ElasticLoadBalancingV2::LoadBalancer" -> elbV2Service.deleteLoadBalancer(region, physicalId);
             case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
             case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
@@ -5770,97 +5756,6 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(deployment.getDeploymentId());
     }
 
-    // ── Cognito ──────────────────────────────────────────────────────────────
-
-    private void provisionCognitoUserPool(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                          String region, String accountId, String stackName) {
-        String poolName = resolveOptional(props, "UserPoolName", engine);
-        if (poolName == null || poolName.isBlank()) {
-            poolName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-
-        Map<String, Object> req = new HashMap<>();
-        if (props != null) {
-            req.putAll(jsonObjectToMap(engine.resolveNode(props)));
-        }
-        req.put("PoolName", poolName);
-
-        // Handle Tags
-        Map<String, String> tags = parseCfnTags(props != null ? props.get("UserPoolTags") : null, engine);
-        if (!tags.isEmpty()) {
-            req.put("UserPoolTags", tags);
-        }
-
-        UserPool pool;
-        if (r.getPhysicalId() == null) {
-            pool = cognitoService.createUserPool(req, region);
-        } else {
-            req.put("UserPoolId", r.getPhysicalId());
-            pool = cognitoService.updateUserPool(req, region);
-        }
-
-        r.setPhysicalId(pool.getId());
-        r.getAttributes().put("Arn", pool.getArn());
-        r.getAttributes().put("UserPoolId", pool.getId());
-        r.getAttributes().put("ProviderName", pool.getName());
-        r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
-    }
-
-    private void provisionCognitoUserPoolClient(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                                String region, String accountId, String stackName) {
-        String userPoolId = resolveOptional(props, "UserPoolId", engine);
-        String clientName = resolveOptional(props, "ClientName", engine);
-        if (clientName == null || clientName.isBlank()) {
-            clientName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-        boolean generateSecret = Boolean.parseBoolean(resolveOrDefault(props, "GenerateSecret", engine, "false"));
-        boolean allowedOAuthFlowsUserPoolClient = Boolean.parseBoolean(resolveOrDefault(props, "AllowedOAuthFlowsUserPoolClient", engine, "false"));
-        List<String> allowedOAuthFlows = resolveStringListOrEmpty(props, "AllowedOAuthFlows", engine);
-        List<String> allowedOAuthScopes = resolveStringListOrEmpty(props, "AllowedOAuthScopes", engine);
-
-        Map<String, Object> analyticsConfiguration = resolveMapOrDefault(props, "AnalyticsConfiguration", engine, null);
-        List<String> callbackURLs = resolveStringListOrEmpty(props, "CallbackURLs", engine);
-        String defaultRedirectURI = resolveOptional(props, "DefaultRedirectURI", engine);
-        List<String> explicitAuthFlows = resolveStringListOrEmpty(props, "ExplicitAuthFlows", engine);
-        Integer accessTokenValidity = parseIntegerPropOrNull(props, "AccessTokenValidity", engine);
-        Integer idTokenValidity = parseIntegerPropOrNull(props, "IdTokenValidity", engine);
-        List<String> logoutURLs = resolveStringListOrEmpty(props, "LogoutURLs", engine);
-        String preventUserExistenceErrors = resolveOptional(props, "PreventUserExistenceErrors", engine);
-        List<String> readAttributes = resolveStringListOrEmpty(props, "ReadAttributes", engine);
-        Integer refreshTokenValidity = parseIntegerPropOrNull(props, "RefreshTokenValidity", engine);
-        List<String> supportedIdentityProviders = resolveStringListOrEmpty(props, "SupportedIdentityProviders", engine);
-        Map<String, String> tokenValidityUnits = resolveStringMapOrNull(props, "TokenValidityUnits", engine);
-        List<String> writeAttributes = resolveStringListOrEmpty(props, "WriteAttributes", engine);
-        Map<String, Object> refreshTokenRotation = resolveMapOrDefault(props, "RefreshTokenRotation", engine, null);
-        Boolean enableTokenRevocation = parseBooleanOrNull(resolveOptional(props, "EnableTokenRevocation", engine));
-
-        UserPoolClient client;
-        if (r.getPhysicalId() == null) {
-            client = cognitoService.createUserPoolClient(
-                    userPoolId, clientName, generateSecret, allowedOAuthFlowsUserPoolClient,
-                    allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
-                    defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
-                    logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
-                    supportedIdentityProviders, tokenValidityUnits, writeAttributes,
-                    refreshTokenRotation, enableTokenRevocation);
-        } else {
-            client = cognitoService.updateUserPoolClient(
-                    userPoolId, r.getPhysicalId(), clientName, allowedOAuthFlowsUserPoolClient,
-                    allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
-                    defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
-                    logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
-                    supportedIdentityProviders, tokenValidityUnits, writeAttributes,
-                    refreshTokenRotation, enableTokenRevocation);
-        }
-
-        r.setPhysicalId(client.getClientId());
-        r.getAttributes().put("ClientId", client.getClientId());
-        r.getAttributes().put("ClientName", client.getClientName());
-        if (client.getClientSecret() != null) {
-            r.getAttributes().put("ClientSecret", client.getClientSecret());
-        }
-    }
-
     private Integer parseIntegerPropOrNull(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         String value = resolveOptional(props, name, engine);
         if (value == null || value.isBlank()) {
@@ -5871,19 +5766,6 @@ public class CloudFormationResourceProvisioner {
         } catch (NumberFormatException e) {
             return null;
         }
-    }
-
-    private Map<String, String> resolveStringMapOrNull(JsonNode props, String source, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return null;
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        if (resolved == null || !resolved.isObject()) {
-            return null;
-        }
-        Map<String, String> out = new LinkedHashMap<>();
-        resolved.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
-        return out;
     }
 
     // ── Lambda LayerVersion ──────────────────────────────────────────────────

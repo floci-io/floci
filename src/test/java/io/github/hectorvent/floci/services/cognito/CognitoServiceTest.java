@@ -861,6 +861,37 @@ class CognitoServiceTest {
     }
 
     @Test
+    void deterministicClientIdFollowsThePoolOverrideAndIsNullWithoutOne() {
+        UserPool plain = service.createUserPool(Map.of("PoolName", "plain"), "us-east-1");
+        assertNull(service.deterministicClientIdFor(plain.getId(), "web"));
+
+        UserPool useName = service.createUserPool(Map.of("PoolName", "use-name",
+                "UserPoolTags", Map.of(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, "use-name")), "us-east-1");
+        assertEquals("web", service.deterministicClientIdFor(useName.getId(), "web"));
+
+        UserPool append = service.createUserPool(Map.of("PoolName", "append",
+                "UserPoolTags", Map.of(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, "append-to-name:-id")), "us-east-1");
+        assertEquals("web-id", service.deterministicClientIdFor(append.getId(), "web"));
+
+        UserPool prepend = service.createUserPool(Map.of("PoolName", "prepend",
+                "UserPoolTags", Map.of(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, "prepend-to-name:app-")), "us-east-1");
+        assertEquals("app-web", service.deterministicClientIdFor(prepend.getId(), "web"));
+        assertEquals("app-web", service.createUserPoolClient(prepend.getId(), "web", false, false,
+                List.of(), List.of()).getClientId());
+    }
+
+    @Test
+    void updateUserPoolRenamesThePoolWhenPoolNameIsGiven() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "before"), "us-east-1");
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(), "PoolName", "after"), "us-east-1");
+        assertEquals("after", service.describeUserPool(pool.getId()).getName());
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(), "MfaConfiguration", "OFF"), "us-east-1");
+        assertEquals("after", service.describeUserPool(pool.getId()).getName());
+    }
+
+    @Test
     void updateUserPoolWithReservedTagStripsIt() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "PinnedPool"), "us-east-1");
 
