@@ -249,6 +249,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>macie2</artifactId>
         </dependency>
+        <!-- AWS Security Hub client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>securityhub</artifactId>
+        </dependency>
         <!-- AWS Account Management client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
