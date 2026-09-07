@@ -833,6 +833,8 @@ public class DynamoDbJsonHandler {
         return changedAttributes;
     }
 
+    private static final int MAX_TOTAL_SEGMENTS = 1_000_000;
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -1038,6 +1040,28 @@ public class DynamoDbJsonHandler {
                     + "Member must have value greater than or equal to 1", 400);
         }
 
+        var segmentErrors = new ArrayList<String>();
+        if (segment != null && segment < 0) {
+            segmentErrors.add("Value '" + segment + "' at 'segment' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 0");
+        }
+        if (totalSegments != null) {
+            if (totalSegments < 1) {
+                segmentErrors.add("Value '" + totalSegments + "' at 'totalSegments' failed to satisfy constraint: "
+                        + "Member must have value greater than or equal to 1");
+            }
+            if (MAX_TOTAL_SEGMENTS < totalSegments) {
+                segmentErrors.add("Value '" + totalSegments + "' at 'totalSegments' failed to satisfy constraint: "
+                        + "Member must have value less than or equal to " + MAX_TOTAL_SEGMENTS);
+            }
+        }
+        if (!segmentErrors.isEmpty()) {
+            var n = segmentErrors.size();
+            throw new AwsException("ValidationException",
+                    n + " validation error" + (n > 1 ? "s" : "") + " detected: "
+                    + String.join("; ", segmentErrors), 400);
+        }
+
         if (segment != null && totalSegments == null) {
             throw new AwsException("ValidationException",
                     "The TotalSegments parameter is required but was not present in the request when Segment parameter is present", 400);
@@ -1045,12 +1069,6 @@ public class DynamoDbJsonHandler {
         if (totalSegments != null && segment == null) {
             throw new AwsException("ValidationException",
                     "The Segment parameter is required but was not present in the request when parameter TotalSegments is present", 400);
-        }
-        if (totalSegments != null && totalSegments > 1_000_000) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + totalSegments
-                    + "' at 'totalSegments' failed to satisfy constraint: "
-                    + "Member must have value less than or equal to 1000000", 400);
         }
         if (segment != null && totalSegments != null && segment >= totalSegments) {
             throw new AwsException("ValidationException",
