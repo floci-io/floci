@@ -763,6 +763,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface BudgetsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface ApsServiceConfig {
         @WithDefault("true")
         boolean enabled();

@@ -34,6 +34,7 @@ import software.amazon.awssdk.services.fis.FisClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
 import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
+import software.amazon.awssdk.services.budgets.BudgetsClient;
 import software.amazon.awssdk.services.macie2.Macie2Client;
 import software.amazon.awssdk.services.rum.RumClient;
 import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2Client;
@@ -306,6 +307,14 @@ public final class TestFixtures {
 
     public static IdentitystoreClient identityStoreClient() {
         return IdentitystoreClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static BudgetsClient budgetsClient() {
+        return BudgetsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
