@@ -23,7 +23,8 @@ public class BudgetsJsonHandler {
         this.objectMapper = objectMapper;
     }
 
-    public Response handle(String action, JsonNode request) {
+    public Response handle(String action, JsonNode request, String callerAccountId) {
+        budgetsService.validateCallerScope(request, callerAccountId);
         return switch (action) {
             case "CreateBudget" -> emptyAfter(() -> budgetsService.createBudget(request));
             case "CreateBudgetAction" -> createBudgetAction(request);

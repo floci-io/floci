@@ -318,7 +318,7 @@ public class AwsJson11Controller {
                         organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "sso" -> ssoAdminJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "identitystore" -> identityStoreJsonHandler.handle(action, request);
-                case "budgets" -> budgetsJsonHandler.handle(action, request);
+                case "budgets" -> budgetsJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "servicequotas" -> serviceQuotasJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 default -> null;

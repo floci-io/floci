@@ -28,6 +28,19 @@ class BudgetsIntegrationTest {
                 .statusCode(200).body("Subscribers[0].Address", equalTo("ops@example.com"));
     }
 
+
+    @Test
+    void crossAccountRequestsReturnAccessDenied() {
+        String foreign = "210987654321";
+        String caller = "123456789012";
+        jsonAs(caller, "AWSBudgetServiceGateway.DescribeBudget",
+                "{\"AccountId\":\"" + foreign + "\",\"BudgetName\":\"foreign\"}")
+                .statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        jsonAs(caller, "AWSBudgetServiceGateway.ListTagsForResource",
+                "{\"ResourceARN\":\"arn:aws:budgets::" + foreign + ":budget/foreign\"}")
+                .statusCode(400).body("__type", equalTo("AccessDeniedException"));
+    }
+
     @Test
     void missingBudgetReturnsNotFound() {
         json("AWSBudgetServiceGateway.DescribeBudget", "{\"AccountId\":\"000000000000\",\"BudgetName\":\"missing\"}")
@@ -36,5 +49,10 @@ class BudgetsIntegrationTest {
 
     private static io.restassured.response.ValidatableResponse json(String target, String body) {
         return given().contentType(TYPE).header("Authorization", AUTH).header("X-Amz-Target", target).body(body).post("/").then();
+    }
+
+    private static io.restassured.response.ValidatableResponse jsonAs(String accountId, String target, String body) {
+        String auth = "AWS4-HMAC-SHA256 Credential=" + accountId + "/20260904/us-east-1/budgets/aws4_request";
+        return given().contentType(TYPE).header("Authorization", auth).header("X-Amz-Target", target).body(body).post("/").then();
     }
 }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.budgets;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -55,11 +56,76 @@ class BudgetsServiceTest {
         assertEquals(1, service.describeNotifications(update).items().size());
     }
 
+
+    @Test
+    void callerScopeRejectsCrossAccountIdsAndArns() {
+        ObjectNode request = mapper.createObjectNode().put("AccountId", "210987654321");
+        assertError("AccessDeniedException", () -> service.validateCallerScope(request, ACCOUNT));
+
+        ObjectNode arnRequest = mapper.createObjectNode()
+                .put("ResourceARN", "arn:aws:budgets::210987654321:budget/foreign");
+        assertError("AccessDeniedException", () -> service.validateCallerScope(arnRequest, ACCOUNT));
+    }
+
+    @Test
+    void budgetActionDefinitionsMustMatchTypeAndContainRequiredFields() {
+        service.createBudget(createBudget("actions"));
+
+        ObjectNode emptyIam = actionRequest("actions", "APPLY_IAM_POLICY");
+        emptyIam.set("Definition", mapper.createObjectNode().set("IamActionDefinition", mapper.createObjectNode()));
+        assertError("InvalidParameterException", () -> service.createBudgetAction(emptyIam));
+
+        ObjectNode noIamTarget = actionRequest("actions", "APPLY_IAM_POLICY");
+        noIamTarget.set("Definition", mapper.createObjectNode().set("IamActionDefinition",
+                mapper.createObjectNode().put("PolicyArn", "arn:aws:iam::aws:policy/ReadOnlyAccess")));
+        assertError("InvalidParameterException", () -> service.createBudgetAction(noIamTarget));
+
+        ObjectNode wrongVariant = actionRequest("actions", "APPLY_IAM_POLICY");
+        ObjectNode ssm = mapper.createObjectNode().put("ActionSubType", "STOP_EC2_INSTANCES").put("Region", "us-east-1");
+        ssm.putArray("InstanceIds").add("i-12345678");
+        wrongVariant.set("Definition", mapper.createObjectNode().set("SsmActionDefinition", ssm));
+        assertError("InvalidParameterException", () -> service.createBudgetAction(wrongVariant));
+
+        BudgetActionRecord record = service.createBudgetAction(actionRequest("actions", "APPLY_IAM_POLICY"));
+        ObjectNode update = mapper.createObjectNode().put("AccountId", ACCOUNT).put("BudgetName", "actions")
+                .put("ActionId", record.getActionId());
+        update.set("Definition", mapper.createObjectNode().set("SsmActionDefinition", ssm));
+        assertError("InvalidParameterException", () -> service.updateBudgetAction(update));
+    }
+
+    @Test
+    void actionExecutionUsesAwsStatusAndHistoryEnums() {
+        service.createBudget(createBudget("execute"));
+        BudgetActionRecord record = service.createBudgetAction(actionRequest("execute", "APPLY_IAM_POLICY"));
+
+        ObjectNode execute = mapper.createObjectNode().put("AccountId", ACCOUNT).put("BudgetName", "execute")
+                .put("ActionId", record.getActionId()).put("ExecutionType", "APPROVE_BUDGET_ACTION");
+        BudgetActionRecord executed = service.executeBudgetAction(execute);
+
+        assertEquals("EXECUTION_SUCCESS", executed.getAction().path("Status").asText());
+        JsonNode history = executed.getHistories().get(executed.getHistories().size() - 1);
+        assertEquals("EXECUTE_ACTION", history.path("EventType").asText());
+        assertEquals("EXECUTION_SUCCESS", history.path("Status").asText());
+    }
+
     private ObjectNode createBudget(String name) {
         ObjectNode request = mapper.createObjectNode().put("AccountId", ACCOUNT);
         ObjectNode budget = request.putObject("Budget");
         budget.put("BudgetName", name).put("BudgetType", "COST").put("TimeUnit", "MONTHLY");
         budget.putObject("BudgetLimit").put("Amount", "100").put("Unit", "USD");
+        return request;
+    }
+
+
+    private ObjectNode actionRequest(String budgetName, String actionType) {
+        ObjectNode request = mapper.createObjectNode().put("AccountId", ACCOUNT).put("BudgetName", budgetName)
+                .put("NotificationType", "ACTUAL").put("ActionType", actionType).put("ApprovalModel", "MANUAL")
+                .put("ExecutionRoleArn", "arn:aws:iam::" + ACCOUNT + ":role/BudgetExecutionRole");
+        request.putObject("ActionThreshold").put("ActionThresholdType", "PERCENTAGE").put("ActionThresholdValue", 100);
+        ObjectNode iam = mapper.createObjectNode().put("PolicyArn", "arn:aws:iam::aws:policy/ReadOnlyAccess");
+        iam.putArray("Users").add("alice");
+        request.set("Definition", mapper.createObjectNode().set("IamActionDefinition", iam));
+        request.putArray("Subscribers").addObject().put("SubscriptionType", "EMAIL").put("Address", "ops@example.com");
         return request;
     }
 

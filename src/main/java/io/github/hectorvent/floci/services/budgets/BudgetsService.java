@@ -31,6 +31,11 @@ import java.util.regex.Pattern;
 public class BudgetsService implements Resettable {
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final Pattern ACTION_ID = Pattern.compile("^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$");
+    private static final Pattern IAM_POLICY_ARN = Pattern.compile("^arn:aws(?:-eusc|-cn|-us-gov|-iso|-iso-[a-z])?:iam::(?:\\d{12}|aws):policy/.+$");
+    private static final Pattern SCP_POLICY_ID = Pattern.compile("^p-[0-9a-zA-Z_]{8,128}$");
+    private static final Pattern SCP_TARGET_ID = Pattern.compile("^(?:ou-[0-9a-z]{4,32}-[a-z0-9]{8,32}|\\d{12})$");
+    private static final Pattern SSM_INSTANCE_ID = Pattern.compile("^(?:i-(?:\\w{8}|\\w{17})|[a-zA-Z](?:[\\w-]{0,61}\\w)?)$");
+    private static final Pattern AWS_REGION = Pattern.compile("^\\w{2,4}-\\w+(?:-\\w+)?-\\d$");
     private static final Pattern BUDGET_NAME = Pattern.compile("^(?![^:\\\\]*/action/|(?i).*<script>.*</script>.*)[^:\\\\]+$");
     private static final Set<String> BUDGET_TYPES = Set.of("USAGE", "COST", "RI_UTILIZATION", "RI_COVERAGE",
             "SAVINGS_PLANS_UTILIZATION", "SAVINGS_PLANS_COVERAGE");
@@ -62,6 +67,32 @@ public class BudgetsService implements Resettable {
         this.budgets = budgets;
         this.actions = actions;
         this.objectMapper = objectMapper;
+    }
+
+
+    public void validateCallerScope(JsonNode request, String callerAccountId) {
+        if (callerAccountId == null || !ACCOUNT_ID.matcher(callerAccountId).matches()) {
+            throw new AwsException("AccessDeniedException",
+                    "You are not authorized to use this operation with the given parameters.", 400);
+        }
+        if (request != null && request.has("AccountId")) {
+            String requestedAccountId = requireAccount(request);
+            if (!callerAccountId.equals(requestedAccountId)) {
+                throw new AwsException("AccessDeniedException",
+                        "You are not authorized to use this operation with the given parameters.", 400);
+            }
+        }
+        if (request != null && request.has("ResourceARN")) {
+            String arn = text(request, "ResourceARN");
+            if (arn == null) {
+                throw invalid("ResourceARN is required.");
+            }
+            ResourceRef ref = parseResourceArn(arn);
+            if (!callerAccountId.equals(ref.accountId())) {
+                throw new AwsException("AccessDeniedException",
+                        "You are not authorized to use this operation with the given parameters.", 400);
+            }
+        }
     }
 
     public BudgetRecord describeBudget(JsonNode request) {
@@ -297,7 +328,7 @@ public class BudgetsService implements Resettable {
         String accountId = requireAccount(request);
         String budgetName = requireBudgetName(request);
         requireBudget(accountId, budgetName);
-        validateActionRequest(request, true);
+        validateActionRequest(request, true, text(request, "ActionType"));
         String actionId = UUID.randomUUID().toString();
         ObjectNode action = actionFromRequest(request, actionId, "STANDBY");
         BudgetActionRecord record = new BudgetActionRecord();
@@ -350,7 +381,7 @@ public class BudgetsService implements Resettable {
         String budgetName = requireBudgetName(request);
         String actionId = requireActionId(request);
         BudgetActionRecord record = requireAction(accountId, budgetName, actionId);
-        validateActionRequest(request, false);
+        validateActionRequest(request, false, record.getAction().path("ActionType").asText());
         ObjectNode oldAction = record.getAction().deepCopy();
         ObjectNode updated = oldAction.deepCopy();
         for (String field : List.of("ActionThreshold", "ApprovalModel", "Definition", "ExecutionRoleArn", "NotificationType", "Subscribers")) {
@@ -359,7 +390,7 @@ public class BudgetsService implements Resettable {
             }
         }
         record.setAction(updated);
-        addActionHistory(record, "UPDATE_ACTION", "SUCCEEDED", "Budget action updated.", updated);
+        addActionHistory(record, "UPDATE_ACTION", updated.path("Status").asText(), "Budget action updated.", updated);
         actions.putForAccount(accountId, actionKey(budgetName, actionId), record);
         ObjectNode result = objectMapper.createObjectNode();
         result.put("AccountId", accountId);
@@ -389,13 +420,13 @@ public class BudgetsService implements Resettable {
         }
         ObjectNode action = record.getAction().deepCopy();
         String status = switch (executionType) {
-            case "REVERSE_BUDGET_ACTION" -> "REVERSED";
+            case "REVERSE_BUDGET_ACTION" -> "REVERSE_SUCCESS";
             case "RESET_BUDGET_ACTION" -> "STANDBY";
-            default -> "EXECUTED";
+            default -> "EXECUTION_SUCCESS";
         };
         action.put("Status", status);
         record.setAction(action);
-        addActionHistory(record, executionType, "SUCCEEDED", "Budget action execution completed.", action);
+        addActionHistory(record, "EXECUTE_ACTION", status, "Budget action execution completed.", action);
         actions.putForAccount(accountId, actionKey(budgetName, actionId), record);
         return record;
     }
@@ -601,7 +632,7 @@ public class BudgetsService implements Resettable {
         }
     }
 
-    private void validateActionRequest(JsonNode request, boolean create) {
+    private void validateActionRequest(JsonNode request, boolean create, String effectiveActionType) {
         if (create || request.has("NotificationType")) {
             if (!NOTIFICATION_TYPES.contains(text(request, "NotificationType"))) {
                 throw invalid("NotificationType is invalid.");
@@ -612,6 +643,9 @@ public class BudgetsService implements Resettable {
                 throw invalid("ActionType is invalid.");
             }
         }
+        if (effectiveActionType == null || !ACTION_TYPES.contains(effectiveActionType)) {
+            throw invalid("ActionType is invalid.");
+        }
         if (create || request.has("ApprovalModel")) {
             if (!APPROVAL_MODELS.contains(text(request, "ApprovalModel"))) {
                 throw invalid("ApprovalModel is invalid.");
@@ -619,24 +653,16 @@ public class BudgetsService implements Resettable {
         }
         if (create || request.has("ActionThreshold")) {
             JsonNode threshold = request.get("ActionThreshold");
+            double value = threshold == null ? Double.NaN : threshold.path("ActionThresholdValue").asDouble(Double.NaN);
             if (threshold == null || !threshold.isObject()
                     || !ACTION_THRESHOLD_TYPES.contains(text(threshold, "ActionThresholdType"))
                     || !threshold.path("ActionThresholdValue").isNumber()
-                    || threshold.path("ActionThresholdValue").asDouble() < 0) {
+                    || !Double.isFinite(value) || value < 0 || value > 15_000_000_000_000D) {
                 throw invalid("ActionThreshold is invalid.");
             }
         }
         if (create || request.has("Definition")) {
-            JsonNode definition = request.get("Definition");
-            if (definition == null || !definition.isObject()) {
-                throw invalid("Definition is required.");
-            }
-            int variants = (definition.has("IamActionDefinition") ? 1 : 0)
-                    + (definition.has("ScpActionDefinition") ? 1 : 0)
-                    + (definition.has("SsmActionDefinition") ? 1 : 0);
-            if (variants != 1) {
-                throw invalid("Definition must contain exactly one action definition.");
-            }
+            validateActionDefinition(request.get("Definition"), effectiveActionType);
         }
         if (create || request.has("ExecutionRoleArn")) {
             String arn = text(request, "ExecutionRoleArn");
@@ -648,6 +674,98 @@ public class BudgetsService implements Resettable {
         if (create || request.has("Subscribers")) {
             parseSubscribers(request.get("Subscribers"));
         }
+    }
+
+    private void validateActionDefinition(JsonNode definition, String actionType) {
+        if (definition == null || !definition.isObject()) {
+            throw invalid("Definition is required.");
+        }
+        int variants = (definition.has("IamActionDefinition") ? 1 : 0)
+                + (definition.has("ScpActionDefinition") ? 1 : 0)
+                + (definition.has("SsmActionDefinition") ? 1 : 0);
+        if (variants != 1) {
+            throw invalid("Definition must contain exactly one action definition.");
+        }
+        switch (actionType) {
+            case "APPLY_IAM_POLICY" -> validateIamActionDefinition(definition.get("IamActionDefinition"));
+            case "APPLY_SCP_POLICY" -> validateScpActionDefinition(definition.get("ScpActionDefinition"));
+            case "RUN_SSM_DOCUMENTS" -> validateSsmActionDefinition(definition.get("SsmActionDefinition"));
+            default -> throw invalid("ActionType is invalid.");
+        }
+    }
+
+    private void validateIamActionDefinition(JsonNode iam) {
+        if (iam == null || !iam.isObject()) {
+            throw invalid("Definition does not match ActionType.");
+        }
+        String policyArn = text(iam, "PolicyArn");
+        if (policyArn == null || policyArn.length() < 25 || policyArn.length() > 684
+                || !IAM_POLICY_ARN.matcher(policyArn).matches()) {
+            throw invalid("IamActionDefinition.PolicyArn is invalid.");
+        }
+        int targets = validateStringArray(iam, "Groups", 100, 640)
+                + validateStringArray(iam, "Roles", 100, 576)
+                + validateStringArray(iam, "Users", 100, 576);
+        if (targets == 0) {
+            throw invalid("IamActionDefinition must target at least one group, role, or user.");
+        }
+    }
+
+    private void validateScpActionDefinition(JsonNode scp) {
+        if (scp == null || !scp.isObject()) {
+            throw invalid("Definition does not match ActionType.");
+        }
+        String policyId = text(scp, "PolicyId");
+        if (policyId == null || !SCP_POLICY_ID.matcher(policyId).matches()) {
+            throw invalid("ScpActionDefinition.PolicyId is invalid.");
+        }
+        JsonNode targets = scp.get("TargetIds");
+        if (targets == null || !targets.isArray() || targets.isEmpty() || targets.size() > 100) {
+            throw invalid("ScpActionDefinition.TargetIds is invalid.");
+        }
+        for (JsonNode target : targets) {
+            if (!target.isTextual() || !SCP_TARGET_ID.matcher(target.textValue()).matches()) {
+                throw invalid("ScpActionDefinition.TargetIds is invalid.");
+            }
+        }
+    }
+
+    private void validateSsmActionDefinition(JsonNode ssm) {
+        if (ssm == null || !ssm.isObject()) {
+            throw invalid("Definition does not match ActionType.");
+        }
+        if (!Set.of("STOP_EC2_INSTANCES", "STOP_RDS_INSTANCES").contains(text(ssm, "ActionSubType"))) {
+            throw invalid("SsmActionDefinition.ActionSubType is invalid.");
+        }
+        String region = text(ssm, "Region");
+        if (region == null || !AWS_REGION.matcher(region).matches()) {
+            throw invalid("SsmActionDefinition.Region is invalid.");
+        }
+        JsonNode instances = ssm.get("InstanceIds");
+        if (instances == null || !instances.isArray() || instances.isEmpty() || instances.size() > 100) {
+            throw invalid("SsmActionDefinition.InstanceIds is invalid.");
+        }
+        for (JsonNode instance : instances) {
+            if (!instance.isTextual() || !SSM_INSTANCE_ID.matcher(instance.textValue()).matches()) {
+                throw invalid("SsmActionDefinition.InstanceIds is invalid.");
+            }
+        }
+    }
+
+    private int validateStringArray(JsonNode node, String field, int maximumItems, int maximumLength) {
+        JsonNode values = node.get(field);
+        if (values == null || values.isNull()) {
+            return 0;
+        }
+        if (!values.isArray() || values.isEmpty() || values.size() > maximumItems) {
+            throw invalid(field + " is invalid.");
+        }
+        for (JsonNode value : values) {
+            if (!value.isTextual() || value.textValue().isBlank() || value.textValue().length() > maximumLength) {
+                throw invalid(field + " is invalid.");
+            }
+        }
+        return values.size();
     }
 
     private ObjectNode actionFromRequest(JsonNode request, String actionId, String status) {

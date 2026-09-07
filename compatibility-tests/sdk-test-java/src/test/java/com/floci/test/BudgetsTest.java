@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.budgets.model.*;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class BudgetsTest {
     private static final String ACCOUNT_ID = "000000000000";
@@ -102,8 +103,15 @@ class BudgetsTest {
                     .approvalModel(ApprovalModel.AUTOMATIC).build());
             client.executeBudgetAction(b -> b.accountId(ACCOUNT_ID).budgetName(budgetName).actionId(actionId)
                     .executionType(ExecutionType.APPROVE_BUDGET_ACTION));
-            assertThat(client.describeBudgetActionHistories(b -> b.accountId(ACCOUNT_ID).budgetName(budgetName).actionId(actionId)).actionHistories())
-                    .isNotEmpty();
+            Action executed = client.describeBudgetAction(b -> b.accountId(ACCOUNT_ID).budgetName(budgetName).actionId(actionId)).action();
+            assertThat(executed.status()).isEqualTo(ActionStatus.EXECUTION_SUCCESS);
+            List<ActionHistory> histories = client.describeBudgetActionHistories(
+                    b -> b.accountId(ACCOUNT_ID).budgetName(budgetName).actionId(actionId)).actionHistories();
+            assertThat(histories).isNotEmpty();
+            assertThat(histories).anySatisfy(history -> {
+                assertThat(history.eventType()).isEqualTo(EventType.EXECUTE_ACTION);
+                assertThat(history.status()).isEqualTo(ActionStatus.EXECUTION_SUCCESS);
+            });
 
             String actionArn = budgetArn + "/action/" + actionId;
             client.tagResource(b -> b.resourceARN(actionArn).resourceTags(ResourceTag.builder().key("action").value("yes").build()));
@@ -114,4 +122,17 @@ class BudgetsTest {
             client.deleteBudget(b -> b.accountId(ACCOUNT_ID).budgetName(budgetName));
         }
     }
+    @Test
+    void crossAccountBudgetAccessIsDenied() {
+        String caller = "123456789012";
+        String foreign = "210987654321";
+        try (BudgetsClient client = TestFixtures.budgetsClient(caller)) {
+            assertThatThrownBy(() -> client.describeBudget(b -> b.accountId(foreign).budgetName("foreign")))
+                    .isInstanceOf(AccessDeniedException.class);
+            assertThatThrownBy(() -> client.listTagsForResource(b ->
+                    b.resourceARN("arn:aws:budgets::" + foreign + ":budget/foreign")))
+                    .isInstanceOf(AccessDeniedException.class);
+        }
+    }
+
 }

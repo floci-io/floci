@@ -321,6 +321,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static BudgetsClient budgetsClient(String accountId) {
+        return BudgetsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
     public static Macie2Client macie2Client() {
         return macie2Client("test");
     }
