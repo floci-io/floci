@@ -23,6 +23,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -176,6 +177,7 @@ public class SesConfigurationSetService {
 
 
     void validateTrackingOptions(TrackingOptions options, Predicate<String> verifiedDomainIdentity) {
+        Objects.requireNonNull(verifiedDomainIdentity, "verifiedDomainIdentity probe is required");
         if (options == null) {
             return;
         }
@@ -201,6 +203,7 @@ public class SesConfigurationSetService {
     }
 
     void validateDeliveryOptions(DeliveryOptions options, Predicate<String> dedicatedIpPoolExists) {
+        Objects.requireNonNull(dedicatedIpPoolExists, "dedicatedIpPoolExists probe is required");
         if (options == null) {
             return;
         }
@@ -240,6 +243,7 @@ public class SesConfigurationSetService {
     }
 
     void requireVerifiedRedirectDomain(String domain, Predicate<String> verifiedDomainIdentity) {
+        Objects.requireNonNull(verifiedDomainIdentity, "verifiedDomainIdentity probe is required");
         if (domain == null) {
             throw new AwsException("ValidationError",
                     "1 validation error detected: Value at 'trackingOptions' failed to satisfy constraint: "

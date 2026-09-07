@@ -23,6 +23,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.UnaryOperator;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -642,6 +643,7 @@ public class SesContactService {
     public Map<String, String> collectListManagementOptOuts(Collection<String> addresses,
                                                             ListManagementOptions listManagement, String region,
                                                             UnaryOperator<String> addressExtractor) {
+        Objects.requireNonNull(addressExtractor, "addressExtractor is required");
         if (listManagement == null || listManagement.contactListName() == null
                 || listManagement.contactListName().isBlank() || addresses == null || addresses.isEmpty()) {
             return Map.of();
