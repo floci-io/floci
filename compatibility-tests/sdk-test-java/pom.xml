@@ -254,6 +254,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>account</artifactId>
         </dependency>
+        <!-- AWS Control Catalog client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>controlcatalog</artifactId>
+        </dependency>
         <!-- IAM Access Analyzer client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

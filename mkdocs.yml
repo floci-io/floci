@@ -124,6 +124,7 @@ nav:
     - IAM Identity Center (SSO Admin): services/ssoadmin.md
     - Identity Store: services/identitystore.md
     - Amazon Macie: services/macie2.md
+    - Control Catalog: services/controlcatalog.md
     - Control Tower: services/controltower.md
     - AWS Service Catalog: services/service-catalog.md
     - ElastiCache: services/elasticache.md
