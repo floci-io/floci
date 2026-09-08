@@ -569,11 +569,32 @@ public class CodeBuildService {
         String buildspecOverride = buildspecOverridesFor(account, region).get(original.getId());
         ProjectSource originalSource = original.getSource();
         return startBuild(region, account, original.getProjectName(),
-                buildspecOverride, original.getEnvironment(), null, original.getArtifacts(),
+                buildspecOverride, replayEnvironment(original.getEnvironment()), null, original.getArtifacts(),
                 null, originalSource != null ? originalSource.getType() : null,
                 originalSource != null ? originalSource.getLocation() : null,
                 original.getSecondarySources(),
                 original.getTimeoutInMinutes(), null, null);
+    }
+
+    /**
+     * The original build's environment as a StartBuild override that wins on every field. A
+     * build started from a project with no variables stores a null list; left null, the
+     * override merge would fall back to the CURRENT project's variables and the retry would
+     * pick up whatever the project gained since, so null is replayed as an empty list.
+     */
+    private static ProjectEnvironment replayEnvironment(ProjectEnvironment original) {
+        ProjectEnvironment replay = new ProjectEnvironment();
+        if (original != null) {
+            replay.setType(original.getType());
+            replay.setImage(original.getImage());
+            replay.setComputeType(original.getComputeType());
+            replay.setPrivilegedMode(original.getPrivilegedMode());
+            replay.setCertificate(original.getCertificate());
+            replay.setImagePullCredentialsType(original.getImagePullCredentialsType());
+        }
+        replay.setEnvironmentVariables(original != null && original.getEnvironmentVariables() != null
+                ? original.getEnvironmentVariables() : List.of());
+        return replay;
     }
 
     private Build copyBuild(Build source) {
