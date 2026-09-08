@@ -500,7 +500,7 @@ class CodePipelineServiceTest {
         CodePipelineExecution rollback = awaitStatus(rollbackId, "Succeeded");
         assertEquals("ROLLBACK", rollback.getExecutionType());
         assertEquals(firstId, rollback.getRollbackTargetPipelineExecutionId());
-        // Only the source stage (artifact seeding) and the target stage ran — Build did not.
+        // Only the source stage (artifact seeding) and the target stage ran. Build did not.
         assertTrue(rollback.getActionExecutions().stream()
                 .noneMatch(a -> "Build".equals(a.getStageName())));
         assertTrue(rollback.getActionExecutions().stream()

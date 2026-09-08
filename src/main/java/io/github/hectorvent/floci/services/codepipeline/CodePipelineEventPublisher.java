@@ -89,7 +89,7 @@ public class CodePipelineEventPublisher {
      * The SNS notification a Manual approval action sends when it starts waiting.
      *
      * <p>Known limitation: {@link SnsService#publish} resolves the topic through the
-     * caller's request context, and this runs on a worker thread with none — so the topic
+     * caller's request context, and this runs on a worker thread with none, so the topic
      * lookup falls back to the default account. Every async SNS publisher in the tree
      * (EventBridge, S3, Scheduler, Pipes) shares this shape; an account-explicit publish
      * overload is a cross-service follow-up rather than something to fork here.</p>
