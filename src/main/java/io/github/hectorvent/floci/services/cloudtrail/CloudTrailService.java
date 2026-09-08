@@ -508,12 +508,24 @@ public class CloudTrailService {
         if (value == null) {
             return false;
         }
-        if (!isEmpty(fs.equalsValues()) && fs.equalsValues().stream().noneMatch(value::equals)) return false;
-        if (!isEmpty(fs.notEquals()) && fs.notEquals().stream().anyMatch(value::equals)) return false;
-        if (!isEmpty(fs.startsWith()) && fs.startsWith().stream().noneMatch(value::startsWith)) return false;
-        if (!isEmpty(fs.notStartsWith()) && fs.notStartsWith().stream().anyMatch(value::startsWith)) return false;
-        if (!isEmpty(fs.endsWith()) && fs.endsWith().stream().noneMatch(value::endsWith)) return false;
-        if (!isEmpty(fs.notEndsWith()) && fs.notEndsWith().stream().anyMatch(value::endsWith)) return false;
+        if (!isEmpty(fs.equalsValues()) && fs.equalsValues().stream().noneMatch(value::equals)) {
+            return false;
+        }
+        if (!isEmpty(fs.notEquals()) && fs.notEquals().stream().anyMatch(value::equals)) {
+            return false;
+        }
+        if (!isEmpty(fs.startsWith()) && fs.startsWith().stream().noneMatch(value::startsWith)) {
+            return false;
+        }
+        if (!isEmpty(fs.notStartsWith()) && fs.notStartsWith().stream().anyMatch(value::startsWith)) {
+            return false;
+        }
+        if (!isEmpty(fs.endsWith()) && fs.endsWith().stream().noneMatch(value::endsWith)) {
+            return false;
+        }
+        if (!isEmpty(fs.notEndsWith()) && fs.notEndsWith().stream().anyMatch(value::endsWith)) {
+            return false;
+        }
         return true;
     }
 

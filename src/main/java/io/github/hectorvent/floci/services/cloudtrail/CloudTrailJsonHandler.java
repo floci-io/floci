@@ -138,7 +138,7 @@ public class CloudTrailJsonHandler {
         boolean hasAdvanced = req.has("AdvancedEventSelectors") && req.path("AdvancedEventSelectors").isArray()
                 && !req.path("AdvancedEventSelectors").isEmpty();
         if (hasBasic && hasAdvanced) {
-            throw new AwsException("InvalidParameterCombinationException",
+            throw new AwsException("InvalidEventSelectorsException",
                     "EventSelectors and AdvancedEventSelectors are mutually exclusive on a single trail.", 400);
         }
 

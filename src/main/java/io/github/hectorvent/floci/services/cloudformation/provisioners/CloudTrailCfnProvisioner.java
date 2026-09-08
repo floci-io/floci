@@ -102,7 +102,7 @@ public class CloudTrailCfnProvisioner implements CfnResourceProvisioner {
         boolean hasAdvanced = resolved.has("AdvancedEventSelectors") && resolved.path("AdvancedEventSelectors").isArray()
                 && !resolved.path("AdvancedEventSelectors").isEmpty();
         if (hasBasic && hasAdvanced) {
-            throw new AwsException("InvalidParameterCombinationException",
+            throw new AwsException("InvalidEventSelectorsException",
                     "EventSelectors and AdvancedEventSelectors are mutually exclusive on a single trail.", 400);
         }
         if (hasAdvanced) {

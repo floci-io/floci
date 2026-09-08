@@ -148,7 +148,7 @@ class CloudTrailAdvancedSelectorsIntegrationTest {
                 """, trailName);
         invokeCloudTrail("PutEventSelectors", putBoth)
                 .then().statusCode(400)
-                .body(containsString("InvalidParameterCombinationException"));
+                .body(containsString("InvalidEventSelectorsException"));
     }
 
     // --- Helpers ---
