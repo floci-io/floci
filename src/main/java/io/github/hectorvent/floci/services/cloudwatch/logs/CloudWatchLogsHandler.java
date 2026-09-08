@@ -28,14 +28,17 @@ public class CloudWatchLogsHandler {
 
     private final CloudWatchLogsService logsService;
     private final CloudWatchLogsCrossAccountService crossAccountService;
+    private final CloudWatchLogsMetricFilterHandler metricFilterHandler;
     private final ObjectMapper objectMapper;
 
     @Inject
     public CloudWatchLogsHandler(CloudWatchLogsService logsService,
                                  CloudWatchLogsCrossAccountService crossAccountService,
+                                 CloudWatchLogsMetricFilterService metricFilterService,
                                  ObjectMapper objectMapper) {
         this.logsService = logsService;
         this.crossAccountService = crossAccountService;
+        this.metricFilterHandler = new CloudWatchLogsMetricFilterHandler(metricFilterService, objectMapper);
         this.objectMapper = objectMapper;
     }
 
@@ -62,6 +65,8 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "PutMetricFilter", "DescribeMetricFilters", "DeleteMetricFilter", "TestMetricFilter" ->
+                    metricFilterHandler.handle(action, request, region);
             case "AssociateKmsKey" -> handleAssociateKmsKey(request, region);
             case "DisassociateKmsKey" -> handleDisassociateKmsKey(request, region);
             case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
@@ -130,7 +135,7 @@ public class CloudWatchLogsHandler {
                 node.put("kmsKeyId", g.getKmsKeyId());
             }
             node.put("storedBytes", 0);
-            node.put("metricFilterCount", 0);
+            node.put("metricFilterCount", metricFilterHandler.metricFilterCount(g.getLogGroupName(), region));
             groupsArray.add(node);
         }
         response.set("logGroups", groupsArray);

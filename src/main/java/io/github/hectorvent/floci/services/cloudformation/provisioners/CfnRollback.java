@@ -82,6 +82,13 @@ public final class CfnRollback {
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
+     * Holds the definition a metric filter had before an in-place update replaced it, or the fact
+     * that it did not exist, so a failed stack update can put it back. Written by
+     * {@code LogsMetricFilterCfnProvisioner} before its put and spent by its {@code rollbackUpdate}.
+     */
+    public static final String METRIC_FILTER_UPDATE_SNAPSHOT_ATTR = "__FlociMetricFilterUpdateSnapshot";
+
+    /**
      * Holds the pipe a rename displaced: the name it still lives under, the region that addresses
      * it, how many times deleting it has been attempted, and when the replacement was created.
      * Written by {@code PipesCfnProvisioner} when it creates the replacement, and spent by whichever
