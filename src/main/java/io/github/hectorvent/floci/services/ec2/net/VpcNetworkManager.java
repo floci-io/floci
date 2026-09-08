@@ -102,8 +102,25 @@ public class VpcNetworkManager {
      * Instance addresses start here inside each subnet slice. AWS reserves the first four
      * addresses of a subnet and Docker takes the first as the gateway, so starting at .10
      * clears both without arithmetic that has to stay in sync with either.
+     *
+     * <p>Ten addresses of headroom is cheap in a /24 and impossible in a /29, which holds eight
+     * addresses in total. {@link #firstHostOffset} scales the offset down for such blocks rather
+     * than leaving them with nothing at all to hand out.
      */
     static final int FIRST_HOST_OFFSET = 10;
+
+    /**
+     * The smallest offset any block can start allocating at: past the network address, and past
+     * the address Docker takes for the gateway.
+     */
+    static final int MIN_HOST_OFFSET = 2;
+
+    /**
+     * The longest prefix this manager will ever allocate a block at. A /28 is the smallest block
+     * AWS itself accepts as a subnet, and about the smallest that is worth handing to a VPC:
+     * past it the network, gateway and broadcast addresses are most of the block.
+     */
+    static final int MAX_ALLOCATABLE_PREFIX = 28;
 
     private final EmulatorConfig config;
     private final DockerClient dockerClient;
@@ -114,6 +131,10 @@ public class VpcNetworkManager {
     private final Map<String, String> subnetOwner = new ConcurrentHashMap<>();
 
     private final Object planLock = new Object();
+
+    /** So a misconfigured fallback prefix is reported once, not once per VPC. */
+    private final java.util.concurrent.atomic.AtomicBoolean warnedPrefixClamp =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     private final ScheduledExecutorService retries = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "ec2-vpc-network-teardown");
@@ -252,7 +273,7 @@ public class VpcNetworkManager {
         if (!vpc.substituted && declared.isPresent()
                 && vpc.effective.contains(declared.get())
                 && siblings.stream().noneMatch(s -> s.overlaps(declared.get()))) {
-            return new SubnetBinding(subnetId, declared.get(), declared.get(), false);
+            return bindSubnet(vpc, subnetId, declared.get(), declared.get(), false);
         }
 
         int desiredPrefix = declared.map(Cidr4::prefix).orElse(24);
@@ -269,7 +290,41 @@ public class VpcNetworkManager {
                 vpc.substituted ? "its VPC's CIDR was itself substituted for " + vpc.effective
                         : "it does not sit inside the VPC range " + vpc.effective + " or collides with a sibling subnet",
                 slice);
-        return new SubnetBinding(subnetId, declared.orElse(null), slice, true);
+        return bindSubnet(vpc, subnetId, declared.orElse(null), slice, true);
+    }
+
+    /**
+     * Binds a subnet to a range it can actually allocate out of.
+     *
+     * <p>A block too small to hold one host address is refused here rather than accepted and then
+     * quietly allocating nothing: a subnet with no Docker-backed range is an ordinary, handled
+     * state (its instances keep synthesised addresses), whereas a subnet that claims a range and
+     * then returns empty from every {@link #allocatePrivateIp} looks like exhaustion and is not.
+     */
+    private SubnetBinding bindSubnet(VpcBinding vpc, String subnetId, Cidr4 declared,
+                                     Cidr4 effective, boolean substituted) {
+        if (effective != null && usableAddressCount(effective) == 0) {
+            LOG.warnv("Subnet {0} in VPC {1}: {2} is too small to hold a usable address ({3} address(es) "
+                            + "in total, of which the network address, the Docker gateway and the "
+                            + "broadcast address are already spoken for). Instances in this subnet fall "
+                            + "back to synthesised private addresses.",
+                    subnetId, vpc.vpcId, effective, String.valueOf(effective.size()));
+            return new SubnetBinding(subnetId, declared, null, true);
+        }
+        return new SubnetBinding(subnetId, declared, effective, substituted);
+    }
+
+    /**
+     * Where allocation starts inside {@code block}: the usual {@link #FIRST_HOST_OFFSET} of
+     * headroom when the block can spare it, and {@link #MIN_HOST_OFFSET} when it cannot.
+     */
+    static long firstHostOffset(Cidr4 block) {
+        return block.size() >= FIRST_HOST_OFFSET + 2 ? FIRST_HOST_OFFSET : MIN_HOST_OFFSET;
+    }
+
+    /** How many addresses {@code block} can hand to instances, once reserved ones are removed. */
+    static long usableAddressCount(Cidr4 block) {
+        return Math.max(0, block.size() - 1 - firstHostOffset(block));
     }
 
     /** First block of {@code desiredPrefix} inside {@code parent} that no member of {@code taken} overlaps. */
@@ -295,15 +350,37 @@ public class VpcNetworkManager {
                     + "no substitution is possible.", cfg.fallbackPool());
             return null;
         }
-        int prefix = cfg.fallbackPrefixLength();
+        int prefix = clampAllocatablePrefix(cfg.fallbackPrefixLength(), pool.get());
         if (declaredPrefix != null && declaredPrefix > prefix) {
             // A VPC that declared a /24 gets a /24: the substitute should be the size that was
             // asked for, not a /16 that wastes fifteen sixteenths of the pool per VPC.
-            prefix = Math.min(declaredPrefix, 30);
+            prefix = Math.min(declaredPrefix, MAX_ALLOCATABLE_PREFIX);
         }
         List<Cidr4> taken = new ArrayList<>(dockerNetworkSubnets(vpcId));
         bindings.values().stream().map(b -> b.effective).filter(c -> c != null).forEach(taken::add);
         return allocateSubBlock(pool.get(), prefix, taken);
+    }
+
+    /**
+     * {@code floci.services.ec2.vpc-networks.fallback-prefix-length} is a plain int with no bounds
+     * declared on it, and both ends of its range are useless in different ways: shorter than the
+     * pool's own prefix asks for a block the pool does not contain, and longer than
+     * {@link #MAX_ALLOCATABLE_PREFIX} asks for a block with no room for a host, which used to mean
+     * every substituted VPC allocated exactly nothing and said nothing about it.
+     *
+     * <p>Neither is worth refusing to start over, since the whole fallback path is already a
+     * degraded one; the value is clamped into the range that can work, and the clamp is logged.
+     */
+    private int clampAllocatablePrefix(int configured, Cidr4 pool) {
+        int clamped = Math.min(Math.max(configured, pool.prefix()), MAX_ALLOCATABLE_PREFIX);
+        if (clamped != configured && warnedPrefixClamp.compareAndSet(false, true)) {
+            LOG.warnv("floci.services.ec2.vpc-networks.fallback-prefix-length is /{0}, which cannot serve "
+                            + "instance addresses out of the pool {1}. Using /{2} instead; valid values run "
+                            + "from the pool''s own prefix (/{3}) to /{4}.",
+                    String.valueOf(configured), pool, String.valueOf(clamped),
+                    String.valueOf(pool.prefix()), String.valueOf(MAX_ALLOCATABLE_PREFIX));
+        }
+        return clamped;
     }
 
     // ─── Address allocation ──────────────────────────────────────────────────
@@ -329,7 +406,7 @@ public class VpcNetworkManager {
             // addresses released by terminated instances, which keeps a long-running survey from
             // exhausting a /24 after 245 launches.
             for (long pass = 0; pass < 2; pass++) {
-                long from = pass == 0 ? subnet.nextOffset : FIRST_HOST_OFFSET;
+                long from = pass == 0 ? subnet.nextOffset : subnet.firstOffset;
                 long to = pass == 0 ? limit : Math.min(subnet.nextOffset, limit);
                 for (long offset = from; offset < to; offset++) {
                     Optional<String> address = subnet.effective.addressAt(offset);
@@ -487,14 +564,41 @@ public class VpcNetworkManager {
             if (vpc.created) {
                 return vpc.networkName;
             }
+            Network existing = null;
             try {
-                dockerClient.inspectNetworkCmd().withNetworkId(vpc.networkName).exec();
-                vpc.created = true;
-                return vpc.networkName;
+                existing = dockerClient.inspectNetworkCmd().withNetworkId(vpc.networkName).exec();
             } catch (NotFoundException notThereYet) {
                 // expected: first instance in this VPC
             } catch (Exception e) {
                 LOG.debugv("Could not inspect VPC network {0}: {1}", vpc.networkName, e.getMessage());
+            }
+            if (existing != null) {
+                List<Cidr4> actual = ipamSubnets(existing);
+                if (actual.contains(vpc.effective)) {
+                    vpc.created = true;
+                    return vpc.networkName;
+                }
+                // A leftover under this VPC's own name, routing a range this VPC does not plan
+                // from. Adopting it would hand out addresses from vpc.effective on a bridge that
+                // routes something else: the exact quiet lie this class exists to remove.
+                //
+                // It is removed and recreated rather than re-planned onto the leftover's own
+                // subnet, for two reasons. Addresses have already been allocated from
+                // vpc.effective by the time materialise runs (attach validates the address
+                // against the subnet plan before calling it), and after a restart some of them
+                // are leases held by live containers, so the plan cannot be moved out from under
+                // them. And the name carries this emulator's port and region, so the network is
+                // by construction Floci's own: recreating it cannot destroy a user's network.
+                LOG.warnv("Docker network {0} for VPC {1} already exists with subnet {2}, but this VPC "
+                                + "allocates addresses from {3}. Removing the stale network and "
+                                + "recreating it on the planned range; anything still attached to it is "
+                                + "disconnected first.",
+                        vpc.networkName, vpc.vpcId,
+                        actual.isEmpty() ? "no readable IPAM configuration" : actual.toString(),
+                        vpc.effective);
+                if (!removeStaleNetwork(existing, vpc)) {
+                    return null;
+                }
             }
             try {
                 dockerClient.createNetworkCmd()
@@ -517,6 +621,41 @@ public class VpcNetworkManager {
                 return null;
             }
         }
+    }
+
+    /**
+     * @return false when the stale network is still there afterwards, in which case the caller
+     *         must not adopt it: an instance on the shared bridge with an unreachable private IP
+     *         is a documented degradation, whereas an instance holding an address the network
+     *         does not route is a wrong answer.
+     */
+    private boolean removeStaleNetwork(Network existing, VpcBinding vpc) {
+        String id = existing.getId() == null ? vpc.networkName : existing.getId();
+        try {
+            disconnectAll(existing);
+            dockerClient.removeNetworkCmd(id).exec();
+            return true;
+        } catch (NotFoundException alreadyGone) {
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Could not remove the stale Docker network {0} for VPC {1}: {2}. Instances in this "
+                            + "VPC stay on the shared bridge rather than being given addresses the "
+                            + "network does not route.",
+                    vpc.networkName, vpc.vpcId, e.getMessage());
+            return false;
+        }
+    }
+
+    /** Every IPv4 range the network's IPAM configuration declares, in declaration order. */
+    private static List<Cidr4> ipamSubnets(Network network) {
+        if (network.getIpam() == null || network.getIpam().getConfig() == null) {
+            return List.of();
+        }
+        List<Cidr4> subnets = new ArrayList<>();
+        for (Network.Ipam.Config ipam : network.getIpam().getConfig()) {
+            Cidr4.parse(ipam.getSubnet()).ifPresent(subnets::add);
+        }
+        return subnets;
     }
 
     private Map<String, String> networkLabels(VpcBinding vpc) {
@@ -755,13 +894,17 @@ public class VpcNetworkManager {
         final Cidr4 effective;
         final boolean substituted;
         final Set<String> leased = ConcurrentHashMap.newKeySet();
-        long nextOffset = FIRST_HOST_OFFSET;
+        /** Scaled to the block: a /29 cannot spare the ten addresses a /24 hands over freely. */
+        final long firstOffset;
+        long nextOffset;
 
         SubnetBinding(String subnetId, Cidr4 declared, Cidr4 effective, boolean substituted) {
             this.subnetId = subnetId;
             this.declared = declared;
             this.effective = effective;
             this.substituted = substituted;
+            this.firstOffset = effective == null ? FIRST_HOST_OFFSET : firstHostOffset(effective);
+            this.nextOffset = this.firstOffset;
         }
     }
 }

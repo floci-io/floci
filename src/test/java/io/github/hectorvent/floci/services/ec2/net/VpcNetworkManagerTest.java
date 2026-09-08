@@ -319,6 +319,103 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void adoptsALeftoverNetworkOnlyWhenItsSubnetIsTheOneThisVpcAllocatesFrom() {
+        // A Floci restart: the bridge for vpc-1 survived, on the range vpc-1 still plans from.
+        existingNetwork(manager.networkName(REGION, "vpc-1"), "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+
+        verify(docker, never()).createNetworkCmd();
+        assertTrue(removedNetworks.isEmpty(), "a matching network is reused, not churned");
+    }
+
+    @Test
+    void recreatesALeftoverNetworkWhoseSubnetIsNotTheRangeThisVpcAllocatesFrom() {
+        // What a previous run with a different declaration leaves behind: this VPC's own network
+        // name, carrying a range that has nothing to do with the addresses now being handed out.
+        String networkName = manager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "172.20.0.0/16", ourLabels("vpc-1", "4650"));
+
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        assertTrue(Cidr4.parse("10.0.1.0/24").orElseThrow()
+                .containsAddress(Cidr4.parse(address + "/32").orElseThrow().network()));
+
+        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+
+        assertEquals(List.of(networkName), removedNetworks,
+                "a network routing 172.20/16 cannot carry a 10.0.1.x address, so it is not adopted");
+        ArgumentCaptor<Network.Ipam> ipam = ArgumentCaptor.forClass(Network.Ipam.class);
+        verify(docker.createNetworkCmd()).withIpam(ipam.capture());
+        assertEquals("10.0.0.0/16", ipam.getValue().getConfig().get(0).getSubnet(),
+                "the network is recreated on the range the addresses actually come from");
+    }
+
+    @Test
+    void keepsInstancesOnTheBridgeWhenAStaleNetworkCannotBeRemoved() {
+        String networkName = manager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "172.20.0.0/16", ourLabels("vpc-1", "4650"));
+        when(docker.removeNetworkCmd(anyString())).thenThrow(new RuntimeException("has active endpoints"));
+
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isEmpty(),
+                "an unreachable private IP is a documented degradation; an address the network "
+                        + "does not route is a wrong answer");
+        verify(docker, never()).connectToNetworkCmd();
+    }
+
+    // ─── Small blocks: usable, or refused out loud ───────────────────────────
+
+    @Test
+    void aSubnetTooSmallForTenAddressesOfHeadroomStillAllocates() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        // A /29 holds eight addresses in total, so the usual .10 offset falls off the end of it.
+        manager.declareSubnet(REGION, "vpc-1", "subnet-tiny", "10.0.9.0/29");
+
+        assertEquals("10.0.9.0/29", manager.effectiveSubnetCidr(REGION, "subnet-tiny").orElseThrow());
+        List<String> allocated = new ArrayList<>();
+        Optional<String> next;
+        while ((next = manager.allocatePrivateIp(REGION, "subnet-tiny")).isPresent()) {
+            allocated.add(next.get());
+        }
+        assertEquals(List.of("10.0.9.2", "10.0.9.3", "10.0.9.4", "10.0.9.5", "10.0.9.6"), allocated,
+                "past the network address and the Docker gateway, and short of the broadcast address");
+    }
+
+    @Test
+    void aSubnetWithNoRoomForAnyHostIsRefusedRatherThanAllocatingNothing() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-nothing", "10.0.9.0/31");
+
+        assertTrue(manager.effectiveSubnetCidr(REGION, "subnet-nothing").isEmpty(),
+                "a subnet that can never hand out an address must not claim a Docker-backed range: "
+                        + "the caller has to fall back rather than read empty as exhaustion");
+        assertTrue(manager.allocatePrivateIp(REGION, "subnet-nothing").isEmpty());
+    }
+
+    @Test
+    void anUnusableFallbackPrefixLengthIsClampedToOneThatCanServeHosts() {
+        // Nothing bounds this config value, and a /30 block has no room for an instance at all.
+        when(config.services().ec2().vpcNetworks().fallbackPrefixLength()).thenReturn(30);
+
+        manager.declareVpc(REGION, "vpc-public", "54.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-public", "subnet-a", "54.0.1.0/24");
+
+        Cidr4 effective = Cidr4.parse(manager.effectiveVpcCidr(REGION, "vpc-public").orElseThrow()).orElseThrow();
+        assertTrue(effective.prefix() <= VpcNetworkManager.MAX_ALLOCATABLE_PREFIX,
+                "a configured-but-unusable prefix must not leave every substituted VPC empty");
+        assertTrue(manager.allocatePrivateIp(REGION, "subnet-a").isPresent(),
+                "the substituted VPC has to be able to hand out an address");
+    }
+
+    @Test
     void doesNothingWhenDisabled() {
         when(config.services().ec2().vpcNetworks().enabled()).thenReturn(false);
         manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
