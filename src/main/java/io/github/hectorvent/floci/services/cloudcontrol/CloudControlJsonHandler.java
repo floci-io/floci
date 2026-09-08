@@ -21,26 +21,26 @@ public class CloudControlJsonHandler {
         this.mapper = mapper;
     }
 
-    public Response handle(String action, JsonNode request, String region) {
+    public Response handle(String action, JsonNode request, String region, String accountId) {
         return switch (action) {
-            case "ListResources" -> listResources(request, region);
-            case "GetResource" -> getResource(request, region);
+            case "ListResources" -> listResources(request, region, accountId);
+            case "GetResource" -> getResource(request, region, accountId);
             case "CreateResource" -> progressResponse(
-                    service.createResource(region, required(request, "TypeName"),
+                    service.createResource(region, accountId, required(request, "TypeName"),
                             request.path("DesiredState").asText(null)));
             case "DeleteResource" -> progressResponse(
-                    service.deleteResource(region, required(request, "TypeName"), required(request, "Identifier")));
+                    service.deleteResource(region, accountId, required(request, "TypeName"), required(request, "Identifier")));
             case "GetResourceRequestStatus" -> progressResponse(
-                    service.requestStatus(requestToken(request)));
+                    service.requestStatus(accountId, requestToken(request)));
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + action + " is not supported.", 400);
         };
     }
 
-    private Response getResource(JsonNode request, String region) {
+    private Response getResource(JsonNode request, String region, String accountId) {
         String typeName = required(request, "TypeName");
         String identifier = required(request, "Identifier");
-        CloudControlService.ResourceDescription resource = service.getResource(region, typeName, identifier);
+        CloudControlService.ResourceDescription resource = service.getResource(region, accountId, typeName, identifier);
         ObjectNode response = mapper.createObjectNode();
         response.put("TypeName", typeName);
         ObjectNode desc = response.putObject("ResourceDescription");
@@ -67,6 +67,13 @@ public class CloudControlJsonHandler {
     }
 
     /**
+     * Compatibility entry point for direct callers that do not have request context.
+     */
+    public Response handle(String action, JsonNode request, String region) {
+        return handle(action, request, region, "000000000000");
+    }
+
+    /**
      * InvalidRequestException is the code Cloud Control declares for a malformed request, so it is
      * what an SDK maps onto a typed exception. ValidationException is not in the service model.
      */
@@ -90,12 +97,12 @@ public class CloudControlJsonHandler {
         return value;
     }
 
-    private Response listResources(JsonNode request, String region) {
+    private Response listResources(JsonNode request, String region, String accountId) {
         String typeName = required(request, "TypeName");
         ObjectNode response = mapper.createObjectNode();
         response.put("TypeName", typeName);
         ArrayNode resources = response.putArray("ResourceDescriptions");
-        for (CloudControlService.ResourceDescription resource : service.listResources(region, typeName)) {
+        for (CloudControlService.ResourceDescription resource : service.listResources(region, accountId, typeName)) {
             ObjectNode node = mapper.createObjectNode();
             node.put("Identifier", resource.identifier());
             node.put("Properties", resource.properties());

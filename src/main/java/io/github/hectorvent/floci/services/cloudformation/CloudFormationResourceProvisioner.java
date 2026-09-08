@@ -520,11 +520,17 @@ public class CloudFormationResourceProvisioner {
      */
     public void deleteStandalone(String resourceType, String identifier, String region,
                                  Map<String, String> attributes) {
+        deleteStandalone(resourceType, identifier, region, "000000000000", attributes);
+    }
+
+    /** Account-aware standalone delete used by Cloud Control. */
+    public void deleteStandalone(String resourceType, String identifier, String region,
+                                 String accountId, Map<String, String> attributes) {
         StackResource resource = new StackResource();
         resource.setResourceType(resourceType);
         resource.setPhysicalId(identifier);
         resource.setAttributes(new HashMap<>(attributes == null ? Map.of() : attributes));
-        delete(resource, region);
+        delete(resource, region, accountId);
     }
 
     /**
@@ -533,6 +539,10 @@ public class CloudFormationResourceProvisioner {
      * type-keyed {@link #delete(String, String, String)}.
      */
     public void delete(StackResource resource, String region) {
+        delete(resource, region, "000000000000");
+    }
+
+    public void delete(StackResource resource, String region, String accountId) {
         String resourceType = resource.getResourceType();
         // Registry first. An extracted provisioner owns its type outright, and gets the whole
         // resource so an attribute-aware delete can read its create-time attributes. Consulting it

@@ -315,7 +315,8 @@ public class AwsJson11Controller {
                         action, request, region, regionResolver.getAccountId());
                 case "servicecatalog" -> serviceCatalogJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
-                case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
+                case "cloudcontrol" -> cloudControlJsonHandler.handle(
+                                        action, request, region, regionResolver.getAccountId());
                 case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
                 // Organizations is global and account-scoped rather than region-scoped: every
                 // action is authorized against the calling account, so pass that instead of region.
