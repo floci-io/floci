@@ -34,6 +34,7 @@ AWS::CloudFront::OriginRequestPolicy	CloudFrontCfnProvisioner
 AWS::CloudFront::ResponseHeadersPolicy	CloudFrontCfnProvisioner
 AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
+AWS::CloudWatch::Dashboard	CloudWatchDashboardCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
 AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner
