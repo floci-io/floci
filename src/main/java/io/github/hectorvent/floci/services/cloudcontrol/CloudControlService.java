@@ -30,6 +30,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -87,8 +88,12 @@ public class CloudControlService {
                             persisted.attributes() == null ? Map.of() : Map.copyOf(persisted.attributes()),
                             persisted.model()));
         }
-        for (AccountAwareStorageBackend.AccountEntry<PersistedRequest> entry
-                : requestStore.scanAllAccountEntries(key -> true)) {
+        List<AccountAwareStorageBackend.AccountEntry<PersistedRequest>> persistedRequests =
+                requestStore.scanAllAccountEntries(key -> true);
+        persistedRequests.sort(Comparator.comparingLong(
+                        (AccountAwareStorageBackend.AccountEntry<PersistedRequest> entry) -> entry.value().createdAt())
+                .thenComparing(entry -> entry.value().event().requestToken()));
+        for (AccountAwareStorageBackend.AccountEntry<PersistedRequest> entry : persistedRequests) {
             PersistedRequest persisted = entry.value();
             ProgressEvent event = persisted.event();
             String accountId = event.accountId() == null ? DEFAULT_ACCOUNT : event.accountId();
@@ -110,7 +115,8 @@ public class CloudControlService {
                         .findFirst().orElse(normalized.identifier());
                 normalized = new ProgressEvent(normalized.typeName(), identifier, normalized.requestToken(),
                         normalized.operation(), "SUCCESS", null, recovered.model(), accountId);
-                persistRequest(new PersistedRequest(normalized, persisted.region(), persisted.desiredStateJson()));
+                persistRequest(new PersistedRequest(normalized, persisted.region(), persisted.desiredStateJson(),
+                        persisted.createdAt()));
             }
             requests.put(normalized.requestToken(), normalized);
             requestOrder.add(normalized.requestToken());
@@ -150,7 +156,11 @@ public class CloudControlService {
                                    Map<String, String> attributes, String model) {}
 
     @RegisterForReflection
-    record PersistedRequest(ProgressEvent event, String region, String desiredStateJson) {}
+    record PersistedRequest(ProgressEvent event, String region, String desiredStateJson, long createdAt) {
+        PersistedRequest(ProgressEvent event, String region, String desiredStateJson) {
+            this(event, region, desiredStateJson, 0L);
+        }
+    }
 
     @RegisterForReflection
     record PersistedCreatedResource(String requestToken, String accountId, String region, String typeName,
@@ -237,7 +247,7 @@ public class CloudControlService {
 
     private void submitCreate(String region, String accountId, String typeName, String desiredStateJson,
                               String token, ProgressEvent pending, JsonNode props) {
-        persistRequest(new PersistedRequest(pending, region, desiredStateJson));
+        persistRequest(new PersistedRequest(pending, region, desiredStateJson, System.currentTimeMillis()));
         executor.submit(() -> RequestScopes.runAs(accountId, () -> {
             try {
                 var resource = provisioner.provisionStandalone(typeName, props, region, accountId);
@@ -384,7 +394,8 @@ public class CloudControlService {
                 event.accountId() == null ? DEFAULT_ACCOUNT : event.accountId(), event.requestToken()).orElse(null);
         persistRequest(new PersistedRequest(event,
                 previous == null ? null : previous.region(),
-                previous == null ? null : previous.desiredStateJson()));
+                previous == null ? null : previous.desiredStateJson(),
+                previous == null ? System.currentTimeMillis() : previous.createdAt()));
         trimPersistedRequests();
         return event;
     }
