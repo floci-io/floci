@@ -322,6 +322,21 @@ class LambdaEventInvokeConfigCfnProvisionerTest {
         assertNull(provisioner.updateCleanupPhysicalId(r));
     }
 
+    /** The service keys configurations by the function's full ARN, so another account's function is another target. */
+    @Test
+    void theSameNameInAnotherAccountIsAnotherTarget() {
+        StackResource r = provision("""
+                {"FunctionName": "arn:aws:lambda:us-east-1:222222222222:function:orders", "Qualifier": "$LATEST"}
+                """, "arn:aws:lambda:us-east-1:111111111111:function:orders|$LATEST");
+
+        verify(lambda).putEventInvokeConfig(eq(REGION),
+                eq("arn:aws:lambda:us-east-1:222222222222:function:orders"), eq("$LATEST"), anyMap());
+        verify(lambda, never()).updateEventInvokeConfig(anyString(), anyString(), anyString(), anyMap());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("arn:aws:lambda:us-east-1:111111111111:function:orders|$LATEST",
+                provisioner.updateCleanupPhysicalId(r));
+    }
+
     @Test
     void theSameNameInAnotherRegionIsAnotherTarget() {
         StackResource r = provision("""

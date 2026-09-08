@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
@@ -26,7 +27,8 @@ import java.util.Set;
  *
  * <p>Both identifier parts are create-only. An update that still names the same function version
  * or alias, whether by the same text or by another form of the function name (a short name and
- * the function's ARN address one configuration), applies the template's settings through the
+ * the function's ARN address one configuration; another account's or Region's function does not),
+ * applies the template's settings through the
  * merge-style update call, as the AWS handler does, so a setting the template drops keeps its
  * stored value. The settings the configuration had are kept on the resource so a failed stack
  * update can put them back. An update that names another function or qualifier creates the
@@ -98,11 +100,24 @@ public class LambdaEventInvokeConfigCfnProvisioner implements CfnResourceProvisi
             LambdaArnUtils.ResolvedFunctionRef prior = LambdaArnUtils.resolve(priorFunction);
             LambdaArnUtils.ResolvedFunctionRef current = LambdaArnUtils.resolve(functionName);
             return prior.name().equals(current.name())
-                    && (prior.region() == null || current.region() == null
-                        || prior.region().equals(current.region()));
-        } catch (AwsException malformed) {
+                    && sameWhenBothKnown(prior.region(), current.region())
+                    && sameWhenBothKnown(accountOf(priorFunction), accountOf(functionName));
+        } catch (AwsException | IllegalArgumentException malformed) {
             return false;
         }
+    }
+
+    /** The account of a full ARN; a short name or partial ARN names the caller's own, so it agrees with any. */
+    private static String accountOf(String functionName) {
+        if (!functionName.startsWith("arn:")) {
+            return null;
+        }
+        String account = AwsArnUtils.parse(functionName).accountId();
+        return account == null || account.isBlank() ? null : account;
+    }
+
+    private static boolean sameWhenBothKnown(String prior, String current) {
+        return prior == null || current == null || prior.equals(current);
     }
 
     /**
