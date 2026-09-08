@@ -78,6 +78,15 @@ public class CloudControlService {
     }
 
     private void restorePersistedState() {
+        for (AccountAwareStorageBackend.AccountEntry<PersistedCreatedResource> entry
+                : createdStore.scanAllAccountEntries(key -> true)) {
+            PersistedCreatedResource persisted = entry.value();
+            String accountId = persisted.accountId() == null ? DEFAULT_ACCOUNT : persisted.accountId();
+            created.put(createdKey(accountId, persisted.region(), persisted.typeName(), persisted.identifier()),
+                    new CreatedResource(persisted.requestToken(), accountId,
+                            persisted.attributes() == null ? Map.of() : Map.copyOf(persisted.attributes()),
+                            persisted.model()));
+        }
         for (AccountAwareStorageBackend.AccountEntry<PersistedRequest> entry
                 : requestStore.scanAllAccountEntries(key -> true)) {
             PersistedRequest persisted = entry.value();
@@ -87,6 +96,22 @@ public class CloudControlService {
                     ? new ProgressEvent(event.typeName(), event.identifier(), event.requestToken(),
                     event.operation(), event.operationStatus(), event.statusMessage(),
                     event.resourceModel(), accountId) : event;
+            String requestToken = normalized.requestToken();
+            CreatedResource recovered = created.values().stream()
+                    .filter(resource -> requestToken.equals(resource.requestToken()))
+                    .findFirst().orElse(null);
+            if (recovered != null && "IN_PROGRESS".equals(normalized.operationStatus())
+                    && "CREATE".equals(normalized.operation())) {
+                String identifier = created.entrySet().stream()
+                        .filter(resource -> resource.getValue() == recovered)
+                        .map(Map.Entry::getKey)
+                        .map(key -> key.substring((accountId + "|").length()))
+                        .map(key -> key.substring(key.lastIndexOf('|') + 1))
+                        .findFirst().orElse(normalized.identifier());
+                normalized = new ProgressEvent(normalized.typeName(), identifier, normalized.requestToken(),
+                        normalized.operation(), "SUCCESS", null, recovered.model(), accountId);
+                persistRequest(new PersistedRequest(normalized, persisted.region(), persisted.desiredStateJson()));
+            }
             requests.put(normalized.requestToken(), normalized);
             requestOrder.add(normalized.requestToken());
             if ("IN_PROGRESS".equals(normalized.operationStatus())
@@ -101,15 +126,7 @@ public class CloudControlService {
                 }
             }
         }
-        for (AccountAwareStorageBackend.AccountEntry<PersistedCreatedResource> entry
-                : createdStore.scanAllAccountEntries(key -> true)) {
-            PersistedCreatedResource persisted = entry.value();
-            String accountId = persisted.accountId() == null ? DEFAULT_ACCOUNT : persisted.accountId();
-            created.put(createdKey(accountId, persisted.region(), persisted.typeName(), persisted.identifier()),
-                    new CreatedResource(accountId,
-                            persisted.attributes() == null ? Map.of() : Map.copyOf(persisted.attributes()),
-                            persisted.model()));
-        }
+        trimPersistedRequests();
     }
 
     private void persistRequest(PersistedRequest persisted) {
@@ -120,7 +137,7 @@ public class CloudControlService {
     private void persistCreated(String accountId, String region, String typeName, String identifier,
                                 CreatedResource resource) {
         createdStore.putForAccount(accountId, region + "|" + typeName + "|" + identifier,
-                new PersistedCreatedResource(accountId, region, typeName, identifier,
+                new PersistedCreatedResource(resource.requestToken(), accountId, region, typeName, identifier,
                         resource.attributes(), resource.model()));
     }
 
@@ -129,13 +146,14 @@ public class CloudControlService {
     }
 
     /** Create-time state for a resource this service provisioned. */
-    private record CreatedResource(String accountId, Map<String, String> attributes, String model) {}
+    private record CreatedResource(String requestToken, String accountId,
+                                   Map<String, String> attributes, String model) {}
 
     @RegisterForReflection
     record PersistedRequest(ProgressEvent event, String region, String desiredStateJson) {}
 
     @RegisterForReflection
-    record PersistedCreatedResource(String accountId, String region, String typeName,
+    record PersistedCreatedResource(String requestToken, String accountId, String region, String typeName,
                                             String identifier, Map<String, String> attributes,
                                             String model) {}
 
@@ -227,7 +245,7 @@ public class CloudControlService {
                     record(pending.failed("CreateResource is not supported for " + typeName + "."));
                 } else {
                     String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
-                    CreatedResource createdResource = new CreatedResource(accountId,
+                    CreatedResource createdResource = new CreatedResource(token, accountId,
                             resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
                     created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
                     persistCreated(accountId, region, typeName, resource.getPhysicalId(), createdResource);
@@ -367,19 +385,30 @@ public class CloudControlService {
         persistRequest(new PersistedRequest(event,
                 previous == null ? null : previous.region(),
                 previous == null ? null : previous.desiredStateJson()));
-        while (requests.size() > MAX_RETAINED_REQUESTS) {
+        trimPersistedRequests();
+        return event;
+    }
+
+    private void trimPersistedRequests() {
+        int inspected = 0;
+        int candidates = requestOrder.size();
+        while (requests.size() > MAX_RETAINED_REQUESTS && inspected < candidates) {
             String oldest = requestOrder.poll();
             if (oldest == null) {
                 break;
             }
             ProgressEvent existing = requests.get(oldest);
+            inspected++;
             if (existing != null && "IN_PROGRESS".equals(existing.operationStatus())) {
                 requestOrder.add(oldest); // still running — keep it and move on
-                break;
+                continue;
             }
-            requests.remove(oldest);
+            if (existing != null) {
+                requests.remove(oldest);
+                String accountId = existing.accountId() == null ? DEFAULT_ACCOUNT : existing.accountId();
+                requestStore.deleteForAccount(accountId, oldest);
+            }
         }
-        return event;
     }
 
     @RegisterForReflection
