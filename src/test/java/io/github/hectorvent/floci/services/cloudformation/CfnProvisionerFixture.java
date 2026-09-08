@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFrontCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
@@ -231,6 +232,9 @@ final class CfnProvisionerFixture {
             }
             if (cognitoService != null) {
                 discovered.add(new CognitoCfnProvisioner(cognitoService));
+            }
+            if (cloudFrontService != null) {
+                discovered.add(new CloudFrontCfnProvisioner(cloudFrontService));
             }
             if (firehoseService != null) {
                 discovered.add(new FirehoseCfnProvisioner(firehoseService));

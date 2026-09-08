@@ -27,7 +27,11 @@ AWS::Batch::JobQueue	LEGACY_SWITCH
 AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	LEGACY_SWITCH
+AWS::CloudFront::CachePolicy	CloudFrontCfnProvisioner
 AWS::CloudFront::Distribution	LEGACY_SWITCH
+AWS::CloudFront::OriginAccessControl	CloudFrontCfnProvisioner
+AWS::CloudFront::OriginRequestPolicy	CloudFrontCfnProvisioner
+AWS::CloudFront::ResponseHeadersPolicy	CloudFrontCfnProvisioner
 AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
