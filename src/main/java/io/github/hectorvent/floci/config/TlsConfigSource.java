@@ -185,9 +185,10 @@ public class TlsConfigSource implements ConfigSource {
 
     /**
      * The full SAN list the server certificate must cover for the current configuration:
-     * defaults, custom hostnames, and — when {@code floci.dns.spoof-aws-endpoints} is enabled
-     * — the AWS endpoint wildcards. Used both for generation and for the change detection that
-     * triggers regeneration, so flipping the spoof flag regenerates the certificate.
+     * defaults, custom hostnames, and the AWS endpoint wildcards when
+     * {@code floci.dns.spoof-aws-endpoints} is enabled. Used both for generation and for the
+     * change detection that triggers regeneration, so flipping the spoof flag regenerates the
+     * certificate.
      */
     private List<String> configuredSanHostnames() {
         List<String> sans = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
@@ -201,7 +202,7 @@ public class TlsConfigSource implements ConfigSource {
      * Wildcards match a single label, so {@code *.amazonaws.com} covers global
      * endpoints ({@code sts.amazonaws.com}) and {@code *.<region>.amazonaws.com}
      * covers regional ones ({@code sts.us-east-1.amazonaws.com}) for the default
-     * region — the only region resolvable this early (pre-CDI, property-based).
+     * region, the only region resolvable this early (pre-CDI, property-based).
      */
     private List<String> awsSpoofSans() {
         if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
