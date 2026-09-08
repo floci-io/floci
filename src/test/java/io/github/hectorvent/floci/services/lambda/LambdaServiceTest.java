@@ -1287,6 +1287,9 @@ class LambdaServiceTest {
         assertEquals("ValidationException", error.getErrorCode());
     }
 
+    // Architectures is validated by upstream's validateArchitectures, which reports the error
+    // botocore actually models for CreateFunction: ValidationException is not in that operation's
+    // error set, InvalidParameterValueException is.
     @Test
     void createFunctionRejectsUnknownArchitecture() {
         Map<String, Object> request = baseRequest("bad-arch-fn");
@@ -1294,7 +1297,7 @@ class LambdaServiceTest {
 
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createFunction(REGION, request));
-        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
     }
 
     @Test
@@ -1304,7 +1307,7 @@ class LambdaServiceTest {
 
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createFunction(REGION, request));
-        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
     }
 
     @Test
@@ -1324,7 +1327,7 @@ class LambdaServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.updateFunctionCode(REGION, "update-code-bad-arch-fn",
                         Map.of("Architectures", List.of("mips"))));
-        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
     }
 
     @Test

@@ -229,8 +229,17 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    /**
+     * The key in-flight builds are tracked under in {@link #stopFlags} and
+     * {@link #runningContainers}. The build ARN, which is what CodeBuildService hands
+     * {@link #stopBuild}; the id is the fallback for a build constructed without an ARN.
+     */
+    private static String executionKey(Build build) {
+        return build.getArn() != null ? build.getArn() : build.getId();
+    }
+
     public void startBuild(String region, Build build, Project project, String buildspecOverride) {
-        String executionId = build.getArn();
+        String executionId = executionKey(build);
         AtomicBoolean stopFlag = new AtomicBoolean(false);
         stopFlags.put(executionId, stopFlag);
         Thread.ofVirtual().start(() -> {
@@ -248,9 +257,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     // failure and releases whatever the aborted cleanup left behind.
     void failBuildOnUncaughtError(Build build, Throwable t) {
         LOG.error("Build thread for " + build.getId() + " died unexpectedly", t);
-        // In-flight builds are tracked under the build ARN (the execution id startBuild keys
-        // them by); fall back to the id for builds constructed without one, e.g. in tests.
-        String executionId = build.getArn() != null ? build.getArn() : build.getId();
+        String executionId = executionKey(build);
         stopFlags.remove(executionId);
         String containerId = runningContainers.remove(executionId);
         if (containerId != null) {

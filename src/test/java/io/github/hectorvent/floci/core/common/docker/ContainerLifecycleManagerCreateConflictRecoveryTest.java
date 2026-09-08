@@ -52,9 +52,15 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
     @Mock
     EmulatorConfig.DockerConfig dockerConfig;
 
+    @Mock
+    EmulatorConfig.TlsConfig tlsConfig;
+
     @BeforeEach
     void setUp() {
         lenient().when(config.docker()).thenReturn(dockerConfig);
+        lenient().when(config.tls()).thenReturn(tlsConfig);
+        // create() now resolves the image through the cache before building the create command.
+        lenient().when(imageCacheService.ensureImageExists("busybox:stable")).thenReturn("busybox:stable");
         lenient().when(dockerConfig.resourceNamespace()).thenReturn(java.util.Optional.empty());
     }
 

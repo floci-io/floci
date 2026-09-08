@@ -5,15 +5,19 @@ import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -36,7 +40,11 @@ class ContainerLauncherCopyRetryTest {
     }
 
     private ContainerLauncher launcher() {
-        return new ContainerLauncher(null, null, null, null, null, null, null, null, null, null, null);
+        // The constructor sizes its code-volume populate semaphore off the config, so a bare null
+        // no longer builds; the copy paths under test read nothing else from it.
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().lambda().codeVolumePopulateConcurrency()).thenReturn(Optional.empty());
+        return new ContainerLauncher(null, null, null, null, null, null, config, null, null, null, null);
     }
 
     @Test
