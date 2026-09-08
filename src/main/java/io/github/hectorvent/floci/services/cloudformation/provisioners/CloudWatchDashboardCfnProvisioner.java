@@ -190,7 +190,9 @@ public class CloudWatchDashboardCfnProvisioner implements CfnResourceProvisioner
         if (ReplacementCleanup.rollback(resource, this::delete)) {
             return true;
         }
-        String raw = resource.getAttributes().remove(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR);
+        // The snapshot is spent only once the restore succeeded: a restore that throws leaves it in
+        // place for the next attempt instead of reporting a rollback that never happened.
+        String raw = resource.getAttributes().get(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR);
         if (raw == null) {
             return true;
         }
@@ -205,12 +207,13 @@ public class CloudWatchDashboardCfnProvisioner implements CfnResourceProvisioner
         String name = snapshot.path("name").asText();
         if (snapshot.path("absent").asBoolean(false)) {
             delete(TYPE, name, region);
-            return true;
+        } else {
+            Map<String, String> tags = new LinkedHashMap<>();
+            snapshot.path("tags").fields().forEachRemaining(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
+            Dashboard restored = dashboardsService.putDashboard(name, snapshot.path("body").asText(), tags, region);
+            reconcileTags(restored.getDashboardArn(), tags, region);
         }
-        Map<String, String> tags = new LinkedHashMap<>();
-        snapshot.path("tags").fields().forEachRemaining(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
-        Dashboard restored = dashboardsService.putDashboard(name, snapshot.path("body").asText(), tags, region);
-        reconcileTags(restored.getDashboardArn(), tags, region);
+        resource.getAttributes().remove(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR);
         return true;
     }
 }

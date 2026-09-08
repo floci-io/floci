@@ -334,6 +334,20 @@ class CloudWatchDashboardCfnProvisionerTest {
                 "the snapshot is spent by the rollback");
     }
 
+    /** A restore that fails keeps the snapshot, so the next rollback attempt still has it. */
+    @Test
+    void aFailedRestoreKeepsTheSnapshot() {
+        StackResource r = provision("""
+                {"DashboardName": "ops", "DashboardBody": "{}"}
+                """, "ops", Map.of("FlociDashboardNameMode", "explicit"));
+        doThrow(new AwsException("InternalServiceError", "boom", 500))
+                .when(dashboards).putDashboard(eq("ops"), eq("{}"), anyMap(), eq(REGION));
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertTrue(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR));
+    }
+
     /** A dashboard deleted outside the stack is recreated by the update; a rollback removes it again. */
     @Test
     void rollingBackAnUpdateThatRecreatedAMissingDashboardDeletesIt() {
