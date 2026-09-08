@@ -109,15 +109,27 @@ class RamServiceTest {
     }
 
     @Test
-    void accountPrincipalShareIsVisibleToAnyNonOwningCaller() {
-        // LZA's Custom::GetResourceShare Lambda runs on launched-container placeholder
-        // credentials, so its caller resolves to the emulator default account rather than
-        // the function's account. OTHER-ACCOUNTS must therefore return every non-owned
-        // share and leave the narrowing to the Lambda's own owningAccountId+name filter.
+    void unrelatedCallerCannotSeeAnAccountPrincipalShare() {
         service.createResourceShare(
                 "ipam-pool-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertEquals(1, service.getResourceShares("000000000000", "OTHER-ACCOUNTS").size());
+        assertTrue(service.getResourceShares("000000000000", "OTHER-ACCOUNTS").isEmpty());
+        assertTrue(service.listResources("000000000000", "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.listPrincipals("000000000000", "OTHER-ACCOUNTS", List.of()).isEmpty());
+    }
+
+    @Test
+    void rejectedInvitationNoLongerGrantsShareVisibility() {
+        service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+                .getFirst().resourceShareInvitationArn();
+
+        service.rejectResourceShareInvitation(invitationArn, ACCEPTER);
+
+        assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").isEmpty());
+        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
     }
 
     @Test

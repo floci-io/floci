@@ -18,6 +18,10 @@ class RamIntegrationTest {
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ram/aws4_request";
 
+    private static String authFor(String accountId) {
+        return "AWS4-HMAC-SHA256 Credential=" + accountId + "/20260101/us-east-1/ram/aws4_request";
+    }
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -105,6 +109,60 @@ class RamIntegrationTest {
         .then()
             .statusCode(200)
             .body("returnValue", equalTo(true));
+    }
+
+    @Test
+    void readOperationsOnlyExposeAResourceShareToItsOwnerOrInvitedAccount() {
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor("111111111111"))
+                .body("""
+                    {
+                        "name": "account-visible-share",
+                        "principals": ["222222222222"],
+                        "resourceArns": ["arn:aws:ec2:us-east-1:111111111111:transit-gateway/tgw-visibility"]
+                    }
+                    """)
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", authFor("111111111111"))
+            .body("{ \"resourceOwner\": \"SELF\", \"resourceShareArns\": [\"%s\"] }".formatted(shareArn))
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(200)
+            .body("resourceShares.size()", equalTo(1));
+
+        for (String path : new String[] {"/getresourceshares", "/listresources", "/listprincipals"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor("222222222222"))
+                .body("{ \"resourceOwner\": \"OTHER-ACCOUNTS\", \"resourceShareArns\": [\"%s\"] }".formatted(shareArn))
+            .when()
+                .post(path)
+            .then()
+                .statusCode(200)
+                .body(path.equals("/getresourceshares") ? "resourceShares.size()"
+                        : path.equals("/listresources") ? "resources.size()" : "principals.size()", equalTo(1));
+
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor("333333333333"))
+                .body("{ \"resourceOwner\": \"OTHER-ACCOUNTS\", \"resourceShareArns\": [\"%s\"] }".formatted(shareArn))
+            .when()
+                .post(path)
+            .then()
+                .statusCode(200)
+                .body(path.equals("/getresourceshares") ? "resourceShares.size()"
+                        : path.equals("/listresources") ? "resources.size()" : "principals.size()", equalTo(0));
+        }
     }
 
     @Test
