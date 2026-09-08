@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -130,8 +131,10 @@ public class CloudControlService {
     /** Create-time state for a resource this service provisioned. */
     private record CreatedResource(String accountId, Map<String, String> attributes, String model) {}
 
+    @RegisterForReflection
     record PersistedRequest(ProgressEvent event, String region, String desiredStateJson) {}
 
+    @RegisterForReflection
     record PersistedCreatedResource(String accountId, String region, String typeName,
                                             String identifier, Map<String, String> attributes,
                                             String model) {}
@@ -379,6 +382,7 @@ public class CloudControlService {
         return event;
     }
 
+    @RegisterForReflection
     public record ProgressEvent(String typeName, String identifier, String requestToken,
                                 String operation, String operationStatus, String statusMessage,
                                 String resourceModel, String accountId) {
