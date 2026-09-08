@@ -128,8 +128,34 @@ public class FirehoseService implements ResourceProvider {
         return key.substring(key.indexOf('/') + 1);
     }
 
+    private static String regionFromScopedKey(String key) {
+        String logicalKey = logicalKeyFromScopedKey(key);
+        return logicalKey.substring(0, logicalKey.indexOf('/'));
+    }
+
+    private static String streamNameFromScopedKey(String key) {
+        String logicalKey = logicalKeyFromScopedKey(key);
+        return logicalKey.substring(logicalKey.indexOf('/') + 1);
+    }
+
+    private static boolean belongsTo(String accountId, String region, DeliveryStreamDescription stream) {
+        if (!accountId.equals(stream.getAccountId())) {
+            return false;
+        }
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(stream.getDeliveryStreamARN());
+            return accountId.equals(arn.accountId()) && region.equals(arn.region());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private Optional<DeliveryStreamDescription> streamGet(String key) {
-        return streamStore.getForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key));
+        String accountId = accountFromScopedKey(key);
+        String region = regionFromScopedKey(key);
+        String streamName = streamNameFromScopedKey(key);
+        return streamStore.getForAccountMigratingLegacyKeys(accountId, logicalKeyFromScopedKey(key),
+                List.of(streamName), stream -> belongsTo(accountId, region, stream), false);
     }
 
     private void streamPut(String key, DeliveryStreamDescription stream) {
@@ -141,7 +167,15 @@ public class FirehoseService implements ResourceProvider {
     }
 
     private Optional<Map<String, String>> iteratorGet(String key) {
-        return sourceIteratorStore.getForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key));
+        String accountId = accountFromScopedKey(key);
+        String logicalKey = logicalKeyFromScopedKey(key);
+        String streamName = streamNameFromScopedKey(key);
+        // An unscoped checkpoint is safe to migrate only after the delivery stream itself has
+        // proved the account and region. Account-prefixed account/name checkpoints are safe by
+        // their prefix and cover the format written before region became part of the key.
+        boolean streamExists = streamGet(key).isPresent();
+        return sourceIteratorStore.getForAccountMigratingLegacyKeys(accountId, logicalKey,
+                List.of(streamName), ignored -> true, streamExists);
     }
 
     private void iteratorPut(String key, Map<String, String> value) {
@@ -652,7 +686,7 @@ public class FirehoseService implements ResourceProvider {
             try {
                 AwsArnUtils.Arn ownerArn = AwsArnUtils.parse(stream.getDeliveryStreamARN());
                 pollKinesisSource(scopedKey(ownerArn.accountId(), ownerArn.region(), stream.getDeliveryStreamName()),
-                        stream.getDeliveryStreamName(), source);
+                        ownerArn.accountId(), stream.getDeliveryStreamName(), source);
             } catch (Exception e) {
                 // A source stream that was deleted (or was never created) is the caller's
                 // business, not a reason to stop polling every other delivery stream.
@@ -662,14 +696,17 @@ public class FirehoseService implements ResourceProvider {
         }
     }
 
-    private void pollKinesisSource(String streamKey, String deliveryStreamName, KinesisStreamSource source) {
+    private void pollKinesisSource(String streamKey, String accountId, String deliveryStreamName,
+                                   KinesisStreamSource source) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(source.getKinesisStreamArn());
         String sourceName = arn.resource().startsWith("stream/")
                 ? arn.resource().substring("stream/".length())
                 : arn.resource();
         String region = arn.region() == null || arn.region().isBlank()
                 ? regionResolver.getDefaultRegion() : arn.region();
-        KinesisStream sourceStream = kinesisService.describeStream(sourceName, region);
+        String sourceAccountId = arn.accountId() == null || arn.accountId().isBlank()
+                ? accountId : arn.accountId();
+        KinesisStream sourceStream = kinesisService.describeStreamForAccount(sourceAccountId, sourceName, region);
         for (KinesisShard shard : sourceStream.getShards()) {
             // Where to read from: the pending position if a flush still owes these
             // records to S3, otherwise the committed one. Reading pending is what stops
@@ -679,12 +716,13 @@ public class FirehoseService implements ResourceProvider {
             if (iterator == null) {
                 Instant start = source.getDeliveryStartTimestamp();
                 iterator = start == null
-                        ? kinesisService.getShardIterator(sourceName, shard.getShardId(),
+                        ? kinesisService.getShardIteratorForAccount(sourceAccountId, sourceName, shard.getShardId(),
                                 "TRIM_HORIZON", null, region)
-                        : kinesisService.getShardIterator(sourceName, shard.getShardId(),
+                        : kinesisService.getShardIteratorForAccount(sourceAccountId, sourceName, shard.getShardId(),
                                 "AT_TIMESTAMP", null, start.toEpochMilli(), region);
             }
-            Map<String, Object> page = kinesisService.getRecords(iterator, SOURCE_POLL_LIMIT, region);
+            Map<String, Object> page = kinesisService.getRecordsForAccount(sourceAccountId, iterator,
+                    SOURCE_POLL_LIMIT, region);
             @SuppressWarnings("unchecked")
             List<KinesisRecord> records = (List<KinesisRecord>) page.get("Records");
             String next = (String) page.get("NextShardIterator");

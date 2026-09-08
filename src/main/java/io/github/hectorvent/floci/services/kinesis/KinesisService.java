@@ -179,6 +179,10 @@ public class KinesisService implements ResourceProvider {
         return resolveStream(streamName, region);
     }
 
+    public KinesisStream describeStreamForAccount(String accountId, String streamName, String region) {
+        return resolveStreamForAccount(accountId, streamName, region);
+    }
+
     public KinesisConsumer registerStreamConsumer(String streamArn, String consumerName, String region) {
         String consumerArn = streamArn + "/consumer/" + consumerName + ":" + System.currentTimeMillis();
         KinesisConsumer consumer = new KinesisConsumer(consumerName, consumerArn, streamArn);
@@ -860,11 +864,19 @@ public class KinesisService implements ResourceProvider {
 
     public String getShardIteratorForAccount(String accountId, String streamName, String shardId,
                                              String type, String sequenceNumber, String region) {
+        return getShardIteratorForAccount(accountId, streamName, shardId, type, sequenceNumber,
+                null, region);
+    }
+
+    public String getShardIteratorForAccount(String accountId, String streamName, String shardId,
+                                             String type, String sequenceNumber, Long timestampMillis,
+                                             String region) {
         KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
-        String raw = String.format("%s|%s|%s|%s|%d|",
+        String raw = String.format("%s|%s|%s|%s|%d|%s",
                 streamName, shardId, type,
                 sequenceNumber != null ? sequenceNumber : "",
-                iteratorStartIndex(stream, shardId, type));
+                iteratorStartIndex(stream, shardId, type),
+                timestampMillis != null ? timestampMillis.toString() : "");
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -876,6 +888,14 @@ public class KinesisService implements ResourceProvider {
         String type = parts[2];
         String startSeq = parts[3];
         int lastIndex = parseIteratorIndex(parts[4]);
+        Long timestampMillis = null;
+        if (parts.length >= 6 && !parts[5].isEmpty()) {
+            try {
+                timestampMillis = Long.parseLong(parts[5]);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidArgumentException", "Invalid timestamp in shard iterator", 400);
+            }
+        }
 
         KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
         KinesisShard shard = stream.getShards().stream()
@@ -892,6 +912,19 @@ public class KinesisService implements ResourceProvider {
             for (int i = 0; i < allRecords.size(); i++) {
                 if (allRecords.get(i).getSequenceNumber().equals(startSeq)) {
                     startIndex = i + 1;
+                    break;
+                }
+            }
+        } else if ("AT_TIMESTAMP".equals(type)) {
+            if (timestampMillis == null) {
+                throw new AwsException("InvalidArgumentException",
+                        "AT_TIMESTAMP iterator requires a Timestamp", 400);
+            }
+            startIndex = allRecords.size();
+            for (int i = 0; i < allRecords.size(); i++) {
+                Instant arrival = allRecords.get(i).getApproximateArrivalTimestamp();
+                if (arrival != null && arrival.toEpochMilli() >= timestampMillis) {
+                    startIndex = i;
                     break;
                 }
             }
