@@ -69,12 +69,6 @@ references a curated image runs without the caller re-tagging anything:
 
 ## Build Execution Model
 
-!!! note "AWS local agent investigation"
-
-    Floci is evaluating AWS's official local CodeBuild agent as an alternate execution backend.
-    See the [investigation epic](codebuild-local-agent-investigation-epic.md) for the product
-    boundary, compatibility matrix, prototype plan, and adoption criteria.
-
 Each `StartBuild` call:
 
 1. Pulls the project's Docker image (e.g. `public.ecr.aws/docker/library/alpine:latest`)
