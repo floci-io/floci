@@ -174,6 +174,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -185,6 +186,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);

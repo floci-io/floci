@@ -255,14 +255,21 @@ class RedshiftServiceTest {
     void createClusterRemovesMetadataOnFailure() {
         when(clusterBackend.accountId()).thenReturn("111111111111");
         when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        // Simulate a concurrent GetClusterCredentials landing while the row exists, then fail
+        // container startup so the rollback path runs.
         when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
-                .thenThrow(new RuntimeException("startup failed"));
+                .thenAnswer(inv -> {
+                    credentialBroker.issue("111111111111", "c1", "analyst", List.of(), 900);
+                    throw new RuntimeException("startup failed");
+                });
 
         assertThrows(AwsException.class, () ->
                 service.createCluster("c1", "dc2.large", "admin", "password123"));
 
         verify(clusterBackend).delete("c1");
         verify(clusterBackend, atLeastOnce()).flush();
+        // The rollback that removes the cluster row must also drop that credential.
+        assertTrue(credentialBroker.resolve("111111111111", "c1", "analyst").isEmpty());
     }
 
     @Test
