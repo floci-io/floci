@@ -315,6 +315,30 @@ public class ApiGatewayService {
         return resourceStore.scan(k -> k.startsWith(prefix));
     }
 
+    /**
+     * The id of the resource at "/", or empty if there is no API to read it from.
+     * <p>
+     * ListRestApis renders a snapshot of the APIs and resolves this per API afterwards, so an
+     * API deleted in between is already gone by the time its root is looked up. That must cost
+     * the caller the one member rather than failing the whole listing, which is why a missing
+     * API is empty here instead of a not-found. Every other failure still propagates.
+     */
+    public Optional<String> findRootResourceId(String region, String apiId) {
+        List<ApiGatewayResource> resources;
+        try {
+            resources = getResources(region, apiId);
+        } catch (AwsException e) {
+            if ("NotFoundException".equals(e.getErrorCode())) {
+                return Optional.empty();
+            }
+            throw e;
+        }
+        return resources.stream()
+                .filter(r -> "/".equals(r.getPath()))
+                .map(ApiGatewayResource::getId)
+                .findFirst();
+    }
+
     public ApiGatewayResource getResource(String region, String apiId, String resourceId) {
         return resourceStore.get(resourceKey(region, apiId, resourceId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid resource id specified", 404));
