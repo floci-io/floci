@@ -682,14 +682,16 @@ public class SecretsManagerService implements ResourceProvider {
     private void executeRotationLifecycle(String secretArn, String clientRequestToken, String lambdaArn, boolean rotateImmediately, boolean isExistingVersion, String region) {
         if (!rotateImmediately) {
             invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
-            
-            Secret refreshed = resolveSecret(secretArn, region);
-            SecretVersion pending = findVersionByStage(refreshed, "AWSPENDING");
-            if (pending != null) {
-                List<String> stages = new ArrayList<>(pending.getVersionStages());
-                stages.remove("AWSPENDING");
-                pending.setVersionStages(stages);
-                store.put(regionKey(region, refreshed.getName()), refreshed);
+
+            synchronized (lockFor(secretArn)) {
+                Secret refreshed = resolveSecret(secretArn, region);
+                SecretVersion pending = findVersionByStage(refreshed, "AWSPENDING");
+                if (pending != null) {
+                    List<String> stages = new ArrayList<>(pending.getVersionStages());
+                    stages.remove("AWSPENDING");
+                    pending.setVersionStages(stages);
+                    store.put(regionKey(region, refreshed.getName()), refreshed);
+                }
             }
             return;
         }
@@ -887,12 +889,12 @@ public class SecretsManagerService implements ResourceProvider {
                     throw new AwsException("InvalidParameterException",
                             ("The parameter RemoveFromVersionId can't be empty. Staging label %s is currently attached to "
                                 + "version %s, so you must explicitly reference that version in RemoveFromVersionId.")
-                            .formatted(versionByStage, currentVersionId), 400);
+                            .formatted(versionStage, currentVersionId), 400);
                 } else if (!Objects.equals(currentVersionId, removeFromVersionId)) {
                     throw new AwsException("InvalidParameterException",
                             ("When you move staging label %s, if you specify RemoveFromVersionId, it must be set to the "
                                 + "version that currently has the staging label %s.")
-                            .formatted(versionByStage, currentVersionId), 400);
+                            .formatted(versionStage, versionStage), 400);
                 }
 
                 List<String> mutableStages = new ArrayList<>(secret.getVersions()

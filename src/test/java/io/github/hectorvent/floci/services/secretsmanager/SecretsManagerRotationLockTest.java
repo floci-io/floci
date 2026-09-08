@@ -112,6 +112,39 @@ class SecretsManagerRotationLockTest {
                 .count());
     }
 
+    @Test
+    void putSecretValueWaitsForTheRotationLifecycleRetiringAwsPending() throws Exception {
+        // A rotation started with RotateImmediately=false retires AWSPENDING from its background
+        // thread. That service has no Lambda, so the lifecycle runs its steps as no-ops and
+        // reaches the retirement directly.
+        SecretsManagerService lambdaless = new SecretsManagerService(new InMemoryStorage<>(), 30);
+        lambdaless.createSecret(SECRET_NAME, "current-value", null, null, null, null, REGION);
+        Secret target = lambdaless.describeSecret(SECRET_NAME, REGION);
+        SecretVersion current = target.getVersions().get(target.getCurrentVersionId());
+        // The state a finishing rotation leaves behind: one version holding both labels, which
+        // RotateSecret's guard accepts.
+        current.setVersionStages(List.of("AWSCURRENT", "AWSPENDING"));
+        ParkingSecretVersion parking = new ParkingSecretVersion(current);
+        target.getVersions().put(parking.getVersionId(), parking);
+
+        parking.arm();
+        lambdaless.rotateSecret(SECRET_NAME, SECOND_TOKEN, LAMBDA_ARN, null, false, REGION);
+        assertTrue(parking.awaitEntered(), "the rotation lifecycle never retired AWSPENDING");
+
+        Watched writer = start("writer", () ->
+                lambdaless.putSecretValue(SECRET_NAME, "staged-value", null, THIRD_TOKEN, REGION, List.of("AWSPENDING")));
+        assertTrue(writer.awaitBlocked(), "PutSecretValue did not wait for the rotation lifecycle");
+
+        parking.release();
+        writer.awaitSuccess();
+
+        SecretVersion pending = lambdaless.getSecretValue(SECRET_NAME, null, "AWSPENDING", REGION);
+        assertEquals(THIRD_TOKEN, pending.getVersionId());
+        assertEquals(1, target.getVersions().values().stream()
+                .filter(v -> v.getVersionStages() != null && v.getVersionStages().contains("AWSPENDING"))
+                .count());
+    }
+
     private BlockingVersions installBlockingVersions() {
         BlockingVersions versions = new BlockingVersions(secret.getVersions());
         secret.setVersions(versions);
