@@ -1283,6 +1283,11 @@ public interface EmulatorConfig {
         // Hostname clients use to reach a cluster endpoint. Empty -> resolved from
         // DockerHostResolver (falls back to "localhost").
         Optional<String> endpointHost();
+
+        // Default lifetime for GetClusterCredentials / GetClusterCredentialsWithIAM when
+        // DurationSeconds is omitted. AWS allows 900 to 3600.
+        @WithDefault("900")
+        int defaultCredentialDurationSeconds();
     }
 
     interface RdsServiceConfig {

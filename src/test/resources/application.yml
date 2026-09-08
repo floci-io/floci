@@ -175,6 +175,7 @@ floci:
       image-version: postgres:15-alpine
       proxy-base-port: 7100
       proxy-max-port: 7199
+      default-credential-duration-seconds: 900
     rds:
       enabled: true
       mock: false

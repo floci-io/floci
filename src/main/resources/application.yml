@@ -352,6 +352,7 @@ floci:
       image-version: postgres:15-alpine
       proxy-base-port: 7100
       proxy-max-port: 7199
+      default-credential-duration-seconds: 900   # GetClusterCredentials default lifetime (900-3600)
       # endpoint-host: localhost                 # Hostname clients use; empty -> DockerHostResolver
     rds:
       enabled: true
