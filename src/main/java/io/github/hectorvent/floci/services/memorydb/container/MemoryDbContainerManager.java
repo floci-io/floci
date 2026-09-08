@@ -121,7 +121,7 @@ public class MemoryDbContainerManager {
                 .withDockerNetwork(config.services().memorydb().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "memorydb", clusterName, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "memorydb", clusterName, regionResolver.getAccountId(), resolvedRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
@@ -145,7 +145,7 @@ public class MemoryDbContainerManager {
                 : info.containerId();
         String logGroup = "/aws/memorydb/cluster/" + clusterName + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
+        String region = resolvedRegion();
 
         Closeable logHandle = logStreamer.attach(
                 info.containerId(), logGroup, logStream, region, "memorydb:" + clusterName);
@@ -239,6 +239,11 @@ public class MemoryDbContainerManager {
 
     private String containerName(String clusterName) {
         return ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
+    }
+
+    private String resolvedRegion() {
+        String region = regionResolver.getRegion();
+        return region != null ? region : regionResolver.getDefaultRegion();
     }
 
     public void stopAll() {

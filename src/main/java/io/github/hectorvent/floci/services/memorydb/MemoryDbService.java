@@ -94,13 +94,14 @@ public class MemoryDbService {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "ClusterName is required.", 400);
         }
-        if (clusters.get(name).isPresent()) {
+        String resourceKey = key(region, name);
+        if (clusters.get(resourceKey).isPresent() || legacyGet(clusters, name, region).isPresent()) {
             throw new AwsException("ClusterAlreadyExistsFault",
                     "Cluster with specified name already exists.", 400);
         }
         // Claim the name for the whole provisioning attempt so a concurrent create can't race
         // ahead and be stopped by this request's handle-less rollback fallback.
-        if (!provisioningClusterNames.add(name)) {
+        if (!provisioningClusterNames.add(resourceKey)) {
             throw new AwsException("ClusterAlreadyExistsFault",
                     "Cluster " + name + " is already being created.", 400);
         }
@@ -110,11 +111,13 @@ public class MemoryDbService {
             if (aclName == null || aclName.isBlank()) {
                 throw new AwsException("InvalidParameterValueException", "ACLName is required.", 400);
             }
-            requireAclExists(aclName);
-            boolean authRequired = isAuthRequired(aclName);
+            requireAclExists(aclName, region);
+            boolean authRequired = isAuthRequired(aclName, region);
 
             Cluster cluster = new Cluster();
             cluster.setName(name);
+            cluster.setAccountId(regionResolver.getAccountId());
+            cluster.setRegion(region);
             cluster.setDescription(spec.getDescription());
             cluster.setStatus(ClusterStatus.AVAILABLE);
             cluster.setNodeType(spec.getNodeType() != null ? spec.getNodeType() : "db.t4g.small");
@@ -134,48 +137,62 @@ public class MemoryDbService {
                 startBackend(cluster, authRequired);
             }
 
-            clusters.put(name, cluster);
+            clusters.put(resourceKey, cluster);
             LOG.infov("MemoryDB cluster {0} created (acl={1}, authRequired={2}), endpoint={3}:{4}",
                     name, aclName, String.valueOf(authRequired), cluster.getClusterEndpoint().address(),
                     String.valueOf(cluster.getClusterEndpoint().port()));
             return cluster;
         } finally {
-            provisioningClusterNames.remove(name);
+            provisioningClusterNames.remove(resourceKey);
         }
     }
 
     public Cluster getCluster(String name) {
+        return getCluster(name, currentRegion());
+    }
+
+    public Cluster getCluster(String name, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "ClusterName is required.", 400);
         }
-        return clusters.get(name).orElseThrow(() ->
+        return resourceGet(clusters, name, region).orElseThrow(() ->
                 new AwsException("ClusterNotFoundFault", "Cluster not found.", 404));
     }
 
     public Collection<Cluster> describeClusters(String filterName) {
+        return describeClusters(filterName, currentRegion());
+    }
+
+    public Collection<Cluster> describeClusters(String filterName, String region) {
         if (filterName != null && !filterName.isBlank()) {
-            return clusters.get(filterName)
-                    .map(List::of)
-                    .orElseThrow(() -> new AwsException("ClusterNotFoundFault",
-                            "Cluster not found.", 404));
+            return List.of(getCluster(filterName, region));
         }
-        return clusters.scan(k -> true);
+        return clusters.scan(k -> k.startsWith(region + ":"));
     }
 
     public Cluster updateCluster(String name, String description) {
-        Cluster cluster = getCluster(name);
+        return updateCluster(name, description, currentRegion());
+    }
+
+    public Cluster updateCluster(String name, String description, String region) {
+        Cluster cluster = getCluster(name, region);
         if (description != null) {
             cluster.setDescription(description);
         }
-        clusters.put(name, cluster);
+        clusters.put(key(region, name), cluster);
         return cluster;
     }
 
     public Cluster deleteCluster(String name) {
-        Cluster cluster = getCluster(name);
-        cluster.setStatus(ClusterStatus.DELETING);
+        return deleteCluster(name, currentRegion());
+    }
 
-        proxyManager.stopProxy(name);
+    public Cluster deleteCluster(String name, String region) {
+        Cluster cluster = getCluster(name, region);
+        cluster.setStatus(ClusterStatus.DELETING);
+        String identity = identityName(cluster.getAccountId(), region, name);
+
+        proxyManager.stopProxy(identity);
 
         if (cluster.getContainerId() != null) {
             containerManager.stop(new MemoryDbContainerHandle(
@@ -183,7 +200,7 @@ public class MemoryDbService {
         }
 
         releaseProxyPort(cluster.getProxyPort());
-        clusters.delete(name);
+        clusters.delete(key(region, name));
         LOG.infov("MemoryDB cluster {0} deleted", name);
         return cluster;
     }
@@ -199,7 +216,9 @@ public class MemoryDbService {
             throw new AwsException("InvalidParameterValueException",
                     "UserName must start with a letter and contain only letters, digits and hyphens.", 400);
         }
-        if (DEFAULT_USER.equals(name) || users.get(name).isPresent()) {
+        String resourceKey = key(region, name);
+        if (DEFAULT_USER.equals(name) || users.get(resourceKey).isPresent()
+                || legacyGet(users, name, region).isPresent()) {
             throw new AwsException("UserAlreadyExistsFault",
                     "User with specified name already exists.", 400);
         }
@@ -225,6 +244,8 @@ public class MemoryDbService {
 
         User user = new User();
         user.setName(name);
+        user.setAccountId(regionResolver.getAccountId());
+        user.setRegion(region);
         user.setStatus(ACTIVE);
         user.setAuthMode(spec.getAuthMode());
         user.setPasswords(spec.getPasswords());
@@ -233,14 +254,14 @@ public class MemoryDbService {
         user.setArn(buildArn(region, "user", name));
         user.setCreatedAt(Instant.now());
 
-        users.put(name, user);
+        users.put(resourceKey, user);
         LOG.infov("MemoryDB user {0} created with authMode={1}", name, user.getAuthMode());
         return user;
     }
 
     public Collection<User> describeUsers(String filterName, String region) {
         if (filterName != null && !filterName.isBlank()) {
-            return users.get(filterName)
+            return resourceGet(users, filterName, region)
                     .map(List::of)
                     .or(() -> DEFAULT_USER.equals(filterName)
                             ? java.util.Optional.of(List.of(builtinDefaultUser(region)))
@@ -249,18 +270,22 @@ public class MemoryDbService {
         }
         List<User> all = new ArrayList<>();
         all.add(builtinDefaultUser(region));
-        all.addAll(users.scan(k -> true));
+        all.addAll(users.scan(k -> k.startsWith(region + ":")));
         return all;
     }
 
     public User deleteUser(String name) {
+        return deleteUser(name, currentRegion());
+    }
+
+    public User deleteUser(String name, String region) {
         if (DEFAULT_USER.equals(name)) {
             throw new AwsException("InvalidParameterValueException",
                     "The default user cannot be deleted.", 400);
         }
-        User user = users.get(name).orElseThrow(() ->
+        User user = resourceGet(users, name, region).orElseThrow(() ->
                 new AwsException("UserNotFoundFault", "User not found.", 404));
-        users.delete(name);
+        users.delete(key(region, name));
         LOG.infov("MemoryDB user {0} deleted", name);
         return user;
     }
@@ -272,7 +297,9 @@ public class MemoryDbService {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "ACLName is required.", 400);
         }
-        if (DEFAULT_ACL.equals(name) || acls.get(name).isPresent()) {
+        String resourceKey = key(region, name);
+        if (DEFAULT_ACL.equals(name) || acls.get(resourceKey).isPresent()
+                || legacyGet(acls, name, region).isPresent()) {
             throw new AwsException("ACLAlreadyExistsFault",
                     "ACL with specified name already exists.", 400);
         }
@@ -286,27 +313,29 @@ public class MemoryDbService {
                 throw new AwsException("DuplicateUserNameFault",
                         "Duplicate user name " + userName + " in ACL.", 400);
             }
-            if (!userExists(userName)) {
+            if (!userExists(userName, region)) {
                 throw new AwsException("UserNotFoundFault", "User " + userName + " not found.", 404);
             }
         }
 
         Acl acl = new Acl();
         acl.setName(name);
+        acl.setAccountId(regionResolver.getAccountId());
+        acl.setRegion(region);
         acl.setStatus(ACTIVE);
         acl.setUserNames(new ArrayList<>(spec.getUserNames()));
         acl.setMinimumEngineVersion(DEFAULT_ENGINE_VERSION);
         acl.setArn(buildArn(region, "acl", name));
         acl.setCreatedAt(Instant.now());
 
-        acls.put(name, acl);
+        acls.put(resourceKey, acl);
         LOG.infov("MemoryDB ACL {0} created with users={1}", name, acl.getUserNames());
         return acl;
     }
 
     public Collection<Acl> describeAcls(String filterName, String region) {
         if (filterName != null && !filterName.isBlank()) {
-            return acls.get(filterName)
+            return resourceGet(acls, filterName, region)
                     .map(List::of)
                     .or(() -> DEFAULT_ACL.equals(filterName)
                             ? java.util.Optional.of(List.of(builtinOpenAccessAcl(region)))
@@ -315,33 +344,41 @@ public class MemoryDbService {
         }
         List<Acl> all = new ArrayList<>();
         all.add(builtinOpenAccessAcl(region));
-        all.addAll(acls.scan(k -> true));
+        all.addAll(acls.scan(k -> k.startsWith(region + ":")));
         return all;
     }
 
     public Acl deleteAcl(String name) {
+        return deleteAcl(name, currentRegion());
+    }
+
+    public Acl deleteAcl(String name, String region) {
         if (DEFAULT_ACL.equals(name)) {
             throw new AwsException("InvalidParameterValueException",
                     "The open-access ACL cannot be deleted.", 400);
         }
-        Acl acl = acls.get(name).orElseThrow(() ->
+        Acl acl = resourceGet(acls, name, region).orElseThrow(() ->
                 new AwsException("ACLNotFoundFault", "ACL not found.", 404));
-        if (!clustersUsingAcl(name).isEmpty()) {
+        if (!clustersUsingAcl(name, region).isEmpty()) {
             throw new AwsException("InvalidACLStateFault",
                     "ACL " + name + " is associated with one or more clusters.", 400);
         }
-        acls.delete(name);
+        acls.delete(key(region, name));
         LOG.infov("MemoryDB ACL {0} deleted", name);
         return acl;
     }
 
     /** Names of ACLs that include the given user; used to populate the user response. */
     public List<String> aclNamesForUser(String userName) {
+        return aclNamesForUser(userName, currentRegion());
+    }
+
+    public List<String> aclNamesForUser(String userName, String region) {
         List<String> result = new ArrayList<>();
         if (DEFAULT_USER.equals(userName)) {
             result.add(DEFAULT_ACL);
         }
-        acls.scan(k -> true).stream()
+        acls.scan(k -> k.startsWith(region + ":")).stream()
                 .filter(a -> a.getUserNames().contains(userName))
                 .map(Acl::getName)
                 .forEach(result::add);
@@ -350,7 +387,11 @@ public class MemoryDbService {
 
     /** Names of clusters currently referencing the given ACL; used to populate the ACL response. */
     public List<String> clustersUsingAcl(String aclName) {
-        return clusters.scan(k -> true).stream()
+        return clustersUsingAcl(aclName, currentRegion());
+    }
+
+    public List<String> clustersUsingAcl(String aclName, String region) {
+        return clusters.scan(k -> k.startsWith(region + ":")).stream()
                 .filter(c -> aclName.equals(c.getAclName()))
                 .map(Cluster::getName)
                 .toList();
@@ -365,14 +406,14 @@ public class MemoryDbService {
     public Map<String, String> tagResource(String resourceArn, Map<String, String> tags) {
         Cluster cluster = clusterByArn(resourceArn);
         cluster.getTags().putAll(tags);
-        clusters.put(cluster.getName(), cluster);
+        clusters.put(key(cluster.getRegion(), cluster.getName()), cluster);
         return cluster.getTags();
     }
 
     public Map<String, String> untagResource(String resourceArn, List<String> tagKeys) {
         Cluster cluster = clusterByArn(resourceArn);
         tagKeys.forEach(cluster.getTags()::remove);
-        clusters.put(cluster.getName(), cluster);
+        clusters.put(key(cluster.getRegion(), cluster.getName()), cluster);
         return cluster.getTags();
     }
 
@@ -386,7 +427,11 @@ public class MemoryDbService {
      * verified as a SigV4 presigned URL.
      */
     public boolean authenticate(String clusterName, String username, String secret) {
-        Cluster cluster = clusters.get(clusterName).orElse(null);
+        return authenticate(clusterName, username, secret, currentRegion());
+    }
+
+    public boolean authenticate(String clusterName, String username, String secret, String region) {
+        Cluster cluster = resourceGet(clusters, clusterName, region).orElse(null);
         if (cluster == null) {
             return false;
         }
@@ -394,7 +439,7 @@ public class MemoryDbService {
         if (DEFAULT_ACL.equals(aclName)) {
             return true;
         }
-        Acl acl = acls.get(aclName).orElse(null);
+        Acl acl = resourceGet(acls, aclName, region).orElse(null);
         if (acl == null) {
             return false;
         }
@@ -402,7 +447,7 @@ public class MemoryDbService {
         if (!acl.getUserNames().contains(target)) {
             return false;
         }
-        User user = resolveUser(target);
+        User user = resolveUser(target, region);
         if (user == null) {
             return false;
         }
@@ -414,32 +459,33 @@ public class MemoryDbService {
     }
 
     /** True if the ACL has at least one user that requires a credential (password or IAM). */
-    private boolean isAuthRequired(String aclName) {
+    private boolean isAuthRequired(String aclName, String region) {
         if (DEFAULT_ACL.equals(aclName)) {
             return false;
         }
-        Acl acl = acls.get(aclName).orElse(null);
+        Acl acl = resourceGet(acls, aclName, region).orElse(null);
         if (acl == null) {
             return false;
         }
         return acl.getUserNames().stream()
-                .map(this::resolveUser)
+                .map(name -> resolveUser(name, region))
                 .filter(java.util.Objects::nonNull)
                 .anyMatch(u -> u.getAuthMode() != AuthMode.NO_PASSWORD);
     }
 
-    private void requireAclExists(String aclName) {
-        if (!DEFAULT_ACL.equals(aclName) && acls.get(aclName).isEmpty()) {
+    private void requireAclExists(String aclName, String region) {
+        if (!DEFAULT_ACL.equals(aclName) && resourceGet(acls, aclName, region).isEmpty()) {
             throw new AwsException("ACLNotFoundFault", "ACL " + aclName + " not found.", 404);
         }
     }
 
-    private boolean userExists(String name) {
-        return DEFAULT_USER.equals(name) || users.get(name).isPresent();
+    private boolean userExists(String name, String region) {
+        return DEFAULT_USER.equals(name) || resourceGet(users, name, region).isPresent();
     }
 
-    private User resolveUser(String name) {
-        return users.get(name).orElseGet(() -> DEFAULT_USER.equals(name) ? builtinDefaultUser(null) : null);
+    private User resolveUser(String name, String region) {
+        return resourceGet(users, name, region)
+                .orElseGet(() -> DEFAULT_USER.equals(name) ? builtinDefaultUser(region) : null);
     }
 
     private User builtinDefaultUser(String region) {
@@ -473,7 +519,16 @@ public class MemoryDbService {
         if (resourceArn == null) {
             throw new AwsException("InvalidParameterValueException", "ResourceArn is required.", 400);
         }
-        return clusters.scan(k -> true).stream()
+        try {
+            var arn = io.github.hectorvent.floci.core.common.AwsArnUtils.parse(resourceArn);
+            if (!"memorydb".equals(arn.service()) || !currentRegion().equals(arn.region())
+                    || !regionResolver.getAccountId().equals(arn.accountId())) {
+                throw new IllegalArgumentException("ARN owner mismatch");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ClusterNotFoundFault", "Cluster not found.", 404);
+        }
+        return clusters.scan(k -> k.startsWith(currentRegion() + ":")).stream()
                 .filter(c -> resourceArn.equals(c.getArn()))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ClusterNotFoundFault", "Cluster not found.", 404));
@@ -481,6 +536,7 @@ public class MemoryDbService {
 
     private void startBackend(Cluster cluster, boolean authRequired) {
         String name = cluster.getName();
+        String identity = identityName(cluster.getAccountId(), cluster.getRegion(), name);
         int proxyPort = allocateProxyPort();
         String image = config.services().memorydb().defaultImage();
         LOG.infov("Creating MemoryDB cluster {0} with authRequired={1} on proxy port {2}",
@@ -492,7 +548,7 @@ public class MemoryDbService {
             // from configuration and need no Docker, so the cluster is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            handle = containerManager.tryStart(name, image);
+            handle = containerManager.tryStart(identity, image);
             cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
             cluster.setProxyPort(proxyPort);
 
@@ -501,9 +557,9 @@ public class MemoryDbService {
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
 
-                proxyManager.startProxy(name, authRequired, proxyPort,
+                proxyManager.startProxy(identity, authRequired, proxyPort,
                         handle.getHost(), handle.getPort(),
-                        (username, secret) -> authenticate(name, username, secret));
+                        (username, secret) -> authenticate(name, username, secret, cluster.getRegion()));
             } else {
                 LOG.warnv("MemoryDB cluster {0} created without a backing container: no Docker "
                         + "daemon is reachable. Metadata operations work; connections to the "
@@ -511,7 +567,7 @@ public class MemoryDbService {
             }
         } catch (RuntimeException e) {
             LOG.warnv("MemoryDB cluster {0} provisioning failed, rolling back: {1}", name, e.getMessage());
-            rollbackBackend(name, handle, proxyPort);
+            rollbackBackend(identity, handle, proxyPort);
             throw e;
         }
     }
@@ -547,6 +603,67 @@ public class MemoryDbService {
             }
         } finally {
             releaseProxyPort(proxyPort);
+        }
+    }
+
+    private String key(String region, String name) {
+        return region + ":" + name;
+    }
+
+    private String currentRegion() {
+        String region = regionResolver.getRegion();
+        if (region != null) {
+            return region;
+        }
+        String defaultRegion = regionResolver.getDefaultRegion();
+        return defaultRegion != null ? defaultRegion : "us-east-1";
+    }
+
+    private String identityName(String accountId, String region, String name) {
+        String defaultAccount = regionResolver.getDefaultAccountId();
+        String defaultRegion = regionResolver.getDefaultRegion();
+        if ((defaultAccount == null || java.util.Objects.equals(defaultAccount, accountId))
+                && (defaultRegion == null || java.util.Objects.equals(defaultRegion, region))) {
+            return name;
+        }
+        return accountId + "-" + region + "-" + name;
+    }
+
+    private <V> java.util.Optional<V> legacyGet(StorageBackend<String, V> store, String name, String region) {
+        String defaultAccount = regionResolver.getDefaultAccountId();
+        String defaultRegion = regionResolver.getDefaultRegion();
+        if ((defaultAccount != null && !java.util.Objects.equals(defaultAccount, regionResolver.getAccountId()))
+                || (defaultRegion != null && !java.util.Objects.equals(defaultRegion, region))) {
+            return java.util.Optional.empty();
+        }
+        return store.get(name);
+    }
+
+    private <V> java.util.Optional<V> resourceGet(StorageBackend<String, V> store, String name, String region) {
+        var result = store.get(key(region, name));
+        if (result.isPresent()) {
+            return result;
+        }
+        var legacy = legacyGet(store, name, region);
+        if (legacy.isPresent()) {
+            setOwner(legacy.get(), region);
+            store.put(key(region, name), legacy.get());
+            store.delete(name);
+        }
+        return legacy;
+    }
+
+    private void setOwner(Object resource, String region) {
+        String accountId = regionResolver.getAccountId();
+        if (resource instanceof Cluster cluster) {
+            cluster.setAccountId(accountId);
+            cluster.setRegion(region);
+        } else if (resource instanceof User user) {
+            user.setAccountId(accountId);
+            user.setRegion(region);
+        } else if (resource instanceof Acl acl) {
+            acl.setAccountId(accountId);
+            acl.setRegion(region);
         }
     }
 
