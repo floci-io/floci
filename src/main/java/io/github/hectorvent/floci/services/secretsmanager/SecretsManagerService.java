@@ -894,7 +894,7 @@ public class SecretsManagerService implements ResourceProvider {
                     throw new AwsException("InvalidParameterException",
                             ("When you move staging label %s, if you specify RemoveFromVersionId, it must be set to the "
                                 + "version that currently has the staging label %s.")
-                            .formatted(versionStage, versionStage), 400);
+                            .formatted(versionStage, currentVersionId), 400);
                 }
 
                 List<String> mutableStages = new ArrayList<>(secret.getVersions()
