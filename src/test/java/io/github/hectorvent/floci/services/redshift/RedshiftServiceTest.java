@@ -1129,6 +1129,16 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void passwordValidatorRejectsMasterUserWithWrongPassword() {
+        seedCluster("acc", "c1");
+
+        PasswordValidator validator = service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT,
+                validator.validate("admin", "not-the-master-password"));
+    }
+
+    @Test
     void passwordValidatorAcceptsLiveBrokerCredentialAsMasterEquivalent() {
         seedCluster("acc", "c1");
         TempCredential cred = credentialBroker.issue("acc", "c1", "analyst", List.of(), 900);

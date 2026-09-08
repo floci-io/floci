@@ -946,11 +946,18 @@ public class RedshiftService {
     // connections without a proxy restart.
     private PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
         return (user, password) -> {
-            boolean master = clusters.getForAccount(accountId, clusterIdentifier)
-                    .map(c -> user.equals(c.getMasterUsername()) && password.equals(c.getMasterPassword()))
-                    .orElse(false);
-            if (master) {
-                return PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+            Optional<Cluster> cluster = clusters.getForAccount(accountId, clusterIdentifier);
+            boolean masterUser = cluster.map(c -> user.equals(c.getMasterUsername())).orElse(false);
+            if (masterUser) {
+                // The master username is authoritative here: a wrong password must be rejected,
+                // never handed to the broker (which only knows minted DbUsers) and never passed
+                // through as if the user were unknown.
+                boolean passwordMatches = cluster
+                        .map(c -> password.equals(c.getMasterPassword()))
+                        .orElse(false);
+                return passwordMatches
+                        ? PasswordValidator.AuthResult.MASTER_EQUIVALENT
+                        : PasswordValidator.AuthResult.REJECT;
             }
             return switch (credentialBroker.classify(accountId, clusterIdentifier, user, password)) {
                 case MASTER_EQUIVALENT -> PasswordValidator.AuthResult.MASTER_EQUIVALENT;
