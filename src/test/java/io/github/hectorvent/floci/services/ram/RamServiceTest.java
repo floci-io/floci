@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.organizations.model.Organization;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -23,6 +25,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Resource-share semantics behind LZA's TGW share flow: the owning account creates a share
@@ -42,7 +47,13 @@ class RamServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new RamService(new SharedStorageFactory());
+        OrganizationsService organizations = mock(OrganizationsService.class);
+        Organization organization = new Organization();
+        organization.setId("o-abc123");
+        when(organizations.describeOrganization(anyString())).thenReturn(organization);
+        when(organizations.organizationPath(anyString(), anyString()))
+                .thenReturn("o-abc123/r-root/ou-root-infra/222222222222/");
+        service = new RamService(new SharedStorageFactory(), organizations);
         service.initializeStorage();
     }
 
@@ -341,7 +352,7 @@ class RamServiceTest {
 
     @Test
     void accountPrincipalUnderEnabledOrganizationSharingCreatesNoInvitation() {
-        service.enableSharingWithAwsOrganization();
+        service.enableSharingWithAwsOrganization(OWNER);
 
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);

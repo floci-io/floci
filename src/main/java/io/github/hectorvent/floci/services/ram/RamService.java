@@ -67,8 +67,8 @@ public class RamService {
         this.organizationsService = organizationsService;
     }
 
-    /** Constructor used by the isolated service tests, which do not provision Organizations. */
-    public RamService(StorageFactory storageFactory) {
+    /** Constructor used by isolated service tests with an explicit Organizations test double. */
+    RamService(StorageFactory storageFactory) {
         this(storageFactory, null);
     }
 
@@ -87,7 +87,23 @@ public class RamService {
         return true;
     }
 
+    public boolean enableSharingWithAwsOrganization(String callerAccountId) {
+        if (settings instanceof AccountAwareStorageBackend<Boolean> accountAware) {
+            accountAware.putForAccount(callerAccountId, ORGANIZATION_SHARING_KEY, true);
+        } else {
+            settings.put(ORGANIZATION_SHARING_KEY, true);
+        }
+        return true;
+    }
+
     public boolean isSharingWithOrganizationEnabled() {
+        return settings.get(ORGANIZATION_SHARING_KEY).orElse(false);
+    }
+
+    public boolean isSharingWithOrganizationEnabled(String accountId) {
+        if (settings instanceof AccountAwareStorageBackend<Boolean> accountAware) {
+            return accountAware.getForAccount(accountId, ORGANIZATION_SHARING_KEY).orElse(false);
+        }
         return settings.get(ORGANIZATION_SHARING_KEY).orElse(false);
     }
 
@@ -241,7 +257,7 @@ public class RamService {
      * was REJECTED gets invited again, same as real AWS re-sharing after a rejection.
      */
     private void inviteAccountPrincipals(ResourceShare share, List<String> principals) {
-        if (isSharingWithOrganizationEnabled()) {
+        if (isSharingWithOrganizationEnabled(share.getOwningAccountId())) {
             return;
         }
         // Serializes the live-invitation check against the insert: two concurrent
@@ -506,23 +522,26 @@ public class RamService {
             // A rejected or removed invitation is no longer an authorization to discover the
             // share. PENDING remains visible because RAM exposes the invitation's share metadata
             // before the receiver accepts it.
-            return allInvitations().stream().anyMatch(invitation ->
-                    invitation.resourceShareArn().equals(share.getResourceShareArn())
-                            && invitation.receiverAccountId().equals(callerAccountId)
-                            && ("PENDING".equals(invitation.status())
-                            || "ACCEPTED".equals(invitation.status())))
-                    || (isSharingWithOrganizationEnabled() && isOrganizationMember(callerAccountId));
+            Optional<ResourceShareInvitation> invitation = allInvitations().stream()
+                    .filter(candidate -> candidate.resourceShareArn().equals(share.getResourceShareArn())
+                            && candidate.receiverAccountId().equals(callerAccountId))
+                    .findFirst();
+            if (invitation.isPresent()) {
+                return "PENDING".equals(invitation.get().status())
+                        || "ACCEPTED".equals(invitation.get().status());
+            }
+            // Organization sharing auto-accepts account principals without persisting an
+            // invitation. Restrict that path to the owner's organization, never any organization.
+            return isSharingWithOrganizationEnabled(share.getOwningAccountId())
+                    && isMemberOfSameOrganization(share.getOwningAccountId(), callerAccountId);
         }
 
         return isOrganizationPrincipalVisible(principal, callerAccountId);
     }
 
     private boolean isOrganizationPrincipalVisible(String principal, String callerAccountId) {
-        // The null service is only possible in the focused unit-test constructor. Those tests use
-        // an OU ARN as a stand-in for an already-established organization membership; production
-        // requests always have the Organizations service and therefore take the strict path below.
         if (organizationsService == null) {
-            return true;
+            return false;
         }
         String[] arn = principal.split(":", 6);
         if (arn.length != 6 || !"aws".equals(arn[1]) || !"organizations".equals(arn[2])) {
@@ -553,11 +572,17 @@ public class RamService {
         }
     }
 
-    private boolean isOrganizationMember(String callerAccountId) {
-        return organizationsService != null && findOrganizationForCaller(callerAccountId) != null;
+    private boolean isMemberOfSameOrganization(String ownerAccountId, String callerAccountId) {
+        Organization ownerOrganization = findOrganizationForCaller(ownerAccountId);
+        Organization callerOrganization = findOrganizationForCaller(callerAccountId);
+        return ownerOrganization != null && callerOrganization != null
+                && ownerOrganization.getId().equals(callerOrganization.getId());
     }
 
     private Organization findOrganizationForCaller(String callerAccountId) {
+        if (organizationsService == null) {
+            return null;
+        }
         try {
             return organizationsService.describeOrganization(callerAccountId);
         } catch (AwsException e) {

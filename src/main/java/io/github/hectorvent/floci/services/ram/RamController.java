@@ -63,7 +63,7 @@ public class RamController {
     @Consumes(MediaType.WILDCARD)
     public Response enableSharingWithAwsOrganization() {
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("returnValue", service.enableSharingWithAwsOrganization());
+        response.put("returnValue", service.enableSharingWithAwsOrganization(regionResolver.getAccountId()));
         return Response.ok(response).build();
     }
 
