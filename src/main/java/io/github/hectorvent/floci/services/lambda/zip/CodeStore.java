@@ -13,9 +13,11 @@ import java.util.Comparator;
 
 /**
  * Manages on-disk locations of extracted Lambda function code.
- * Each function gets its own directory under {@code <codePath>/<accountId>/<region>/},
- * mirroring the account- and region-scoped Lambda namespace. Without either tenant
- * segment, same-named functions can overwrite each other's extracted code.
+ * Each function gets its own directory under
+ * {@code <codePath>/<accountId>/@regions/<region>/}, mirroring the account- and
+ * region-scoped Lambda namespace. The reserved namespace marker is intentional: it keeps
+ * this layout disjoint from the preceding account/name layout, including when a legacy
+ * function is named like a region.
  */
 @ApplicationScoped
 public class CodeStore {
@@ -27,6 +29,9 @@ public class CodeStore {
      * outside {@link #sanitizeName}'s output character set, so the two namespaces cannot overlap.
      */
     private static final String VERSIONS_DIR_SUFFIX = "@versions";
+
+    /** Namespace marker keeps the new layout disjoint from the preceding account/name layout. */
+    private static final String REGIONS_DIR = "@regions";
 
     private final Path baseDir;
 
@@ -41,6 +46,7 @@ public class CodeStore {
 
     public Path getCodePath(String accountId, String region, String functionName) {
         return baseDir.resolve(sanitizeName(accountId))
+                .resolve(REGIONS_DIR)
                 .resolve(sanitizeName(region))
                 .resolve(sanitizeName(functionName));
     }
@@ -72,6 +78,7 @@ public class CodeStore {
      */
     public Path getVersionsPath(String accountId, String region, String functionName) {
         return baseDir.resolve(sanitizeName(accountId))
+                .resolve(REGIONS_DIR)
                 .resolve(sanitizeName(region))
                 .resolve(sanitizeName(functionName) + VERSIONS_DIR_SUFFIX);
     }

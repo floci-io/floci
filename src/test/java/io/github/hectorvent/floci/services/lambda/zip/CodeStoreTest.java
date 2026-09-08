@@ -28,6 +28,21 @@ class CodeStoreTest {
     }
 
     @Test
+    void newRegionLayoutCannotNestInsideAlegacyRegionNamedFunction(@TempDir Path baseDir) throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        Path legacyFunction = baseDir.resolve(ACCOUNT_A).resolve(REGION);
+        Path newFunction = store.getCodePath(ACCOUNT_A, REGION, REGION);
+
+        writeHandler(legacyFunction, "legacy");
+        writeHandler(newFunction, "new");
+
+        assertFalse(newFunction.normalize().startsWith(legacyFunction.normalize()),
+                "new extraction paths must not be children of a legacy region-named function");
+        assertEquals("legacy", Files.readString(legacyFunction.resolve("index.js")));
+        assertEquals("new", Files.readString(newFunction.resolve("index.js")));
+    }
+
+    @Test
     void deleteRemovesOnlyTheOwningAccountsCode(@TempDir Path baseDir) throws IOException {
         CodeStore store = new CodeStore(baseDir);
         writeHandler(store.getCodePath(ACCOUNT_A, REGION, "shared-name"), "a");
