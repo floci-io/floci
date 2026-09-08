@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,7 @@ class RedshiftServiceTest {
     private RegionResolver regionResolver;
     private RedshiftProxyManager proxyManager;
     private DockerHostResolver dockerHostResolver;
+    private RedshiftCredentialBroker credentialBroker;
     private RedshiftService service;
 
     @BeforeEach
@@ -85,7 +87,10 @@ class RedshiftServiceTest {
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
 
-        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver);
+        credentialBroker = new RedshiftCredentialBroker();
+
+        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker);
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
@@ -1100,5 +1105,58 @@ class RedshiftServiceTest {
     private static String extractResourceId(String arn) {
         String resource = arn.substring(arn.lastIndexOf(':') + 1);
         return resource.contains("/") ? resource.substring(resource.lastIndexOf('/') + 1) : resource;
+    }
+
+    // ── passwordValidatorFor / GetClusterCredentials broker wiring ─────────────
+
+    private void seedCluster(String accountId, String clusterId) {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier(clusterId);
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("SecretPass1");
+        when(clusterBackend.getForAccount(accountId, clusterId)).thenReturn(Optional.of(cluster));
+    }
+
+    @Test
+    void passwordValidatorAcceptsMasterPair() {
+        seedCluster("acc", "c1");
+
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                validator.validate("admin", "SecretPass1"));
+    }
+
+    @Test
+    void passwordValidatorAcceptsLiveBrokerCredentialAsMasterEquivalent() {
+        seedCluster("acc", "c1");
+        TempCredential cred = credentialBroker.issue("acc", "c1", "analyst", List.of(), 900);
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                validator.validate("analyst", cred.password()));
+    }
+
+    @Test
+    void passwordValidatorRejectsKnownBrokerUserWithWrongPassword() {
+        seedCluster("acc", "c1");
+        credentialBroker.issue("acc", "c1", "analyst", List.of(), 900);
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT,
+                validator.validate("analyst", "nope"));
+    }
+
+    @Test
+    void passwordValidatorPassesThroughUnknownUser() {
+        seedCluster("acc", "c1");
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.PASSTHROUGH,
+                validator.validate("someone-else", "whatever"));
     }
 }

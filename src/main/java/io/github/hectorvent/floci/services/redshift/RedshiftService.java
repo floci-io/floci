@@ -6,7 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
@@ -51,13 +51,15 @@ public class RedshiftService {
     private final RegionResolver regionResolver;
     private final RedshiftProxyManager proxyManager;
     private final DockerHostResolver dockerHostResolver;
+    private final RedshiftCredentialBroker credentialBroker;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
-                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver) {
+                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                            RedshiftCredentialBroker credentialBroker) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -67,6 +69,7 @@ public class RedshiftService {
         this.regionResolver = regionResolver;
         this.proxyManager = proxyManager;
         this.dockerHostResolver = dockerHostResolver;
+        this.credentialBroker = credentialBroker;
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -936,11 +939,29 @@ public class RedshiftService {
         return accountId + ":" + clusterIdentifier;
     }
 
-    // Validates the master password at the proxy against current cluster state, so a
-    // ModifyCluster password change is reflected for new connections without a proxy restart.
-    private RdsAuthProxy.PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
-        return (user, password) -> clusters.getForAccount(accountId, clusterIdentifier)
-                .map(c -> user.equals(c.getMasterUsername()) && password.equals(c.getMasterPassword()))
-                .orElse(false);
+    // Classifies a proxy login against current cluster state: the master pair and any live
+    // GetClusterCredentials credential both run the backend leg as the cluster master, a known
+    // broker user with a stale password is rejected, everyone else passes through to the backend.
+    // Reading cluster state per call means a ModifyCluster password change takes effect for new
+    // connections without a proxy restart.
+    private PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
+        return (user, password) -> {
+            boolean master = clusters.getForAccount(accountId, clusterIdentifier)
+                    .map(c -> user.equals(c.getMasterUsername()) && password.equals(c.getMasterPassword()))
+                    .orElse(false);
+            if (master) {
+                return PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+            }
+            return switch (credentialBroker.classify(accountId, clusterIdentifier, user, password)) {
+                case MASTER_EQUIVALENT -> PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+                case REJECT -> PasswordValidator.AuthResult.REJECT;
+                case PASSTHROUGH -> PasswordValidator.AuthResult.PASSTHROUGH;
+            };
+        };
+    }
+
+    // Package-private hook for tests: passwordValidatorFor is otherwise private.
+    PasswordValidator passwordValidatorForTesting(String accountId, String clusterIdentifier) {
+        return passwordValidatorFor(accountId, clusterIdentifier);
     }
 }
