@@ -126,6 +126,7 @@ public class ElastiCacheService implements ResourceProvider {
             Integer numCacheClusters,
             Boolean automaticFailoverEnabled,
             Boolean multiAzEnabled,
+            Integer port,
             ReplicationGroupSettings settings,
             Map<String, String> tags) {
     }
@@ -142,7 +143,7 @@ public class ElastiCacheService implements ResourceProvider {
                                                    Map<String, String> tags) {
         return createReplicationGroup(new CreateReplicationGroupRequest(groupId, description,
                 authMode, authToken, region, null, null, null, null, null, null,
-                null, null, null, null, null, settings, tags));
+                null, null, null, null, null, null, settings, tags));
     }
 
     public ReplicationGroup createReplicationGroup(CreateReplicationGroupRequest request) {
@@ -221,7 +222,7 @@ public class ElastiCacheService implements ResourceProvider {
                                                       ReplicationGroupSettings resolvedSettings) {
         String groupId = request.replicationGroupId();
         AuthMode authMode = request.authMode();
-        int proxyPort = allocateProxyPort();
+        int proxyPort = allocateProxyPort(request.port());
         String image = config.services().elasticache().defaultImage();
 
         LOG.infov("Creating replication group {0} with authMode={1} on proxy port {2}",
@@ -304,8 +305,11 @@ public class ElastiCacheService implements ResourceProvider {
                 int[] slots = ValkeyClusterFormation.slotRange(shard, numNodeGroups);
                 for (int member = 0; member <= replicasPerNodeGroup; member++) {
                     String memberId = groupId + "-" + nodeGroupId + "-" + String.format("%03d", member + 1);
+                    // The group's Port is reported from the first node's proxy port, so only that
+                    // node can honor a requested port; the rest take whatever is free.
+                    Integer requestedPort = nodes.isEmpty() ? request.port() : null;
                     nodes.add(new ClusterNode(memberId, nodeGroupId, member == 0,
-                            allocateProxyPort(), slots[0] + "-" + slots[1]));
+                            allocateProxyPort(requestedPort), slots[0] + "-" + slots[1]));
                 }
             }
 
@@ -917,8 +921,32 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     private int allocateProxyPort() {
+        return allocateProxyPort(null);
+    }
+
+    /**
+     * Honors the request's {@code Port} when it is free and inside the proxy range, matching
+     * {@code NeptuneService.allocateProxyPort}. AWS models Port as an optional input on
+     * CreateReplicationGroup ("the port number on which each member of the replication group
+     * accepts connections"), so a caller that pins one and reads back a different value sees
+     * permanent drift: Terraform treats the port as replacement-forcing.
+     *
+     * <p>Floci multiplexes every group's proxy onto one host, so two groups genuinely cannot
+     * share a port. When the requested one is taken or out of range this logs why and falls
+     * back to the next free port rather than failing, which keeps that limit visible without
+     * breaking callers that do not care which port they get.
+     */
+    private int allocateProxyPort(Integer requested) {
         int base = config.services().elasticache().proxyBasePort();
         int max = config.services().elasticache().proxyMaxPort();
+        if (requested != null && requested >= base && requested <= max && usedPorts.add(requested)) {
+            return requested;
+        }
+        if (requested != null) {
+            LOG.infov("Requested ElastiCache port {0} is outside the proxy range {1}-{2} or already in use; "
+                    + "allocating the next free proxy port instead",
+                    String.valueOf(requested), String.valueOf(base), String.valueOf(max));
+        }
         for (int port = base; port <= max; port++) {
             if (usedPorts.add(port)) {
                 return port;
