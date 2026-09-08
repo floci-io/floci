@@ -71,6 +71,10 @@ class CloudWatchDashboardCfnProvisionerTest {
         when(dashboards.putDashboard(anyString(), anyString(), anyMap(), eq(REGION))).thenAnswer(i ->
                 new Dashboard(i.getArgument(0), arn(i.getArgument(0)), i.getArgument(1)));
         when(dashboards.listTagsForResource(anyString(), eq(REGION))).thenReturn(Map.of());
+        // The service never answers null: a missing dashboard throws. Tests that care about the
+        // dashboard before an update stub their own.
+        when(dashboards.getDashboard(anyString(), eq(REGION))).thenAnswer(i ->
+                new Dashboard(i.getArgument(0), arn(i.getArgument(0)), "{}"));
     }
 
     private static String arn(String name) {
@@ -94,8 +98,14 @@ class CloudWatchDashboardCfnProvisionerTest {
     }
 
     private StackResource provision(String json, String priorPhysicalId) {
+        return provision(json, priorPhysicalId, Map.of());
+    }
+
+    /** Provisions as a create (no prior id) or an update (prior id and the attributes it left). */
+    private StackResource provision(String json, String priorPhysicalId, Map<String, String> priorAttributes) {
         StackResource r = resource();
         r.setPhysicalId(priorPhysicalId);
+        r.getAttributes().putAll(priorAttributes);
         provisioner.provision(r, props(json),
                 new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, priorPhysicalId));
         return r;
@@ -114,7 +124,8 @@ class CloudWatchDashboardCfnProvisionerTest {
 
         verify(dashboards).putDashboard("ops", BODY, Map.of(), REGION);
         assertEquals("ops", r.getPhysicalId(), "Ref is the dashboard name");
-        assertTrue(r.getAttributes().isEmpty(), "the schema declares no Fn::GetAtt attributes");
+        assertEquals(Map.of("FlociDashboardNameMode", "explicit"), r.getAttributes(),
+                "the schema declares no Fn::GetAtt attributes; only the name mode is recorded");
         assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
@@ -139,7 +150,7 @@ class CloudWatchDashboardCfnProvisionerTest {
 
         StackResource updated = provision("""
                 {"DashboardBody": "{\\"widgets\\":[]}"}
-                """, generated);
+                """, generated, created.getAttributes());
 
         assertEquals(generated, updated.getPhysicalId(), "an unnamed dashboard keeps its name across updates");
         verify(dashboards).putDashboard(generated, "{\"widgets\":[]}", Map.of(), REGION);
@@ -269,14 +280,102 @@ class CloudWatchDashboardCfnProvisionerTest {
         assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
+    /** Dropping an explicit name is a replacement on AWS: the dashboard gets a generated name. */
     @Test
-    void anInPlaceUpdateReportsNoRollback() {
+    void droppingAnExplicitNameReplacesTheDashboardWithAGeneratedOne() {
+        StackResource r = provision("""
+                {"DashboardBody": "{}"}
+                """, "ops", Map.of("FlociDashboardNameMode", "explicit"));
+
+        assertTrue(r.getPhysicalId().startsWith("my-stack-Dashboard-"), r.getPhysicalId());
+        verify(dashboards).putDashboard(eq(r.getPhysicalId()), eq("{}"), anyMap(), eq(REGION));
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("ops", provisioner.updateCleanupPhysicalId(r));
+        assertEquals("generated", r.getAttributes().get("FlociDashboardNameMode"));
+    }
+
+    @Test
+    void moreTagsThanTheSchemaAllowsAreRejected() {
+        StringBuilder tags = new StringBuilder();
+        for (int i = 0; i < 51; i++) {
+            tags.append(i > 0 ? "," : "").append("{\"Key\": \"k").append(i).append("\", \"Value\": \"v\"}");
+        }
+
+        AwsException e = assertThrows(AwsException.class, () -> provision("""
+                {"DashboardName": "ops", "DashboardBody": "{}", "Tags": [%s]}
+                """.formatted(tags), "ops"));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertTrue(e.getMessage().contains("Tags"), e.getMessage());
+        verify(dashboards, never()).putDashboard(anyString(), anyString(), anyMap(), anyString());
+        verify(dashboards, never()).tagResource(anyString(), anyMap(), anyString());
+    }
+
+    /** The body and tags before an in-place update are kept, and a failed stack update puts them back. */
+    @Test
+    void anInPlaceUpdateIsRolledBackFromTheBodyAndTagsItReplaced() {
+        Dashboard before = new Dashboard("ops", arn("ops"), "{\"widgets\":[{\"type\":\"text\"}]}");
+        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
+        when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
+
+        StackResource r = provision("""
+                {"DashboardName": "ops", "DashboardBody": "{}", "Tags": [{"Key": "env", "Value": "dev"}]}
+                """, "ops", Map.of("FlociDashboardNameMode", "explicit"));
+        assertTrue(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR));
+        when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("env", "dev"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(dashboards).putDashboard("ops", "{\"widgets\":[{\"type\":\"text\"}]}", Map.of("team", "platform"), REGION);
+        verify(dashboards).untagResource(arn("ops"), List.of("env"), REGION);
+        verify(dashboards).tagResource(arn("ops"), Map.of("team", "platform"), REGION);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR),
+                "the snapshot is spent by the rollback");
+    }
+
+    /** A dashboard deleted outside the stack is recreated by the update; a rollback removes it again. */
+    @Test
+    void rollingBackAnUpdateThatRecreatedAMissingDashboardDeletesIt() {
+        when(dashboards.getDashboard("ops", REGION))
+                .thenThrow(new AwsException("ResourceNotFound", "Dashboard does not exist: ops", 404));
+
         StackResource r = provision("""
                 {"DashboardName": "ops", "DashboardBody": "{}"}
-                """, "ops");
+                """, "ops", Map.of("FlociDashboardNameMode", "explicit"));
 
-        assertFalse(provisioner.rollbackUpdate(r));
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(dashboards).deleteDashboards(List.of("ops"), REGION);
+    }
+
+    /** A successful update clears the snapshot, so a later rollback cannot restore stale state. */
+    @Test
+    void aCommittedUpdateDropsTheSnapshot() {
+        StackResource r = provision("""
+                {"DashboardName": "ops", "DashboardBody": "{}"}
+                """, "ops", Map.of("FlociDashboardNameMode", "explicit"));
+
+        provisioner.clearUpdate(r);
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR));
         assertNull(provisioner.updateCleanupPhysicalId(r));
+        assertTrue(provisioner.rollbackUpdate(r), "nothing is left to undo");
+        verify(dashboards, never()).deleteDashboards(anyList(), anyString());
+    }
+
+    /** A provision that failed before it changed anything has nothing to undo. */
+    @Test
+    void aProvisionThatFailedBeforeMutatingReportsRolledBack() {
+        doThrow(new AwsException("InvalidParameterInput", "The dashboard body is invalid", 400))
+                .when(dashboards).putDashboard(eq("ops-v2"), anyString(), anyMap(), eq(REGION));
+        StackResource r = resource();
+        r.setPhysicalId("ops");
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"DashboardName": "ops-v2", "DashboardBody": "not json"}
+                """), new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, "ops")));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(dashboards, never()).deleteDashboards(anyList(), anyString());
     }
 
     @Test

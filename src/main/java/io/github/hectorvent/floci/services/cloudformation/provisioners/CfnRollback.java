@@ -62,6 +62,14 @@ public final class CfnRollback {
     public static final String EVENT_INVOKE_CONFIG_SNAPSHOT_ATTR = "__FlociEventInvokeConfigSnapshot";
 
     /**
+     * Holds the body and tags a dashboard carried before an in-place update changed them, or the
+     * fact that it did not exist, so a failed stack update can put it back. Written by
+     * {@code CloudWatchDashboardCfnProvisioner} before its first mutating call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+
+    /**
      * Holds the pipe a rename displaced: the name it still lives under, the region that addresses
      * it, how many times deleting it has been attempted, and when the replacement was created.
      * Written by {@code PipesCfnProvisioner} when it creates the replacement, and spent by whichever

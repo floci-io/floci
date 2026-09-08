@@ -9,8 +9,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -196,6 +194,53 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
         awaitStackDeleted(stack);
     }
 
+    /** An in-place body and tag change is put back from the snapshot the update took. */
+    @Test
+    void aFailedUpdateRestoresTheBodyAndTagsAnInPlaceUpdateChanged() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-dashboard-ip-" + suffix;
+        String name = "ops-ip-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(EXTRA_TAG, ""), Map.of("Name", name));
+        describeStacks(stack, "CREATE_COMPLETE");
+        String arn = dashboardArn(name);
+
+        cloudFormation(stack, "UpdateStack", TEMPLATE.formatted("", FAILING_RESOURCE.formatted(suffix)),
+                Map.of("Name", name, "Title", "Errors", "Team", "data"));
+        String rolledBack = describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+        assertEquals(name, outputValue(rolledBack, "DashboardRef"));
+        getDashboard(name).then()
+            .statusCode(200)
+            .body("GetDashboardResponse.GetDashboardResult.DashboardBody", containsString("\"Requests\""))
+            .body("GetDashboardResponse.GetDashboardResult.DashboardBody", not(containsString("\"Errors\"")));
+        assertTags(arn, Map.of("team", "platform", "env", "dev"), Map.of());
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        awaitStackDeleted(stack);
+    }
+
+    /** Dropping an explicit name is a replacement on AWS: the dashboard comes back under a generated name. */
+    @Test
+    void droppingTheExplicitNameReplacesTheDashboard() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-dashboard-drop-" + suffix;
+        String name = "ops-drop-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted("", ""), Map.of("Name", name));
+        describeStacks(stack, "CREATE_COMPLETE");
+
+        cloudFormation(stack, "UpdateStack", UNNAMED_TEMPLATE, Map.of());
+        String generated = outputValue(describeStacks(stack, "UPDATE_COMPLETE"), "DashboardRef");
+        assertTrue(generated.startsWith(stack + "-Dashboard-"), generated);
+        getDashboard(generated).then().statusCode(200);
+        getDashboard(name).then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("ResourceNotFound"));
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        awaitStackDeleted(stack);
+    }
+
     private static Response getDashboard(String name) {
         return given()
             .contentType("application/x-www-form-urlencoded")
@@ -264,15 +309,10 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
     }
 
     private static void assertEvent(String eventsXml, String status, String physicalId) {
-        Matcher m = Pattern.compile("<member>(.*?)</member>", Pattern.DOTALL).matcher(eventsXml);
-        while (m.find()) {
-            String member = m.group(1);
-            if (member.contains("<ResourceStatus>" + status + "</ResourceStatus>")
-                    && member.contains("<PhysicalResourceId>" + physicalId + "</PhysicalResourceId>")) {
-                return;
-            }
-        }
-        fail("no " + status + " event for " + physicalId + " in " + eventsXml);
+        boolean found = XmlParser.extractGroups(eventsXml, "member").stream()
+                .anyMatch(event -> status.equals(event.get("ResourceStatus"))
+                        && physicalId.equals(event.get("PhysicalResourceId")));
+        assertTrue(found, "no " + status + " event for " + physicalId + " in " + eventsXml);
     }
 
     private static void awaitStackDeleted(String stack) throws InterruptedException {
