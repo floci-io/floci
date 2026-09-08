@@ -13,10 +13,9 @@ import java.util.Comparator;
 
 /**
  * Manages on-disk locations of extracted Lambda function code.
- * Each function gets its own directory under {@code <codePath>/<accountId>/}, mirroring
- * the account-prefixed S3 key {@code LambdaService.codeObjectKey} uses for the same
- * deployment package. Without the account segment two accounts' same-named functions in
- * one region share a single extraction directory and overwrite each other's code.
+ * Each function gets its own directory under {@code <codePath>/<accountId>/<region>/},
+ * mirroring the account- and region-scoped Lambda namespace. Without either tenant
+ * segment, same-named functions can overwrite each other's extracted code.
  */
 @ApplicationScoped
 public class CodeStore {
@@ -40,8 +39,10 @@ public class CodeStore {
         this.baseDir = baseDir;
     }
 
-    public Path getCodePath(String accountId, String functionName) {
-        return baseDir.resolve(sanitizeName(accountId)).resolve(sanitizeName(functionName));
+    public Path getCodePath(String accountId, String region, String functionName) {
+        return baseDir.resolve(sanitizeName(accountId))
+                .resolve(sanitizeName(region))
+                .resolve(sanitizeName(functionName));
     }
 
     /**
@@ -69,14 +70,15 @@ public class CodeStore {
      * {@code foo.v1} owns the exact directory {@code foo}'s version 1 would otherwise claim, and
      * deleting either one silently corrupts the other.
      */
-    public Path getVersionsPath(String accountId, String functionName) {
+    public Path getVersionsPath(String accountId, String region, String functionName) {
         return baseDir.resolve(sanitizeName(accountId))
+                .resolve(sanitizeName(region))
                 .resolve(sanitizeName(functionName) + VERSIONS_DIR_SUFFIX);
     }
 
     /** Where one published version's own copy of the code lives. */
-    public Path getVersionCodePath(String accountId, String functionName, String version) {
-        return getVersionsPath(accountId, functionName).resolve(sanitizeName(version));
+    public Path getVersionCodePath(String accountId, String region, String functionName, String version) {
+        return getVersionsPath(accountId, region, functionName).resolve(sanitizeName(version));
     }
 
     /**
@@ -84,12 +86,12 @@ public class CodeStore {
      * directory already there. Returns null when there is nothing to copy, which is the case for
      * image-backed and hot-reload functions.
      */
-    public Path copyForVersion(String accountId, String functionName, String version, Path source)
+    public Path copyForVersion(String accountId, String region, String functionName, String version, Path source)
             throws IOException {
         if (source == null || !Files.isDirectory(source)) {
             return null;
         }
-        Path target = getVersionCodePath(accountId, functionName, version);
+        Path target = getVersionCodePath(accountId, region, functionName, version);
         deleteDirectory(target, functionName);
         try (var walk = Files.walk(source)) {
             for (Path from : walk.toList()) {
@@ -106,8 +108,8 @@ public class CodeStore {
     }
 
     /** Removes every published version's code for a function. */
-    public void deleteVersions(String accountId, String functionName) {
-        deleteDirectory(getVersionsPath(accountId, functionName), functionName);
+    public void deleteVersions(String accountId, String region, String functionName) {
+        deleteDirectory(getVersionsPath(accountId, region, functionName), functionName);
     }
 
     /**
@@ -115,13 +117,13 @@ public class CodeStore {
      * {@code $LATEST} in place. Deleting a single version otherwise left its package on disk for
      * as long as the data directory lived, so a repeated publish/delete cycle grew without bound.
      */
-    public void deleteVersion(String accountId, String functionName, String version) {
-        deleteDirectory(getVersionCodePath(accountId, functionName, version), functionName);
+    public void deleteVersion(String accountId, String region, String functionName, String version) {
+        deleteDirectory(getVersionCodePath(accountId, region, functionName, version), functionName);
     }
 
-    public void delete(String accountId, String functionName) {
-        deleteDirectory(getCodePath(accountId, functionName), functionName);
-        deleteVersions(accountId, functionName);
+    public void delete(String accountId, String region, String functionName) {
+        deleteDirectory(getCodePath(accountId, region, functionName), functionName);
+        deleteVersions(accountId, region, functionName);
     }
 
     /**
@@ -153,8 +155,8 @@ public class CodeStore {
         }
     }
 
-    public boolean exists(String accountId, String functionName) {
-        Path codePath = getCodePath(accountId, functionName);
+    public boolean exists(String accountId, String region, String functionName) {
+        Path codePath = getCodePath(accountId, region, functionName);
         if (!Files.exists(codePath)) {
             return false;
         }
