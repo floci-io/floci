@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -20,14 +22,20 @@ class RedshiftDataResourceResolver {
     private final RedshiftService redshiftService;
     private final SecretsManagerService secretsManagerService;
     private final ObjectMapper objectMapper;
+    private final RedshiftCredentialBroker credentialBroker;
+    private final RegionResolver regionResolver;
 
     @Inject
     RedshiftDataResourceResolver(RedshiftService redshiftService,
                                  SecretsManagerService secretsManagerService,
-                                 ObjectMapper objectMapper) {
+                                 ObjectMapper objectMapper,
+                                 RedshiftCredentialBroker credentialBroker,
+                                 RegionResolver regionResolver) {
         this.redshiftService = redshiftService;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
+        this.credentialBroker = credentialBroker;
+        this.regionResolver = regionResolver;
     }
 
     DatabaseTarget resolve(JsonNode request, String region) {
@@ -71,11 +79,19 @@ class RedshiftDataResourceResolver {
         String clusterId = requiredText(request, "ClusterIdentifier");
         String dbUser = requiredText(request, "DbUser");
         Cluster cluster = cluster(clusterId);
-        if (!dbUser.equals(cluster.getMasterUsername())) {
-            throw validation("DbUser " + dbUser + " is not the cluster master; create it first or use "
-                    + "GetClusterCredentials (not yet emulated).");
+
+        if (dbUser.equals(cluster.getMasterUsername())) {
+            return target(clusterArn(clusterId, null), cluster, database, dbUser, cluster.getMasterPassword());
         }
-        return target(clusterArn(clusterId, null), cluster, database, dbUser, cluster.getMasterPassword());
+        boolean liveCredential = credentialBroker
+                .resolve(regionResolver.getAccountId(), clusterId, dbUser)
+                .isPresent();
+        if (liveCredential) {
+            // The minted DbUser is nominal: connect as the cluster master.
+            return target(clusterArn(clusterId, null), cluster, database,
+                    cluster.getMasterUsername(), cluster.getMasterPassword());
+        }
+        throw validation("DbUser " + dbUser + " has no active credentials; call GetClusterCredentials first.");
     }
 
     private Cluster cluster(String clusterId) {

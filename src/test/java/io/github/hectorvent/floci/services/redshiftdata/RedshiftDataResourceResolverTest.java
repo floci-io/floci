@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -21,7 +23,9 @@ import static org.mockito.Mockito.when;
 class RedshiftDataResourceResolverTest {
 
     private static final String REGION = "us-east-1";
+    private static final String ACCOUNT = "acc";
     private final ObjectMapper mapper = new ObjectMapper();
+    private final RedshiftCredentialBroker broker = new RedshiftCredentialBroker();
 
     private static Cluster cluster() {
         Cluster c = new Cluster();
@@ -34,7 +38,9 @@ class RedshiftDataResourceResolverTest {
     }
 
     private RedshiftDataResourceResolver resolver(RedshiftService redshift, SecretsManagerService secrets) {
-        return new RedshiftDataResourceResolver(redshift, secrets, mapper);
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
+        return new RedshiftDataResourceResolver(redshift, secrets, mapper, broker, regionResolver);
     }
 
     @Test
@@ -92,6 +98,24 @@ class RedshiftDataResourceResolverTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> resolver(redshift, mock(SecretsManagerService.class)).resolve(req, REGION));
         assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void resolvesLiveMintedDbUserAsMaster() {
+        RedshiftService redshift = mock(RedshiftService.class);
+        when(redshift.describeClusters("wh")).thenReturn(List.of(cluster()));
+        broker.issue(ACCOUNT, "wh", "analyst", List.of(), 900);
+
+        ObjectNode req = mapper.createObjectNode();
+        req.put("ClusterIdentifier", "wh");
+        req.put("DbUser", "analyst");
+        req.put("Database", "dev");
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(req, REGION);
+
+        assertEquals("admin", target.user());
+        assertEquals("Secret123", target.password());
     }
 
     @Test
