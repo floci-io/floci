@@ -339,7 +339,15 @@ public class ApiGatewayService {
     }
 
     public void deleteResource(String region, String apiId, String resourceId) {
-        getResource(region, apiId, resourceId);
+        ApiGatewayResource resource = getResource(region, apiId, resourceId);
+        // The root resource is created with the API and cannot be removed on its own; it
+        // goes away only when the API does. Allowing it to be deleted would leave the API
+        // with no resource at "/", and so with no rootResourceId to report or to parent a
+        // new resource on, a state that has no way back short of recreating the API.
+        if ("/".equals(resource.getPath())) {
+            throw new AwsException("BadRequestException",
+                    "Invalid resource identifier specified: the root resource cannot be deleted", 400);
+        }
         resourceStore.delete(resourceKey(region, apiId, resourceId));
     }
 
