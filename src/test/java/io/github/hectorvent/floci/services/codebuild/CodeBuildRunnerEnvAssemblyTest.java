@@ -123,6 +123,10 @@ class CodeBuildRunnerEnvAssemblyTest {
         assertTrue(error.getMessage().contains("/accelerator/missing"), error.getMessage());
     }
 
+    /**
+     * CodeBuildService hands the runner a build whose environment already lists the project's
+     * variables followed by the override, so the later entry in that one list wins.
+     */
     @Test
     void buildLevelVariablesWinOverProjectVariables() {
         when(ssmService.getParameter("/pipeline/stage", REGION))
@@ -131,16 +135,40 @@ class CodeBuildRunnerEnvAssemblyTest {
                 Map.of("name", "ACCELERATOR_STAGE", "value", "project-level"),
                 Map.of("name", "UNTOUCHED", "value", "kept")));
         Build build = build();
-        ProjectEnvironment overrides = new ProjectEnvironment();
-        overrides.setEnvironmentVariables(List.of(Map.of(
-                "name", "ACCELERATOR_STAGE", "value", "/pipeline/stage", "type", "PARAMETER_STORE")));
-        build.setEnvironment(overrides);
+        ProjectEnvironment resolved = new ProjectEnvironment();
+        resolved.setEnvironmentVariables(List.of(
+                Map.of("name", "ACCELERATOR_STAGE", "value", "project-level"),
+                Map.of("name", "UNTOUCHED", "value", "kept"),
+                Map.of("name", "ACCELERATOR_STAGE", "value", "/pipeline/stage", "type", "PARAMETER_STORE")));
+        build.setEnvironment(resolved);
 
         List<String> env = envList(build, project);
 
         assertTrue(env.contains("ACCELERATOR_STAGE=prepare"), env.toString());
         assertTrue(env.contains("UNTOUCHED=kept"), env.toString());
         assertTrue(env.stream().noneMatch("ACCELERATOR_STAGE=project-level"::equals), env.toString());
+    }
+
+    /**
+     * The build's environment is the one the service already resolved when the build started
+     * (project variables plus overrides, or on a retry the ORIGINAL build's resolved list), so
+     * the runner must not layer the current project's variables underneath it: a variable the
+     * project gained after the original build ran would otherwise leak into the retry.
+     */
+    @Test
+    void retryDoesNotPickUpVariablesTheProjectGainedLater() {
+        Project project = project(List.of(
+                Map.of("name", "ACCELERATOR_STAGE", "value", "prepare"),
+                Map.of("name", "ADDED_AFTER_ORIGINAL_BUILD", "value", "leaked")));
+        Build retry = build();
+        ProjectEnvironment original = new ProjectEnvironment();
+        original.setEnvironmentVariables(List.of(Map.of("name", "ACCELERATOR_STAGE", "value", "prepare")));
+        retry.setEnvironment(original);
+
+        List<String> env = envList(retry, project);
+
+        assertTrue(env.contains("ACCELERATOR_STAGE=prepare"), env.toString());
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("ADDED_AFTER_ORIGINAL_BUILD=")), env.toString());
     }
 
     // ── endpoint injection scheme ─────────────────────────────────────────────

@@ -892,13 +892,16 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
         }
 
-        if (project.getEnvironment() != null) {
-            applyEnvironmentVariables(env, project.getEnvironment().getEnvironmentVariables(), region);
-        }
-
-        if (build.getEnvironment() != null) {
-            applyEnvironmentVariables(env, build.getEnvironment().getEnvironmentVariables(), region);
-        }
+        // The build's environment is the one CodeBuildService resolved when the build started:
+        // the project's variables plus any StartBuild override, or on a retry the ORIGINAL
+        // build's already-resolved list. Layering the CURRENT project's variables underneath it
+        // would leak into a retry every variable the project gained after the original build
+        // ran, so the project is only consulted when the build carries no variable list at all.
+        List<Map<String, String>> variables = build.getEnvironment() != null
+                && build.getEnvironment().getEnvironmentVariables() != null
+                ? build.getEnvironment().getEnvironmentVariables()
+                : (project.getEnvironment() != null ? project.getEnvironment().getEnvironmentVariables() : null);
+        applyEnvironmentVariables(env, variables, region);
 
         List<String> result = new ArrayList<>();
         env.forEach((k, v) -> result.add(k + "=" + (v != null ? v : "")));
