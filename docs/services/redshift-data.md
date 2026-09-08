@@ -36,7 +36,7 @@ For the upstream API shape, see the AWS documentation:
 
 A request identifies its target cluster one of two ways:
 
-- **`ClusterIdentifier` + `DbUser` + `Database`.** The `DbUser` must be the cluster master user. Floci connects directly to the container, so a non-master `DbUser` needs a real PostgreSQL role; until `GetClusterCredentials` is emulated, a non-master `DbUser` returns `ValidationException`.
+- **`ClusterIdentifier` + `DbUser` + `Database`.** The `DbUser` is the cluster master, or any user for which an unexpired `GetClusterCredentials` credential has been issued. Floci connects to the container as the cluster master in both cases. Any other `DbUser` returns `ValidationException`.
 - **`SecretArn` + `ClusterIdentifier` + `Database`.** The secret must be a local Secrets Manager secret holding JSON credentials (`username` or `user`, plus `password`). A cross-region `SecretArn` is rejected.
 
 `WorkgroupName` (Amazon Redshift Serverless) is rejected with `ValidationException`. Redshift Serverless is not emulated.

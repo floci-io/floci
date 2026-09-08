@@ -38,6 +38,8 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
 | `ModifyCluster` | Update node type, parameter group, security groups, or the master password |
 | `RebootCluster` | Restart a cluster's container |
+| `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
+| `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
 
 ## Configuration
@@ -177,6 +179,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 - The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
 - A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
 - Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
+- `GetClusterCredentials` / `GetClusterCredentialsWithIAM` mint a short-lived password held in memory (lost on restart). The returned `DbUser` is nominal: the session runs as the cluster master, not a distinct PostgreSQL role, so `current_user`, `GRANT`, and object ownership are the master's.
 
 ### UNLOAD to S3
 
@@ -220,5 +223,5 @@ the result to S3 as one or more objects under `<prefix>`.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
-- The auth proxy validates only the master user's password. Non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
-- IAM database authentication (`GetClusterCredentials`), and `sslmode=verify-full` against the self-signed proxy certificate.
+- The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
+- IAM database authentication over the wire, and `sslmode=verify-full` against the self-signed proxy certificate.
