@@ -38,7 +38,8 @@ quarkus:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), IAM reads its AWS managed-policy
-      # catalog (iam/managed-policies.yaml and iam/managed-policy-documents.json), AppSync's GraphQL parser reads its
+      # catalog (iam/managed-policies.yaml, iam/managed-policy-documents.json and
+      # iam/managed-policy-versions.json), AppSync's GraphQL parser reads its
       # message bundles, and API Gateway's Velocity engine reads its default
       # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis

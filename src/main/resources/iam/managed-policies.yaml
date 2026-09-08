@@ -8,6 +8,17 @@
 # Policy documents are stored in iam/managed-policy-documents.json, keyed by policy name.
 # The documents are generated from the public AWS managed policy dataset cited below.
 #
+# Each document is the policy's current default version. The version id AWS reports for it
+# (e.g. v3 for AmazonS3ReadOnlyAccess) is stored in iam/managed-policy-versions.json, also
+# keyed by policy name, together with the policy's creation date (createDate) and the date
+# of its current default version (updateDate), the two dates GetPolicy reports. The version
+# id and updateDate come from the same dataset (the "version" and "updatedate" fields of
+# aws/managed_policies.json); createDate comes from the "Creation time" published on each
+# policy's page of the AWS managed policy reference,
+# https://docs.aws.amazon.com/aws-managed-policy/latest/reference/, which is minute-precise,
+# and falls back to the dataset's date for policies that no longer have a page. Only the
+# default version's document is bundled, so superseded version ids resolve to NoSuchEntity.
+#
 # Names and paths derive from the public AWS managed policy list, via
 # https://github.com/iann0036/iam-dataset (MIT). To refresh against a real account:
 #   aws iam list-policies --scope AWS

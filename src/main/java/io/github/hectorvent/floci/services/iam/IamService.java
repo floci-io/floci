@@ -276,8 +276,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Map<String, IamPolicy> catalog = new LinkedHashMap<>();
         for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
             String arn = def.arn();
+            // The bundled document is the policy's current default version, served under the
+            // version id AWS actually reports for it (v3 for AmazonS3ReadOnlyAccess, v1 for
+            // AdministratorAccess) so GetPolicy/ListPolicyVersions match a real account.
+            // Superseded versions are not bundled, so they resolve to NoSuchEntity.
+            Instant now = Instant.now();
+            Instant updateDate = def.updateDate() != null ? def.updateDate() : now;
+            Instant createDate = def.createDate() != null ? def.createDate() : updateDate;
+            PolicyVersion defaultVersion = new PolicyVersion(
+                    def.defaultVersionId(), def.document(), true, updateDate);
             catalog.put(arn, new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
-                    def.description(), def.document()));
+                    def.description(), defaultVersion, createDate, updateDate));
         }
         return catalog;
     }

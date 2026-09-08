@@ -274,7 +274,23 @@ Floci seeds a catalog of commonly-used AWS managed policies at startup. These ar
 **Other execution roles**
 `AmazonS3ObjectLambdaExecutionRolePolicy` · `CloudWatchLambdaInsightsExecutionRolePolicy` · `CloudWatchLambdaApplicationSignalsExecutionRolePolicy` · `AWSConfigRulesExecutionRole` · `AWSMSKReplicatorExecutionRole` · `AWS-SSM-DiagnosisAutomation-ExecutionRolePolicy` · `AWS-SSM-RemediationAutomation-ExecutionRolePolicy` · `AmazonSageMakerGeospatialExecutionRole` · `AmazonSageMakerCanvasEMRServerlessExecutionRolePolicy` · `SageMakerStudioBedrockFunctionExecutionRolePolicy` · `SageMakerStudioDomainExecutionRolePolicy` · `SageMakerStudioQueryExecutionRolePolicy` · `AmazonDataZoneDomainExecutionRolePolicy` · `AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy` · `AWSPartnerCentralSellingResourceSnapshotJobExecutionRolePolicy`
 
-All seeded policies use a permissive wildcard document since Floci does not enforce IAM policy evaluation by default.
+Every catalog entry carries the real policy document of its current default version, generated from the public [iam-dataset](https://github.com/iann0036/iam-dataset), so `GetPolicyVersion` returns the same statements a real account would and enforcement mode evaluates them faithfully.
+
+### Version numbers
+
+AWS revises its managed policies in place, so their default version is rarely `v1`: `AmazonS3ReadOnlyAccess` is on `v3`, `ReadOnlyAccess` far beyond that, while `AdministratorAccess` has never been revised. Floci reports the version id AWS publishes for each policy, the date the policy was first created as `CreateDate`, and the date of its current default version as `UpdateDate`:
+
+```bash
+aws --endpoint-url http://localhost:4566 iam get-policy \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+# -> DefaultVersionId: "v3", CreateDate: 2015-02-06T18:40:00Z, UpdateDate: 2023-08-10T21:31:39Z
+
+aws --endpoint-url http://localhost:4566 iam list-policy-versions \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+# -> a single entry, v3, IsDefaultVersion: true
+```
+
+Only the default version's document is bundled. Requesting a superseded version (`v1` or `v2` of `AmazonS3ReadOnlyAccess`) returns `NoSuchEntity`, the same answer AWS gives once it has pruned a managed policy's history, and `ListPolicyVersions` lists only the default. AWS managed policies remain read-only: `CreatePolicyVersion`, `SetDefaultPolicyVersion` and `DeletePolicyVersion` are rejected with `AccessDenied`.
 
 ## Optional Local Deployer Principal
 

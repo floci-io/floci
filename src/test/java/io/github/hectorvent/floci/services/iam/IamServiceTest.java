@@ -356,7 +356,7 @@ class IamServiceTest {
         IamPolicy policy = iamService.getPolicy(arn);
 
         assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
-        assertEquals("v1", policy.getDefaultVersionId());
+        assertEquals("v3", policy.getDefaultVersionId());
         assertEquals(IamPolicyEvaluator.Decision.ALLOW,
                 new IamPolicyEvaluator(new com.fasterxml.jackson.databind.ObjectMapper())
                         .evaluate(List.of(policy.getDefaultDocument()), "s3:GetObject", "arn:aws:s3:::bucket/key"));
@@ -409,13 +409,21 @@ class IamServiceTest {
         IamPolicy policy = iamService.getPolicy(arn);
         assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
         assertEquals(arn, policy.getArn());
-        assertEquals("v1", policy.getDefaultVersionId());
+        // AWS revised this policy twice; a real account reports v3, not v1.
+        assertEquals("v3", policy.getDefaultVersionId());
         assertTrue(policy.getDefaultDocument().contains("s3:Get*"));
 
-        AwsException error = assertThrows(AwsException.class,
-                () -> iamService.getPolicyVersion(arn, "v9"));
-        assertEquals("NoSuchEntity", error.getErrorCode());
-        assertEquals(404, error.getHttpStatus());
+        PolicyVersion current = iamService.getPolicyVersion(arn, "v3");
+        assertTrue(current.isDefaultVersion());
+        assertEquals(policy.getDefaultDocument(), current.getDocument());
+
+        // Neither a future version nor a superseded one whose document is not bundled resolves.
+        for (String versionId : new String[] {"v9", "v1"}) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> iamService.getPolicyVersion(arn, versionId));
+            assertEquals("NoSuchEntity", error.getErrorCode());
+            assertEquals(404, error.getHttpStatus());
+        }
     }
 
     @Test
