@@ -609,7 +609,7 @@ public class CloudWatchLogsService implements ResourceProvider {
         putForAccount(streamStore, accountId, streamKey, stream);
 
         if (logEventsIngested != null && !stored.isEmpty()) {
-            logEventsIngested.fire(new LogEventsIngested(region, groupName, streamName, List.copyOf(stored)));
+            logEventsIngested.fire(new LogEventsIngested(accountId, region, groupName, streamName, List.copyOf(stored)));
         }
         return nextToken;
     }

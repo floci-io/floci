@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterMatch;
@@ -337,11 +338,13 @@ public class CloudWatchLogsMetricFilterService {
     /**
      * Publishes the metrics of the group's filters for a stored batch: one value per matching
      * event, at the event's timestamp, with the dimensions whose fields the event carries, and the
-     * default value once when nothing in the batch matched. A filter that cannot publish is logged
-     * and skipped: AWS never fails an ingestion because of a metric filter.
+     * default value once when nothing in the batch matched. The filters and the metrics are those
+     * of the account the batch was written for, the caller's own unless the writer named one. A
+     * filter that cannot publish is logged and skipped: AWS never fails an ingestion because of a
+     * metric filter.
      */
     void onLogEventsIngested(@Observes LogEventsIngested event) {
-        for (MetricFilter filter : filtersOf(event.logGroupName(), event.region())) {
+        for (MetricFilter filter : filtersOf(event.logGroupName(), event.region(), event.accountId())) {
             try {
                 publish(filter, event);
             } catch (RuntimeException e) {
@@ -357,12 +360,16 @@ public class CloudWatchLogsMetricFilterService {
         Double literal = NUMBER.matcher(t.getMetricValue()).matches() ? Double.parseDouble(t.getMetricValue()) : null;
         List<MetricDatum> datums = new ArrayList<>();
         long lastTimestamp = 0;
+        boolean matched = false;
         for (LogEvent logEvent : event.events()) {
             lastTimestamp = Math.max(lastTimestamp, logEvent.getTimestamp());
             FilterMatch match = pattern.match(logEvent.getMessage());
             if (!match.matched()) {
                 continue;
             }
+            matched = true;
+            // A match whose field is missing or not a number publishes nothing, and it is still a
+            // match: the default value is for batches the pattern matched nothing in.
             Double value = literal != null ? literal : number(match.value(t.getMetricValue()));
             if (value == null) {
                 continue;
@@ -378,11 +385,11 @@ public class CloudWatchLogsMetricFilterService {
             }
             datums.add(datum(t, value, dimensions, logEvent.getTimestamp()));
         }
-        if (datums.isEmpty() && t.getDefaultValue() != null) {
+        if (!matched && t.getDefaultValue() != null) {
             datums.add(datum(t, t.getDefaultValue(), List.of(), lastTimestamp));
         }
         if (!datums.isEmpty()) {
-            metricsService.putMetricData(t.getMetricNamespace(), datums, event.region());
+            metricsService.putMetricDataForAccount(event.accountId(), t.getMetricNamespace(), datums, event.region());
         }
     }
 
@@ -408,7 +415,17 @@ public class CloudWatchLogsMetricFilterService {
     }
 
     private List<MetricFilter> filtersOf(String logGroupName, String region) {
+        return filtersOf(logGroupName, region, null);
+    }
+
+    /** The group's filters in {@code accountId}'s partition, or in the caller's own when it is null. */
+    private List<MetricFilter> filtersOf(String logGroupName, String region, String accountId) {
         String prefix = groupPrefix(region, logGroupName);
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<MetricFilter> aware = (AccountAwareStorageBackend<MetricFilter>) rawAware;
+            return aware.scanForAccount(accountId, key -> key.startsWith(prefix));
+        }
         return store.scan(key -> key.startsWith(prefix));
     }
 

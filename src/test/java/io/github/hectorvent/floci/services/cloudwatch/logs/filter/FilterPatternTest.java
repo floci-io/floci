@@ -304,7 +304,7 @@ class FilterPatternTest {
         void malformedPatternsAreRejected() {
             for (String bad : List.of("{ $.a = }", "{ $.a }", "{ $.a = 1", "{ $.a = 1 } trailing", "{ a = 1 }",
                     "{ $.a == 1 }", "{ $.a = 1 && }", "{ ($.a = 1 }", "{ $.a IS MAYBE }", "{ $.a EXISTS }",
-                    "{ $.a[x] = 1 }", "{ $.a = \"unterminated }")) {
+                    "{ $.a[x] = 1 }", "{ $.a = \"unterminated }", "{ $.x[99999999999999999999] = 1 }")) {
                 assertThrows(FilterPatternException.class, () -> FilterPattern.parse(bad), bad);
             }
         }
