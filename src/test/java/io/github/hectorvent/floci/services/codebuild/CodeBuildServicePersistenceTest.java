@@ -204,6 +204,38 @@ class CodeBuildServicePersistenceTest {
                 retried.getEnvironment().getEnvironmentVariables());
     }
 
+    /**
+     * A project that had no variables when the original build ran stores a null variable list
+     * on that build; the retry must not read the variables the project gained since.
+     */
+    @Test
+    void retryBuildDoesNotAdoptVariablesTheProjectGainedWhenTheOriginalHadNone() {
+        CodeBuildRunner runner = mock(CodeBuildRunner.class);
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory(), runner);
+        ProjectEnvironment original = new ProjectEnvironment();
+        original.setImage("aws/codebuild/standard:6.0");
+        original.setComputeType("BUILD_GENERAL1_SMALL");
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                original, "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+        Build started = service.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null, null, null, null, null);
+        assertNull(started.getEnvironment().getEnvironmentVariables());
+
+        ProjectEnvironment updated = new ProjectEnvironment();
+        updated.setImage("aws/codebuild/standard:6.0");
+        updated.setComputeType("BUILD_GENERAL1_SMALL");
+        updated.setEnvironmentVariables(List.of(Map.of("name", "ADDED_LATER", "value", "leaked")));
+        service.updateProject(REGION, "p1", null, null, null, null, null, null, updated,
+                null, null, null, null, null, null, null, null);
+
+        Build retried = service.retryBuild(REGION, ACCOUNT, started.getId());
+
+        List<Map<String, String>> variables = retried.getEnvironment().getEnvironmentVariables();
+        assertTrue(variables == null || variables.isEmpty(), String.valueOf(variables));
+    }
+
     @Test
     void startBuildWithSparseEnvironmentTypeOverrideRetainsProjectImageAndComputeType() {
         CodeBuildService service = serviceWithStorage(new SharedStorageFactory());
