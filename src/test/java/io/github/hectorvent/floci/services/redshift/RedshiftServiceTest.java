@@ -1129,6 +1129,16 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void passwordValidatorRejectsEverythingWhenClusterRowIsAbsent() {
+        when(clusterBackend.getForAccount("acc", "gone")).thenReturn(Optional.empty());
+
+        PasswordValidator validator = service.passwordValidatorForTesting("acc", "gone");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT, validator.validate("admin", "SecretPass1"));
+        assertEquals(PasswordValidator.AuthResult.REJECT, validator.validate("analyst", "anything"));
+    }
+
+    @Test
     void passwordValidatorRejectsMasterUserWithWrongPassword() {
         seedCluster("acc", "c1");
 

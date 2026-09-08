@@ -947,15 +947,19 @@ public class RedshiftService {
     private PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
         return (user, password) -> {
             Optional<Cluster> cluster = clusters.getForAccount(accountId, clusterIdentifier);
-            boolean masterUser = cluster.map(c -> user.equals(c.getMasterUsername())).orElse(false);
-            if (masterUser) {
+            if (cluster.isEmpty()) {
+                // No cluster row to validate against: vouch for nothing. Falling through to the
+                // broker would classify an unknown user as PASSTHROUGH, and the wire proxy reads
+                // isMaster from its own start-time config, so a PASSTHROUGH there still opens the
+                // backend as master, authenticating any password for the master username.
+                return PasswordValidator.AuthResult.REJECT;
+            }
+            Cluster c = cluster.get();
+            if (user.equals(c.getMasterUsername())) {
                 // The master username is authoritative here: a wrong password must be rejected,
                 // never handed to the broker (which only knows minted DbUsers) and never passed
                 // through as if the user were unknown.
-                boolean passwordMatches = cluster
-                        .map(c -> password.equals(c.getMasterPassword()))
-                        .orElse(false);
-                return passwordMatches
+                return password.equals(c.getMasterPassword())
                         ? PasswordValidator.AuthResult.MASTER_EQUIVALENT
                         : PasswordValidator.AuthResult.REJECT;
             }

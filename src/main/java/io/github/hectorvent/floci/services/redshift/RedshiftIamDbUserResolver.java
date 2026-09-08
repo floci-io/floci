@@ -43,7 +43,8 @@ public class RedshiftIamDbUserResolver {
             return parts.length >= 2 ? "IAMR:" + parts[1] : FALLBACK_DB_USER;
         }
         if (resource.startsWith("user/")) {
-            return "IAM:" + resource.substring("user/".length());
+            // Drop any IAM path prefix (user/team/alice -> alice), matching how AWS names the DbUser.
+            return "IAM:" + resource.substring(resource.lastIndexOf('/') + 1);
         }
         LOG.warnv("GetClusterCredentialsWithIAM caller ARN {0} is not a user or role; using {1}",
                 arn.get(), FALLBACK_DB_USER);
