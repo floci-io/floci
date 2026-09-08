@@ -16,6 +16,14 @@ record DynamoDbAccessPath(String indexName, Kind kind, List<KeySchemaElement> ke
     enum Kind { TABLE, GLOBAL_SECONDARY_INDEX, LOCAL_SECONDARY_INDEX }
 
     static DynamoDbAccessPath resolve(TableDefinition table, String indexName) {
+        return resolve(table, indexName,
+                "The table does not have the specified index: " + indexName);
+    }
+
+    // Callers that phrase the missing-index error differently supply their own
+    // wording: ExecuteStatement omits the index name, unlike Query/Scan
+    // (characterised on real AWS, eu-west-1, 2026-09-02).
+    static DynamoDbAccessPath resolve(TableDefinition table, String indexName, String missingIndexMessage) {
         if (indexName == null) {
             return new DynamoDbAccessPath(null, Kind.TABLE, table.getKeySchema(), "ALL", List.of());
         }
@@ -32,8 +40,7 @@ record DynamoDbAccessPath(String indexName, Kind kind, List<KeySchemaElement> ke
                     lsi.getKeySchema(), lsi.getProjectionType(), lsi.getNonKeyAttributes());
         }
 
-        throw new AwsException("ValidationException",
-                "The table does not have the specified index: " + indexName, 400);
+        throw new AwsException("ValidationException", missingIndexMessage, 400);
     }
 
     DynamoDbAccessPath {

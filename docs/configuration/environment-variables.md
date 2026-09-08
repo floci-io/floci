@@ -13,8 +13,6 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | AWS region used in ARNs and API responses |
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Fallback account ID used in ARNs when the request's access key is not exactly 12 digits. When the access key IS 12 digits, it is used directly as the account ID — see [Multi-Account Isolation](./multi-account.md) |
 | `FLOCI_DEFAULT_AVAILABILITY_ZONE` | `us-east-1a` | Availability zone reported in EC2 and other responses |
-| `FLOCI_MAX_REQUEST_SIZE` | `512` | Maximum HTTP request body size in megabytes |
-| `FLOCI_ECR_BASE_URI` | `public.ecr.aws` | Base URI for public ECR image references |
 
 ---
 
@@ -44,7 +42,7 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_TLS_ENABLED` | `false` | Enable TLS/HTTPS on all endpoints (HTTP remains available simultaneously) |
 | `FLOCI_TLS_CERT_PATH` | _(none)_ | Path to a PEM certificate file. When set, disables auto-generation |
 | `FLOCI_TLS_KEY_PATH` | _(none)_ | Path to a PEM private key file. Required when `FLOCI_TLS_CERT_PATH` is set |
-| `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate and persist a self-signed certificate when no cert/key paths are provided |
+| `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate and persist a server certificate signed by Floci's local CA when no cert/key paths are provided |
 
 See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss://`) support.
 
@@ -54,6 +52,7 @@ See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss:/
 
 | Variable | Default | Description |
 |---|---|---|
+| `FLOCI_PROTOCOLS_MAX_REQUEST_SIZE` | `2048` | Maximum HTTP request body size in megabytes (feeds `quarkus.http.limits.max-body-size`). Legacy name `FLOCI_MAX_REQUEST_SIZE` still works |
 | `FLOCI_PROTOCOLS_STRICT_CLAIMING` | `false` | Reject RPC-signaled requests that no supported wire protocol claims, per the [Smithy wire-protocol-selection guide](https://smithy.io/2.0/guides/wire-protocol-selection.html) (e.g. an unknown `Smithy-Protocol` header value or an unimplemented `rpc-v2-json` request). When disabled such requests are logged and pass through |
 | `FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE` | `true` | Reject REST requests whose SigV4 credential scope names a service Floci does not implement, with `UnknownOperationException` instead of letting them fall through to S3's path-style routes and return a misleading `NoSuchBucket`. Set to `false` if Floci serves a route whose signing scope is not yet enumerated: the request then falls through as before instead of failing with a 404 |
 
@@ -200,6 +199,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable the Lambda service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove Lambda containers immediately after each invocation |
+| `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` | `public.ecr.aws` | Registry (optionally with a path prefix) the Lambda runtime images are pulled from, e.g. `public.ecr.aws/lambda/python:3.12`. Legacy name `FLOCI_ECR_BASE_URI` still works |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default memory allocation for functions that don't specify one |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default invocation timeout in seconds |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API port range |
@@ -309,6 +309,8 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDFORMATION_ENABLED` | `true` | Enable the CloudFormation service |
+| `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_LAMBDA_CODE` | `false` | Fall back to the built-in stub handler for an `AWS::Lambda::Function` whose S3 code cannot be read. Off matches real CloudFormation, which fails the resource and rolls the stack back |
+| `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES` | `true` | Stub a resource whose type has no provisioner (synthetic physical ID, `arn:aws:stub:::` ARN attribute, `CREATE_COMPLETE`), logged at `WARN` with a resource status reason. Set `false` to fail the resource instead, which rolls the stack back |
 
 ### ACM (Certificate Manager)
 
@@ -333,6 +335,19 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_PIPES_ENABLED` | `true` | Enable the EventBridge Pipes service |
+
+### IoT Core
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_IOT_ENABLED` | `true` | Enable the IoT Core service |
+| `FLOCI_SERVICES_IOT_ENDPOINT_ADDRESS` | _(none)_ | Value `DescribeEndpoint` returns for every endpoint type, and the domain name of the AWS-managed domain configurations. Set it to a bare hostname when the AWS IoT ports (8883, 443, 8443) reach Floci; the name is added to the server certificate. Defaults to the host and port of `FLOCI_BASE_URL`, with `FLOCI_HOSTNAME` applied |
+| `FLOCI_SERVICES_IOT_RULE_SQL_STRICT` | `false` | Reject topic rules whose SQL falls outside the evaluated subset, as AWS does |
+| `FLOCI_SERVICES_IOT_MQTT_ENABLED` | `true` | Run the embedded MQTT broker |
+| `FLOCI_SERVICES_IOT_MQTT_AUTO_START` | `false` | Start the broker at boot instead of on the first IoT API call |
+| `FLOCI_SERVICES_IOT_MQTT_HOST` | `0.0.0.0` | Address the broker listens on |
+| `FLOCI_SERVICES_IOT_MQTT_PORT` | `1883` | Plaintext MQTT port |
+| `FLOCI_SERVICES_IOT_MQTT_TLS_PORT` | `8883` | MQTT over TLS port, opened while `FLOCI_TLS_ENABLED` is `true`; `0` disables it |
 
 ---
 
@@ -373,7 +388,7 @@ These services spawn Docker containers. They require access to the Docker socket
 |---|---|---|
 | `FLOCI_SERVICES_OPENSEARCH_ENABLED` | `true` | Enable the OpenSearch service |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK` | `false` | When `true`, domains are created instantly without a real container (API only) |
-| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` | Docker image for OpenSearch domains |
+| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | *(unset)* | Optional fixed Docker image for every OpenSearch domain; when unset, images resolve per requested `EngineVersion` |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | First port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Last port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Keep OpenSearch containers running when Floci stops |
@@ -406,6 +421,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Enable TLS for the ECR registry |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Keep the ECR registry container running when Floci stops |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
+| `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
 | `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | _(none)_ | Docker network for the ECR registry container |
 
 ### EKS (Elastic Kubernetes Service)
@@ -466,6 +482,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_TEXTRACT_ENABLED` | `true` | Enable the Textract service |
 | `FLOCI_SERVICES_TRANSFER_ENABLED` | `true` | Enable the Transfer Family service |
 | `FLOCI_SERVICES_ROUTE53_ENABLED` | `true` | Enable the Route 53 service |
+| `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Simulated processing window for Route 53 VPC association/auth mutations; positive values make documented overlap errors (`PriorRequestNotComplete` / `ConcurrentModification`) reproducible for retry tests |
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable the ELBv2 (ALB/NLB) service |
 | `FLOCI_SERVICES_ELBV2_MOCK` | `false` | When `true`, load balancers are registered but no containers are spawned |
 | `FLOCI_SERVICES_AUTOSCALING_ENABLED` | `true` | Enable the Auto Scaling service |

@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,8 +34,8 @@ public final class SigV4TokenTestHelper {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("Action", "connect");
         params.put("User", user);
-        return signToken(clusterId, null, clusterId, accessKeyId, secretKey, "us-east-1",
-                "elasticache", timestamp, expiresSeconds, params);
+        return signToken(clusterId, null, accessKeyId, secretKey, "us-east-1",
+                "elasticache", timestamp, expiresSeconds, params, Map.of("host", clusterId));
     }
 
     public static String createElastiCacheTokenWithoutUser(
@@ -46,8 +47,8 @@ public final class SigV4TokenTestHelper {
     ) throws Exception {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("Action", "connect");
-        return signToken(clusterId, null, clusterId, accessKeyId, secretKey, "us-east-1",
-                "elasticache", timestamp, expiresSeconds, params);
+        return signToken(clusterId, null, accessKeyId, secretKey, "us-east-1",
+                "elasticache", timestamp, expiresSeconds, params, Map.of("host", clusterId));
     }
 
     public static String createRdsToken(
@@ -62,31 +63,68 @@ public final class SigV4TokenTestHelper {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("Action", "connect");
         params.put("DBUser", dbUser);
-        return signToken(host, port, host + ":" + port, accessKeyId, secretKey, "us-east-1",
-                "rds-db", timestamp, expiresSeconds, params);
+        return signToken(host, port, accessKeyId, secretKey, "us-east-1",
+                "rds-db", timestamp, expiresSeconds, params, Map.of("host", host + ":" + port));
+    }
+
+    public static String createEksToken(
+            String clusterName,
+            String accessKeyId,
+            String secretKey,
+            Instant timestamp,
+            int expiresSeconds
+    ) throws Exception {
+        return createEksToken(clusterName, accessKeyId, secretKey, timestamp, expiresSeconds, null);
+    }
+
+    public static String createEksToken(
+            String clusterName,
+            String accessKeyId,
+            String secretKey,
+            Instant timestamp,
+            int expiresSeconds,
+            String sessionToken
+    ) throws Exception {
+        String host = "sts.us-east-1.amazonaws.com";
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("Action", "GetCallerIdentity");
+        params.put("Version", "2011-06-15");
+        if (sessionToken != null) {
+            params.put("X-Amz-Security-Token", sessionToken);
+        }
+        String url = "https://" + signToken(host, null, accessKeyId, secretKey, "us-east-1", "sts",
+                timestamp, expiresSeconds, params,
+                Map.of("host", host, "x-k8s-aws-id", clusterName));
+        return "k8s-aws-v1." + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(url.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String signToken(
             String host,
             Integer port,
-            String canonicalHostHeader,
             String accessKeyId,
             String secretKey,
             String region,
             String service,
             Instant timestamp,
             int expiresSeconds,
-            Map<String, String> params
+            Map<String, String> params,
+            Map<String, String> signedHeaders
     ) throws Exception {
-        String date = DateTimeFormatter.BASIC_ISO_DATE.withZone(ZoneOffset.UTC).format(timestamp);
+        String date = DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC).format(timestamp);
         String dateTime = DATETIME_FMT.format(timestamp);
         String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
         Map<String, String> queryParams = new LinkedHashMap<>(params);
+        queryParams.put("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
         queryParams.put("X-Amz-Credential", accessKeyId + "/" + credentialScope);
         queryParams.put("X-Amz-Date", dateTime);
         queryParams.put("X-Amz-Expires", Integer.toString(expiresSeconds));
-        queryParams.put("X-Amz-SignedHeaders", "host");
+        String signedHeaderNames = signedHeaders.keySet().stream()
+                .sorted()
+                .reduce((left, right) -> left + ";" + right)
+                .orElseThrow();
+        queryParams.put("X-Amz-SignedHeaders", signedHeaderNames);
 
         List<String> encodedPairs = new ArrayList<>();
         for (Map.Entry<String, String> entry : queryParams.entrySet()) {
@@ -98,10 +136,14 @@ public final class SigV4TokenTestHelper {
                 .reduce((a, b) -> a + "&" + b)
                 .orElse("");
 
+        String canonicalHeaders = signedHeaders.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> entry.getKey() + ":" + entry.getValue() + "\n")
+                .reduce("", String::concat);
         String canonicalRequest = "GET\n/\n"
                 + canonicalQuery + "\n"
-                + "host:" + canonicalHostHeader + "\n\n"
-                + "host\n"
+                + canonicalHeaders + "\n"
+                + signedHeaderNames + "\n"
                 + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
         String stringToSign = "AWS4-HMAC-SHA256\n"

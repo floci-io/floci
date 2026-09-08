@@ -15,7 +15,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests that SNS FIFO topic delivery correctly passes messageDeduplicationId
- * through to subscribed SQS FIFO queues.
+ * through to subscribed SQS FIFO queues, and that the topic's FifoThroughputScope
+ * decides whether deduplication is topic-wide or per message group.
  */
 class SnsSqsFanoutFifoDeliveryTest {
 
@@ -163,6 +164,143 @@ class SnsSqsFanoutFifoDeliveryTest {
         List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
         assertEquals(1, messages.size());
         assertTrue(messages.get(0).getBody().contains("first"));
+    }
+
+    @Test
+    void publish_withDefaultThroughputScope_dedupsAcrossMessageGroups() {
+        // Arrange: no FifoThroughputScope, so the AWS default (Topic) applies
+        String queueUrl = createGroupScopedQueue("fifo-topic-scope-queue.fifo");
+        String topicArn = createFifoTopic("fifo-topic-scope-topic.fifo", Map.of("FifoTopic", "true"),
+                "fifo-topic-scope-queue.fifo");
+
+        // Act: same dedup ID under two different message groups
+        snsService.publish(topicArn, null, null, "group-one", null, null, "group-1", "shared-dedup", REGION);
+        snsService.publish(topicArn, null, null, "group-two", null, null, "group-2", "shared-dedup", REGION);
+
+        // Assert: deduplication is topic-wide, so the second publish is swallowed
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
+        assertTrue(messages.getFirst().getBody().contains("group-one"));
+    }
+
+    @Test
+    void publish_withMessageGroupThroughputScope_deliversSameDedupIdInDifferentGroups() {
+        // Arrange
+        String queueUrl = createGroupScopedQueue("fifo-group-scope-queue.fifo");
+        String topicArn = createFifoTopic("fifo-group-scope-topic.fifo",
+                Map.of("FifoTopic", "true", "FifoThroughputScope", "MessageGroup"),
+                "fifo-group-scope-queue.fifo");
+
+        // Act: same dedup ID under two different message groups
+        snsService.publish(topicArn, null, null, "group-one", null, null, "group-1", "shared-dedup", REGION);
+        snsService.publish(topicArn, null, null, "group-two", null, null, "group-2", "shared-dedup", REGION);
+
+        // Assert: deduplication is scoped per group, so both are distinct messages
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(2, messages.size());
+        List<String> bodies = messages.stream().map(Message::getBody).toList();
+        assertTrue(bodies.stream().anyMatch(b -> b.contains("group-one")));
+        assertTrue(bodies.stream().anyMatch(b -> b.contains("group-two")));
+    }
+
+    @Test
+    void publish_withMessageGroupThroughputScope_stillDedupsWithinOneGroup() {
+        // Arrange
+        String queueUrl = createGroupScopedQueue("fifo-group-scope-dup-queue.fifo");
+        String topicArn = createFifoTopic("fifo-group-scope-dup-topic.fifo",
+                Map.of("FifoTopic", "true", "FifoThroughputScope", "MessageGroup"),
+                "fifo-group-scope-dup-queue.fifo");
+
+        // Act: same dedup ID twice under the same message group
+        snsService.publish(topicArn, null, null, "first", null, null, "group-1", "shared-dedup", REGION);
+        snsService.publish(topicArn, null, null, "second", null, null, "group-1", "shared-dedup", REGION);
+
+        // Assert: narrowing the scope must not disable deduplication inside a group
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
+        assertTrue(messages.getFirst().getBody().contains("first"));
+    }
+
+    @Test
+    void publish_withMessageGroupThroughputScope_isCaseInsensitive() {
+        // Arrange
+        String queueUrl = createGroupScopedQueue("fifo-group-scope-case-queue.fifo");
+        String topicArn = createFifoTopic("fifo-group-scope-case-topic.fifo",
+                Map.of("FifoTopic", "true", "FifoThroughputScope", "messagegroup"),
+                "fifo-group-scope-case-queue.fifo");
+
+        // Act
+        snsService.publish(topicArn, null, null, "group-one", null, null, "group-1", "shared-dedup", REGION);
+        snsService.publish(topicArn, null, null, "group-two", null, null, "group-2", "shared-dedup", REGION);
+
+        // Assert
+        assertEquals(2, sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION).size());
+    }
+
+    @Test
+    void publish_afterThroughputScopeChanges_doesNotHitTheOtherScopesCacheEntry() {
+        // Arrange
+        String queueUrl = createGroupScopedQueue("fifo-scope-switch-queue.fifo");
+        String topicArn = createFifoTopic("fifo-scope-switch-topic.fifo",
+                Map.of("FifoTopic", "true", "FifoThroughputScope", "MessageGroup"),
+                "fifo-scope-switch-queue.fifo");
+
+        // Act: publish group-scoped, then again topic-scoped with a dedup id shaped like the
+        // group-scoped key, inside the deduplication window.
+        snsService.publish(topicArn, null, null, "group-scoped", null, null, "a", "b", REGION);
+        snsService.setTopicAttributes(topicArn, "FifoThroughputScope", "Topic", REGION);
+        snsService.publish(topicArn, null, null, "topic-scoped", null, null, "z", "1#ab", REGION);
+
+        // Assert: the two scopes keep separate cache namespaces, so neither suppresses the other.
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(2, messages.size());
+        List<String> bodies = messages.stream().map(Message::getBody).toList();
+        assertTrue(bodies.stream().anyMatch(b -> b.contains("group-scoped")));
+        assertTrue(bodies.stream().anyMatch(b -> b.contains("topic-scoped")));
+    }
+
+    @Test
+    void publishBatch_withMessageGroupThroughputScope_deliversSameDedupIdInDifferentGroups() {
+        // Arrange
+        String queueUrl = createGroupScopedQueue("fifo-batch-group-scope-queue.fifo");
+        String topicArn = createFifoTopic("fifo-batch-group-scope-topic.fifo",
+                Map.of("FifoTopic", "true", "FifoThroughputScope", "MessageGroup"),
+                "fifo-batch-group-scope-queue.fifo");
+
+        // Act: one batch, same dedup ID under two different message groups
+        var entries = List.<Map<String, Object>>of(
+                Map.of("Id", "e1", "Message", "batch-group-one",
+                        "MessageGroupId", "group-1", "MessageDeduplicationId", "shared-dedup"),
+                Map.of("Id", "e2", "Message", "batch-group-two",
+                        "MessageGroupId", "group-2", "MessageDeduplicationId", "shared-dedup")
+        );
+        var result = snsService.publishBatch(topicArn, entries, REGION);
+
+        // Assert
+        assertEquals(2, result.successful().size());
+        assertEquals(0, result.failed().size());
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(2, messages.size());
+        List<String> bodies = messages.stream().map(Message::getBody).toList();
+        assertTrue(bodies.stream().anyMatch(b -> b.contains("batch-group-one")));
+        assertTrue(bodies.stream().anyMatch(b -> b.contains("batch-group-two")));
+    }
+
+    /** Per-group dedup on the queue too, so its own topic-wide window cannot mask the topic's. */
+    private String createGroupScopedQueue(String queueName) {
+        sqsService.createQueue(queueName, Map.of(
+                "FifoQueue", "true",
+                "DeduplicationScope", "messageGroup",
+                "FifoThroughputLimit", "perMessageGroupId"), REGION);
+        return BASE_URL + "/" + ACCOUNT + "/" + queueName;
+    }
+
+    private String createFifoTopic(String topicName, Map<String, String> attributes, String queueName) {
+        snsService.createTopic(topicName, attributes, null, REGION);
+        String topicArn = "arn:aws:sns:" + REGION + ":" + ACCOUNT + ":" + topicName;
+        snsService.subscribe(topicArn, "sqs",
+                "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + queueName, REGION, Map.of());
+        return topicArn;
     }
 
     @Test

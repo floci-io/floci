@@ -128,6 +128,7 @@ public class GlueService {
             throw new AwsException("AlreadyExistsException", "Database already exists: " + database.getName(), 400);
         }
         database.setName(databaseName);
+        database.setCatalogId(regionResolver.getAccountId());
         databaseStore.put(databaseName, database);
         if (tags != null && !tags.isEmpty()) {
             resourceGroupsTaggingService.tagResources(List.of(databaseArn(region, databaseName)), tags, region);
@@ -136,12 +137,27 @@ public class GlueService {
     }
 
     public Database getDatabase(String name) {
-        return databaseStore.get(normalizeName(name))
+        Database database = databaseStore.get(normalizeName(name))
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Database not found: " + name, 400));
+        backfillCatalogId(database);
+        return database;
     }
 
     public List<Database> getDatabases() {
-        return databaseStore.scan(k -> true);
+        List<Database> databases = databaseStore.scan(k -> true);
+        databases.forEach(this::backfillCatalogId);
+        return databases;
+    }
+
+    /**
+     * Heals a database persisted before CatalogId was modelled. The store is namespaced by
+     * account, so the reader is always the owning account and the healed value is stable —
+     * the same migrate-on-read the account-aware backend does for un-prefixed keys.
+     */
+    private void backfillCatalogId(Database database) {
+        if (database.getCatalogId() == null) {
+            database.setCatalogId(regionResolver.getAccountId());
+        }
     }
 
     public void updateDatabase(String name, Database database) {
@@ -156,6 +172,7 @@ public class GlueService {
         updated.setLocationUri(database.getLocationUri());
         updated.setParameters(database.getParameters() == null ? null : new LinkedHashMap<>(database.getParameters()));
         updated.setCreateTime(existing.getCreateTime());
+        updated.setCatalogId(regionResolver.getAccountId());
         databaseStore.put(databaseName, updated);
         LOG.infov("Updated Glue Database: {0}", databaseName);
     }

@@ -177,3 +177,25 @@ def test_find_undocumented_deferred_entry_already_resolved_is_not_flagged():
     )
     assert undocumented == []
     assert expired == []
+
+
+# --------------------------------------------------------------------------- #
+# Unlinked pages
+# --------------------------------------------------------------------------- #
+def test_find_unlinked_pages_flags_a_page_with_no_row(tmp_path):
+    for name in ("index.md", "ssm.md", "elb.md", "elb-classic.md"):
+        (tmp_path / name).write_text("# page\n")
+    # index.md is the matrix page itself; elb.md is linked; elb-classic.md is not.
+    assert c.find_unlinked_pages(tmp_path, slugs={"ssm", "elb"}, facet_pages=set()) == ["elb-classic"]
+
+
+def test_find_unlinked_pages_honours_facet_exemption(tmp_path):
+    for name in ("index.md", "lambda.md", "lambda-microvms.md"):
+        (tmp_path / name).write_text("# page\n")
+    assert c.find_unlinked_pages(tmp_path, slugs={"lambda"}, facet_pages={"lambda-microvms"}) == []
+
+
+def test_find_unlinked_pages_ignores_non_markdown(tmp_path):
+    (tmp_path / "ssm.md").write_text("# page\n")
+    (tmp_path / "diagram.svg").write_text("<svg/>")
+    assert c.find_unlinked_pages(tmp_path, slugs={"ssm"}, facet_pages=set()) == []

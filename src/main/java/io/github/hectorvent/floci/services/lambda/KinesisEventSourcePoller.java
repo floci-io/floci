@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -14,12 +16,15 @@ import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
 import io.vertx.core.Vertx;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +44,7 @@ public class KinesisEventSourcePoller implements Resettable {
     private final EsmStore esmStore;
     private final long pollIntervalMs;
     private final ObjectMapper objectMapper;
+    private final PipesFilterMatcher filterMatcher;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
     private final ExecutorService pollExecutor = Executors.newCachedThreadPool(r -> {
@@ -52,7 +58,8 @@ public class KinesisEventSourcePoller implements Resettable {
                                      LambdaExecutorService executorService,
                                      LambdaFunctionStore functionStore,
                                      EsmStore esmStore, EmulatorConfig config,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     PipesFilterMatcher filterMatcher) {
         this.vertx = vertx;
         this.kinesisService = kinesisService;
         this.executorService = executorService;
@@ -60,6 +67,7 @@ public class KinesisEventSourcePoller implements Resettable {
         this.esmStore = esmStore;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
         this.objectMapper = objectMapper;
+        this.filterMatcher = filterMatcher;
     }
 
     public void startPersistedPollers() {
@@ -102,7 +110,8 @@ public class KinesisEventSourcePoller implements Resettable {
         if (timerId != null) vertx.cancelTimer(timerId);
     }
 
-    private void pollAndInvoke(EventSourceMapping esm) {
+    /** Package-private (not private) only so unit tests can drive a single poll directly. */
+    void pollAndInvoke(EventSourceMapping esm) {
         if (activePolls.putIfAbsent(esm.getUuid(), Boolean.TRUE) != null) return;
         pollExecutor.submit(() -> {
             try {
@@ -124,25 +133,48 @@ public class KinesisEventSourcePoller implements Resettable {
                     Map<String, Object> result = kinesisService.getRecords(iterator, esm.getBatchSize(), esm.getRegion());
                     List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
-                    if (!records.isEmpty()) {
-                        String eventJson = buildKinesisEvent(records, esm, shard.getShardId());
-                        InvokeResult invokeResult;
-                        try {
-                            invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse);
-                        } catch (AwsException e) {
-                            if ("TooManyRequestsException".equals(e.getErrorCode())) {
-                                LOG.infov("Kinesis ESM {0}: function {1} throttled, shard iterator not advanced",
-                                        esm.getUuid(), fn.getFunctionName());
-                                continue;
-                            }
-                            throw e;
-                        }
+                    if (records.isEmpty()) {
+                        continue;
+                    }
 
-                        if (invokeResult.getFunctionError() == null) {
-                            String newestSeq = records.get(records.size() - 1).getSequenceNumber();
-                            esm.getShardSequenceNumbers().put(shard.getShardId(), newestSeq);
-                            esmStore.saveForAccount(esm.getAccountId(), esm);
+                    // The checkpoint must advance to the newest FETCHED record whenever the batch is
+                    // disposed of, whether by a successful invoke or because a filter matched nothing,
+                    // so filtered-out records are consumed, not re-read forever. Only an invoke that was
+                    // attempted and failed leaves the checkpoint unmoved (the whole window retries).
+                    String newestFetchedSeq = records.get(records.size() - 1).getSequenceNumber();
+
+                    List<KinesisRecord> matched = records;
+                    JsonNode filterParams = EsmFilterCriteriaUtils.matcherSourceParameters(objectMapper, esm.getFilterCriteria());
+                    if (filterParams != null) {
+                        List<JsonNode> filterNodes = new ArrayList<>(records.size());
+                        for (KinesisRecord rec : records) {
+                            filterNodes.add(buildKinesisFilterNode(rec));
                         }
+                        matched = EsmFilterCriteriaUtils.selectMatched(
+                                records, filterNodes, filterMatcher.applyFilterCriteria(filterNodes, filterParams));
+                    }
+
+                    if (matched.isEmpty()) {
+                        // Whole batch filtered out: consume it (advance past), do not invoke, do not retry.
+                        advanceCheckpoint(esm, shard.getShardId(), newestFetchedSeq);
+                        continue;
+                    }
+
+                    String eventJson = buildKinesisEvent(matched, esm, shard.getShardId());
+                    InvokeResult invokeResult;
+                    try {
+                        invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse);
+                    } catch (AwsException e) {
+                        if ("TooManyRequestsException".equals(e.getErrorCode())) {
+                            LOG.infov("Kinesis ESM {0}: function {1} throttled, shard iterator not advanced",
+                                    esm.getUuid(), fn.getFunctionName());
+                            continue;
+                        }
+                        throw e;
+                    }
+
+                    if (invokeResult.getFunctionError() == null) {
+                        advanceCheckpoint(esm, shard.getShardId(), newestFetchedSeq);
                     }
                 }
             } catch (Exception e) {
@@ -181,6 +213,35 @@ public class KinesisEventSourcePoller implements Resettable {
         } catch (Exception e) {
             return "{\"Records\":[]}";
         }
+    }
+
+    /**
+     * The record view a Kinesis filter pattern matches against. AWS decodes the base64 {@code data} and
+     * filters the <em>top-level</em> {@code data} key (plus metadata such as {@code partitionKey}), not the
+     * nested/base64 invocation envelope produced by {@link #buildKinesisEvent}. This is a separate,
+     * filter-only view: {@code data} is the base64-decoded payload, parsed as JSON when it parses, else kept
+     * as the decoded string (an object pattern then won't match it: AWS drops on format mismatch).
+     */
+    private JsonNode buildKinesisFilterNode(KinesisRecord rec) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("partitionKey", rec.getPartitionKey());
+        String decoded = new String(rec.getData(), StandardCharsets.UTF_8);
+        try {
+            JsonNode parsed = objectMapper.readTree(decoded);
+            if (parsed == null || parsed.isMissingNode()) {
+                node.put("data", decoded);
+            } else {
+                node.set("data", parsed);
+            }
+        } catch (JsonProcessingException e) {
+            node.put("data", decoded);
+        }
+        return node;
+    }
+
+    private void advanceCheckpoint(EventSourceMapping esm, String shardId, String newestSeq) {
+        esm.getShardSequenceNumbers().put(shardId, newestSeq);
+        esmStore.saveForAccount(esm.getAccountId(), esm);
     }
 
     private static String streamNameFromArn(String arn) {

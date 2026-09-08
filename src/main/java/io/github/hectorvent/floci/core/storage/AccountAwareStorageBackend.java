@@ -66,13 +66,23 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         if (result.isPresent()) {
             return result;
         }
-        // Backward-compat: try un-prefixed key (pre-multi-account data) and migrate on read.
-        result = delegate.get(key);
-        if (result.isPresent()) {
-            delegate.put(prefixedKey, result.get());
-            delegate.delete(key);
+        // Backward-compat: try un-prefixed key (pre-multi-account data) and migrate on read. The
+        // migration is a write (put then delete), so it runs under the same monitor the explicit-account
+        // migrators hold, or two readers resolving the same legacy key from different account contexts
+        // would each copy it into their own partition and the two copies would then diverge. The hit
+        // path above stays outside the monitor, so only a miss pays for it.
+        synchronized (this) {
+            Optional<V> migratedByAnotherReader = delegate.get(prefixedKey);
+            if (migratedByAnotherReader.isPresent()) {
+                return migratedByAnotherReader;
+            }
+            result = delegate.get(key);
+            if (result.isPresent()) {
+                delegate.put(prefixedKey, result.get());
+                delegate.delete(key);
+            }
+            return result;
         }
-        return result;
     }
 
     @Override

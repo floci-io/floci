@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -167,6 +168,28 @@ class ApiGatewayV2CfnProvisionerTest {
                 previous.getAttributes().get("__FlociApiGatewayV2BodyIntegrationIds"));
         assertEquals("old-authorizer,surviving-authorizer",
                 previous.getAttributes().get("__FlociApiGatewayV2BodyAuthorizerIds"));
+    }
+
+    @Test
+    void carriesAReplacementCleanupRecordOntoTheRestoredResourceForAnyType() {
+        StackResource previous = new StackResource();
+        previous.setLogicalId("Subnet");
+        previous.setResourceType("AWS::EC2::Subnet");
+        previous.setPhysicalId("subnet-prior");
+        previous.setAttributes(new java.util.HashMap<>());
+        StackResource attempted = new StackResource();
+        attempted.setLogicalId("Subnet");
+        attempted.setResourceType("AWS::EC2::Subnet");
+        attempted.setPhysicalId("subnet-replacement");
+        attempted.setAttributes(new java.util.HashMap<>(Map.of(
+                "__FlociReplacementCleanup",
+                "{\"region\":\"us-east-1\",\"displaced\":[{\"physicalId\":\"subnet-replacement\",\"resourceType\":\"AWS::EC2::Subnet\",\"region\":\"us-east-1\",\"retainable\":false,\"cleanupAttempts\":1}]}")));
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        String record = previous.getAttributes().get("__FlociReplacementCleanup");
+        assertTrue(record != null && record.contains("subnet-replacement") && record.contains("\"cleanupAttempts\":1"),
+                "the orphan the attempt could not remove is owed on the restored resource: " + record);
     }
 
     @Test

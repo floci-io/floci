@@ -37,7 +37,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void ipv4AddressEncodedAsIpAddressSanType() throws Exception {
-        var cert = generator.generateCertificate(
+        var cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "192.168.1.100"),
                 KeyAlgorithm.RSA_2048);
@@ -56,7 +56,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void ipv6LoopbackEncodedAsIpAddressSanType() throws Exception {
-        var cert = generator.generateCertificate(
+        var cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "0.0.0.0", "::1"),
                 KeyAlgorithm.RSA_2048);
@@ -81,7 +81,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void dnsNamesEncodedAsDnsNameSanType() throws Exception {
-        var cert = generator.generateCertificate(
+        var cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("myhost.example.com", "floci"),
                 KeyAlgorithm.RSA_2048);
@@ -106,7 +106,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void wildcardEncodedAsDnsNameSanType() throws Exception {
-        var cert = generator.generateCertificate(
+        var cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "*.localhost"),
                 KeyAlgorithm.RSA_2048);
@@ -123,7 +123,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void mixedIpsAndDnsNamesEncodedCorrectly() throws Exception {
-        var cert = generator.generateCertificate(
+        var cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost", "floci", "10.0.0.5"),
                 KeyAlgorithm.RSA_2048);

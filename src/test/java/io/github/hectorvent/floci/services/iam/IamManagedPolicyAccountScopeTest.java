@@ -35,6 +35,8 @@ class IamManagedPolicyAccountScopeTest {
     private static final String DEFAULT_ACCT = "000000000000";
     private static final String REQUEST_ACCT = "111111111111";
     private static final String OTHER_ACCT = "222222222222";
+    private static final String CUSTOMER_DOCUMENT =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
 
     @SuppressWarnings("unchecked")
     private static Instance<RequestContext> requestContextFor(String accountId) {
@@ -56,7 +58,7 @@ class IamManagedPolicyAccountScopeTest {
         String customerArn = "arn:aws:iam::" + DEFAULT_ACCT + ":policy/customer-policy";
         policies.putForAccount(DEFAULT_ACCT, customerArn,
                 new IamPolicy("ANPACUSTOMER0001", "customer-policy", "/", customerArn,
-                        "customer", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+                        "customer", CUSTOMER_DOCUMENT));
 
         IamService service = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -129,13 +131,13 @@ class IamManagedPolicyAccountScopeTest {
         String customerArn = "arn:aws:iam::" + REQUEST_ACCT + ":policy/app-policy";
         reqPolicies.putForAccount(REQUEST_ACCT, customerArn,
                 new IamPolicy("ANPAAPP000000001", "app-policy", "/", customerArn,
-                        "app", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+                        "app", CUSTOMER_DOCUMENT));
 
         // Simulate the seed-time mirror: a managed policy copied into the default account store.
         String mirroredManagedArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
         reqPolicies.putForAccount(DEFAULT_ACCT, mirroredManagedArn,
                 new IamPolicy("ANPAADMIN0000001", "AdministratorAccess", "/", mirroredManagedArn,
-                        "admin", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+                        "admin", CUSTOMER_DOCUMENT));
 
         IamService reqService = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -180,7 +182,7 @@ class IamManagedPolicyAccountScopeTest {
         String customerArn = "arn:aws:iam::" + REQUEST_ACCT + ":policy/app-policy";
         policies.putForAccount(REQUEST_ACCT, customerArn,
                 new IamPolicy("ANPAAPP000000001", "app-policy", "/", customerArn,
-                        "app", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+                        "app", CUSTOMER_DOCUMENT));
 
         IamUser user = new IamUser("AIDAUSER00000001", "app-user", "/",
                 "arn:aws:iam::" + REQUEST_ACCT + ":user/app-user");
@@ -204,7 +206,7 @@ class IamManagedPolicyAccountScopeTest {
         // the attached managed policy's document for a non-default-account principal.
         CallerContext caller = service.resolvePrincipalContext(
                 "arn:aws:iam::" + REQUEST_ACCT + ":user/app-user");
-        assertTrue(caller.identityPolicies().contains(AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+        assertTrue(caller.identityPolicies().contains(CUSTOMER_DOCUMENT));
 
         // Control: the customer policy is genuinely account-scoped — invisible from another account.
         Instance<RequestContext> otherCtx = requestContextFor("222222222222");
@@ -238,7 +240,7 @@ class IamManagedPolicyAccountScopeTest {
         String customerArn = "arn:aws:iam::" + REQUEST_ACCT + ":policy/group-policy";
         policies.putForAccount(REQUEST_ACCT, customerArn,
                 new IamPolicy("ANPAGRP000000001", "group-policy", "/", customerArn,
-                        "grp", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+                        "grp", CUSTOMER_DOCUMENT));
 
         IamGroup group = new IamGroup("AGPAGROUP0000001", "app-group", "/",
                 "arn:aws:iam::" + REQUEST_ACCT + ":group/app-group");
@@ -291,8 +293,10 @@ class IamManagedPolicyAccountScopeTest {
         // the attached managed policy and the managed permissions boundary for a non-default account.
         CallerContext caller = service.resolvePrincipalContext(
                 "arn:aws:iam::" + REQUEST_ACCT + ":role/task-role");
-        assertTrue(caller.identityPolicies().contains(AwsManagedPolicies.PERMISSIVE_DOCUMENT));
-        assertEquals(AwsManagedPolicies.PERMISSIVE_DOCUMENT, caller.boundaryPolicyDocument());
+        assertTrue(caller.identityPolicies().stream()
+                .anyMatch(document -> document.contains("logs:CreateLogGroup")));
+        assertTrue(caller.boundaryPolicyDocument().contains("NotAction"));
+        assertFalse(caller.boundaryPolicyDocument().contains("\"Action\":\"*\""));
     }
     /**
      * The alias is the only IAM entity keyed by a constant rather than a caller-supplied name, so

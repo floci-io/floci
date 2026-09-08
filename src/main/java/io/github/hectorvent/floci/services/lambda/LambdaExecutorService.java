@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -27,8 +28,8 @@ import java.util.concurrent.TimeoutException;
 public class LambdaExecutorService {
 
     private static final Logger LOG = Logger.getLogger(LambdaExecutorService.class);
-    /** Grace period beyond the configured function timeout to allow the runtime to report back. */
-    private static final int TIMEOUT_GRACE_SECONDS = 2;
+    /** Extra time for a newly started runtime to request its first invocation. */
+    private static final int RUNTIME_DISPATCH_GRACE_SECONDS = 2;
 
     private final WarmPool warmPool;
     private final ObjectMapper objectMapper;
@@ -99,26 +100,31 @@ public class LambdaExecutorService {
 
             handle.getRuntimeApiServer().enqueue(invocation);
 
-            InvokeResult result = invocation.getResultFuture()
-                    .get(fn.getTimeout() + TIMEOUT_GRACE_SECONDS, TimeUnit.SECONDS);
+            java.util.concurrent.CompletableFuture.anyOf(
+                            invocation.getDispatchedFuture(), invocation.getResultFuture())
+                    .get(fn.getTimeout() + RUNTIME_DISPATCH_GRACE_SECONDS, TimeUnit.SECONDS);
+            InvokeResult result = invocation.getResultFuture().get();
 
             warmPool.release(handle);
             return result;
 
-        } catch (TimeoutException e) {
-            LOG.warnv("Function {0} timed out after {1}s", fn.getFunctionName(), fn.getTimeout());
-            warmPool.destroyHandle(handle);
-            return new InvokeResult(200, "Unhandled",
-                    buildErrorPayload("Task timed out after " + fn.getTimeout() + " seconds", "Function.TimedOut"),
-                    null, requestId);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             warmPool.destroyHandle(handle);
             return new InvokeResult(200, "Unhandled", buildErrorPayload("Invocation interrupted", "Interrupted"), null, requestId);
         } catch (Exception e) {
-            LOG.warnv("Invocation error for function {0}: {1}", fn.getFunctionName(), e.getMessage());
+            Throwable cause = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof TimeoutException) {
+                LOG.warnv("Function {0} timed out after {1}s", fn.getFunctionName(), fn.getTimeout());
+                warmPool.destroyHandle(handle);
+                return new InvokeResult(200, "Unhandled",
+                        buildErrorPayload("Task timed out after " + fn.getTimeout() + " seconds", "Function.TimedOut"),
+                        null, requestId);
+            }
+            LOG.warnv("Invocation error for function {0}: {1}", fn.getFunctionName(), cause.getMessage());
             warmPool.destroyHandle(handle);
-            return new InvokeResult(200, "Unhandled", buildErrorPayload(e.getMessage(), "InvocationError"), null, requestId);
+            return new InvokeResult(200, "Unhandled",
+                    buildErrorPayload(cause.getMessage(), "InvocationError"), null, requestId);
         }
     }
 

@@ -46,15 +46,16 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         WebAcl desired = fromProperties(resolved);
         WebAcl acl;
         if (existing != null && existing.getName().equals(name) && existing.getScope().equals(scope)) {
-            wafV2Service.updateWebAcl(desired, scope, existing.getId(), existing.getLockToken());
-            acl = wafV2Service.getWebAcl(scope, existing.getId());
+            wafV2Service.updateWebAcl(desired, scope, existing.getId(), name, existing.getLockToken());
+            acl = wafV2Service.getWebAcl(scope, existing.getId(), name);
             reconcileTags(acl, desired.getTags());
         } else {
             acl = wafV2Service.createWebAcl(desired, scope, name, ctx.region());
             setReferences(resource, acl);
             if (existing != null) {
                 try {
-                    wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getLockToken());
+                    wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getName(),
+                            existing.getLockToken());
                 } catch (RuntimeException e) {
                     // old ACL may still be associated with a resource; new ACL is already tracked
                     LOG.warnv("WAFv2 CFN replacement cleanup of {0}|{1}|{2} tolerated: {3}",
@@ -70,7 +71,8 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
     public void delete(String resourceType, String physicalId, String region) {
         WebAcl existing = findExisting(physicalId);
         if (existing != null) {
-            wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getLockToken());
+            wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getName(),
+                    existing.getLockToken());
         }
     }
 

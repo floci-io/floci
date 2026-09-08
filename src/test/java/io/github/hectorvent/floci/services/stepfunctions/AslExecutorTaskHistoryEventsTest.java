@@ -281,6 +281,7 @@ class AslExecutorTaskHistoryEventsTest {
                     "Iterate": {
                       "Type": "Map",
                       "ItemsPath": "$[0].items",
+                      "MaxConcurrency": 1,
                       "ItemProcessor": {
                         "StartAt": "ItemStep",
                         "States": {"ItemStep": {"Type": "Pass", "End": true}}
@@ -293,10 +294,23 @@ class AslExecutorTaskHistoryEventsTest {
 
         assertEquals("SUCCEEDED", execution.getStatus(), "history: " + typesOf(history));
         assertEquals(
-                List.of("ParallelStateEntered", "ParallelStateExited",
-                        "MapStateEntered", "MapStateExited", "ExecutionSucceeded"),
+                List.of("ParallelStateEntered", "ParallelStateStarted",
+                        "PassStateEntered", "PassStateExited", "PassStateEntered", "PassStateExited",
+                        "ParallelStateSucceeded", "ParallelStateExited",
+                        "MapStateEntered", "MapStateStarted",
+                        "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
+                        "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
+                        "MapStateSucceeded", "MapStateExited", "ExecutionSucceeded"),
                 typesOf(history));
-        assertChain(history);
+        // The branch and the iterations chain to the Started event that opened them, and a
+        // Succeeded event is passed by: the Exited event after it points where it pointed.
+        assertEquals(
+                List.of(0L, 1L, 2L, 3L, 4L, 5L, 6L, 6L,
+                        8L, 9L, 10L, 11L, 12L, 13L, 10L, 15L, 16L, 17L, 18L, 18L, 20L),
+                history.stream().map(HistoryEvent::getPreviousEventId).toList());
+        for (var i = 0; i < history.size(); i++) {
+            assertEquals(i + 1L, history.get(i).getId(), "unexpected id at index " + i);
+        }
     }
 
     private static List<String> typesOf(List<HistoryEvent> history) {

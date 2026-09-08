@@ -15,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -46,6 +47,43 @@ class RdsContainerManagerTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void mysql84UsesSupportedNativePasswordOptions() {
+        assertEquals(
+                List.of(
+                        "--mysql-native-password=ON",
+                        "--authentication-policy=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.MYSQL, "mysql:8.4"));
+        assertEquals(
+                List.of(
+                        "--mysql-native-password=ON",
+                        "--authentication-policy=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(
+                        DatabaseEngine.MYSQL,
+                        "registry.example.com:5000/mysql:8.4.3-oracle@sha256:abcdef"));
+    }
+
+    @Test
+    void olderMysqlKeepsLegacyNativePasswordOption() {
+        assertEquals(
+                List.of("--default-authentication-plugin=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.MYSQL, "mysql:8.0.36"));
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.POSTGRES, "postgres:18").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MARIADB, "mariadb:11").isEmpty());
+    }
+
+    @Test
+    void defersToServerAuthenticationForMysql9AndUnversionedImages() {
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MYSQL, "mysql:9.0").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MYSQL, "mysql:latest").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.MYSQL, "mysql@sha256:abcdef").isEmpty());
+    }
 
     @Test
     void postgresInitSqlCreatesRdsIamRoleWhenMissing() {
@@ -492,6 +530,166 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void tryStartReportsUnavailableInsteadOfThrowingWhenNoDockerDaemonIsReachable() {
+        // Floci running inside Docker without a mounted daemon socket: the RDS control plane must
+        // keep working, so the failure is reported rather than propagated.
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        doThrow(new IllegalStateException("Failed to remove stale container floci-rds-db1"))
+                .when(lifecycleManager).removeIfExistsStrict(any());
+        doThrow(new IllegalStateException("Failed to remove container floci-rds-db1"))
+                .when(lifecycleManager).stopAndRemoveStrict(any(), any());
+        when(lifecycleManager.getDockerClient()).thenThrow(
+                new RuntimeException("java.net.SocketException: No such file or directory"));
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                    DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"),
+                    "attempt " + attempt + " should report unavailable");
+        }
+        assertFalse(manager.isDockerReachable());
+        // No container was created, so no cleanup identity is retained for the runtime.
+        assertNull(manager.getActiveHandle(runtimeId));
+    }
+
+    @Test
+    void tryStartPropagatesFailuresRaisedWhileTheDaemonIsReachable() {
+        // A reachable daemon that cannot start the container is a genuine failure, not a
+        // degraded mode: CreateDBInstance must still surface it.
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.create(any()))
+                .thenThrow(new IllegalStateException("no such image: mysql:8.0"));
+        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager.tryStart("arn:aws:rds:us-east-1:000000000000:db:db1", "db1", "db1",
+                        "floci-rds-db1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+
+        assertEquals("no such image: mysql:8.0", failure.getMessage());
+        assertTrue(manager.isDockerReachable());
+    }
+
+    @Test
+    void tryStartSucceedsForTheSameRuntimeOnceADaemonAppears() {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        doThrow(new IllegalStateException("Failed to remove stale container floci-rds-db1"))
+                .when(lifecycleManager).removeIfExistsStrict(any());
+        doThrow(new IllegalStateException("Failed to remove container floci-rds-db1"))
+                .when(lifecycleManager).stopAndRemoveStrict(any(), any());
+        when(lifecycleManager.getDockerClient()).thenThrow(
+                new RuntimeException("java.net.SocketException: No such file or directory"));
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+
+        assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+
+        // A Docker daemon appears.
+        org.mockito.Mockito.reset(lifecycleManager);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "late-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+        RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        assertEquals("late-container", handle.getContainerId());
+        assertEquals(3306, handle.getPort());
+        assertEquals(handle, manager.getActiveHandle(runtimeId));
+    }
+
+    @Test
+    void tryStartKeepsAndLaterCleansTheIdentityOfAContainerCreatedBeforeTheDaemonWentAway() {
+        // Docker answered the create and then went away: the created container must stay known
+        // so the retry removes it once the daemon is back, rather than being forgotten.
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.create(any())).thenReturn("created-container");
+        when(lifecycleManager.startCreated(any(), any()))
+                .thenThrow(new IllegalStateException("java.net.SocketException: Connection reset"));
+        doThrow(new IllegalStateException("Failed to remove container created-container"))
+                .when(lifecycleManager).stopAndRemoveStrict(any(), any());
+        when(lifecycleManager.getDockerClient()).thenThrow(
+                new RuntimeException("java.net.SocketException: No such file or directory"));
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+
+        assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+        assertEquals("created-container", manager.getActiveHandle(runtimeId).getContainerId());
+
+        // Still no daemon: the retry keeps the identity rather than dropping it.
+        assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+        assertEquals("created-container", manager.getActiveHandle(runtimeId).getContainerId());
+
+        // The daemon is back: the leftover is removed first, then the start goes through.
+        org.mockito.Mockito.reset(lifecycleManager);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "late-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+        RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        assertEquals("late-container", handle.getContainerId());
+        verify(lifecycleManager).stopAndRemoveStrict(
+                org.mockito.ArgumentMatchers.eq("created-container"), any());
+    }
+
+    @Test
+    void tryStartRetriesACleanupThatFailedAfterAStop() {
+        // The service stops a container whose auth proxy did not start. When that stop fails
+        // the handle and claim stay retained, and the runtime's next start must clean them up
+        // rather than fail on the claim forever.
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager,
+                new ContainerLifecycleManager.ContainerInfo("first-container",
+                        Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))),
+                new ContainerLifecycleManager.ContainerInfo("second-container",
+                        Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        doThrow(new IllegalStateException("Failed to remove container first-container"))
+                .doNothing()
+                .when(lifecycleManager).stopAndRemoveStrict(
+                        org.mockito.ArgumentMatchers.eq("first-container"), any());
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+
+        RdsContainerHandle first = manager.start(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        assertThrows(IllegalStateException.class, () -> manager.stop(first));
+        assertEquals(first, manager.getActiveHandle(runtimeId));
+
+        RdsContainerHandle retried = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        assertEquals("second-container", retried.getContainerId());
+        assertEquals(retried, manager.getActiveHandle(runtimeId));
+        verify(lifecycleManager, times(2)).stopAndRemoveStrict(
+                org.mockito.ArgumentMatchers.eq("first-container"), any());
+    }
+
+    private RdsContainerManager daemonlessCapableManager(ContainerLifecycleManager lifecycleManager) {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        return new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager,
+                logStreamer,
+                mock(ContainerDetector.class),
+                config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+    }
+
+    @Test
     void failedStartReleasesClaimsForSameRuntimeRetry() {
         EmulatorConfig config = config(tempDir.resolve("host-root"));
         ContainerDetector containerDetector = mock(ContainerDetector.class);
@@ -874,6 +1072,36 @@ class RdsContainerManagerTest {
                 org.mockito.ArgumentMatchers.isNull());
     }
 
+    @Test
+    void restoreScriptConnectsToPostgresDatabase() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        assertTrue(script.contains("-d postgres"), "Script must connect to postgres, not template1");
+        assertTrue(script.contains("-f /tmp/dump.sql"), "Script must replay the dump file");
+    }
+
+    @Test
+    void restoreScriptDropsNonSystemDatabasesAndRoles() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        assertTrue(script.contains("datistemplate = false"),
+                "Script must only drop non-template databases");
+        assertTrue(script.contains("datname <> 'postgres'"),
+                "Script must preserve the postgres database");
+        assertTrue(script.contains("rolname <> current_user"),
+                "Script must not drop the current user");
+        assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),
+                "Script must not drop system roles");
+    }
+
+    @Test
+    void restoreScriptInterpolatesUser() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        assertTrue(script.contains("USER=\"$1\""),
+                "Script must assign the first argument to the USER variable");
+    }
+
     private static EmulatorConfig config(Path hostRoot) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -890,6 +1118,7 @@ class RdsContainerManagerTest {
         when(docker.logMaxFile()).thenReturn("3");
         when(config.storage()).thenReturn(storage);
         when(storage.hostPersistentPath()).thenReturn(hostRoot.toString());
+        when(storage.mode()).thenReturn("persistent");
         return config;
     }
 

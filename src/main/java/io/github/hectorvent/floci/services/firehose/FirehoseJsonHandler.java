@@ -46,6 +46,7 @@ public class FirehoseJsonHandler {
                 S3Destination s3 = null;
                 if (request.has("S3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("S3DestinationConfiguration"), S3Destination.class);
+                    dropConversionFromLegacyShape(s3);
                     S3DestinationValidator.validateWireShape(s3, "s3DestinationConfiguration");
                 } else if (request.has("ExtendedS3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("ExtendedS3DestinationConfiguration"), S3Destination.class);
@@ -81,6 +82,7 @@ public class FirehoseJsonHandler {
                     S3DestinationValidator.validateWireShape(update, "extendedS3DestinationUpdate");
                 } else if (request.has("S3DestinationUpdate")) {
                     update = mapper.treeToValue(request.get("S3DestinationUpdate"), S3Destination.class);
+                    dropConversionFromLegacyShape(update);
                     S3DestinationValidator.validateWireShape(update, "s3DestinationUpdate");
                 }
                 firehoseService.updateDestination(name, currentVersionId, destinationId, update);
@@ -193,6 +195,28 @@ public class FirehoseJsonHandler {
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    /**
+     * Clears {@code DataFormatConversionConfiguration} from a legacy
+     * {@code S3DestinationConfiguration} or {@code S3DestinationUpdate}, which AWS
+     * models only on the extended shapes. The two share one class here, which would
+     * otherwise let a legacy request store a member its contract does not define.
+     *
+     * Dropped rather than rejected: AWS's JSON protocol ignores a member the shape does
+     * not model, so a request carrying one succeeds with the member disregarded. The
+     * SDKs cannot even send it, since it is absent from the legacy shape's model.
+     *
+     * Only this member is cleared. {@code FileExtension}, {@code CustomTimeZone} and
+     * {@code S3BackupMode} are extended-only too and reach the legacy shapes the same
+     * way, a deviation that predates this change and is recorded in
+     * docs/services/firehose.md; widening the clearing would change behavior those
+     * members already have.
+     */
+    private static void dropConversionFromLegacyShape(S3Destination s3) {
+        if (s3 != null) {
+            s3.setDataFormatConversionConfiguration(null);
+        }
     }
 
     /** DeliveryStreamType values the 2015-08-04 model enumerates. */

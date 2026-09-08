@@ -285,11 +285,12 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
 
     /** CloudFormation tags are a list of {@code {Key, Value}} objects. */
     private Map<String, String> resolveTags(JsonNode props, ProvisionContext ctx) {
-        if (props == null || !props.has("Tags") || !props.get("Tags").isArray()) {
+        JsonNode tagsNode = props != null ? ctx.engine().resolveNode(props.get("Tags")) : null;
+        if (tagsNode == null || !tagsNode.isArray()) {
             return null;
         }
         Map<String, String> tags = new LinkedHashMap<>();
-        for (JsonNode tag : ctx.engine().resolveNode(props.get("Tags"))) {
+        for (JsonNode tag : tagsNode) {
             String key = tag.path("Key").asText(null);
             if (key != null && !key.isBlank()) {
                 tags.put(key, tag.path("Value").asText(""));

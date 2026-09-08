@@ -11,8 +11,10 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 
 @ApplicationScoped
@@ -44,6 +46,11 @@ public class AutoScalingQueryHandler {
                 case "DeleteAutoScalingGroup"       -> handleDeleteAutoScalingGroup(p, region);
                 case "DescribeAutoScalingGroups"    -> handleDescribeAutoScalingGroups(p, region);
                 case "SetDesiredCapacity"           -> handleSetDesiredCapacity(p, region);
+                case "SuspendProcesses"             -> handleSuspendProcesses(p, region);
+                case "ResumeProcesses"              -> handleResumeProcesses(p, region);
+                case "PutWarmPool"                  -> handlePutWarmPool(p, region);
+                case "DescribeWarmPool"             -> handleDescribeWarmPool(p, region);
+                case "DeleteWarmPool"               -> handleDeleteWarmPool(p, region);
                 case "StartInstanceRefresh"         -> handleStartInstanceRefresh(p, region);
                 case "DescribeInstanceRefreshes"    -> handleDescribeInstanceRefreshes(p, region);
                 case "CreateOrUpdateTags"           -> handleCreateOrUpdateTags(p, region);
@@ -62,6 +69,9 @@ public class AutoScalingQueryHandler {
                 case "AttachLoadBalancers"               -> handleAttachLoadBalancers(p, region);
                 case "DetachLoadBalancers"               -> handleDetachLoadBalancers(p, region);
                 case "DescribeLoadBalancers"             -> handleDescribeLoadBalancers(p, region);
+                case "AttachTrafficSources"              -> handleAttachTrafficSources(p, region);
+                case "DetachTrafficSources"               -> handleDetachTrafficSources(p, region);
+                case "DescribeTrafficSources"             -> handleDescribeTrafficSources(p, region);
                 // Lifecycle hooks
                 case "PutLifecycleHook"             -> handlePutLifecycleHook(p, region);
                 case "DeleteLifecycleHook"          -> handleDeleteLifecycleHook(p, region);
@@ -72,6 +82,9 @@ public class AutoScalingQueryHandler {
                 case "PutScalingPolicy"             -> handlePutScalingPolicy(p, region);
                 case "DeletePolicy"                 -> handleDeletePolicy(p, region);
                 case "DescribePolicies"             -> handleDescribePolicies(p, region);
+                case "PutScheduledUpdateGroupAction" -> handlePutScheduledUpdateGroupAction(p, region);
+                case "DeleteScheduledAction"         -> handleDeleteScheduledAction(p, region);
+                case "DescribeScheduledActions"      -> handleDescribeScheduledActions(p, region);
                 // Activities
                 case "DescribeScalingActivities"    -> handleDescribeScalingActivities(p, region);
                 // Metadata
@@ -104,7 +117,9 @@ public class AutoScalingQueryHandler {
                 memberList(p, "SecurityGroups"),
                 p.getFirst("UserData"),
                 p.getFirst("IamInstanceProfile"),
-                nullableBoolParam(p, "AssociatePublicIpAddress"));
+                nullableBoolParam(p, "AssociatePublicIpAddress"),
+                nullableBoolParam(p, "InstanceMonitoring.Enabled"),
+                parseLaunchConfigurationBlockDeviceMappings(p));
         String xml = new XmlBuilder()
                 .start("CreateLaunchConfigurationResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -137,7 +152,15 @@ public class AutoScalingQueryHandler {
             if (lc.getIamInstanceProfile() != null) { xml.elem("IamInstanceProfile", lc.getIamInstanceProfile()); }
             xml.start("SecurityGroups");
             for (String sg : lc.getSecurityGroups()) { xml.elem("member", sg); }
-            xml.end("SecurityGroups").end("member");
+            xml.end("SecurityGroups");
+            // AWS always returns both structures. A record from before these fields were
+            // stored reads back AWS's default of enabled and an empty mapping list.
+            xml.start("InstanceMonitoring")
+               .elem("Enabled", String.valueOf(
+                       lc.getInstanceMonitoringEnabled() != null ? lc.getInstanceMonitoringEnabled() : Boolean.TRUE))
+               .end("InstanceMonitoring");
+            writeLaunchConfigurationBlockDeviceMappings(xml, lc.getBlockDeviceMappings());
+            xml.end("member");
         }
         xml.end("LaunchConfigurations")
            .end("DescribeLaunchConfigurationsResult")
@@ -267,6 +290,11 @@ public class AutoScalingQueryHandler {
             xml.end("LaunchTemplate");
         }
         appendMixedInstancesPolicyXml(xml, asg.getMixedInstancesPolicy());
+        // Botocore's own AutoScalingGroup shape documents WarmPoolConfiguration as a member of
+        // DescribeAutoScalingGroups' response, not only reachable via DescribeWarmPool -
+        // terraform-aws-autoscaling's warm_pool example reads the group's warm pool state this
+        // way. Shared with handleDescribeWarmPool so the two never drift.
+        appendWarmPoolConfigurationXml(xml, service.describeWarmPool(asg.getRegion(), asg.getAutoScalingGroupName()));
 
         xml.start("AvailabilityZones");
         for (String az : asg.getAvailabilityZones()) { xml.elem("member", az); }
@@ -287,6 +315,12 @@ public class AutoScalingQueryHandler {
         xml.start("TerminationPolicies");
         for (String tp : asg.getTerminationPolicies()) { xml.elem("member", tp); }
         xml.end("TerminationPolicies");
+
+        xml.start("SuspendedProcesses");
+        for (String sp : asg.getSuspendedProcesses()) {
+            xml.start("member").elem("ProcessName", sp).end("member");
+        }
+        xml.end("SuspendedProcesses");
 
         xml.start("Instances");
         for (AsgInstance inst : asg.getInstances()) {
@@ -1144,6 +1178,218 @@ public class AutoScalingQueryHandler {
         try { return Integer.parseInt(val); } catch (NumberFormatException e) { return defaultValue; }
     }
 
+    // ── Suspend/resume scaling processes ────────────────────────────────────
+
+    private Response handleSuspendProcesses(MultivaluedMap<String, String> p, String region) {
+        service.suspendProcesses(region,
+                p.getFirst("AutoScalingGroupName"),
+                memberList(p, "ScalingProcesses"));
+        return ok(new XmlBuilder()
+                .start("SuspendProcessesResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("SuspendProcessesResponse").build());
+    }
+
+    private Response handleResumeProcesses(MultivaluedMap<String, String> p, String region) {
+        service.resumeProcesses(region,
+                p.getFirst("AutoScalingGroupName"),
+                memberList(p, "ScalingProcesses"));
+        return ok(new XmlBuilder()
+                .start("ResumeProcessesResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("ResumeProcessesResponse").build());
+    }
+
+    // ── Warm pools ──────────────────────────────────────────────────────────
+    // Parsed against botocore's autoscaling/2011-01-01/service-2.json
+    // (PutWarmPoolType, DescribeWarmPoolType, DescribeWarmPoolAnswer,
+    // DeleteWarmPoolType, WarmPoolConfiguration, InstanceReusePolicy) rather than
+    // docs prose - see AutoScalingService's warm-pool section for the
+    // full-replace-with-defaults rationale behind PutWarmPool's parsing here.
+
+    private Response handlePutWarmPool(MultivaluedMap<String, String> p, String region) {
+        service.putWarmPool(region,
+                p.getFirst("AutoScalingGroupName"),
+                nullableIntParam(p, "MaxGroupPreparedCapacity"),
+                nullableIntParam(p, "MinSize"),
+                p.getFirst("PoolState"),
+                nullableBoolParam(p, "InstanceReusePolicy.ReuseOnScaleIn"));
+        return ok(new XmlBuilder()
+                .start("PutWarmPoolResponse", NS)
+                  .start("PutWarmPoolResult").end("PutWarmPoolResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("PutWarmPoolResponse").build());
+    }
+
+    private Response handleDescribeWarmPool(MultivaluedMap<String, String> p, String region) {
+        WarmPoolConfiguration pool = service.describeWarmPool(region, p.getFirst("AutoScalingGroupName"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeWarmPoolResponse", NS)
+                  .start("DescribeWarmPoolResult");
+        appendWarmPoolConfigurationXml(xml, pool);
+        xml.start("Instances").end("Instances")
+           .end("DescribeWarmPoolResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeWarmPoolResponse");
+        return ok(xml.build());
+    }
+
+    private static void appendWarmPoolConfigurationXml(XmlBuilder xml, WarmPoolConfiguration pool) {
+        if (pool == null) {
+            return;
+        }
+        xml.start("WarmPoolConfiguration");
+        if (pool.getMaxGroupPreparedCapacity() != null) {
+            xml.elem("MaxGroupPreparedCapacity", String.valueOf(pool.getMaxGroupPreparedCapacity()));
+        }
+        xml.elem("MinSize", String.valueOf(pool.getMinSize()))
+           .elem("PoolState", pool.getPoolState())
+           .start("InstanceReusePolicy")
+             .elem("ReuseOnScaleIn", String.valueOf(pool.isReuseOnScaleIn()))
+           .end("InstanceReusePolicy")
+           .end("WarmPoolConfiguration");
+    }
+
+    private Response handleDeleteWarmPool(MultivaluedMap<String, String> p, String region) {
+        service.deleteWarmPool(region,
+                p.getFirst("AutoScalingGroupName"),
+                "true".equalsIgnoreCase(p.getFirst("ForceDelete")));
+        return ok(new XmlBuilder()
+                .start("DeleteWarmPoolResponse", NS)
+                  .start("DeleteWarmPoolResult").end("DeleteWarmPoolResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DeleteWarmPoolResponse").build());
+    }
+
+    // ── Traffic sources ─────────────────────────────────────────────────────
+    // AWS's own DescribeTrafficSources doc page example shows a bare, unwrapped
+    // <TrafficSources> element per item, which reads as a flattened list - but
+    // botocore's actual service-2.json models the TrafficSources list WITHOUT
+    // "flattened": true and with member locationName "member" like every other
+    // list in this API, so the wire shape is the normal
+    // <TrafficSources><member>...</member></TrafficSources>. The doc page's
+    // example was simply wrong; trusting it verbatim left the AWS provider's own
+    // post-create waiter polling DescribeTrafficSources and never finding the
+    // resource it had just attached - the actual wire format, not the docs, is
+    // the source of truth here.
+
+    private Response handleAttachTrafficSources(MultivaluedMap<String, String> p, String region) {
+        service.attachTrafficSources(region, p.getFirst("AutoScalingGroupName"), parseTrafficSources(p));
+        return ok(new XmlBuilder()
+                .start("AttachTrafficSourcesResponse", NS)
+                  .start("AttachTrafficSourcesResult").end("AttachTrafficSourcesResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("AttachTrafficSourcesResponse").build());
+    }
+
+    private Response handleDetachTrafficSources(MultivaluedMap<String, String> p, String region) {
+        service.detachTrafficSources(region, p.getFirst("AutoScalingGroupName"), parseTrafficSources(p));
+        return ok(new XmlBuilder()
+                .start("DetachTrafficSourcesResponse", NS)
+                  .start("DetachTrafficSourcesResult").end("DetachTrafficSourcesResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DetachTrafficSourcesResponse").build());
+    }
+
+    private Response handleDescribeTrafficSources(MultivaluedMap<String, String> p, String region) {
+        Map<String, String> sources = service.describeTrafficSources(region,
+                p.getFirst("AutoScalingGroupName"), p.getFirst("TrafficSourceType"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTrafficSourcesResponse", NS)
+                  .start("DescribeTrafficSourcesResult")
+                    .start("TrafficSources");
+        sources.forEach((identifier, type) -> xml.start("member")
+               .elem("Identifier", identifier)
+               .elem("State", "InService")
+               .elem("Type", type)
+               .end("member"));
+        xml.end("TrafficSources")
+           .end("DescribeTrafficSourcesResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeTrafficSourcesResponse");
+        return ok(xml.build());
+    }
+
+    private List<AutoScalingService.TrafficSourceIdentifier> parseTrafficSources(MultivaluedMap<String, String> p) {
+        List<AutoScalingService.TrafficSourceIdentifier> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String identifier = p.getFirst("TrafficSources.member." + i + ".Identifier");
+            if (identifier == null) { break; }
+            String type = p.getFirst("TrafficSources.member." + i + ".Type");
+            result.add(new AutoScalingService.TrafficSourceIdentifier(identifier, type));
+        }
+        return result;
+    }
+
+    // ── Scheduled actions ───────────────────────────────────────────────────
+
+    private Response handlePutScheduledUpdateGroupAction(MultivaluedMap<String, String> p, String region) {
+        service.putScheduledUpdateGroupAction(region,
+                p.getFirst("AutoScalingGroupName"),
+                p.getFirst("ScheduledActionName"),
+                parseInstant("StartTime", p.getFirst("StartTime")),
+                parseInstant("EndTime", p.getFirst("EndTime")),
+                p.getFirst("Recurrence"),
+                p.getFirst("TimeZone"),
+                nullableIntParam(p, "MinSize"),
+                nullableIntParam(p, "MaxSize"),
+                nullableIntParam(p, "DesiredCapacity"));
+        return ok(new XmlBuilder()
+                .start("PutScheduledUpdateGroupActionResponse", NS)
+                  .start("PutScheduledUpdateGroupActionResult").end("PutScheduledUpdateGroupActionResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("PutScheduledUpdateGroupActionResponse").build());
+    }
+
+    private Response handleDeleteScheduledAction(MultivaluedMap<String, String> p, String region) {
+        service.deleteScheduledAction(region,
+                p.getFirst("AutoScalingGroupName"), p.getFirst("ScheduledActionName"));
+        return ok(new XmlBuilder()
+                .start("DeleteScheduledActionResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DeleteScheduledActionResponse").build());
+    }
+
+    private Response handleDescribeScheduledActions(MultivaluedMap<String, String> p, String region) {
+        List<ScheduledAction> actions = service.describeScheduledActions(
+                region, p.getFirst("AutoScalingGroupName"), memberList(p, "ScheduledActionNames"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeScheduledActionsResponse", NS)
+                  .start("DescribeScheduledActionsResult")
+                    .start("ScheduledUpdateGroupActions");
+        for (ScheduledAction action : actions) {
+            xml.start("member")
+               .elem("ScheduledActionName", action.getScheduledActionName())
+               .elem("ScheduledActionARN", action.getScheduledActionArn())
+               .elem("AutoScalingGroupName", action.getAutoScalingGroupName());
+            if (action.getStartTime() != null) { xml.elem("StartTime", ISO_FMT.format(action.getStartTime())); }
+            if (action.getEndTime() != null) { xml.elem("EndTime", ISO_FMT.format(action.getEndTime())); }
+            if (action.getRecurrence() != null) { xml.elem("Recurrence", action.getRecurrence()); }
+            if (action.getTimeZone() != null) { xml.elem("TimeZone", action.getTimeZone()); }
+            if (action.getMinSize() != null) { xml.elem("MinSize", String.valueOf(action.getMinSize())); }
+            if (action.getMaxSize() != null) { xml.elem("MaxSize", String.valueOf(action.getMaxSize())); }
+            if (action.getDesiredCapacity() != null) {
+                xml.elem("DesiredCapacity", String.valueOf(action.getDesiredCapacity()));
+            }
+            xml.end("member");
+        }
+        xml.end("ScheduledUpdateGroupActions")
+           .end("DescribeScheduledActionsResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeScheduledActionsResponse");
+        return ok(xml.build());
+    }
+
+    private Instant parseInstant(String name, String value) {
+        if (value == null || value.isBlank()) { return null; }
+        try {
+            return Instant.parse(value);
+        } catch (DateTimeParseException e) {
+            throw new AwsException("ValidationError",
+                    name + " '" + value + "' is not a valid ISO 8601 timestamp.", 400);
+        }
+    }
+
     private Integer nullableIntParam(MultivaluedMap<String, String> p, String key) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) { return null; }
@@ -1159,7 +1405,102 @@ public class AutoScalingQueryHandler {
     private Boolean nullableBoolParam(MultivaluedMap<String, String> p, String key) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) { return null; }
-        return Boolean.parseBoolean(val);
+        return parseOptionalBoolean(val, key);
+    }
+
+    private List<LaunchConfigurationBlockDeviceMapping> parseLaunchConfigurationBlockDeviceMappings(
+            MultivaluedMap<String, String> p) {
+        List<LaunchConfigurationBlockDeviceMapping> mappings = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "BlockDeviceMappings.member." + i;
+            String deviceName = p.getFirst(prefix + ".DeviceName");
+            String virtualName = p.getFirst(prefix + ".VirtualName");
+            String noDevice = p.getFirst(prefix + ".NoDevice");
+            String snapshotId = p.getFirst(prefix + ".Ebs.SnapshotId");
+            String volumeSize = p.getFirst(prefix + ".Ebs.VolumeSize");
+            String volumeType = p.getFirst(prefix + ".Ebs.VolumeType");
+            String deleteOnTermination = p.getFirst(prefix + ".Ebs.DeleteOnTermination");
+            String iops = p.getFirst(prefix + ".Ebs.Iops");
+            String throughput = p.getFirst(prefix + ".Ebs.Throughput");
+            String encrypted = p.getFirst(prefix + ".Ebs.Encrypted");
+            boolean hasEbs = snapshotId != null || volumeSize != null || volumeType != null
+                    || deleteOnTermination != null || iops != null || throughput != null || encrypted != null;
+            if (deviceName == null && virtualName == null && noDevice == null && !hasEbs) {
+                break;
+            }
+            if (deviceName == null || deviceName.isBlank()) {
+                throw new AwsException("ValidationError",
+                        "1 validation error detected: Value null at '" + prefix
+                                + ".DeviceName' failed to satisfy constraint: Member must not be null", 400);
+            }
+            LaunchConfigurationBlockDeviceMapping mapping = new LaunchConfigurationBlockDeviceMapping();
+            mapping.setDeviceName(deviceName);
+            mapping.setVirtualName(virtualName);
+            mapping.setNoDevice(parseOptionalBoolean(noDevice, prefix + ".NoDevice"));
+            if (hasEbs) {
+                LaunchConfigurationBlockDeviceMapping.Ebs ebs = new LaunchConfigurationBlockDeviceMapping.Ebs();
+                ebs.setSnapshotId(snapshotId);
+                ebs.setVolumeSize(parseOptionalInt(volumeSize, prefix + ".Ebs.VolumeSize"));
+                ebs.setVolumeType(volumeType);
+                ebs.setDeleteOnTermination(parseOptionalBoolean(deleteOnTermination, prefix + ".Ebs.DeleteOnTermination"));
+                ebs.setIops(parseOptionalInt(iops, prefix + ".Ebs.Iops"));
+                ebs.setThroughput(parseOptionalInt(throughput, prefix + ".Ebs.Throughput"));
+                ebs.setEncrypted(parseOptionalBoolean(encrypted, prefix + ".Ebs.Encrypted"));
+                mapping.setEbs(ebs);
+            }
+            mappings.add(mapping);
+        }
+        return mappings;
+    }
+
+    private Integer parseOptionalInt(String value, String name) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError", name + " must be an integer.", 400);
+        }
+    }
+
+    private Boolean parseOptionalBoolean(String value, String name) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        if ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
+            return Boolean.parseBoolean(value);
+        }
+        throw new AwsException("ValidationError", name + " must be true or false.", 400);
+    }
+
+    // AWS returns an empty list when the launch configuration carries no mappings, so the
+    // element is always present.
+    private void writeLaunchConfigurationBlockDeviceMappings(
+            XmlBuilder xml, List<LaunchConfigurationBlockDeviceMapping> mappings) {
+        xml.start("BlockDeviceMappings");
+        for (LaunchConfigurationBlockDeviceMapping mapping : mappings != null ? mappings : List.<LaunchConfigurationBlockDeviceMapping>of()) {
+            xml.start("member");
+            if (mapping.getVirtualName() != null) { xml.elem("VirtualName", mapping.getVirtualName()); }
+            if (mapping.getDeviceName() != null) { xml.elem("DeviceName", mapping.getDeviceName()); }
+            if (mapping.getNoDevice() != null) { xml.elem("NoDevice", String.valueOf(mapping.getNoDevice())); }
+            LaunchConfigurationBlockDeviceMapping.Ebs ebs = mapping.getEbs();
+            if (ebs != null) {
+                xml.start("Ebs");
+                if (ebs.getSnapshotId() != null) { xml.elem("SnapshotId", ebs.getSnapshotId()); }
+                if (ebs.getVolumeSize() != null) { xml.elem("VolumeSize", String.valueOf(ebs.getVolumeSize())); }
+                if (ebs.getVolumeType() != null) { xml.elem("VolumeType", ebs.getVolumeType()); }
+                if (ebs.getDeleteOnTermination() != null) {
+                    xml.elem("DeleteOnTermination", String.valueOf(ebs.getDeleteOnTermination()));
+                }
+                if (ebs.getIops() != null) { xml.elem("Iops", String.valueOf(ebs.getIops())); }
+                if (ebs.getThroughput() != null) { xml.elem("Throughput", String.valueOf(ebs.getThroughput())); }
+                if (ebs.getEncrypted() != null) { xml.elem("Encrypted", String.valueOf(ebs.getEncrypted())); }
+                xml.end("Ebs");
+            }
+            xml.end("member");
+        }
+        xml.end("BlockDeviceMappings");
     }
 
     /** A required boolean member must be present and exactly "true"/"false" — never silently coerced to false. */
@@ -1175,7 +1516,7 @@ public class AutoScalingQueryHandler {
                     "1 validation error detected: Value '" + val + "' at '" + key
                             + "' failed to satisfy constraint: Member must be a valid boolean", 400);
         }
-        return Boolean.parseBoolean(val);
+        return parseOptionalBoolean(val, key);
     }
 
     private String intString(Integer value) {

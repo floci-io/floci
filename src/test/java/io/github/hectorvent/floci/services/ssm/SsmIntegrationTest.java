@@ -486,14 +486,18 @@ class SsmIntegrationTest {
             .body("BaselineId", startsWith("pb-"));
     }
 
-    // ── Read-only list operations for resources not modeled (empty results) ──
-
     @Test
-    void listDocuments_returnsEmptyList() {
+    void listDocuments_unmatchedNameFilterReturnsEmptyList() {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListDocuments")
             .contentType(SSM_CONTENT_TYPE)
-            .body("{}")
+            .body("""
+                {
+                    "Filters": [
+                        {"Key": "Name", "Values": ["non-existent-doc-xyz-123"]}
+                    ]
+                }
+                """)
         .when()
             .post("/")
         .then()
@@ -553,11 +557,17 @@ class SsmIntegrationTest {
     }
 
     @Test
-    void listAssociations_returnsEmptyList() {
+    void listAssociations_unmatchedInstanceFilterReturnsEmptyList() {
         given()
             .header("X-Amz-Target", "AmazonSSM.ListAssociations")
             .contentType(SSM_CONTENT_TYPE)
-            .body("{}")
+            .body("""
+                {
+                    "AssociationFilterList": [
+                        {"key": "InstanceId", "value": "i-nonexistent-000"}
+                    ]
+                }
+                """)
         .when()
             .post("/")
         .then()
@@ -565,6 +575,8 @@ class SsmIntegrationTest {
             .body("Associations.size()", equalTo(0))
             .body("$", not(hasKey("NextToken")));
     }
+
+    // ── Read-only list operations for resources not modeled (empty results) ──
 
     @Test
     void describeMaintenanceWindows_returnsEmptyList() {
@@ -1272,6 +1284,112 @@ class SsmIntegrationTest {
         .then()
             .statusCode(200)
             .body("AccountIds", empty());
+    }
+
+    @Test
+    @Order(15)
+    void publicAmiParametersResolveWithoutSetup() {
+        String al2023 = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64";
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "%s" }
+                """.formatted(al2023))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo(al2023))
+            .body("Parameter.Value", equalTo("ami-0abcdef1234567891"))
+            .body("Parameter.Type", equalTo("String"))
+            .body("Parameter.Version", equalTo(1))
+            .body("Parameter.ARN", equalTo("arn:aws:ssm:us-east-1::parameter" + al2023));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameters")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Names": ["%s", "/aws/service/ami-amazon-linux-latest/no-such-variant"] }
+                """.formatted(al2023))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Name", contains(al2023))
+            .body("InvalidParameters", contains("/aws/service/ami-amazon-linux-latest/no-such-variant"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Path": "/aws/service/ami-amazon-linux-latest" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Name", hasItems(al2023,
+                    "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Name", not(hasItem(al2023)));
+    }
+
+    @Test
+    @Order(16)
+    void putParameterRejectsReservedPrefixes() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
+                    "Value": "ami-mine",
+                    "Type": "String",
+                    "Overwrite": true
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("can't be prefixed with \"aws\" or \"ssm\""));
+
+        // Only the aws and ssm path segments are reserved, so a CloudFormation-generated name
+        // for a stack called ssm-auto-stack still writes.
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "ssm-auto-stack-Param-ABC123", "Value": "ok", "Type": "String" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Version", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Value", equalTo("ami-0abcdef1234567891"));
     }
 
     private static void createSharableDocument(String name) {

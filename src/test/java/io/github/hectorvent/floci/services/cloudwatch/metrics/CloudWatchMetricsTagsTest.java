@@ -118,6 +118,49 @@ class CloudWatchMetricsTagsTest {
     }
 
     @Test
+    void tagResourceQueryResponseCarriesTheResultWrapper() {
+        // TagResourceOutput is an empty structure, so the Query response still declares a
+        // TagResourceResult element. The AWS Go SDK v2 unmarshaler rejects a response without it.
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("test-alarm");
+        alarm.setAlarmArn("arn:aws:cloudwatch:us-east-1:000000000000:alarm:test-alarm");
+        service.putMetricAlarm(alarm, REGION);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("ResourceARN", alarm.getAlarmArn());
+        params.add("Tags.member.1.Key", "env");
+        params.add("Tags.member.1.Value", "prod");
+
+        Response response = queryHandler.handle("TagResource", params, REGION);
+        String xml = (String) response.getEntity();
+
+        assertTrue(xml.contains("<TagResourceResponse>"), xml);
+        assertTrue(xml.contains("<TagResourceResult"), xml);
+        assertTrue(xml.contains("<ResponseMetadata>"), xml);
+        assertEquals("prod", service.listTagsForResource(alarm.getAlarmArn(), REGION).get("env"));
+    }
+
+    @Test
+    void untagResourceQueryResponseCarriesTheResultWrapper() {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("test-alarm");
+        alarm.setAlarmArn("arn:aws:cloudwatch:us-east-1:000000000000:alarm:test-alarm");
+        service.putMetricAlarm(alarm, REGION);
+        service.tagResource(alarm.getAlarmArn(), Map.of("env", "prod"), REGION);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("ResourceARN", alarm.getAlarmArn());
+        params.add("TagKeys.member.1", "env");
+
+        Response response = queryHandler.handle("UntagResource", params, REGION);
+        String xml = (String) response.getEntity();
+
+        assertTrue(xml.contains("<UntagResourceResponse>"), xml);
+        assertTrue(xml.contains("<UntagResourceResult"), xml);
+        assertTrue(service.listTagsForResource(alarm.getAlarmArn(), REGION).isEmpty());
+    }
+
+    @Test
     void listTagsJsonResponse() {
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName("test-alarm");

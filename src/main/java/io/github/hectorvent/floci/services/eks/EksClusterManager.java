@@ -80,6 +80,45 @@ public class EksClusterManager {
     }
 
     /**
+     * Attempts {@link #startCluster} and reports the k3s backend as unavailable instead of
+     * propagating the failure, when the cause is that no Docker daemon is reachable from Floci:
+     * Floci running inside Docker without a mounted socket, or a stopped daemon on the host. A
+     * failure raised while the daemon <em>is</em> reachable is a genuine provisioning error and
+     * still propagates, so a cluster only reaches FAILED for a reason AWS would also fail on.
+     *
+     * @return true when the k3s container was created and started
+     */
+    public boolean tryStartCluster(Cluster cluster) {
+        try {
+            startCluster(cluster);
+            return true;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            LOG.warnv("No Docker daemon is reachable from Floci ({0}). EKS cluster {1} is created as "
+                    + "metadata only: describe, list, tag, nodegroups, Fargate profiles and delete "
+                    + "work, but the cluster has no Kubernetes API server and kubectl cannot connect "
+                    + "to the endpoint it reports.", e.getMessage(), cluster.getName());
+            return false;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * k3s container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * Starts a k3s container for the given cluster. Updates the cluster with
      * the container ID and host port. The cluster status remains CREATING until
      * {@link #isReady(Cluster)} returns true and {@link #finalizeCluster(Cluster)} is called.
@@ -135,9 +174,10 @@ public class EksClusterManager {
 
         // Wire a token-authentication webhook so `aws eks get-token` bearer tokens are validated by
         // Floci and mapped to cluster-admin. The k3s API server POSTs a TokenReview to Floci's
-        // _floci/eks/token-webhook endpoint. The kubeconfig is copied into the container via the
-        // Docker API after create and before start (below) — not bind-mounted — so it works the same
-        // natively and in Docker-in-Docker, with no host-path / host-persistent-path requirement.
+        // _floci/eks/clusters/<cluster-name>/token-webhook endpoint. The kubeconfig is copied into
+        // the container via the Docker API after create and before start (below), not bind-mounted,
+        // so it works the same natively and in Docker-in-Docker, with no host-path /
+        // host-persistent-path requirement.
         String webhookLocalFile = null;
         if (config.services().eks().iamAuthWebhook()) {
             webhookLocalFile = writeWebhookKubeconfig(cluster.getName());
@@ -492,7 +532,7 @@ public class EksClusterManager {
                 .toAbsolutePath().normalize();
         try {
             Files.createDirectories(localFile.getParent());
-            Files.writeString(localFile, buildWebhookKubeconfig(webhookUrl()));
+            Files.writeString(localFile, buildWebhookKubeconfig(webhookUrl(clusterName)));
         } catch (IOException e) {
             LOG.warnv("EKS token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
                     clusterName, e.getMessage());
@@ -590,8 +630,12 @@ public class EksClusterManager {
     }
 
     /** The Floci token-webhook URL as reachable from inside the k3s container. */
-    String webhookUrl() {
-        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + "/_floci/eks/token-webhook";
+    String webhookUrl(String clusterName) {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + webhookPath(clusterName);
+    }
+
+    static String webhookPath(String clusterName) {
+        return "/_floci/eks/clusters/" + clusterName + "/token-webhook";
     }
 
     /**

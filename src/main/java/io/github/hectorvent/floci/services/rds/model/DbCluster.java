@@ -31,6 +31,9 @@ public class DbCluster {
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private String dbClusterResourceId;
     private String dbClusterArn;
+    private String masterUserSecretArn;
+    private String masterUserSecretStatus;
+    private String masterUserSecretKmsKeyId;
     private Instant createdAt;
     private int proxyPort;
     private Map<String, String> tags = new LinkedHashMap<>();
@@ -137,6 +140,17 @@ public class DbCluster {
 
     public String getDbClusterArn() { return dbClusterArn; }
     public void setDbClusterArn(String dbClusterArn) { this.dbClusterArn = dbClusterArn; }
+
+    public String getMasterUserSecretArn() { return masterUserSecretArn; }
+    public void setMasterUserSecretArn(String masterUserSecretArn) { this.masterUserSecretArn = masterUserSecretArn; }
+
+    public String getMasterUserSecretStatus() { return masterUserSecretStatus; }
+    public void setMasterUserSecretStatus(String masterUserSecretStatus) { this.masterUserSecretStatus = masterUserSecretStatus; }
+
+    public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
+    public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) {
+        this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId;
+    }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

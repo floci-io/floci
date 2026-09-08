@@ -121,6 +121,63 @@ class XmlParserTest {
         assertNull(XmlParser.extractElementTree(null, "Target"));
     }
 
+    // --- extractDeleteObjectEntries: batch delete Key/VersionId pairing ---
+
+    @Test
+    void extractDeleteObjectEntriesPairsKeyWithVersionId() {
+        String xml = """
+                <Delete>
+                  <Object><Key>a.txt</Key><VersionId>v1</VersionId></Object>
+                  <Object><Key>b.txt</Key><VersionId>v2</VersionId></Object>
+                </Delete>
+                """;
+
+        List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
+
+        assertEquals(2, entries.size());
+        assertEquals(new XmlParser.KeyVersion("a.txt", "v1"), entries.get(0));
+        assertEquals(new XmlParser.KeyVersion("b.txt", "v2"), entries.get(1));
+    }
+
+    @Test
+    void extractDeleteObjectEntriesVersionIdIsOptional() {
+        String xml = """
+                <Delete>
+                  <Object><Key>no-version.txt</Key></Object>
+                </Delete>
+                """;
+
+        List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
+
+        assertEquals(1, entries.size());
+        assertEquals("no-version.txt", entries.get(0).key());
+        assertNull(entries.get(0).versionId());
+    }
+
+    @Test
+    void extractDeleteObjectEntriesMixedVersionedAndUnversioned() {
+        String xml = """
+                <Delete>
+                  <Quiet>true</Quiet>
+                  <Object><Key>versioned.txt</Key><VersionId>v1</VersionId></Object>
+                  <Object><Key>plain.txt</Key></Object>
+                </Delete>
+                """;
+
+        List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
+
+        assertEquals(2, entries.size());
+        assertEquals("v1", entries.get(0).versionId());
+        assertNull(entries.get(1).versionId());
+    }
+
+    @Test
+    void extractDeleteObjectEntriesEmptyWhenNoObjects() {
+        assertTrue(XmlParser.extractDeleteObjectEntries("<Delete><Quiet>true</Quiet></Delete>").isEmpty());
+        assertTrue(XmlParser.extractDeleteObjectEntries(null).isEmpty());
+        assertTrue(XmlParser.extractDeleteObjectEntries("").isEmpty());
+    }
+
     // --- extractPairsPerGroup ---
 
     @Test

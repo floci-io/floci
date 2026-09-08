@@ -52,7 +52,8 @@ class EcsServiceTeardownTest {
                 containerManager,
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                new SingleUseStorageFactory());
+                new SingleUseStorageFactory(),
+                null);
         service.initializeStorage();
 
         ContainerDefinition cd = new ContainerDefinition();
@@ -98,7 +99,8 @@ class EcsServiceTeardownTest {
                 containerManager,
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                new SingleUseStorageFactory());
+                new SingleUseStorageFactory(),
+                null);
         service.initializeStorage();
 
         ContainerDefinition cd = new ContainerDefinition();

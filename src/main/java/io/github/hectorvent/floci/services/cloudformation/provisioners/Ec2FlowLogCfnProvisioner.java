@@ -63,6 +63,7 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 ctx.resolveOptional(props, "TrafficType"),
                 ctx.resolveOptional(props, "LogDestinationType"),
                 ctx.resolveOptional(props, "LogDestination"),
+                ctx.resolveOptional(props, "DeliverLogsPermissionArn"),
                 ctx.resolveOptional(props, "LogFormat"),
                 props != null && props.hasNonNull("MaxAggregationInterval")
                         ? props.get("MaxAggregationInterval").asInt()
@@ -92,6 +93,8 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 orDefault(ctx.resolveOptional(props, "LogDestinationType"), DEFAULT_LOG_DESTINATION_TYPE));
         rejectIfChanged("LogDestination", existing.getLogDestination(),
                 ctx.resolveOptional(props, "LogDestination"));
+        rejectIfChanged("DeliverLogsPermissionArn", existing.getDeliverLogsPermissionArn(),
+                ctx.resolveOptional(props, "DeliverLogsPermissionArn"));
         rejectIfChanged("LogFormat", existing.getLogFormat(), ctx.resolveOptional(props, "LogFormat"));
         int requestedInterval = props != null && props.hasNonNull("MaxAggregationInterval")
                 ? props.get("MaxAggregationInterval").asInt()

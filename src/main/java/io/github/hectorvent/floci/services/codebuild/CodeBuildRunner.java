@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codebuild;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -228,12 +229,22 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    /**
+     * The key in-flight builds are tracked under in {@link #stopFlags} and
+     * {@link #runningContainers}. The build ARN, which is what CodeBuildService hands
+     * {@link #stopBuild}; the id is the fallback for a build constructed without an ARN.
+     */
+    private static String executionKey(Build build) {
+        return build.getArn() != null ? build.getArn() : build.getId();
+    }
+
     public void startBuild(String region, Build build, Project project, String buildspecOverride) {
+        String executionId = executionKey(build);
         AtomicBoolean stopFlag = new AtomicBoolean(false);
-        stopFlags.put(build.getId(), stopFlag);
+        stopFlags.put(executionId, stopFlag);
         Thread.ofVirtual().start(() -> {
             try {
-                runBuild(region, build, project, buildspecOverride, stopFlag);
+                runBuild(region, build, project, buildspecOverride, stopFlag, executionId);
             } catch (Throwable t) {
                 failBuildOnUncaughtError(build, t);
             }
@@ -246,8 +257,9 @@ public class CodeBuildRunner implements ContainerTeardown {
     // failure and releases whatever the aborted cleanup left behind.
     void failBuildOnUncaughtError(Build build, Throwable t) {
         LOG.error("Build thread for " + build.getId() + " died unexpectedly", t);
-        stopFlags.remove(build.getId());
-        String containerId = runningContainers.remove(build.getId());
+        String executionId = executionKey(build);
+        stopFlags.remove(executionId);
+        String containerId = runningContainers.remove(executionId);
         if (containerId != null) {
             try {
                 lifecycleManager.stopAndRemove(containerId, null);
@@ -283,12 +295,12 @@ public class CodeBuildRunner implements ContainerTeardown {
         build.setCurrentPhase("COMPLETED");
     }
 
-    public void stopBuild(String buildId) {
-        AtomicBoolean flag = stopFlags.get(buildId);
+    public void stopBuild(String executionId) {
+        AtomicBoolean flag = stopFlags.get(executionId);
         if (flag != null) {
             flag.set(true);
         }
-        String containerId = runningContainers.get(buildId);
+        String containerId = runningContainers.get(executionId);
         if (containerId != null) {
             try {
                 dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
@@ -299,9 +311,9 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     private void runBuild(String region, Build build, Project project,
-                          String buildspecOverride, AtomicBoolean stopFlag) {
+                          String buildspecOverride, AtomicBoolean stopFlag, String executionId) {
         try {
-            withBuildSlot(() -> runBuildBody(region, build, project, buildspecOverride, stopFlag));
+            withBuildSlot(() -> runBuildBody(region, build, project, buildspecOverride, stopFlag, executionId));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             finishStopped(build);
@@ -475,7 +487,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     private void runBuildBody(String region, Build build, Project project,
-                          String buildspecOverride, AtomicBoolean stopFlag) {
+                          String buildspecOverride, AtomicBoolean stopFlag, String executionId) {
         String buildId = build.getId();
         Path workspace = null;
         Path secondaryRoot = null;
@@ -589,7 +601,7 @@ public class CodeBuildRunner implements ContainerTeardown {
             ContainerLifecycleManager.ContainerInfo info =
                     underStagingSlot(() -> lifecycleManager.createAndStart(spec));
             containerId = info.containerId();
-            runningContainers.put(buildId, containerId);
+            runningContainers.put(executionId, containerId);
 
             // Ensure the CloudWatch log group/stream exists, but do NOT open a persistent PID1
             // log-follow connection: the CodeBuild container's entrypoint is `tail -f /dev/null`,
@@ -705,8 +717,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                 build.getPhases().add(completedPhase);
             }
         } finally {
-            stopFlags.remove(buildId);
-            if (containerId != null && runningContainers.remove(buildId, containerId)) {
+            stopFlags.remove(executionId);
+            if (containerId != null && runningContainers.remove(executionId, containerId)) {
                 if (System.getenv("FLOCI_DEBUG_KEEP_CONTAINER") != null) {
                     LOG.warnv("FLOCI_DEBUG_KEEP_CONTAINER set; leaving build container {0} alive for inspection", containerId);
                 } else {
@@ -973,10 +985,16 @@ public class CodeBuildRunner implements ContainerTeardown {
     // prelude can build a combined CA bundle before any buildspec phase runs —
     // builds then trust the spoofed https://*.amazonaws.com endpoints Floci serves.
     void stageCaCertificate(String containerId) {
+        // Upstream replaced the standalone self-signed PEM with a CA-issued leaf plus the
+        // ContainerCaBundle trust anchor, so the fallback anchor is that bundle. An explicit
+        // floci.tls.cert-path still wins, as before.
         Path certPath = config.tls().certPath()
                 .filter(p -> !p.isBlank())
                 .map(Path::of)
-                .orElseGet(() -> TlsConfigSource.selfSignedCertPath(config.storage().persistentPath()));
+                .or(() -> ContainerCaBundle.hostPath(config))
+                .orElseThrow(() -> new IllegalStateException(
+                        "no Floci TLS trust anchor is available; cannot stage one so build containers "
+                                + "trust spoofed AWS endpoints"));
         try {
             if (!Files.isReadable(certPath)) {
                 // Reached only under spoofedEndpointTrustEnabled(), so the CA is required. Warning and

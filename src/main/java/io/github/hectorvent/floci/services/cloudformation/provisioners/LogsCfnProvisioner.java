@@ -77,8 +77,9 @@ public class LogsCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         Map<String, String> tags = new HashMap<>();
-        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
-            for (JsonNode tag : props.get("Tags")) {
+        JsonNode tagsNode = props != null ? ctx.engine().resolveNode(props.get("Tags")) : null;
+        if (tagsNode != null && tagsNode.isArray()) {
+            for (JsonNode tag : tagsNode) {
                 String key = ctx.engine().resolve(tag.path("Key"));
                 if (!key.isEmpty()) {
                     tags.put(key, ctx.engine().resolve(tag.path("Value")));

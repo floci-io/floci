@@ -4,7 +4,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.jboss.logging.Logger;
+
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * Translates between the Bedrock Runtime Converse wire shape and the OpenAI
@@ -17,10 +26,15 @@ final class BedrockOpenAiTranslator {
     private BedrockOpenAiTranslator() {
     }
 
-    static ObjectNode toOpenAiRequest(ObjectMapper mapper, ObjectNode bedrockRequest, String resolvedModel) {
+    static ObjectNode toOpenAiRequest(ObjectMapper mapper, ObjectNode bedrockRequest, String resolvedModel, boolean stream) {
         ObjectNode openAi = mapper.createObjectNode();
         openAi.put("model", resolvedModel);
-        openAi.put("stream", false);
+        openAi.put("stream", stream);
+        if (stream) {
+            // Not all OpenAI-compatible backends honor this, but the ones that do (including
+            // OpenAI itself) only include token usage in the final chunk when asked for it.
+            openAi.putObject("stream_options").put("include_usage", true);
+        }
         ArrayNode openAiMessages = openAi.putArray("messages");
 
         JsonNode system = bedrockRequest.path("system");
@@ -193,6 +207,13 @@ final class BedrockOpenAiTranslator {
 
     static ObjectNode toBedrockResponse(ObjectMapper mapper, JsonNode openAiResponse, long latencyMs) {
         JsonNode choice = openAiResponse.path("choices").path(0);
+        if (!choice.isObject()) {
+            // A 2xx response with no choices at all (e.g. an error object the backend still
+            // returned with a success status) is not a completion - don't fabricate an empty
+            // assistant message out of it.
+            throw new AwsException("ModelErrorException",
+                    "Proxy backend's response had no choices: " + truncate(openAiResponse.toString(), 512), 424);
+        }
         JsonNode message = choice.path("message");
         String finishReason = choice.path("finish_reason").asText("stop");
         JsonNode toolCallsNode = message.path("tool_calls");
@@ -240,25 +261,252 @@ final class BedrockOpenAiTranslator {
         return root;
     }
 
+    /**
+     * Translates an OpenAI Chat Completions SSE stream ({@code data: {...}} lines, terminated by
+     * {@code data: [DONE]}) into Bedrock ConverseStream events, writing each frame to {@code out}
+     * as soon as it's known instead of buffering the whole response - text deltas reach the
+     * client as they arrive from the upstream.
+     *
+     * <p>By the time this runs, JAX-RS has already committed the 200 response (messageStart is
+     * about to be written), so a failure discovered here - a truncated stream that never reaches
+     * a finish_reason or "[DONE]" - can no longer become an HTTP error status. It's written as an
+     * in-band {@code modelStreamErrorException} event instead, matching how real Bedrock reports
+     * a mid-stream failure after the response has already started.
+     *
+     * <p>Tool calls are accumulated across chunks and emitted as a single complete
+     * contentBlockDelta once the stream ends, rather than as incremental argument fragments -
+     * simpler than real Bedrock's fragment-by-fragment streaming, but SDKs consume both the same
+     * way since they just concatenate delta.toolUse.input across events for a given
+     * contentBlockIndex before parsing it as JSON.
+     */
+    static void streamBedrockEvents(ObjectMapper mapper, Stream<String> sseLines, OutputStream out, long startNanos) {
+        BedrockStreamEncoder.writeEvent(mapper, out, "messageStart", mapper.createObjectNode().put("role", "assistant"));
+
+        boolean anyContentDeltaWritten = false;
+        Map<Integer, ToolCallAccumulator> toolCalls = new LinkedHashMap<>();
+        String finishReason = "stop";
+        boolean sawFinishReason = false;
+        boolean sawDone = false;
+        int promptTokens = 0;
+        int completionTokens = 0;
+        int totalTokens = 0;
+
+        try (sseLines) {
+            Iterator<String> lineIterator = sseLines.iterator();
+            String rawLine;
+            while ((rawLine = readLine(lineIterator)) != null) {
+                String line = rawLine.strip();
+                if (!line.startsWith("data:")) {
+                    continue;
+                }
+                String data = line.substring(5).strip();
+                if (data.isEmpty()) {
+                    continue;
+                }
+                if ("[DONE]".equals(data)) {
+                    sawDone = true;
+                    continue;
+                }
+                JsonNode chunk;
+                try {
+                    chunk = mapper.readTree(data);
+                } catch (Exception e) {
+                    LOG.warnv("Skipping malformed SSE chunk from proxy backend: {0}", e.getMessage());
+                    continue;
+                }
+
+                JsonNode usage = chunk.path("usage");
+                if (usage.isObject()) {
+                    promptTokens = usage.path("prompt_tokens").asInt(promptTokens);
+                    completionTokens = usage.path("completion_tokens").asInt(completionTokens);
+                    totalTokens = usage.path("total_tokens").asInt(totalTokens);
+                }
+
+                JsonNode choice = chunk.path("choices").path(0);
+                String reason = choice.path("finish_reason").asText(null);
+                if (reason != null) {
+                    finishReason = reason;
+                    sawFinishReason = true;
+                }
+
+                JsonNode delta = choice.path("delta");
+                if (writeContentDelta(mapper, out, delta)) {
+                    anyContentDeltaWritten = true;
+                }
+                writeToolCalls(delta, toolCalls);
+            }
+        }
+
+        boolean streamCompleted = sawFinishReason || sawDone;
+        if (!streamCompleted) {
+            writeTruncatedException(mapper, out);
+            return;
+        }
+
+        if (anyContentDeltaWritten) {
+            BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockStop",
+                    mapper.createObjectNode().put("contentBlockIndex", 0));
+        }
+
+        var validToolCalls = collectValidToolCalls(mapper, toolCalls);
+        int blockIndex = anyContentDeltaWritten ? 1 : 0;
+        for (ToolCallAccumulator acc : validToolCalls) {
+            writeToolCalls(mapper, out, acc, blockIndex);
+            blockIndex++;
+        }
+
+        boolean hasToolCalls = !validToolCalls.isEmpty();
+        BedrockStreamEncoder.writeEvent(mapper, out, "messageStop",
+                mapper.createObjectNode().put("stopReason", hasToolCalls ? "tool_use" : mapFinishReason(finishReason)));
+
+        writeMetadata(mapper, out, startNanos, promptTokens, completionTokens, totalTokens);
+    }
+
+    private static String readLine(Iterator<String> lineIterator) {
+        try {
+            if (!lineIterator.hasNext()) {
+                return null;
+            }
+            return lineIterator.next();
+        } catch (RuntimeException e) {
+            // The upstream connection failed mid-read (e.g. it dropped the connection).
+            // Treat exactly like reaching EOF without a finish_reason/[DONE]: fall through
+            // to the truncation handling instead of letting an UncheckedIOException
+            // propagate and abruptly kill the response mid-stream.
+            LOG.warnv(e, "Bedrock proxy backend connection failed while streaming");
+            return null;
+        }
+    }
+
+    private static void writeMetadata(ObjectMapper mapper, OutputStream out, long startNanos, int promptTokens, int completionTokens, int totalTokens) {
+        long latencyMs = (System.nanoTime() - startNanos) / 1_000_000;
+        ObjectNode metadata = mapper.createObjectNode();
+        metadata.putObject("usage")
+                .put("inputTokens", promptTokens)
+                .put("outputTokens", completionTokens)
+                .put("totalTokens", totalTokens);
+        metadata.putObject("metrics").put("latencyMs", latencyMs);
+        BedrockStreamEncoder.writeEvent(mapper, out, "metadata", metadata);
+    }
+
+    private static void writeToolCalls(ObjectMapper mapper, OutputStream out, ToolCallAccumulator acc, int blockIndex) {
+        ObjectNode startEvent = mapper.createObjectNode();
+        startEvent.put("contentBlockIndex", blockIndex);
+        ObjectNode toolUseStart = startEvent.putObject("start").putObject("toolUse");
+        toolUseStart.put("toolUseId", acc.id);
+        toolUseStart.put("name", acc.name);
+        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockStart", startEvent);
+
+        ObjectNode deltaEvent = mapper.createObjectNode();
+        deltaEvent.put("contentBlockIndex", blockIndex);
+        deltaEvent.putObject("delta").putObject("toolUse").put("input", acc.arguments.toString());
+        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockDelta", deltaEvent);
+
+        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockStop",
+                mapper.createObjectNode().put("contentBlockIndex", blockIndex));
+    }
+
+    private static List<ToolCallAccumulator> collectValidToolCalls(ObjectMapper mapper, Map<Integer, ToolCallAccumulator> toolCalls) {
+        // A tool_calls delta only becomes a usable toolUse block once it has a non-blank id,
+        // a non-blank name, and arguments that actually form a JSON object - a partial or
+        // truncated fragment (e.g. an id with no name, or unclosed argument JSON) is dropped
+        // instead of being surfaced as a broken tool_use block with empty identity fields.
+        List<ToolCallAccumulator> validToolCalls = new ArrayList<>();
+        for (ToolCallAccumulator acc : toolCalls.values()) {
+            if (isUsableToolCall(mapper, acc)) {
+                validToolCalls.add(acc);
+            } else {
+                LOG.warnv("Dropping incomplete or invalid tool_calls fragment from proxy backend: id={0}, name={1}",
+                        acc.id, acc.name);
+            }
+        }
+        return validToolCalls;
+    }
+
+    private static void writeTruncatedException(ObjectMapper mapper, OutputStream out) {
+        // The stream ended (upstream closed the connection, or we ran out of lines) without
+        // ever reaching a finish_reason or "[DONE]" - a truncated generation. The HTTP status
+        // is already 200, so this can only be reported in-band.
+        ObjectNode errorPayload = mapper.createObjectNode();
+        errorPayload.put("message", "Proxy backend's ConverseStream response ended without a finish_reason "
+                + "or \"[DONE]\" terminator - the stream may have been truncated.");
+        BedrockStreamEncoder.writeException(mapper, out, "modelStreamErrorException", errorPayload);
+    }
+
+    private static void writeToolCalls(JsonNode delta, Map<Integer, ToolCallAccumulator> toolCalls) {
+        JsonNode toolCallDeltas = delta.path("tool_calls");
+        if (!toolCallDeltas.isArray()) {
+            return;
+        }
+        for (JsonNode toolCallDelta : toolCallDeltas) {
+            int index = toolCallDelta.path("index").asInt(0);
+            ToolCallAccumulator acc = toolCalls.computeIfAbsent(index, i -> new ToolCallAccumulator());
+            String id = toolCallDelta.path("id").asText(null);
+            if (id != null) {
+                acc.id = id;
+            }
+            JsonNode function = toolCallDelta.path("function");
+            String name = function.path("name").asText(null);
+            if (name != null) {
+                acc.name = name;
+            }
+            String argsFragment = function.path("arguments").asText(null);
+            if (argsFragment != null) {
+                acc.arguments.append(argsFragment);
+            }
+        }
+    }
+
+    private static boolean writeContentDelta(ObjectMapper mapper, OutputStream out, JsonNode delta) {
+        String contentDelta = delta.path("content").asText(null);
+        if (contentDelta == null || contentDelta.isEmpty()) {
+            return false;
+        }
+
+        ObjectNode deltaEvent = mapper.createObjectNode();
+        deltaEvent.put("contentBlockIndex", 0);
+        deltaEvent.putObject("delta").put("text", contentDelta);
+        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockDelta", deltaEvent);
+        return true;
+    }
+
+    private static boolean isUsableToolCall(ObjectMapper mapper, ToolCallAccumulator acc) {
+        if (acc.id == null || acc.id.isBlank() || acc.name == null || acc.name.isBlank()) {
+            return false;
+        }
+        try {
+            return mapper.readTree(acc.arguments.toString()).isObject();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static final class ToolCallAccumulator {
+        String id;
+        String name;
+        final StringBuilder arguments = new StringBuilder();
+    }
+
     private static String extractMessageText(JsonNode message) {
         JsonNode content = message.path("content");
         if (content.isTextual()) {
             return content.asText("");
         }
-        if (content.isArray()) {
-            StringBuilder sb = new StringBuilder();
-            for (JsonNode part : content) {
-                String text = part.path("text").asText(null);
-                if (text != null) {
-                    if (sb.length() > 0) {
-                        sb.append('\n');
-                    }
-                    sb.append(text);
-                }
-            }
-            return sb.toString();
+        if (!content.isArray()) {
+            return "";
         }
-        return "";
+        StringBuilder sb = new StringBuilder();
+        for (JsonNode part : content) {
+            String text = part.path("text").asText(null);
+            if (text == null) {
+                continue;
+            }
+            if (!sb.isEmpty()) {
+                sb.append('\n');
+            }
+            sb.append(text);
+        }
+        return sb.toString();
     }
 
     private static ObjectNode parseToolArguments(ObjectMapper mapper, String argumentsJson) {
@@ -275,5 +523,9 @@ final class BedrockOpenAiTranslator {
 
     private static String mapFinishReason(String finishReason) {
         return "length".equals(finishReason) ? "max_tokens" : "end_turn";
+    }
+
+    private static String truncate(String value, int maxLength) {
+        return value != null && value.length() > maxLength ? value.substring(0, maxLength) + "…" : value;
     }
 }

@@ -1,0 +1,84 @@
+name: PR Template
+
+# Guards against PRs that dropped the pull request template entirely (or
+# stripped out a section) rather than filling it in. This only checks that
+# the required section headers survive in the PR body: it does not judge
+# what a contributor wrote under each one, since that's a human review call,
+# not something CI can score.
+#
+# AWS Compatibility is deliberately not required here: plenty of PRs are not
+# AWS-behavior changes (chores, refactors, docs), so an empty/missing section
+# there is not evidence of a dropped template.
+#
+# Keep REQUIRED_HEADERS in sync with .github/pull_request_template.md.
+#
+# No grandfathering: this applies to every open PR immediately, including
+# ones opened before this rule existed, so they start failing on their next
+# push/edit/reopen until the description is fixed up.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  check-template:
+    name: PR body keeps the required template sections
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.type != 'Bot'
+
+    steps:
+      - name: Check required sections are present
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          REQUIRED_HEADERS=(
+            "## Summary"
+            "## Type of change"
+            "## Checklist"
+          )
+
+          # Single pass over lines, tracking fenced code blocks so a header
+          # string quoted or pasted inside one doesn't count. Leading
+          # indentation is restricted to 0-3 plain spaces (no tab): CommonMark
+          # treats a tab, or 4+ spaces, as an indented code block rather than
+          # an ATX heading, and so does this check.
+          declare -A FOUND
+          for header in "${REQUIRED_HEADERS[@]}"; do FOUND["$header"]=0; done
+          FENCE_RE='^[[:space:]]{0,3}(```|~~~)'
+          in_fence=0
+
+          while IFS= read -r line; do
+            if [[ "$line" =~ $FENCE_RE ]]; then
+              in_fence=$((1 - in_fence))
+              continue
+            fi
+            [ "$in_fence" -eq 1 ] && continue
+
+            for header in "${REQUIRED_HEADERS[@]}"; do
+              header_re="^[ ]{0,3}${header}[[:space:]]*\$"
+              [[ "$line" =~ $header_re ]] && FOUND["$header"]=1
+            done
+          done <<< "$PR_BODY"
+
+          MISSING=()
+          for header in "${REQUIRED_HEADERS[@]}"; do
+            [ "${FOUND[$header]}" -eq 0 ] && MISSING+=("$header")
+          done
+
+          if [ "${#MISSING[@]}" -eq 0 ]; then
+            echo "ok: all required template sections present"
+            exit 0
+          fi
+
+          echo "::error::PR description is missing required template section(s):"
+          for header in "${MISSING[@]}"; do
+            echo "::error::  - $header"
+          done
+          echo ""
+          echo "  It looks like the pull request template was edited or removed."
+          echo "  Please restore the missing section(s) from .github/pull_request_template.md"
+          echo "  and fill them in: you can edit the PR description directly on GitHub."
+          exit 1

@@ -57,6 +57,10 @@ public class Instance {
     private boolean disableApiStop = false;
     private boolean disableApiTermination = false;
 
+    // Null for an instance persisted before metadata options were stored; reads fall back to
+    // AWS's launch defaults through effectiveMetadataOptions().
+    private LaunchTemplateData.MetadataOptions metadataOptions;
+
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
     private String containerBridgeIp;
@@ -199,4 +203,12 @@ public class Instance {
 
     public boolean isDisableApiTermination() { return disableApiTermination; }
     public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
+
+    public LaunchTemplateData.MetadataOptions getMetadataOptions() { return metadataOptions; }
+    public void setMetadataOptions(LaunchTemplateData.MetadataOptions metadataOptions) { this.metadataOptions = metadataOptions; }
+
+    /** The stored metadata options, or AWS's launch defaults for a record that has none. */
+    public LaunchTemplateData.MetadataOptions effectiveMetadataOptions() {
+        return metadataOptions != null ? metadataOptions : LaunchTemplateData.MetadataOptions.launchDefaults();
+    }
 }

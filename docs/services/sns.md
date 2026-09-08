@@ -88,6 +88,35 @@ Supported subscription protocols:
 - `http` / `https` — posts to an HTTP endpoint
 - `application` — fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
 
+## FIFO topics
+
+A topic whose name ends in `.fifo` is a FIFO topic. `Publish` and `PublishBatch` require a
+`MessageGroupId`, and a message is deduplicated against its `MessageDeduplicationId` for five
+minutes. Set `ContentBasedDeduplication` on the topic to derive that id from the message body.
+
+The `FifoThroughputScope` attribute decides how wide that deduplication reaches:
+
+| Value | Deduplication scope |
+|---|---|
+| `Topic` (default) | Across the whole topic: the same `MessageDeduplicationId` is a duplicate no matter which message group it arrives under |
+| `MessageGroup` | Within a single message group: the same `MessageDeduplicationId` under two different `MessageGroupId`s is two distinct messages |
+
+`MessageGroup` is what a fan-out that reuses one deduplication id per group needs, for example
+publishing the same event to a topic once per tenant with the tenant as the message group.
+
+```bash
+aws sns create-topic --name events.fifo \
+  --attributes FifoTopic=true,FifoThroughputScope=MessageGroup \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+When the topic forwards to an SQS FIFO queue, set the matching queue attributes
+(`DeduplicationScope=messageGroup` and `FifoThroughputLimit=perMessageGroupId`), otherwise the
+queue deduplicates topic-wide on the way in.
+
+CloudFormation carries both settings through: `AWS::SNS::Topic` forwards `FifoThroughputScope` and
+`ContentBasedDeduplication`, and a FIFO topic left unnamed gets a generated name ending in `.fifo`.
+
 ## Control Tower managed topic
 
 AWS Control Tower creates the regional

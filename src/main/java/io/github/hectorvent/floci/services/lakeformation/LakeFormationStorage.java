@@ -10,6 +10,8 @@ public interface LakeFormationStorage {
     Optional<DataLakeSettings> getDataLakeSettings(String region, String catalogId);
 
     void registerResource(String region, String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation);
+    void updateResource(String region, String resourceArn, String roleArn, String expectedResourceOwnerAccount,
+                        Boolean hybridAccessEnabled, Boolean withFederation);
     void deregisterResource(String region, String resourceArn);
     List<ResourceInfo> listResources(String region, List<FilterCondition> filterConditions, Integer maxResults, String nextToken);
     Optional<ResourceInfo> describeResource(String region, String resourceArn);

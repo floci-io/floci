@@ -100,10 +100,10 @@ jobs:
   shim:
     name: warm / compat-shim
     # Produces the scope that compatibility.yml's compat-aws-cli-shim job reads.
-    # Worth warming, unlike floci-native: this image builds FROM a published
-    # floci/floci tag and its cost is a microdnf install of python3/pip/unzip that
-    # changes only when the Dockerfile does — genuinely stable layers, with nothing
-    # volatile above them.
+    # Worth warming, unlike floci-native: the tools stage of Dockerfile.compat is a
+    # microdnf install of python3/pip/unzip plus the aws CLI, and it depends only on
+    # ubi9-minimal and the Dockerfile. Genuinely stable layers. The final stage,
+    # which copies the binary out of a published floci/floci tag, is left out.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
 
@@ -119,8 +119,10 @@ jobs:
           context: .
           file: docker/Dockerfile.compat
           # Must match the consumer's build-args, or the layers key differently
-          # and the warm is silently useless (compatibility.yml:38).
+          # and the warm is silently useless (compatibility.yml:38). The consumer
+          # builds the whole image; its tools layers key the same as this target.
           build-args: VERSION=latest
+          target: tools
           # No `load:` — the image is discarded; only the cache is wanted.
           cache-from: type=gha,scope=compat-shim
           cache-to: type=gha,scope=compat-shim,mode=max

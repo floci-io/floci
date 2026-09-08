@@ -23,6 +23,10 @@ public class EcsServiceModel {
     private Instant createdAt;
     /** When the current deployment began: service creation, or the last task-definition change. */
     private Instant lastDeploymentAt;
+    /** Current deployment identifier ("ecs-svc/<hex>"). Rolls on a task-definition change or forceNewDeployment. */
+    private String deploymentId;
+    /** The deploymentId last observed to reach steady state; guards against re-emitting COMPLETED. */
+    private String lastCompletedDeploymentId;
     private String namespace;
     private String deploymentController;
     private String schedulingStrategy;
@@ -62,6 +66,14 @@ public class EcsServiceModel {
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
     public Instant getLastDeploymentAt() { return lastDeploymentAt; }
     public void setLastDeploymentAt(Instant lastDeploymentAt) { this.lastDeploymentAt = lastDeploymentAt; }
+
+    public String getDeploymentId() { return deploymentId; }
+    public void setDeploymentId(String deploymentId) { this.deploymentId = deploymentId; }
+
+    public String getLastCompletedDeploymentId() { return lastCompletedDeploymentId; }
+    public void setLastCompletedDeploymentId(String lastCompletedDeploymentId) {
+        this.lastCompletedDeploymentId = lastCompletedDeploymentId;
+    }
 
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }

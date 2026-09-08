@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -24,6 +25,7 @@ public class RedshiftProxyManager {
 
     private final RdsSigV4Validator sigV4Validator;
     private final RdsProxyTlsCertificates tlsCertificates;
+    private final S3Service s3Service;
     private final ConcurrentHashMap<String, RedshiftAuthProxy> proxies = new ConcurrentHashMap<>();
     /**
      * Proxies whose listener could not be closed during a failed start or replace. The
@@ -34,9 +36,11 @@ public class RedshiftProxyManager {
     private final ConcurrentHashMap<String, RedshiftAuthProxy> unclosableProxies = new ConcurrentHashMap<>();
 
     @Inject
-    public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates) {
+    public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                                S3Service s3Service) {
         this.sigV4Validator = sigV4Validator;
         this.tlsCertificates = tlsCertificates;
+        this.s3Service = s3Service;
     }
 
     public synchronized void startProxy(String relayKey, int proxyPort,
@@ -50,7 +54,7 @@ public class RedshiftProxyManager {
         tlsCertificates.ensureHost(advertisedHost);
         RedshiftAuthProxy proxy = new RedshiftAuthProxy(
                 relayKey, backendHost, backendPort, masterUsername, masterPassword, dbName,
-                sigV4Validator, tlsCertificates, passwordValidator);
+                sigV4Validator, tlsCertificates, passwordValidator, s3Service);
         try {
             proxy.start(proxyPort);
         } catch (IOException | RuntimeException e) {

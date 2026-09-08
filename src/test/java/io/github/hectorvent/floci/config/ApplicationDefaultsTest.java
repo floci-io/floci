@@ -35,7 +35,7 @@ class ApplicationDefaultsTest {
         JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
 
         assertEquals(2048,
-                config.path("floci").path("max-request-size").asInt(),
+                config.path("floci").path("protocols").path("max-request-size").asInt(),
                 "production application.yml should allow 2048 MB request bodies by default");
     }
 

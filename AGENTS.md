@@ -249,17 +249,22 @@ When adding functionality:
 
 ## Adding a New AWS Service
 
-1. Create a package under `services/`
-2. Add:
-   - Controller
-   - Service
-   - `model/`
-3. Register the service in `ServiceRegistry`
-4. Add config to `EmulatorConfig`
-5. Add YAML config in main and test config files
-6. Wire storage through `StorageFactory`
-7. Add tests
-8. Update documentation
+1. Create a package under `services/<svc>/` with a Controller, a Service, and `model/`
+2. Add a `<Svc>ServiceConfig` interface and its accessor on `ServicesConfig` in `EmulatorConfig`
+3. Add one `descriptor(...)` entry in `ResolvedServiceCatalog`. This is the registration point;
+   `ServiceRegistry` only reads the catalog and has no registration API
+4. Add `floci.services.<key>.enabled` to both `src/main/resources/application.yml` and
+   `src/test/resources/application.yml`
+5. JSON 1.1 only: inject the handler in `AwsJson11Controller`
+6. Obtain storage through `StorageFactory` and implement `Resettable`
+7. List any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in
+   `application.yml`
+8. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
+9. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
+   `docs/services/index.md`, and a row in the README category table
+10. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
+    `make docs-check`
+11. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
 
 ---
 

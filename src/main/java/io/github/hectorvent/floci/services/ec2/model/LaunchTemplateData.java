@@ -435,6 +435,51 @@ public class LaunchTemplateData {
 
         public String getInstanceMetadataTags() { return instanceMetadataTags; }
         public void setInstanceMetadataTags(String instanceMetadataTags) { this.instanceMetadataTags = instanceMetadataTags; }
+
+        /** The options AWS applies to a launch that specifies none. */
+        public static MetadataOptions launchDefaults() {
+            MetadataOptions defaults = new MetadataOptions();
+            defaults.state = "applied";
+            defaults.httpTokens = "optional";
+            defaults.httpPutResponseHopLimit = 1;
+            defaults.httpEndpoint = "enabled";
+            defaults.httpProtocolIpv6 = "disabled";
+            defaults.instanceMetadataTags = "disabled";
+            return defaults;
+        }
+
+        /**
+         * A copy of {@code base} with every field {@code override} sets replacing the base value.
+         * A null override or a null field leaves the base value alone.
+         */
+        public static MetadataOptions merge(MetadataOptions base, MetadataOptions override) {
+            MetadataOptions merged = new MetadataOptions();
+            merged.state = base.state;
+            merged.httpTokens = base.httpTokens;
+            merged.httpPutResponseHopLimit = base.httpPutResponseHopLimit;
+            merged.httpEndpoint = base.httpEndpoint;
+            merged.httpProtocolIpv6 = base.httpProtocolIpv6;
+            merged.instanceMetadataTags = base.instanceMetadataTags;
+            if (override == null) {
+                return merged;
+            }
+            if (override.httpTokens != null) {
+                merged.httpTokens = override.httpTokens;
+            }
+            if (override.httpPutResponseHopLimit != null) {
+                merged.httpPutResponseHopLimit = override.httpPutResponseHopLimit;
+            }
+            if (override.httpEndpoint != null) {
+                merged.httpEndpoint = override.httpEndpoint;
+            }
+            if (override.httpProtocolIpv6 != null) {
+                merged.httpProtocolIpv6 = override.httpProtocolIpv6;
+            }
+            if (override.instanceMetadataTags != null) {
+                merged.instanceMetadataTags = override.instanceMetadataTags;
+            }
+            return merged;
+        }
     }
 
     @RegisterForReflection

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,13 +39,15 @@ public class IamQueryHandler {
     private final IamService iamService;
     private final IamPolicyEvaluator policyEvaluator;
     private final AccountResolver accountResolver;
+    private final SAMLProviderService samlProviderService;
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
-                           AccountResolver accountResolver) {
+                           AccountResolver accountResolver, SAMLProviderService samlProviderService) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
+        this.samlProviderService = samlProviderService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
@@ -64,8 +67,10 @@ public class IamQueryHandler {
             case "ListMFADevices" -> handleListMFADevices(params);
             case "GetLoginProfile" -> handleGetLoginProfile(params);
 
-            // Identity providers & server certificates (read-only, not modeled)
-            case "ListSAMLProviders" -> handleListSAMLProviders(params);
+            // Identity providers & server certificates
+            case "ListSAMLProviders" -> handleListSAMLProviders(authorization);
+            case "CreateSAMLProvider" -> handleCreateSAMLProvider(params, authorization);
+            case "GetSAMLProvider" -> handleGetSAMLProvider(params, authorization);
             case "ListOpenIDConnectProviders" -> handleListOpenIDConnectProviders(params);
             case "CreateOpenIDConnectProvider" -> handleCreateOpenIDConnectProvider(params);
             case "GetOpenIDConnectProvider" -> handleGetOpenIDConnectProvider(params);
@@ -312,13 +317,31 @@ public class IamQueryHandler {
                 AwsNamespaces.IAM, 404);
     }
 
-    private Response handleListSAMLProviders(MultivaluedMap<String, String> params) {
-        // SAML identity providers are not modeled; return the wire-accurate empty
-        // list (ListSAMLProviders is not paginated — no Marker/IsTruncated).
-        String result = new XmlBuilder()
-                .start("SAMLProviderList").end("SAMLProviderList")
-                .build();
-        return Response.ok(AwsQueryResponse.envelope("ListSAMLProviders", AwsNamespaces.IAM, result)).build();
+    private Response handleListSAMLProviders(String authorization) {
+        var xml = new XmlBuilder().start("SAMLProviderList");
+        for (SAMLProvider provider : samlProviderService.list(accountResolver.resolve(authorization))) {
+            xml.start("member").elem("Arn", provider.getArn()).end("member");
+        }
+        xml.end("SAMLProviderList");
+        return Response.ok(AwsQueryResponse.envelope("ListSAMLProviders", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleCreateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        SAMLProvider provider = samlProviderService.create(accountResolver.resolve(authorization),
+                getParam(params, "Name"), getParam(params, "SAMLMetadataDocument"));
+        return Response.ok(AwsQueryResponse.envelope("CreateSAMLProvider", AwsNamespaces.IAM,
+                new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).build())).build();
+    }
+
+    private Response handleGetSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        SAMLProvider provider = samlProviderService.getForAccount(accountId, getParam(params, "SAMLProviderArn"));
+        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
+                + provider.getEntityId() + "\"><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>"
+                + provider.getCertificate() + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:EntityDescriptor>";
+        return Response.ok(AwsQueryResponse.envelope("GetSAMLProvider", AwsNamespaces.IAM,
+                new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).elem("CreateDate", isoDate(provider.getCreateDate()))
+                        .elem("ValidUntil", isoDate(provider.getCreateDate().plusSeconds(31536000))).elem("SAMLMetadataDocument", metadata).build())).build();
     }
 
     // ListOpenIDConnectProviders is not paginated and carries only ARNs — the client fetches
@@ -1174,7 +1197,7 @@ public class IamQueryHandler {
         if (resourceArns.isEmpty()) {
             resourceArns = List.of("*");
         }
-        Map<String, String> context = extractContextEntries(params);
+        Map<String, List<String>> context = extractContextEntries(params);
 
         XmlBuilder results = new XmlBuilder().start("EvaluationResults");
         for (String actionName : actionNames) {
@@ -1402,14 +1425,21 @@ public class IamQueryHandler {
         return values;
     }
 
-    private Map<String, String> extractContextEntries(MultivaluedMap<String, String> params) {
-        Map<String, String> context = new HashMap<>();
+    /**
+     * Reads every {@code ContextEntries.member.N.ContextKeyValues.member.M}. AWS context keys
+     * are set-typed, and the evaluator's set operators quantify over the whole set, so reading
+     * only {@code member.1} silently dropped the values a ForAnyValue:/ForAllValues: condition
+     * has to see. An entry that names a key but supplies no value is skipped.
+     */
+    private Map<String, List<String>> extractContextEntries(MultivaluedMap<String, String> params) {
+        Map<String, List<String>> context = new HashMap<>();
         for (int i = 1; ; i++) {
             String name = params.getFirst("ContextEntries.member." + i + ".ContextKeyName");
             if (name == null) break;
-            String value = params.getFirst("ContextEntries.member." + i + ".ContextKeyValues.member.1");
-            if (value != null) {
-                context.put(name, value);
+            List<String> values = extractIndexedValues(
+                    params, "ContextEntries.member." + i + ".ContextKeyValues.member");
+            if (!values.isEmpty()) {
+                context.put(name, values);
             }
         }
         return context;

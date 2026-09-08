@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -11,6 +12,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Catalog of AWS managed policies, loaded from {@code iam/managed-policies.yaml}.
@@ -22,8 +24,9 @@ import java.util.List;
  * subset would reject valid configurations; resolving every well-formed ARN would accept
  * invalid ones.
  *
- * <p>Policy documents are not modelled. Floci does not evaluate IAM by default, so every
- * entry shares {@link #PERMISSIVE_DOCUMENT} and only the name, path and description matter.
+ * <p>Policy documents are loaded from the versioned data generated from the public AWS managed
+ * policy dataset. Entries without a document are omitted so an unavailable policy fails closed
+ * through the normal {@code NoSuchEntity} path rather than receiving broader permissions.
  */
 final class AwsManagedPolicies {
 
@@ -32,12 +35,9 @@ final class AwsManagedPolicies {
     static final String ARN_PREFIX = "arn:aws:iam::aws:policy";
 
     private static final String CATALOG_RESOURCE_NAME = "iam/managed-policies.yaml";
+    private static final String DOCUMENTS_RESOURCE_NAME = "iam/managed-policy-documents.json";
 
-    static final String PERMISSIVE_DOCUMENT =
-            "{\"Version\":\"2012-10-17\",\"Statement\":"
-            + "[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
-
-    record ManagedPolicyDef(String name, String path, String description) {
+    record ManagedPolicyDef(String name, String path, String description, String document) {
         String arn() {
             return ARN_PREFIX + path + name;
         }
@@ -55,19 +55,41 @@ final class AwsManagedPolicies {
                 throw new IllegalStateException(
                         "AWS managed policy catalog not found on the classpath: " + CATALOG_RESOURCE_NAME);
             }
-            Catalog catalog = new ObjectMapper(new YAMLFactory()).readValue(in, Catalog.class);
+            ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+            Catalog catalog = mapper.readValue(in, Catalog.class);
+            Map<String, JsonNode> documents = loadDocuments();
             List<ManagedPolicyDef> defs = new ArrayList<>();
             for (CatalogEntry entry : catalog.policies == null ? List.<CatalogEntry>of() : catalog.policies) {
                 if (entry.name == null || entry.name.isBlank() || entry.path == null || entry.path.isBlank()) {
                     continue;
                 }
-                defs.add(new ManagedPolicyDef(entry.name, entry.path, entry.description));
+                JsonNode document = documents.get(entry.name);
+                if (document == null || document.isNull()) {
+                    LOG.warnv("No AWS managed policy document available for {0}; omitting it from the resolvable catalog",
+                            entry.name);
+                    continue;
+                }
+                defs.add(new ManagedPolicyDef(entry.name, entry.path, entry.description, document.toString()));
             }
-            LOG.debugv("Loaded {0} AWS managed policies from {1}", defs.size(), CATALOG_RESOURCE_NAME);
+            LOG.debugv("Loaded {0} AWS managed policies from {1} and {2}",
+                    defs.size(), CATALOG_RESOURCE_NAME, DOCUMENTS_RESOURCE_NAME);
             return List.copyOf(defs);
         } catch (IOException e) {
             throw new UncheckedIOException(
                     "Failed to read the AWS managed policy catalog: " + CATALOG_RESOURCE_NAME, e);
+        }
+    }
+
+    private static Map<String, JsonNode> loadDocuments() throws IOException {
+        try (InputStream in = Thread.currentThread().getContextClassLoader()
+                .getResourceAsStream(DOCUMENTS_RESOURCE_NAME)) {
+            if (in == null) {
+                throw new IllegalStateException(
+                        "AWS managed policy documents not found on the classpath: " + DOCUMENTS_RESOURCE_NAME);
+            }
+            ObjectMapper jsonMapper = new ObjectMapper();
+            return jsonMapper.readValue(in, jsonMapper.getTypeFactory()
+                    .constructMapType(Map.class, String.class, JsonNode.class));
         }
     }
 

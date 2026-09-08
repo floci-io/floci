@@ -115,41 +115,18 @@ public class SesController {
                 configurationSetName = configSetNode.textValue();
             }
 
-            if (sesService.getIdentityVerificationAttributes(emailIdentity, region) != null) {
-                throw new AwsException("AlreadyExistsException",
-                        "Email identity " + emailIdentity + " already exist.", 400);
-            }
-
-            // Parse Tags up front. parseTagsArray is pure (it only reads the node), so validating the
-            // shape before creating the identity keeps the call atomic — a malformed Tags value fails
-            // without leaving a half-created identity behind, matching AWS and the ConfigurationSetName
-            // pre-check below.
             List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
-            // Validate tags before creating the identity so an invalid set fails atomically
-            // instead of leaving the identity behind.
-            SesTags.validate(parsedTags);
 
-            // Verified against AWS: a non-existent ConfigurationSetName fails the whole call
-            // (NotFoundException) without creating the identity, so validate it before creating.
             // Only the empty string means "no default configuration set" (consistent with the
             // PutEmailIdentityConfigurationSetAttributes path); a whitespace-only name flows through
             // name validation and is rejected as invalid input, rather than being silently ignored.
             boolean hasConfigSet = configurationSetName != null && !configurationSetName.isEmpty();
-            if (hasConfigSet) {
-                sesService.getConfigurationSet(configurationSetName, region);
-            }
 
-            Identity identity = emailIdentity.contains("@")
-                    ? sesService.verifyEmailIdentity(emailIdentity, region)
-                    : sesService.verifyDomainIdentity(emailIdentity, region);
-
-            if (hasConfigSet) {
-                sesService.setEmailIdentityConfigurationSet(emailIdentity, configurationSetName, region);
-            }
-
-            if (parsedTags != null) {
-                sesService.setIdentityTags(emailIdentity, region, parsedTags);
-            }
+            // The service builds the complete identity (default configuration set and tags included)
+            // and persists it with a single write, so any failure (AlreadyExists, invalid tags, a
+            // missing configuration set) fails the whole call and creates nothing, matching AWS.
+            Identity identity = sesService.createEmailIdentity(emailIdentity,
+                    hasConfigSet ? configurationSetName : null, parsedTags, region);
 
             ObjectNode result = objectMapper.createObjectNode();
             result.put("IdentityType", toV2IdentityType(identity.getIdentityType()));
@@ -355,7 +332,7 @@ public class SesController {
                 throw new AwsException("BadRequestException",
                         "EXTERNAL origin requires DomainSigningSelector and DomainSigningPrivateKey.", 400);
             }
-            SesService.DkimSigningResult result = sesService.putDkimSigningAttributes(
+            SesIdentityService.DkimSigningResult result = sesService.putDkimSigningAttributes(
                     emailIdentity, origin, selector, nextKeyLength, region);
             ObjectNode out = objectMapper.createObjectNode();
             out.put("DkimStatus", toV2Status(result.dkimStatus()));
@@ -568,7 +545,7 @@ public class SesController {
                 if (hasName || hasArn) {
                     String resolvedName = hasName
                             ? templateName
-                            : SesService.templateNameFromArn(templateArn);
+                            : SesTemplateService.templateNameFromArn(templateArn);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, resolvedName, regionResolver.getAccountId(), region);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
@@ -666,7 +643,7 @@ public class SesController {
             } else {
                 String resolvedName = hasName
                         ? templateName
-                        : SesService.templateNameFromArn(templateArn);
+                        : SesTemplateService.templateNameFromArn(templateArn);
                 gateTemplateName = resolvedName;
                 EmailTemplate stored = sesService.getTemplate(resolvedName, region);
                 subject = stored.getSubject();

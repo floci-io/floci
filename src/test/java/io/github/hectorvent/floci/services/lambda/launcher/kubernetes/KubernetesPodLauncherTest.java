@@ -6,6 +6,7 @@ import io.fabric8.kubernetes.api.model.PodStatusBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -19,7 +20,17 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -42,10 +54,22 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * {@code client} (the fabric8 mock server injected by {@code @EnableKubernetesMockClient}) plays
+ * two roles here: it is the fake HTTPS API server {@link #apiClient} talks to (over a trust-all
+ * {@link HttpClient}, since the mock's cert is self-signed and per-run), and it is used directly
+ * to seed pods and play the kubelet (setting phases) exactly as a real cluster would. Reading
+ * pods back through it after {@link #apiClient} creates them works because both talk to the same
+ * backing store; only the mock's transport is fabric8, never Floci's own code.
+ */
 @EnableKubernetesMockClient(crud = true)
 class KubernetesPodLauncherTest {
     KubernetesClient client;
 
+    @TempDir
+    Path tempDir;
+
+    private KubernetesApiClient apiClient;
     private EmulatorConfig config;
     private RuntimeApiServerFactory runtimeApiServerFactory;
     private RuntimeApiServer runtimeApiServer;
@@ -100,9 +124,29 @@ class KubernetesPodLauncherTest {
         lenient().when(logStreamer.logStreamName(anyString())).thenReturn("2026/07/25/[$LATEST]test");
         s3Service = mock(S3Service.class);
 
-        launcher = new KubernetesPodLauncher(client, config, runtimeApiServerFactory, imageResolver,
+        apiClient = new KubernetesApiClient(
+                URI.create(client.getConfiguration().getMasterUrl()), trustAllHttpClient(), null);
+        launcher = new KubernetesPodLauncher(apiClient, config, runtimeApiServerFactory, imageResolver,
                 addressResolver, awsEnv, layerService, new LambdaPodSpecFactory(config),
                 logStreamer, s3Service);
+    }
+
+    /** The mock server's cert is self-signed and generated per run; trust it, not the JVM default. */
+    private static HttpClient trustAllHttpClient() {
+        try {
+            var trustAll = new X509TrustManager() {
+                public void checkClientTrusted(X509Certificate[] chain, String authType) { }
+                public void checkServerTrusted(X509Certificate[] chain, String authType) { }
+                public X509Certificate[] getAcceptedIssuers() {
+                    return new X509Certificate[0];
+                }
+            };
+            var context = SSLContext.getInstance("TLS");
+            context.init(null, new TrustManager[]{trustAll}, new SecureRandom());
+            return HttpClient.newBuilder().sslContext(context).build();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private LambdaFunction function() {
@@ -231,16 +275,9 @@ class KubernetesPodLauncherTest {
         // the cleanup delete can never confirm the pod is gone. The pod could still reach
         // Running later and poll AWS_LAMBDA_RUNTIME_API, so the port must stay reserved
         // instead of going back to the pool for another environment.
-        var failingClient = spy(client);
-        doAnswer(invocation -> {
-            var failedPodExists = client.pods().inNamespace("default").list().getItems().stream()
-                    .anyMatch(p -> p.getStatus() != null && "Failed".equals(p.getStatus().getPhase()));
-            if (failedPodExists) {
-                throw new RuntimeException("kube api down");
-            }
-            return invocation.callRealMethod();
-        }).when(failingClient).pods();
-        var failingLauncher = new KubernetesPodLauncher(failingClient, config,
+        var failingApiClient = spy(apiClient);
+        doThrow(new RuntimeException("kube api down")).when(failingApiClient).deletePod(anyString(), anyString());
+        var failingLauncher = new KubernetesPodLauncher(failingApiClient, config,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
                 new LambdaPodSpecFactory(config), logStreamer, s3Service);
         markPodPhaseInBackground("floci-lambda-my-fn-", "Failed");
@@ -383,14 +420,14 @@ class KubernetesPodLauncherTest {
 
         // First Kubernetes API access (the sweep's pod list) fails once.
         var failedOnce = new AtomicBoolean();
-        var flakyClient = spy(client);
+        var flakyApiClient = spy(apiClient);
         doAnswer(invocation -> {
             if (failedOnce.compareAndSet(false, true)) {
                 throw new RuntimeException("kube api down");
             }
             return invocation.callRealMethod();
-        }).when(flakyClient).pods();
-        var retryingLauncher = new KubernetesPodLauncher(flakyClient, config,
+        }).when(flakyApiClient).listPods(anyString(), anyMap());
+        var retryingLauncher = new KubernetesPodLauncher(flakyApiClient, config,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
                 new LambdaPodSpecFactory(config), logStreamer, s3Service);
 
@@ -415,5 +452,43 @@ class KubernetesPodLauncherTest {
 
     private ContainerHandle handleFor(String podName) {
         return new ContainerHandle(podName, "my-fn", runtimeApiServer, ContainerState.WARM);
+    }
+
+    @Test
+    void tlsOnPublishesTheCaBundleAsAConfigMapAndTheFunctionEnvWins() throws Exception {
+        String bundlePem = enableTlsWithBundle();
+        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        var fn = function();
+        fn.setEnvironment(Map.of("SSL_CERT_FILE", "/my/own.pem"));
+
+        var handle = launcher.launch(fn);
+
+        var configMap = client.configMaps().inNamespace("default").withName(KubernetesPodLauncher.CA_CONFIG_MAP_NAME).get();
+        assertThat(configMap.getData()).containsEntry(KubernetesPodLauncher.CA_CONFIG_MAP_KEY, bundlePem);
+        var env = client.pods().inNamespace("default").withName(handle.getContainerId()).get()
+                .getSpec().getContainers().getFirst().getEnv();
+        assertThat(env).extracting(EnvVar::getName, EnvVar::getValue).contains(
+                tuple("SSL_CERT_FILE", "/my/own.pem"),
+                tuple("CURL_CA_BUNDLE", "/etc/floci-ca-bundle.pem"),
+                tuple("REQUESTS_CA_BUNDLE", "/etc/floci-ca-bundle.pem"),
+                tuple("NODE_EXTRA_CA_CERTS", "/etc/floci-ca-bundle.pem"),
+                tuple("AWS_CA_BUNDLE", "/etc/floci-ca-bundle.pem"));
+        assertThat(env).extracting(EnvVar::getName).containsOnlyOnce("SSL_CERT_FILE");
+    }
+
+    /** TLS on with a bundle under {@link #tempDir}, the file the boot would have written; returns its PEM. */
+    private String enableTlsWithBundle() throws Exception {
+        System.setProperty("floci.tls.enabled", "false");
+        new TlsConfigSource(); // forgets the static directory a TLS-on bootstrap in another test class left behind
+        System.clearProperty("floci.tls.enabled");
+        var tls = mock(EmulatorConfig.TlsConfig.class);
+        var storage = mock(EmulatorConfig.StorageConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(true);
+        when(config.storage()).thenReturn(storage);
+        when(storage.persistentPath()).thenReturn(tempDir.toString());
+        String bundlePem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        Files.writeString(Files.createDirectories(tempDir.resolve("tls")).resolve("floci-ca-bundle.pem"), bundlePem);
+        return bundlePem;
     }
 }

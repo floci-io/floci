@@ -1968,15 +1968,11 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", dcb.getResponseHeadersPolicyId())
                 .elem("Compress", dcb.isCompress());
 
+        xml.raw(xmlTrustedSigners());
         xml.raw(xmlTrustedKeyGroups(
                 dcb.isTrustedKeyGroupsEnabled(), dcb.getTrustedKeyGroups()));
 
-        List<String> allowed = dcb.getAllowedMethods();
-        if (allowed == null || allowed.isEmpty()) {
-            allowed = List.of("GET", "HEAD");
-        }
-        xml.raw(xmlQuantityItems("AllowedMethods", "Method", allowed.size(),
-                allowed.stream().map(m -> "<Method>" + XmlBuilder.escape(m) + "</Method>").toList()));
+        xml.raw(xmlAllowedMethods(dcb.getAllowedMethods(), dcb.getCachedMethods()));
 
         xml.raw(xmlFunctionAssociations(dcb.getFunctionAssociations()));
         xml.raw(xmlLambdaFunctionAssociations(dcb.getLambdaFunctionAssociations()));
@@ -1997,15 +1993,11 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", cb.getResponseHeadersPolicyId())
                 .elem("Compress", cb.isCompress());
 
+        xml.raw(xmlTrustedSigners());
         xml.raw(xmlTrustedKeyGroups(
                 cb.isTrustedKeyGroupsEnabled(), cb.getTrustedKeyGroups()));
 
-        List<String> allowed = cb.getAllowedMethods();
-        if (allowed == null || allowed.isEmpty()) {
-            allowed = List.of("GET", "HEAD");
-        }
-        xml.raw(xmlQuantityItems("AllowedMethods", "Method", allowed.size(),
-                allowed.stream().map(m -> "<Method>" + XmlBuilder.escape(m) + "</Method>").toList()));
+        xml.raw(xmlAllowedMethods(cb.getAllowedMethods(), cb.getCachedMethods()));
 
         xml.raw(xmlFunctionAssociations(cb.getFunctionAssociations()));
         xml.raw(xmlLambdaFunctionAssociations(cb.getLambdaFunctionAssociations()));
@@ -2066,6 +2058,18 @@ public class CloudFrontController {
             xml.end("Items");
         }
         return xml.end("TrustedKeyGroups").build();
+    }
+
+    // AWS always echoes a (usually empty) TrustedSigners object in every cache behavior. Floci models
+    // only the modern TrustedKeyGroups, but the Terraform AWS provider reads TrustedSigners.Items with
+    // no nil guard, so an omitted object segfaults it on read-back. Emit the disabled form AWS returns.
+    private String xmlTrustedSigners() {
+        return new XmlBuilder()
+                .start("TrustedSigners")
+                .elem("Enabled", false)
+                .elem("Quantity", 0)
+                .end("TrustedSigners")
+                .build();
     }
 
     private String xmlActiveTrustedKeyGroups(DistributionConfig config) {
@@ -2289,6 +2293,28 @@ public class CloudFrontController {
     /** Renders a possibly-null value as a string, using the empty string for {@code null}. */
     private static String str(Object value) {
         return value != null ? value.toString() : "";
+    }
+
+    // AllowedMethods.CachedMethods is a nested Quantity/Items pair, not a sibling of AllowedMethods
+    // itself. Terraform's aws_cloudfront_distribution requires both allowed_methods and
+    // cached_methods on every cache behavior, so omitting this sub-object is a permanent diff.
+    private String xmlAllowedMethods(List<String> allowedMethods, List<String> cachedMethods) {
+        List<String> allowed = allowedMethods == null || allowedMethods.isEmpty()
+                ? List.of("GET", "HEAD") : allowedMethods;
+        XmlBuilder xml = new XmlBuilder().start("AllowedMethods").elem("Quantity", allowed.size());
+        xml.start("Items");
+        for (String method : allowed) {
+            xml.elem("Method", method);
+        }
+        xml.end("Items");
+        if (cachedMethods != null && !cachedMethods.isEmpty()) {
+            xml.start("CachedMethods").elem("Quantity", cachedMethods.size()).start("Items");
+            for (String method : cachedMethods) {
+                xml.elem("Method", method);
+            }
+            xml.end("Items").end("CachedMethods");
+        }
+        return xml.end("AllowedMethods").build();
     }
 
     private String xmlQuantityItems(String wrapper, String itemTag, int count, List<String> items) {
@@ -2830,11 +2856,13 @@ public class CloudFrontController {
             XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
             boolean inDcb = false;
             boolean inAllowedMethods = false;
+            boolean inCachedMethods = false;
             boolean inTrustedKeyGroups = false;
             boolean sawTrustedKeyGroups = false;
             Boolean trustedKeyGroupsEnabled = null;
             Integer trustedKeyGroupsQuantity = null;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> cachedMethods = new ArrayList<>();
             List<String> trustedKeyGroups = new ArrayList<>();
             boolean inLambdaAssociations = false;
             boolean inFunctionAssociations = false;
@@ -2926,6 +2954,9 @@ public class CloudFrontController {
                         case "AllowedMethods" -> {
                             if (inDcb) inAllowedMethods = true;
                         }
+                        case "CachedMethods" -> {
+                            if (inAllowedMethods) inCachedMethods = true;
+                        }
                         case "TargetOriginId" -> {
                             if (inDcb) dcb.setTargetOriginId(r.getElementText());
                         }
@@ -2951,13 +2982,18 @@ public class CloudFrontController {
                             if (inDcb) dcb.setCompress("true".equalsIgnoreCase(r.getElementText()));
                         }
                         case "Method" -> {
-                            if (inAllowedMethods) allowedMethods.add(r.getElementText());
+                            if (inCachedMethods) {
+                                cachedMethods.add(r.getElementText());
+                            } else if (inAllowedMethods) {
+                                allowedMethods.add(r.getElementText());
+                            }
                         }
                         default -> {
                         }
                     }
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
+                        case "CachedMethods" -> inCachedMethods = false;
                         case "AllowedMethods" -> inAllowedMethods = false;
                         case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "DefaultCacheBehavior" -> inDcb = false;
@@ -2983,6 +3019,9 @@ public class CloudFrontController {
             r.close();
             if (!allowedMethods.isEmpty()) {
                 dcb.setAllowedMethods(allowedMethods);
+            }
+            if (!cachedMethods.isEmpty()) {
+                dcb.setCachedMethods(cachedMethods);
             }
             if (!trustedKeyGroups.isEmpty()) {
                 dcb.setTrustedKeyGroups(trustedKeyGroups);
@@ -3030,12 +3069,14 @@ public class CloudFrontController {
             boolean inCacheBehaviors = false;
             boolean inCacheBehavior = false;
             boolean inAllowedMethods = false;
+            boolean inCachedMethods = false;
             boolean inTrustedKeyGroups = false;
             CacheBehavior current = null;
             boolean sawTrustedKeyGroups = false;
             Boolean trustedKeyGroupsEnabled = null;
             Integer trustedKeyGroupsQuantity = null;
             List<String> allowedMethods = new ArrayList<>();
+            List<String> cachedMethods = new ArrayList<>();
             List<String> trustedKeyGroups = new ArrayList<>();
             boolean inLambdaAssociations = false;
             boolean inFunctionAssociations = false;
@@ -3060,6 +3101,7 @@ public class CloudFrontController {
                                 trustedKeyGroupsEnabled = null;
                                 trustedKeyGroupsQuantity = null;
                                 allowedMethods = new ArrayList<>();
+                                cachedMethods = new ArrayList<>();
                                 trustedKeyGroups = new ArrayList<>();
                                 lambdaAssociations = new ArrayList<>();
                                 functionAssociations = new ArrayList<>();
@@ -3142,6 +3184,9 @@ public class CloudFrontController {
                         case "AllowedMethods" -> {
                             if (inCacheBehavior) inAllowedMethods = true;
                         }
+                        case "CachedMethods" -> {
+                            if (inAllowedMethods) inCachedMethods = true;
+                        }
                         case "PathPattern" -> {
                             if (inCacheBehavior && current != null) current.setPathPattern(r.getElementText());
                         }
@@ -3168,13 +3213,18 @@ public class CloudFrontController {
                             }
                         }
                         case "Method" -> {
-                            if (inAllowedMethods) allowedMethods.add(r.getElementText());
+                            if (inCachedMethods) {
+                                cachedMethods.add(r.getElementText());
+                            } else if (inAllowedMethods) {
+                                allowedMethods.add(r.getElementText());
+                            }
                         }
                         default -> {
                         }
                     }
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     switch (r.getLocalName()) {
+                        case "CachedMethods" -> inCachedMethods = false;
                         case "AllowedMethods" -> inAllowedMethods = false;
                         case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "LambdaFunctionAssociations" -> inLambdaAssociations = false;
@@ -3195,6 +3245,9 @@ public class CloudFrontController {
                             if (inCacheBehavior && current != null) {
                                 if (!allowedMethods.isEmpty()) {
                                     current.setAllowedMethods(allowedMethods);
+                                }
+                                if (!cachedMethods.isEmpty()) {
+                                    current.setCachedMethods(cachedMethods);
                                 }
                                 if (!trustedKeyGroups.isEmpty()) {
                                     current.setTrustedKeyGroups(trustedKeyGroups);

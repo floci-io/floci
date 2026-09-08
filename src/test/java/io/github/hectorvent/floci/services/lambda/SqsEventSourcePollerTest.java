@@ -7,21 +7,27 @@ import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -57,7 +63,8 @@ class SqsEventSourcePollerTest {
                 functionStore,
                 mock(EsmStore.class),
                 config,
-                OBJECT_MAPPER
+                OBJECT_MAPPER,
+                new PipesFilterMatcher(OBJECT_MAPPER)
         );
     }
 
@@ -393,5 +400,391 @@ class SqsEventSourcePollerTest {
         assertEquals(String.valueOf(firstReceived.toEpochMilli()), firstTs.asText());
         assertEquals(firstTs.asText(), secondTs.asText(),
                 "ApproximateFirstReceiveTimestamp must not change between retries");
+    }
+
+    // ──────────────────────────── FilterCriteria ────────────────────────────
+
+    private EventSourceMapping esmWithFilter(int batchSize, String... patterns) {
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(batchSize);
+        if (patterns.length > 0) {
+            EventSourceMapping.FilterCriteria fc = new EventSourceMapping.FilterCriteria();
+            List<EventSourceMapping.Filter> filters = new java.util.ArrayList<>();
+            for (String p : patterns) {
+                EventSourceMapping.Filter f = new EventSourceMapping.Filter();
+                f.setPattern(p);
+                filters.add(f);
+            }
+            fc.setFilters(filters);
+            esm.setFilterCriteria(fc);
+        }
+        return esm;
+    }
+
+    private Message msgBody(String id, String body) {
+        Message m = new Message();
+        m.setMessageId(id);
+        m.setReceiptHandle("rh-" + id);
+        m.setBody(body);
+        m.setSentTimestamp(Instant.now());
+        m.setFirstReceiveTimestamp(Instant.now());
+        return m;
+    }
+
+    private LambdaFunction stubThrowFn() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("throwfn");
+        fn.setTimeout(10);
+        when(functionStore.getForAccount("000000000000", "us-east-1", "throwfn")).thenReturn(Optional.of(fn));
+        return fn;
+    }
+
+    private void stubReceive(EventSourceMapping esm, List<Message> messages) {
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(messages);
+    }
+
+    /**
+     * Hard happens-after barrier: re-stub the fetch to return empty, then re-kick until a SECOND
+     * receiveMessage is observed. {@code activePolls} serializes polls per ESM, so fetch #2 cannot begin until
+     * poll #1's finally-block ran, so poll #1 is fully complete. The empty re-stub makes poll #2 a no-op, so
+     * poll #1's exact delete/return counts are preserved for the assertions.
+     */
+    private void awaitPollCompleted(EventSourceMapping esm) {
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of());
+        long deadline = System.currentTimeMillis() + 5000;
+        while (true) {
+            poller.pollAndInvoke(esm);
+            try {
+                verify(sqsService, atLeast(2))
+                        .receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1"));
+                return;
+            } catch (AssertionError retry) {
+                if (System.currentTimeMillis() > deadline) {
+                    throw retry;
+                }
+                try {
+                    Thread.sleep(25);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw retry;
+                }
+            }
+        }
+    }
+
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void pollUntilInvoked(EventSourceMapping esm, LambdaFunction fn) {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (true) {
+            poller.pollAndInvoke(esm);
+            try {
+                verify(executorService, timeout(2000))
+                        .invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse));
+                return;
+            } catch (AssertionError retry) {
+                if (System.currentTimeMillis() > deadline) {
+                    throw retry;
+                }
+                sleep(25);
+            }
+        }
+    }
+
+    @Test
+    void batchingWindowHoldsUnderfilledBatchUntilTheWindowElapses() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(2);
+        esm.setMaximumBatchingWindowInSeconds(5);
+
+        AtomicLong now = new AtomicLong(0);
+        poller.setClockForTest(now::get);
+
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(message("m1")))
+                .thenReturn(List.of());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        // Polls inside the window buffer the record without invoking.
+        for (int i = 0; i < 4; i++) {
+            poller.pollAndInvoke(esm);
+            sleep(25);
+            now.addAndGet(1000); // reaches 4s, short of the 5s window
+        }
+        verify(sqsService, atLeast(1))
+                .receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1"));
+        verify(executorService, never()).invoke(any(), any(), any());
+        verify(sqsService, never()).deleteMessage(any(), any(), any());
+
+        // Once the window elapses the buffered record is delivered.
+        now.set(5000);
+        pollUntilInvoked(esm, fn);
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+    }
+
+    @Test
+    void batchingWindowFlushesEarlyOnceTheBatchIsFull() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(2);
+        esm.setMaximumBatchingWindowInSeconds(30);
+
+        poller.setClockForTest(() -> 0L); // the window never expires on its own
+
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(message("m1")))
+                .thenReturn(List.of(message("m2")))
+                .thenReturn(List.of());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        pollUntilInvoked(esm, fn);
+
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+    }
+
+    @Test
+    void batchingWindowVisibilityTimeoutCoversTheWindowPlusFunctionTimeout() {
+        EventSourceMapping esm = esm();
+        esm.setMaximumBatchingWindowInSeconds(60);
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("throwfn");
+        fn.setTimeout(120);
+        when(functionStore.getForAccount("000000000000", "us-east-1", "throwfn"))
+                .thenReturn(Optional.of(fn));
+        poller.setClockForTest(() -> 0L);
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of());
+
+        poller.pollAndInvoke(esm);
+
+        ArgumentCaptor<Integer> visibility = ArgumentCaptor.forClass(Integer.class);
+        verify(sqsService, timeout(2000)).receiveMessage(
+                eq(esm.getQueueUrl()), anyInt(), visibility.capture(), anyInt(), eq("us-east-1"));
+        // held up to 60s buffered, then up to 120s executing, plus AWS's 30s margin
+        assertEquals(120 + 60 + 30, visibility.getValue());
+    }
+
+    @Test
+    void turningTheBatchingWindowOffDeliversAnAlreadyBufferedBatch() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(10);
+        esm.setMaximumBatchingWindowInSeconds(300);
+        poller.setClockForTest(() -> 0L); // the window never elapses on its own
+
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(message("m1")))
+                .thenReturn(List.of());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        // Poll once with the window open: the record is buffered, not delivered.
+        poller.pollAndInvoke(esm);
+        verify(sqsService, timeout(2000))
+                .receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1"));
+        verify(executorService, never()).invoke(any(), any(), any());
+
+        // Window turned off: the next poll must flush the stranded batch instead of ignoring it.
+        esm.setMaximumBatchingWindowInSeconds(0);
+        pollUntilInvoked(esm, fn);
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+    }
+
+    private static final String BODY_PATTERN = "{\"body\":{\"type\":[\"order\"]}}";
+
+    @Test
+    void filterDeletesNonMatchingAndInvokesMatchedOnly() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esmWithFilter(10, BODY_PATTERN);
+        Message m1 = msgBody("m1", "{\"type\":\"order\"}");
+        Message m2 = msgBody("m2", "{\"type\":\"refund\"}");
+        stubReceive(esm, List.of(m1, m2));
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        poller.pollAndInvoke(esm);
+
+        // Non-matching m2 is deleted immediately (consumed, per AWS SQS filtering).
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+        // Only m1 is delivered to the function.
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse));
+        try {
+            JsonNode records = OBJECT_MAPPER.readTree(payload.getValue()).get("Records");
+            assertEquals(1, records.size());
+            assertEquals("m1", records.get(0).get("messageId").asText());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        // m1 deleted after successful invoke; nothing returned to the queue.
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+    }
+
+    @Test
+    void fullyFilteredBatchDeletesAllWithoutInvoking() {
+        stubThrowFn();
+        EventSourceMapping esm = esmWithFilter(10, BODY_PATTERN);
+        Message m1 = msgBody("m1", "{\"type\":\"refund\"}");
+        Message m2 = msgBody("m2", "{\"type\":\"chargeback\"}");
+        stubReceive(esm, List.of(m1, m2));
+
+        poller.pollAndInvoke(esm);
+
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+        awaitPollCompleted(esm);
+        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+    }
+
+    @Test
+    void invokeErrorStillConsumesFilteredOutButReturnsMatched() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esmWithFilter(10, BODY_PATTERN);
+        Message m1 = msgBody("m1", "{\"type\":\"order\"}");   // matches
+        Message m2 = msgBody("m2", "{\"type\":\"refund\"}");  // filtered out
+        stubReceive(esm, List.of(m1, m2));
+        when(sqsService.getQueueAttributes(eq(esm.getQueueUrl()), any(), eq("us-east-1")))
+                .thenReturn(Map.of("VisibilityTimeout", "5"));
+        InvokeResult err = new InvokeResult();
+        err.setFunctionError("Handled");
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(err);
+
+        poller.pollAndInvoke(esm);
+
+        // Filtered-out m2 is consumed (deleted) regardless of the invoke outcome.
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+        // Matched m1 failed → returned to the queue (visibility reset), NOT deleted.
+        verify(sqsService, timeout(2000)).changeMessageVisibility(esm.getQueueUrl(), "rh-m1", 5, "us-east-1");
+        awaitPollCompleted(esm);
+        verify(sqsService, never()).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+    }
+
+    @Test
+    void batchItemFailureIdOfFilteredMessageIsInert() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esmWithFilter(10, BODY_PATTERN);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        Message m1 = msgBody("m1", "{\"type\":\"order\"}");   // matches, delivered
+        Message m2 = msgBody("m2", "{\"type\":\"refund\"}");  // filtered out, deleted pre-invoke
+        stubReceive(esm, List.of(m1, m2));
+        // Function (defensively) reports the already-filtered id m2 as failed.
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"m2\"}]}".getBytes());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+
+        poller.pollAndInvoke(esm);
+
+        // m1 (delivered, not reported failed) is deleted post-success; m2 was deleted once as filtered-out.
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+        awaitPollCompleted(esm);
+        // The stale failure id does not cause a second delete or a visibility reset.
+        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+    }
+
+    @Test
+    void nonJsonBodyDroppedByObjectPattern() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esmWithFilter(10, BODY_PATTERN);
+        Message m1 = msgBody("m1", "not json");                 // dropped by object pattern
+        Message m2 = msgBody("m2", "{\"type\":\"order\"}");      // matches
+        stubReceive(esm, List.of(m1, m2));
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        poller.pollAndInvoke(esm);
+
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse));
+        try {
+            JsonNode records = OBJECT_MAPPER.readTree(payload.getValue()).get("Records");
+            assertEquals(1, records.size());
+            assertEquals("m2", records.get(0).get("messageId").asText());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    // ───────────────────────── ReportBatchItemFailures ─────────────────────────
+
+    /** Delivers m1 and m2 to a ReportBatchItemFailures mapping whose function returns {@code payload}. */
+    private EventSourceMapping pollReportingBatch(String payload) {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(2);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        stubReceive(esm, List.of(message("m1"), message("m2")));
+        when(sqsService.getQueueAttributes(eq(esm.getQueueUrl()), any(), eq("us-east-1")))
+                .thenReturn(Map.of("VisibilityTimeout", "2"));
+        InvokeResult result = new InvokeResult();
+        result.setPayload(payload.getBytes());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+
+        poller.pollAndInvoke(esm);
+        return esm;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"batchItemFailures\":[{\"itemIdentifier\":\"\"}]}",
+            "{\"batchItemFailures\":[{\"itemIdentifier\":null}]}",
+            "{\"batchItemFailures\":[{\"itemIdentifier\":\"unknown\"}]}",
+            "{\"batchItemFailures\":[{\"wrongKey\":\"m1\"}]}",
+            "{\"batchItemFailures\":\"invalid\"}",
+            "not json",
+    })
+    void malformedBatchItemFailuresResponseFailsWholeBatch(String payload) {
+        EventSourceMapping esm = pollReportingBatch(payload);
+
+        // AWS treats these as a complete failure: nothing is deleted, every delivered
+        // message goes back to the queue for retry/redrive.
+        verify(sqsService, timeout(2000)).changeMessageVisibility(esm.getQueueUrl(), "rh-m1", 2, "us-east-1");
+        verify(sqsService, timeout(2000)).changeMessageVisibility(esm.getQueueUrl(), "rh-m2", 2, "us-east-1");
+        awaitPollCompleted(esm);
+        verify(sqsService, never()).deleteMessage(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"batchItemFailures\":[]}",
+            "{\"batchItemFailures\":null}",
+            "{}",
+            "null",
+    })
+    void emptyOrNullBatchItemFailuresResponseDeletesWholeBatch(String payload) {
+        EventSourceMapping esm = pollReportingBatch(payload);
+
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+        awaitPollCompleted(esm);
+        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+    }
+
+    @Test
+    void validPartialBatchFailureRetriesOnlyReportedMessage() {
+        EventSourceMapping esm = pollReportingBatch("{\"batchItemFailures\":[{\"itemIdentifier\":\"m2\"}]}");
+
+        verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
+        verify(sqsService, timeout(2000)).changeMessageVisibility(esm.getQueueUrl(), "rh-m2", 2, "us-east-1");
+        awaitPollCompleted(esm);
+        verify(sqsService, never()).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+        verify(sqsService, never()).changeMessageVisibility(eq(esm.getQueueUrl()), eq("rh-m1"), anyInt(), any());
     }
 }

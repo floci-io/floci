@@ -44,6 +44,7 @@ public class TransferService {
     // ── Servers ───────────────────────────────────────────────────────────────
 
     public Server createServer(String region,
+                               String domain,
                                List<String> protocols,
                                String endpointType,
                                Map<String, Object> endpointDetails,
@@ -59,6 +60,7 @@ public class TransferService {
         server.setServerId(serverId);
         server.setArn(arn);
         server.setState("ONLINE");
+        server.setDomain(domain != null ? domain : "S3");
         server.setProtocols(protocols != null && !protocols.isEmpty() ? protocols : List.of("SFTP"));
         server.setEndpointType(endpointType != null ? endpointType : "PUBLIC");
         server.setEndpointDetails(endpointDetails);
@@ -86,11 +88,9 @@ public class TransferService {
     }
 
     public synchronized void deleteServer(String serverId) {
-        Server server = getServer(serverId);
-        if (!"OFFLINE".equals(server.getState())) {
-            throw new AwsException("ConflictException",
-                    "Server must be in OFFLINE state to be deleted.", 409);
-        }
+        // AWS deletes a server in any state: the DeleteServer API defines no
+        // state precondition (and no ConflictException at all).
+        getServer(serverId);
         serverStore.delete(serverId);
         tagStore.delete("server/" + serverId);
         for (User user : userStore.scan(k -> k.startsWith(serverId + "/"))) {

@@ -88,9 +88,10 @@ public class LambdaController {
     @Path("/functions/{functionName}")
     public Response getFunction(@Context HttpHeaders headers,
                                 @Context UriInfo uriInfo,
-                                @PathParam("functionName") String functionName) {
+                                @PathParam("functionName") String functionName,
+                                @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaFunction fn = lambdaService.getFunction(region, functionName);
+        LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
 
         ObjectNode root = objectMapper.createObjectNode();
         root.set("Configuration", objectMapper.valueToTree(buildFunctionConfiguration(fn)));
@@ -145,9 +146,10 @@ public class LambdaController {
     @GET
     @Path("/functions/{functionName}/configuration")
     public Response getFunctionConfiguration(@Context HttpHeaders headers,
-                                              @PathParam("functionName") String functionName) {
+                                              @PathParam("functionName") String functionName,
+                                              @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaFunction fn = lambdaService.getFunction(region, functionName);
+        LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
         return Response.ok(buildFunctionConfiguration(fn)).build();
     }
 
@@ -340,12 +342,17 @@ public class LambdaController {
         return Response.status(202).entity(buildEsmResponse(esm)).build();
     }
 
-    private Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
+    Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("UUID", esm.getUuid());
         node.put("FunctionArn", esm.getFunctionArn());
-        node.put("EventSourceArn", esm.getEventSourceArn());
+        if (esm.getEventSourceArn() != null) {
+            node.put("EventSourceArn", esm.getEventSourceArn());
+        }
         node.put("BatchSize", esm.getBatchSize());
+        if (esm.getMaximumBatchingWindowInSeconds() != null) {
+            node.put("MaximumBatchingWindowInSeconds", esm.getMaximumBatchingWindowInSeconds());
+        }
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
         // Omitted rather than nulled when unset, so a mapping created without a starting position
@@ -369,6 +376,19 @@ public class LambdaController {
             onFailure.put("Destination", esm.getDestinationConfig().getOnFailure().getDestination());
         }
 
+        if (esm.getSelfManagedEventSource() != null) {
+            node.set("SelfManagedEventSource", objectMapper.valueToTree(esm.getSelfManagedEventSource()));
+        }
+
+        if (esm.getTopics() != null && !esm.getTopics().isEmpty()) {
+            ArrayNode topicsNode = node.putArray("Topics");
+            esm.getTopics().forEach(topicsNode::add);
+        }
+
+        if (esm.getSourceAccessConfigurations() != null && !esm.getSourceAccessConfigurations().isEmpty()) {
+            node.set("SourceAccessConfigurations", objectMapper.valueToTree(esm.getSourceAccessConfigurations()));
+        }
+
         if (esm.getFunctionResponseTypes() != null) {
             esm.getFunctionResponseTypes().forEach(responseTypes::add);
         }
@@ -379,6 +399,15 @@ public class LambdaController {
         if (maxConcurrency != null) {
             ObjectNode scaling = node.putObject("ScalingConfig");
             scaling.put("MaximumConcurrency", maxConcurrency.intValue());
+        }
+        // Only emit FilterCriteria when filters are configured: AWS omits the field
+        // entirely (rather than returning null or an empty object) when no filter is set.
+        if (esm.getFilterCriteria() != null && !esm.getFilterCriteria().getFilters().isEmpty()) {
+            ObjectNode filterCriteria = node.putObject("FilterCriteria");
+            ArrayNode filters = filterCriteria.putArray("Filters");
+            for (EventSourceMapping.Filter filter : esm.getFilterCriteria().getFilters()) {
+                filters.addObject().put("Pattern", filter.getPattern());
+            }
         }
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
@@ -394,16 +423,50 @@ public class LambdaController {
                                    String body) {
         String region = regionResolver.resolveRegion(headers);
         String description = null;
+        String codeSha256 = null;
         if (body != null && !body.isBlank()) {
+            Map<String, Object> req;
             try {
                 @SuppressWarnings("unchecked")
-                Map<String, Object> req = objectMapper.readValue(body, Map.class);
-                description = (String) req.get("Description");
-            } catch (Exception ignored) {}
+                Map<String, Object> parsed = objectMapper.readValue(body, Map.class);
+                req = parsed;
+            } catch (Exception e) {
+                // Swallowing this would treat a malformed body as an empty one, so a request whose
+                // CodeSha256 could not be read would publish instead of failing its precondition.
+                throw new AwsException("InvalidParameterValueException",
+                        "Could not parse request body: " + e.getMessage(), 400);
+            }
+            if (req == null) {
+                // A literal "null" body parses cleanly to a null map, so it never reaches the catch
+                // above. Checked here rather than inside the try, where this exception would be
+                // caught by that same catch and rewrapped as a parse failure it is not.
+                throw new AwsException("InvalidParameterValueException",
+                        "Request body must be a JSON object", 400);
+            }
+            description = stringField(req, "Description");
+            codeSha256 = stringField(req, "CodeSha256");
         }
-        LambdaFunction version = lambdaService.publishVersion(region, functionName, description);
+        LambdaFunction version = lambdaService.publishVersion(region, functionName, description, codeSha256);
         return Response.status(201).entity(buildFunctionConfiguration(version)).build();
     }
+
+    /**
+     * Reads a string field, rejecting a value of the wrong JSON type rather than letting a cast
+     * failure be swallowed. A {@code CodeSha256} that arrives as a number or an object is a
+     * malformed precondition, and treating it as absent would publish without checking anything.
+     */
+    private static String stringField(Map<String, Object> req, String name) {
+        Object value = req.get(name);
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof String text)) {
+            throw new AwsException("InvalidParameterValueException",
+                    name + " must be a string", 400);
+        }
+        return text;
+    }
+
 
     @GET
     @Path("/functions/{functionName}/versions")

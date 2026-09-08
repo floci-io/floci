@@ -71,6 +71,7 @@ class SigninServiceTest {
         assertEquals(900, tokens.expiresIn());
         verify(iam).registerSessionForAccount(eq(ACCOUNT_A), eq(tokens.accessToken().accessKeyId()),
                 eq(tokens.accessToken().secretAccessKey()),
+                eq(tokens.accessToken().sessionToken()),
                 eq("arn:aws:iam::" + ACCOUNT_A + ":root"), any(), isNull());
         assertTokenValidation(() -> exchangeCode(code, VERIFIER));
     }
@@ -251,7 +252,7 @@ class SigninServiceTest {
                 assertEquals(900, result.expiresIn());
             }
             verify(iam, times(2)).registerSessionForAccount(eq(ACCOUNT_A), anyString(), anyString(),
-                    anyString(), any(), isNull());
+                    anyString(), anyString(), any(), isNull());
         } finally {
             executor.shutdownNow();
         }
@@ -347,7 +348,7 @@ class SigninServiceTest {
             assertTrue(allowIssuance.await(5, TimeUnit.SECONDS));
             return null;
         }).when(iam).registerSessionForAccount(anyString(), anyString(), anyString(),
-                anyString(), any(), isNull());
+                anyString(), anyString(), any(), isNull());
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
@@ -378,9 +379,9 @@ class SigninServiceTest {
         TokenResult rotated = refresh(initial.refreshToken());
         assertNotEquals(initial.refreshToken(), rotated.refreshToken());
         verify(iam, times(2)).registerSessionForAccount(eq(ACCOUNT_A), anyString(), anyString(),
-                eq("arn:aws:iam::" + ACCOUNT_A + ":root"), any(), isNull());
+                anyString(), eq("arn:aws:iam::" + ACCOUNT_A + ":root"), any(), isNull());
         verify(iam, never()).registerSessionForAccount(eq(ACCOUNT_B), anyString(), anyString(),
-                anyString(), any(), isNull());
+                anyString(), anyString(), any(), isNull());
     }
 
     private TokenResult issueInitialTokens() throws Exception {

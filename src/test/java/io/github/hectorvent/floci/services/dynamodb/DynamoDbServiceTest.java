@@ -1,23 +1,46 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class DynamoDbServiceTest {
 
@@ -64,6 +87,99 @@ class DynamoDbServiceTest {
             node.set(kvPairs[i], attributeValue("S", kvPairs[i + 1]));
         }
         return node;
+    }
+
+    @Test
+    void transactWriteDoesNotPartiallyApplyAfterFailedConditionCheck() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"},"name":{"S":"created"}}}}
+                """);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Users","Key":{"userId":{"S":"missing"}},
+                  "ConditionExpression":"attribute_exists(userId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(put, invalidUpdate), region));
+
+        assertNull(service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"new\"}}"), region));
+    }
+
+    @Test
+    void transactWriteDoesNotPartiallyApplyAcrossTablesAfterFailedConditionCheck() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        createOrdersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"}}}}
+                """);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Orders","Key":{"customerId":{"S":"c"},"orderId":{"S":"o"}},
+                  "ConditionExpression":"attribute_exists(customerId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(put, invalidUpdate), region));
+
+        assertNull(service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"new\"}}"), region));
+        assertNull(service.getItem("Orders", mapper.readTree("{\"customerId\":{\"S\":\"c\"},\"orderId\":{\"S\":\"o\"}}"), region));
+    }
+
+    @Test
+    void failedTransactWritePublishesNoStreamOrKinesisEvents() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"}}}}
+                """);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Users","Key":{"userId":{"S":"missing"}},
+                  "ConditionExpression":"attribute_exists(userId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(put, invalidUpdate), region));
+
+        verifyNoInteractions(stream, kinesis);
+    }
+
+    @Test
+    void validTransactWriteCommitsAllMutations() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"}}}}
+                """);
+        JsonNode update = mapper.readTree("""
+                {"Update":{"TableName":"Users","Key":{"userId":{"S":"existing"}},
+                  "UpdateExpression":"SET #name = :name",
+                  "ExpressionAttributeNames":{"#name":"name"},
+                  "ExpressionAttributeValues":{":name":{"S":"updated"}}}}
+                """);
+
+        service.putItem("Users", mapper.readTree("{\"userId\":{\"S\":\"existing\"}}"), region);
+        service.transactWriteItems(List.of(put, update), region);
+
+        assertNotNull(service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"new\"}}"), region));
+        assertEquals("updated", service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"existing\"}}"), region).path("name").path("S").asText());
+    }
+
+    @Test
+    void failedTransactWriteLeavesExistingItemsUnchanged() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "existing", "name", "before"), region);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Users","Key":{"userId":{"S":"existing"}},
+                  "ConditionExpression":"attribute_not_exists(userId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(invalidUpdate), region));
+
+        assertEquals("before", service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"existing\"}}"), region).path("name").path("S").asText());
     }
 
     @Test
@@ -381,7 +497,7 @@ class DynamoDbServiceTest {
         request.set("Keys", mapper.createArrayNode().add(item("userId", "user-1")));
         String usersArn = tableArn("us-east-1", "Users");
 
-        DynamoDbService.BatchGetResult result = service.batchGetItem(java.util.Map.of(usersArn, request), "us-east-1");
+        DynamoDbService.BatchGetResult result = service.batchGetItem(Map.of(usersArn, request), "us-east-1");
 
         assertTrue(result.responses().containsKey(usersArn));
         assertEquals("Alice", result.responses().get(usersArn).getFirst().get("name").get("S").asText());
@@ -1603,7 +1719,7 @@ class DynamoDbServiceTest {
         assertEquals(2, ssArray.size(), "tags should have 2 elements");
 
         // Verify values from the SS array
-        java.util.Set<String> tagValues = new java.util.HashSet<>();
+        Set<String> tagValues = new HashSet<>();
         ssArray.forEach(node -> tagValues.add(node.asText()));
         assertEquals(2, tagValues.size());
         assertTrue(tagValues.containsAll(Arrays.asList("a", "b")));
@@ -1674,7 +1790,150 @@ class DynamoDbServiceTest {
         assertTrue(stored.get("isActive").get("BOOL").asBoolean(),
                 "isActive should still be true after get");
     }
+    
+    @Test
+    void updateItemSetListIndexPastEndAppendsWithoutNullPadding() {
+        String region = "eu-west-1";
+        createUsersTable(region);
 
+        ObjectNode initialItem = item("userId", "list-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "list-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[10] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("a", updatedList.get(0).get("S").asText());
+        assertEquals("b", updatedList.get(1).get("S").asText());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetHugeListIndexAppendsWithoutAllocatingPadding() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "huge-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "huge-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[2000000000] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetMaximumValidListIndexAppends() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "max-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "max-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[4294967294] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetListIndexAboveMaximumThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "invalid-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        var list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "invalid-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.updateItem(
+                        "Users",
+                        key,
+                        null,
+                        "SET l[4294967295] = :v",
+                        null,
+                        exprValues,
+                        "ALL_NEW",
+                        region));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertTrue(exception.getMessage().contains("List index is not within the allowable range"));
+        assertTrue(exception.getMessage().contains("4294967295"));
+    }
     /**
      * Test REMOVE with nested map paths (e.g. "ratings.foo").
      * Reproduces GitHub issue #402: REMOVE on a map key succeeds but data is unchanged.
@@ -1912,9 +2171,9 @@ class DynamoDbServiceTest {
                 "ADD #meta.#tags :tags", names, values, "ALL_NEW", region);
 
         JsonNode stored = service.getItem("Users", userIdKey("nested-add-set"), region);
-        java.util.Set<String> tags = new java.util.HashSet<>();
+        Set<String> tags = new HashSet<>();
         stored.path("metadata").path("M").path("tags").path("SS").forEach(value -> tags.add(value.asText()));
-        assertEquals(java.util.Set.of("alpha", "beta", "gamma"), tags);
+        assertEquals(Set.of("alpha", "beta", "gamma"), tags);
         assertFalse(stored.has("#meta.#tags"), "ADD must not create a phantom top-level attribute");
     }
 
@@ -3274,5 +3533,584 @@ class DynamoDbServiceTest {
 
         JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
         assertEquals("2", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void batchWriteItem_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> writeRequests = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "u" + i));
+            ObjectNode putReq = mapper.createObjectNode();
+            putReq.set("Item", item);
+            ObjectNode req = mapper.createObjectNode();
+            req.set("PutRequest", putReq);
+            writeRequests.add(req);
+        }
+
+        serviceWithMock.batchWriteItem(Map.of("Users", writeRequests), "us-east-1");
+
+        // Verify that itemStore.put was called exactly once for the table, not 5 times
+        verify(mockItemStore, times(1))
+                .put(eq("us-east-1::Users"), any());
+    }
+
+    @Test
+    void transactWriteItems_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> transactItems = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "tx-u" + i));
+            ObjectNode put = mapper.createObjectNode();
+            put.put("TableName", "Users");
+            put.set("Item", item);
+            ObjectNode txItem = mapper.createObjectNode();
+            txItem.set("Put", put);
+            transactItems.add(txItem);
+        }
+
+        serviceWithMock.transactWriteItems(transactItems, "us-east-1");
+
+        verify(mockItemStore, times(1))
+                .put(eq("us-east-1::Users"), any());
+    }
+
+    @Test
+    void batchWriteItem_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item valid
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq1 = mapper.createObjectNode();
+        putReq1.set("Item", item1);
+        ObjectNode req1 = mapper.createObjectNode();
+        req1.set("PutRequest", putReq1);
+
+        // 2nd item invalid (missing partition key "userId")
+        ObjectNode item2 = mapper.createObjectNode();
+        item2.set("otherAttr", attributeValue("S", "val"));
+        ObjectNode putReq2 = mapper.createObjectNode();
+        putReq2.set("Item", item2);
+        ObjectNode req2 = mapper.createObjectNode();
+        req2.set("PutRequest", putReq2);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.batchWriteItem(Map.of("Users", List.of(req1, req2)), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not saved in memory
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    @Test
+    void transactWriteItems_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item: valid Put
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "tx-u1"));
+        ObjectNode put = mapper.createObjectNode();
+        put.put("TableName", "Users");
+        put.set("Item", item1);
+        ObjectNode txItem1 = mapper.createObjectNode();
+        txItem1.set("Put", put);
+
+        // 2nd item: invalid Update that attempts to modify key attribute "userId"
+        ObjectNode key2 = mapper.createObjectNode();
+        key2.set("userId", attributeValue("S", "tx-u2"));
+        ObjectNode upd = mapper.createObjectNode();
+        upd.put("TableName", "Users");
+        upd.set("Key", key2);
+        upd.put("UpdateExpression", "SET userId = :newId");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":newId", attributeValue("S", "tx-u2-modified"));
+        upd.set("ExpressionAttributeValues", exprValues);
+        ObjectNode txItem2 = mapper.createObjectNode();
+        txItem2.set("Update", upd);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.transactWriteItems(List.of(txItem1, txItem2), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not retained in memory
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "tx-u1"), "us-east-1"));
+    }
+
+    @Test
+    void transactWriteItems_whenMultipleOperationsOnSameItem_failsWithValidationException() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st operation on userId "u1": Put
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        item1.set("name", attributeValue("S", "Initial"));
+        ObjectNode put = mapper.createObjectNode();
+        put.put("TableName", "Users");
+        put.set("Item", item1);
+        ObjectNode txItem1 = mapper.createObjectNode();
+        txItem1.set("Put", put);
+
+        // 2nd operation on SAME userId "u1": Update
+        ObjectNode key2 = mapper.createObjectNode();
+        key2.set("userId", attributeValue("S", "u1"));
+        ObjectNode upd = mapper.createObjectNode();
+        upd.put("TableName", "Users");
+        upd.set("Key", key2);
+        upd.put("UpdateExpression", "SET #n = :val");
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+        upd.set("ExpressionAttributeNames", exprNames);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "Updated"));
+        upd.set("ExpressionAttributeValues", exprValues);
+        ObjectNode txItem2 = mapper.createObjectNode();
+        txItem2.set("Update", upd);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithMock.transactWriteItems(List.of(txItem1, txItem2), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Transaction request cannot include multiple operations on one item"));
+
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    @Test
+    void batchWriteItem_whenDuplicateKeysInBatch_failsWithValidationException() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq1 = mapper.createObjectNode();
+        putReq1.set("Item", item1);
+        ObjectNode req1 = mapper.createObjectNode();
+        req1.set("PutRequest", putReq1);
+
+        ObjectNode item2 = mapper.createObjectNode();
+        item2.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq2 = mapper.createObjectNode();
+        putReq2.set("Item", item2);
+        ObjectNode req2 = mapper.createObjectNode();
+        req2.set("PutRequest", putReq2);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithMock.batchWriteItem(Map.of("Users", List.of(req1, req2)), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Provided list of item keys contains duplicates"));
+
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    // --- ImportTable ---
+
+    private DynamoDbService serviceWithS3(S3Service s3, StorageBackend<String, ImportTableDescription> importStore) {
+        return new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), null, importStore,
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3, mapper);
+    }
+
+    private void createUsersTableInCreating(DynamoDbService svc) {
+        svc.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1").setTableStatus("CREATING");
+    }
+
+    private ImportTableDescription importDescription(String bucket, String prefix, String compression) {
+        var desc = new ImportTableDescription();
+        desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/1-abc");
+        var source = mapper.createObjectNode();
+        source.put("S3Bucket", bucket);
+        source.put("S3KeyPrefix", prefix);
+        desc.setS3BucketSource(source);
+        desc.setInputCompressionType(compression);
+        return desc;
+    }
+
+    private ObjectNode importRequest(String tableName, String inputFormat) {
+        var request = mapper.createObjectNode();
+        request.putObject("S3BucketSource").put("S3Bucket", "bucket").put("S3KeyPrefix", "imp/");
+        request.put("InputFormat", inputFormat);
+        request.putObject("TableCreationParameters").put("TableName", tableName);
+        return request;
+    }
+
+    private static byte[] gzip(String text) throws Exception {
+        var out = new ByteArrayOutputStream();
+        try (var gz = new GZIPOutputStream(out)) {
+            gz.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+        return out.toByteArray();
+    }
+
+    private static S3Object s3Object(String key, byte[] data) {
+        return new S3Object("bucket", key, data, "application/octet-stream");
+    }
+
+    private static S3Service s3With(S3Object... objects) {
+        var s3 = mock(S3Service.class);
+        when(s3.listObjects("bucket", "imp/", null, 0)).thenReturn(List.of(objects));
+        for (var object : objects) {
+            when(s3.getObjectMetadata("bucket", object.getKey(), null)).thenReturn(object);
+            when(s3.openObjectStream("bucket", object.getKey(), null))
+                    .thenAnswer(invocation -> new ByteArrayInputStream(object.getData()));
+        }
+        return s3;
+    }
+
+    /** Checked against real DynamoDB: every item call on a CREATING table fails this way, DescribeTable still works. */
+    @Test
+    void itemCalls_creatingTable_returnResourceNotFoundWithoutTableName() {
+        var svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var region = "us-east-1";
+        var key = item("userId", "u1");
+        var keys = mapper.createObjectNode();
+        keys.set("Keys", mapper.createArrayNode().add(key));
+        var putRequest = mapper.createObjectNode();
+        putRequest.putObject("PutRequest").set("Item", key);
+        var transactPut = mapper.createObjectNode();
+        transactPut.putObject("Put").put("TableName", "Users").set("Item", key);
+        var transactGet = mapper.createObjectNode();
+        transactGet.putObject("Get").put("TableName", "Users").set("Key", key);
+
+        List<org.junit.jupiter.api.function.Executable> itemCalls = List.of(
+                () -> svc.getItem("Users", key, region),
+                () -> svc.putItem("Users", key, null, null, null, region, "NONE"),
+                () -> svc.updateItem("Users", key, null, "SET x = :v", null, item("v", "1"), "NONE", region),
+                () -> svc.deleteItem("Users", key, region),
+                () -> svc.query("Users", null, item("pk", "u1"), "userId = :pk", null, null, region),
+                () -> svc.scan("Users", null, null, null, null, null, null, null, region),
+                () -> svc.batchGetItem(Map.of("Users", keys), region),
+                () -> svc.batchWriteItem(Map.of("Users", List.of(putRequest)), region),
+                () -> svc.transactWriteItems(List.of(transactPut), region, null, null),
+                () -> svc.transactGetItems(List.of(transactGet), region));
+        for (var call : itemCalls) {
+            var e = assertThrows(AwsException.class, call);
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals("Requested resource not found", e.getMessage());
+        }
+        assertEquals("CREATING", svc.describeTable("Users", region).getTableStatus());
+    }
+
+    @Test
+    void runImport_loadsGzipLinesAndCountsBadOnes() throws Exception {
+        var object = s3Object("imp/part-0.json.gz",
+                gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\nnot json\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n"));
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        var svc = serviceWithS3(s3With(object), importStore);
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "GZIP");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(3L, desc.getProcessedItemCount());
+        assertEquals(2L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+        assertTrue(desc.getProcessedSizeBytes() > 0);
+        assertNotNull(desc.getEndTime());
+        assertEquals("COMPLETED", importStore.get(desc.getImportArn()).orElseThrow().getImportStatus());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+        assertEquals("u2", svc.getItem("Users", item("userId", "u2"), "us-east-1").get("userId").get("S").asText());
+    }
+
+    /** Checked against real DynamoDB: another account's bucket fails this way when no policy grants access. */
+    @Test
+    void runImport_bucketOfAnotherAccount_failsWithS3AccessDeniedWithoutReadingS3() {
+        var s3 = mock(S3Service.class);
+        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "NONE");
+        ((ObjectNode) desc.getS3BucketSource()).put("S3BucketOwner", "111111111111");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3AccessDenied", desc.getFailureCode());
+        assertEquals("Access Denied (Service: Amazon S3; Status Code: 403; Error Code: AccessDenied)", desc.getFailureMessage());
+        verifyNoInteractions(s3);
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_bucketOwnerIsTheCaller_readsTheBucket() {
+        var object = s3Object("imp/data.json", "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n".getBytes(StandardCharsets.UTF_8));
+        var svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "NONE");
+        ((ObjectNode) desc.getS3BucketSource()).put("S3BucketOwner", "000000000000");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+    }
+
+    @Test
+    void runImport_persistsLoadedItems() {
+        var object = s3Object("imp/data.json",
+                "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n".getBytes(StandardCharsets.UTF_8));
+        var itemStore = new InMemoryStorage<String, Map<String, JsonNode>>();
+        var svc = new DynamoDbService(new InMemoryStorage<>(), itemStore, null, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3With(object), mapper);
+        createUsersTableInCreating(svc);
+
+        svc.runImport(importDescription("bucket", "imp/", "NONE"), "Users", "us-east-1");
+
+        assertEquals(1, itemStore.scan(k -> true).size());
+        assertEquals(2, itemStore.scan(k -> true).getFirst().size());
+    }
+
+    @Test
+    void runImport_unreadableObject_isCountedAndTheRestIsLoaded() throws Exception {
+        var data = s3Object("imp/data.json.gz", gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n"));
+        var manifest = s3Object("imp/manifest-summary.json", "{}".getBytes(StandardCharsets.UTF_8));
+        var svc = serviceWithS3(s3With(data, manifest), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "GZIP");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_malformedAttributeValue_isCountedNotFatal() {
+        var object = s3Object("imp/data.json",
+                ("{\"Item\":{\"userId\":{\"S\":\"u1\"},\"m\":{\"M\":\"not a map\"}}}\n"
+                + "{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n").getBytes(StandardCharsets.UTF_8));
+        var svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+    }
+
+    @Test
+    void runImport_missingBucket_failsWithS3NoSuchBucket() {
+        var s3 = mock(S3Service.class);
+        when(s3.listObjects("missing", "imp/", null, 0))
+                .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("missing", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3NoSuchBucket", desc.getFailureCode());
+        assertNotNull(desc.getEndTime());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_otherS3Error_reportsAnS3FailureCode() {
+        var s3 = mock(S3Service.class);
+        when(s3.listObjects("bucket", "imp/", null, 0))
+                .thenThrow(new AwsException("AccessDenied", "Access Denied", 403));
+        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        var desc = importDescription("bucket", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3AccessDenied", desc.getFailureCode());
+    }
+
+    @Test
+    void deleteTable_whileCreating_returnsResourceInUseException() {
+        createUsersTableInCreating(service);
+
+        var e = assertThrows(AwsException.class, () -> service.deleteTable("Users", "us-east-1"));
+
+        assertEquals("ResourceInUseException", e.getErrorCode());
+        assertEquals("CREATING", service.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void updateTable_whileCreating_returnsResourceInUseException() {
+        createUsersTableInCreating(service);
+
+        var e = assertThrows(AwsException.class, () -> service.updateTable("Users", 10L, 10L, "us-east-1"));
+
+        assertEquals("ResourceInUseException", e.getErrorCode());
+    }
+
+    @Test
+    void validateImportRequest_rejectsUnsupportedFormatWithoutUnsupportedOperationWording() {
+        var e = assertThrows(AwsException.class,
+                () -> service.validateImportRequest(importRequest("Users", "CSV")));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertTrue(e.getMessage().contains("CSV"));
+        assertFalse(e.getMessage().toLowerCase().contains("not supported"));
+    }
+
+    @Test
+    void validateImportRequest_blankClientToken_returnsValidationException() {
+        var request = importRequest("Users", "DYNAMODB_JSON");
+        request.put("ClientToken", "");
+
+        var e = assertThrows(AwsException.class, () -> service.validateImportRequest(request));
+
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void validateImportRequest_sameClientToken_returnsExistingImport() {
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        var request = importRequest("Users", "DYNAMODB_JSON");
+        request.put("ClientToken", "token-1");
+        var existing = importDescription("bucket", "imp/", "NONE");
+        existing.setClientToken("token-1");
+        existing.setInputFormat("DYNAMODB_JSON");
+        existing.setTableCreationParameters(request.get("TableCreationParameters"));
+        importStore.put(existing.getImportArn(), existing);
+        var svc = serviceWithS3(mock(S3Service.class), importStore);
+
+        assertSame(existing, svc.validateImportRequest(request));
+    }
+
+    @Test
+    void validateImportRequest_sameClientTokenDifferentParameters_returnsImportConflictException() {
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        var existing = importDescription("bucket", "imp/", "NONE");
+        existing.setClientToken("token-1");
+        existing.setInputFormat("DYNAMODB_JSON");
+        existing.setTableCreationParameters(mapper.createObjectNode().put("TableName", "Users"));
+        importStore.put(existing.getImportArn(), existing);
+        var svc = serviceWithS3(mock(S3Service.class), importStore);
+        var request = importRequest("Other", "DYNAMODB_JSON");
+        request.put("ClientToken", "token-1");
+
+        var e = assertThrows(AwsException.class, () -> svc.validateImportRequest(request));
+
+        assertEquals("ImportConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void listImports_pageSizeBelowOne_returnsValidationException() {
+        var svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+
+        var e = assertThrows(AwsException.class, () -> svc.listImports(null, 0, null));
+
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listImports_walksPagesByNextToken() {
+        var importStore = new InMemoryStorage<String, ImportTableDescription>();
+        for (var i = 1; i <= 3; i++) {
+            var desc = importDescription("bucket", "imp/", "NONE");
+            desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/" + i + "-abc");
+            importStore.put(desc.getImportArn(), desc);
+        }
+        var svc = serviceWithS3(mock(S3Service.class), importStore);
+
+        var first = svc.listImports(null, 2, null);
+        var second = svc.listImports(null, 2, first.nextToken());
+
+        assertEquals(2, first.importSummaryList().size());
+        assertNotNull(first.nextToken());
+        assertEquals(1, second.importSummaryList().size());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void constructor_failsInterruptedJobsAndActivatesCreatingTables() {
+        var resolver = new RegionResolver("us-east-1", "000000000000");
+        var tables = new AccountAwareStorageBackend<TableDefinition>(new InMemoryStorage<>(), null, "000000000000");
+        var exports = new AccountAwareStorageBackend<ExportDescription>(new InMemoryStorage<>(), null, "000000000000");
+        var imports = new AccountAwareStorageBackend<ImportTableDescription>(new InMemoryStorage<>(), null, "000000000000");
+        var before = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+                resolver, null, null, mock(S3Service.class), mapper);
+        createUsersTableInCreating(before);
+        var importDesc = importDescription("bucket", "imp/", "NONE");
+        importDesc.setImportStatus("IN_PROGRESS");
+        imports.put(importDesc.getImportArn(), importDesc);
+        var exportDesc = new ExportDescription();
+        exportDesc.setExportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/export/1-abc");
+        exportDesc.setExportStatus("IN_PROGRESS");
+        exports.put(exportDesc.getExportArn(), exportDesc);
+
+        var restarted = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+                resolver, null, null, mock(S3Service.class), mapper);
+
+        assertEquals("ACTIVE", restarted.describeTable("Users", "us-east-1").getTableStatus());
+        assertEquals("FAILED", restarted.describeImport(importDesc.getImportArn()).getImportStatus());
+        assertEquals("InterruptedByRestart", restarted.describeImport(importDesc.getImportArn()).getFailureCode());
+        assertEquals("FAILED", restarted.describeExport(exportDesc.getExportArn()).getExportStatus());
     }
 }

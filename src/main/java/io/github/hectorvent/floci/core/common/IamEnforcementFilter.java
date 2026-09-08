@@ -169,9 +169,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             caller = caller.withScpLevels(scpLevels);
         }
 
-        String resource = arnBuilder.build(credentialScope, ctx, region, accountId);
+        List<String> resources = arnBuilder.buildResources(credentialScope, ctx, region, accountId);
 
-        Map<String, String> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
+        Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
 
         // aws:PrincipalArn is populated for every principal this filter can identify — IAM users,
         // assumed-role sessions, and now the synthesized account-root principal above, using AWS's
@@ -184,18 +184,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 : iamService.resolveCallerArn(akid);
         if (principalArn.isPresent()) {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
-            conditionContext.put("aws:PrincipalArn", principalArn.get());
+            conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
         }
 
-        Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
-        if (decision == Decision.DENY) {
-            LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-            String denyMessage = "User: arn:aws:iam::" + accountId
-                    + ":user/" + akid + " is not authorized to perform: " + action
-                    + " on resource: \"" + resource + "\""
-                    + " because no identity-based policy allows the " + action + " action";
-            emitS3DenialIfApplicable(akid, action, resource, ctx, region, denyMessage);
-            ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
+        for (String resource : resources) {
+            Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
+            if (decision == Decision.DENY) {
+                LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
+                String denyMessage = "User: arn:aws:iam::" + accountId
+                        + ":user/" + akid + " is not authorized to perform: " + action
+                        + " on resource: \"" + resource + "\""
+                        + " because no identity-based policy allows the " + action + " action";
+                emitS3DenialIfApplicable(akid, action, resource, ctx, region, denyMessage);
+                ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
+                return;
+            }
         }
     }
 

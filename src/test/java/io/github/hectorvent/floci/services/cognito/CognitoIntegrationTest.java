@@ -231,6 +231,20 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void describeUnknownUserPoolNamesPoolInResourceNotFoundMessage() {
+        String missingPoolId = "us-east-1_000000000";
+
+        cognitoAction("DescribeUserPool", """
+                { "UserPoolId": "%s" }
+                """.formatted(missingPoolId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"))
+                .body("message", equalTo("User pool " + missingPoolId + " does not exist."));
+    }
+
+    @Test
     @Order(6)
     void confirmForgotPasswordRejectsWrongConfirmationCode() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """

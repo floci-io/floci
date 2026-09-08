@@ -31,6 +31,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
@@ -274,7 +276,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
             String arn = def.arn();
             catalog.put(arn, new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
-                    def.description(), AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+                    def.description(), def.document()));
         }
         return catalog;
     }
@@ -393,7 +395,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateUser(String userName, String newUserName, String newPath) {
+        updateUser(userName, newUserName, newPath, null);
+    }
+
+    /**
+     * Same as {@link #updateUser(String, String, String)}, but verifies {@code expectedUserId}
+     * against the resolved user's immutable ID before applying the update, atomically with the
+     * name-based lookup.
+     */
+    public void updateUser(String userName, String newUserName, String newPath, String expectedUserId) {
         IamUser user = getUser(userName);
+        if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
+            throw new AwsException("EntityAlreadyExists",
+                    "User " + userName + " was replaced by a different user of the same name; "
+                            + "refusing to apply an update meant for the original user.", 409);
+        }
         if (newUserName != null && !newUserName.equals(userName)) {
             if (users.get(newUserName).isPresent()) {
                 throw new AwsException("EntityAlreadyExists",
@@ -1810,12 +1826,58 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // Internal helpers
     // =========================================================================
 
+    /** Returns the secret for an active access key or an unexpired temporary session. */
     public Optional<String> findSecretKey(String accessKeyId) {
-        Optional<String> fromAccessKey = accessKeys.get(accessKeyId).map(AccessKey::getSecretAccessKey);
-        if (fromAccessKey.isPresent()) {
-            return fromAccessKey;
+        return activeAccessKeySecret(accessKeyId)
+                .or(() -> currentSession(accessKeyId).map(SessionCredential::getSecretAccessKey));
+    }
+
+    /** Returns a temporary session secret only when the issued session token also matches. */
+    public Optional<String> findSecretKey(String accessKeyId, String sessionToken) {
+        return activeAccessKeySecret(accessKeyId).or(() -> currentSession(accessKeyId)
+                .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                .map(SessionCredential::getSecretAccessKey));
+    }
+
+    /**
+     * The session token issued alongside a temporary credential, for callers that must tell a
+     * missing token apart from one that does not match.
+     *
+     * <p>Empty means the token cannot be verified, not that any token is acceptable: the key is
+     * not a temporary credential, names no session Floci minted, or names a session stored before
+     * tokens were recorded. A caller that treats the token as required must check
+     * {@link #isTemporaryAccessKey(String)} separately. Where that distinction does not matter,
+     * {@link #findSecretKey(String, String)} resolves the secret and matches the token in one step.
+     */
+    public Optional<String> findSessionToken(String accessKeyId) {
+        return currentSession(accessKeyId)
+                .map(SessionCredential::getSessionToken)
+                .filter(token -> !token.isBlank());
+    }
+
+    /** Whether an access key ID identifies Floci's documented public deployer credential. */
+    public boolean isSeededDeployerAccessKey(String accessKeyId) {
+        return DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(accessKeyId);
+    }
+
+    private Optional<String> activeAccessKeySecret(String accessKeyId) {
+        return accessKeys.get(accessKeyId)
+                .filter(accessKey -> "Active".equals(accessKey.getStatus()))
+                .map(AccessKey::getSecretAccessKey);
+    }
+
+    private Optional<SessionCredential> currentSession(String accessKeyId) {
+        return findSessionAnyAccount(accessKeyId)
+                .filter(session -> session.getExpiration() == null || Instant.now().isBefore(session.getExpiration()));
+    }
+
+    private static boolean hasMatchingSessionToken(SessionCredential session, String sessionToken) {
+        if (sessionToken == null || session.getSessionToken() == null) {
+            return false;
         }
-        return findSessionAnyAccount(accessKeyId).map(SessionCredential::getSecretAccessKey);
+        return MessageDigest.isEqual(
+                session.getSessionToken().getBytes(StandardCharsets.UTF_8),
+                sessionToken.getBytes(StandardCharsets.UTF_8));
     }
 
     public Optional<AccessKey> findAccessKey(String accessKeyId) {
@@ -1864,8 +1926,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
                                 java.time.Instant expiration, String sessionPolicyDocument) {
+        registerSession(sessionAccessKeyId, secretAccessKey, null, roleArn, expiration, sessionPolicyDocument);
+    }
+
+    /** Stores a temporary credential including the session token required for authentication. */
+    public void registerSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                String roleArn, java.time.Instant expiration, String sessionPolicyDocument) {
         sessions.put(sessionAccessKeyId,
-                new SessionCredential(sessionAccessKeyId, secretAccessKey, roleArn, expiration, sessionPolicyDocument));
+                new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
+                        expiration, sessionPolicyDocument));
     }
 
     /**
@@ -1876,8 +1945,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
                                 java.time.Instant expiration, String sessionPolicyDocument,
                                 String originAccountId) {
+        registerSession(sessionAccessKeyId, secretAccessKey, null, roleArn, expiration, sessionPolicyDocument,
+                originAccountId);
+    }
+
+    /** Stores a temporary credential and its origin account. */
+    public void registerSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                String roleArn, java.time.Instant expiration, String sessionPolicyDocument,
+                                String originAccountId) {
         sessions.put(sessionAccessKeyId,
-                new SessionCredential(sessionAccessKeyId, secretAccessKey, roleArn, expiration,
+                new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, expiration,
                         sessionPolicyDocument, originAccountId));
     }
 
@@ -1885,11 +1962,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
                                           String roleArn, java.time.Instant expiration,
                                           String sessionPolicyDocument) {
+        registerSessionForAccount(accountId, sessionAccessKeyId, secretAccessKey, null, roleArn, expiration,
+                sessionPolicyDocument);
+    }
+
+    /** Stores a temporary credential in an explicit account namespace. */
+    public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
+                                          String sessionToken, String roleArn, java.time.Instant expiration,
+                                          String sessionPolicyDocument) {
         if (accountId == null || accountId.isBlank()) {
             throw new IllegalArgumentException("Session account ID must not be blank");
         }
         SessionCredential session = new SessionCredential(
-                sessionAccessKeyId, secretAccessKey, roleArn, expiration, sessionPolicyDocument, accountId);
+                sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, expiration, sessionPolicyDocument,
+                accountId);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);
         } else {
@@ -1903,11 +1989,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
                                                    String secretAccessKey, String roleArn) {
+        registerLambdaExecutionRoleSession(accountId, sessionAccessKeyId, secretAccessKey, null, roleArn);
+    }
+
+    /** Stores a non-expiring Lambda execution-role session with its session token. */
+    public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
+                                                   String secretAccessKey, String sessionToken, String roleArn) {
         if (accountId == null || accountId.isBlank()) {
             throw new IllegalArgumentException("Lambda function account ID must not be blank");
         }
         SessionCredential session = new SessionCredential(
-                sessionAccessKeyId, secretAccessKey, roleArn, null, null, accountId);
+                sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, null, null, accountId);
         session.setLambdaExecutionRole(true);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);
@@ -2091,7 +2183,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return Optional.empty();
     }
 
-    private static boolean isTemporaryAccessKey(String accessKeyId) {
+    /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */
+    public static boolean isTemporaryAccessKey(String accessKeyId) {
         return accessKeyId != null && accessKeyId.startsWith(TEMPORARY_ACCESS_KEY_PREFIX);
     }
 

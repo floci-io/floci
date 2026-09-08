@@ -19,6 +19,8 @@ public class Database {
     @JsonProperty("CreateTime")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant createTime;
+    @JsonProperty("CatalogId")
+    private String catalogId;
 
     public Database() {}
     public Database(String name) {
@@ -36,4 +38,6 @@ public class Database {
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
     public Instant getCreateTime() { return createTime; }
     public void setCreateTime(Instant createTime) { this.createTime = createTime; }
+    public String getCatalogId() { return catalogId; }
+    public void setCatalogId(String catalogId) { this.catalogId = catalogId; }
 }

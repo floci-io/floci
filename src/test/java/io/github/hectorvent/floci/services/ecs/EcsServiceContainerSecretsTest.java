@@ -39,7 +39,7 @@ class EcsServiceContainerSecretsTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
         EcsService service = new EcsService(new RegionResolver("us-east-1", "000000000000"),
-                containerManager, config, mock(EcsLoadBalancerRegistrar.class), null);
+                containerManager, config, mock(EcsLoadBalancerRegistrar.class), null, null);
         service.createCluster("test-cluster", "us-east-1");
 
         ContainerDefinition app = new ContainerDefinition();
