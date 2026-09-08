@@ -14,6 +14,8 @@ import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersResponse;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterResponse;
+import software.amazon.awssdk.services.redshift.model.GetClusterCredentialsResponse;
+import software.amazon.awssdk.services.redshift.model.GetClusterCredentialsWithIamResponse;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
@@ -148,6 +150,39 @@ public class RedshiftTest {
                                 .asByteArray(),
                         StandardCharsets.UTF_8)));
         assertEquals("1|alice\n2|bob\n", all.toString());
+    }
+
+    @Test
+    @Order(2)
+    public void testGetClusterCredentialsReturnsTemporaryCredentials() {
+        RedshiftClient client = getClient();
+        GetClusterCredentialsResponse res = client.getClusterCredentials(b -> b
+                .clusterIdentifier("test-cluster")
+                .dbUser("analyst")
+                .dbName("dev")
+                .durationSeconds(900));
+
+        assertNotNull(res.dbUser());
+        assertTrue(res.dbUser().contains("analyst"));
+        assertNotNull(res.dbPassword());
+        assertTrue(!res.dbPassword().isBlank());
+        assertNotNull(res.expiration());
+    }
+
+    @Test
+    @Order(2)
+    public void testGetClusterCredentialsWithIamReturnsIamPrefixedUser() {
+        RedshiftClient client = getClient();
+        GetClusterCredentialsWithIamResponse res = client.getClusterCredentialsWithIAM(b -> b
+                .clusterIdentifier("test-cluster")
+                .dbName("dev")
+                .durationSeconds(900));
+
+        assertNotNull(res.dbUser());
+        assertTrue(res.dbUser().startsWith("IAM"));
+        assertNotNull(res.dbPassword());
+        assertTrue(!res.dbPassword().isBlank());
+        assertNotNull(res.expiration());
     }
 
     @Test
