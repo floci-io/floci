@@ -522,13 +522,13 @@ public class RamService {
             // A rejected or removed invitation is no longer an authorization to discover the
             // share. PENDING remains visible because RAM exposes the invitation's share metadata
             // before the receiver accepts it.
-            Optional<ResourceShareInvitation> invitation = allInvitations().stream()
-                    .filter(candidate -> candidate.resourceShareArn().equals(share.getResourceShareArn())
-                            && candidate.receiverAccountId().equals(callerAccountId))
-                    .findFirst();
-            if (invitation.isPresent()) {
-                return "PENDING".equals(invitation.get().status())
-                        || "ACCEPTED".equals(invitation.get().status());
+            boolean hasLiveInvitation = allInvitations().stream()
+                    .anyMatch(candidate -> candidate.resourceShareArn().equals(share.getResourceShareArn())
+                            && candidate.receiverAccountId().equals(callerAccountId)
+                            && ("PENDING".equals(candidate.status())
+                            || "ACCEPTED".equals(candidate.status())));
+            if (hasLiveInvitation) {
+                return true;
             }
             // Organization sharing auto-accepts account principals without persisting an
             // invitation. Restrict that path to the owner's organization, never any organization.

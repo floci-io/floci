@@ -427,6 +427,14 @@ class RamServiceTest {
                 service.getResourceShareInvitations(ACCEPTER, List.of(), List.of());
         assertEquals(2, invitations.size());
         assertTrue(invitations.stream().anyMatch(i -> "PENDING".equals(i.status())));
+
+        // The live invitation must keep the share visible even when the rejected historical
+        // invitation is returned first by storage scans.
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+        assertEquals(1, service.listResources(ACCEPTER, "OTHER-ACCOUNTS",
+                List.of(share.getResourceShareArn())).size());
+        assertEquals(1, service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS",
+                List.of(share.getResourceShareArn())).size());
     }
 
     @Test

@@ -247,11 +247,6 @@ class RamIntegrationTest {
             .post("/enablesharingwithawsorganization")
         .then()
             .statusCode(200);
-        organizations("666666666666", "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
 
         String accountShareArn =
             given()
