@@ -24,11 +24,11 @@ import static org.mockito.Mockito.when;
 
 /**
  * The transport-level retry ({@code RetryingDockerHttpClient}) must refuse to replay a one-shot
- * {@code InputStream} body — after the first attempt the streamed tar bytes are gone. That leaves
+ * {@code InputStream} body, after the first attempt the streamed tar bytes are gone. That leaves
  * the Lambda launcher's tar-copies (function code, layers, and the TLS CA cert) exposed to
  * transient broken pipes: one blip while copying {@code floci-selfsigned.crt} failed an entire
  * LZA Accounts stage with {@code Lambda.InitError}. The copy is idempotent (tar extract over the
- * same path), and the whole operation — fresh pipe, fresh streamer thread, fresh request — can be
+ * same path), and the whole operation, fresh pipe, fresh streamer thread, fresh request, can be
  * rebuilt per attempt, so the retry lives at the call site.
  */
 class ContainerLauncherCopyRetryTest {

@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * {@code CodeBuildService.startBuild} always resolves {@code build.getEnvironment()} to the
  * fully-merged environment before persisting the Build, so the runner must trust that value
- * alone rather than ORing it with the project's own privileged-mode flag — an OR would make an
+ * alone rather than ORing it with the project's own privileged-mode flag, an OR would make an
  * explicit {@code privilegedModeOverride=false} unable to disable a privileged project.
  */
 class CodeBuildRunnerPrivilegedModeTest {

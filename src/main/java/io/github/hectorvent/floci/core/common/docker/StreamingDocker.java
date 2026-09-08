@@ -8,7 +8,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * CDI qualifier for the DockerClient dedicated to long-lived streaming operations —
+ * CDI qualifier for the DockerClient dedicated to long-lived streaming operations,
  * container log-follow ({@link ContainerLogStreamer}) and {@code execStartCmd} output
  * streams held open for a whole CodeBuild phase. These calls occupy a connection pool
  * slot for a container's (or build's) entire lifetime, so they must not share a pool

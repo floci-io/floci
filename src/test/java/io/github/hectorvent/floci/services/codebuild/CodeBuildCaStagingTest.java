@@ -25,7 +25,7 @@ import static org.mockito.Mockito.when;
  * socket. Under an LZA Deploy fan-out that socket drops the write mid-stream ({@code Broken pipe}),
  * exactly as {@code copySourceToContainer} guards against. If the copy is fired once and its failure
  * swallowed, the container runs CA-less and every spoofed HTTPS AWS call dies with
- * {@code DEPTH_ZERO_SELF_SIGNED_CERT} three seconds later — a cryptic failure far from the cause.
+ * {@code DEPTH_ZERO_SELF_SIGNED_CERT} three seconds later, a cryptic failure far from the cause.
  * Staging must therefore retry a transient docker I/O error and fail the build loudly when it cannot
  * stage the cert, never proceed silently without it.
  */
@@ -81,7 +81,7 @@ class CodeBuildCaStagingTest {
     @Test
     void stagingThrowsWhenCertFileIsUnreadable(@TempDir Path dir) {
         // stageCaCertificate is only ever reached under spoofedEndpointTrustEnabled(), so the CA is
-        // required — an unreadable/missing cert is a hard failure, not a warn-and-continue. Proceeding
+        // required, an unreadable/missing cert is a hard failure, not a warn-and-continue. Proceeding
         // CA-less lets the build start, then every spoofed HTTPS AWS call dies three seconds later with
         // DEPTH_ZERO_SELF_SIGNED_CERT far from the cause. Fail loud here, matching the catch block below.
         Path missing = dir.resolve("floci-selfsigned.crt"); // never written -> not readable

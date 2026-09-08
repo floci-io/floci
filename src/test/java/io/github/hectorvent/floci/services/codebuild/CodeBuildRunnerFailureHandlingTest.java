@@ -185,7 +185,7 @@ class CodeBuildRunnerFailureHandlingTest {
     // dead attach stream with a fresh exec while PhaseSession.hasStarted() is still false. This
     // is the exact gate that decision is made on, so it must flip at the right moment: false
     // until the first phase-start sentinel is parsed, true forever after (even once that phase
-    // has also ended) — retrying past that point could duplicate a real CFN/CDK operation.
+    // has also ended), retrying past that point could duplicate a real CFN/CDK operation.
 
     @Test
     void hasStartedIsFalseUntilFirstPhaseStartSentinel() {
@@ -209,7 +209,7 @@ class CodeBuildRunnerFailureHandlingTest {
     // The attach retry must back off between attempts, not burn all of them within
     // milliseconds. Observed live (issues/0030): three attempts logged 11 ms apart, all
     // drawing stale keep-alive connections from the same streaming-pool cohort that Podman
-    // had already closed — so retrying instantly is guaranteed to re-fail. Each failed
+    // had already closed, so retrying instantly is guaranteed to re-fail. Each failed
     // attach discards its dead connection, so spaced attempts progressively drain the
     // stale cohort; instant attempts cannot.
 

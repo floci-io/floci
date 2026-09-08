@@ -13,7 +13,7 @@ import java.util.Map;
  *
  * <p>The daemon drops connections under fan-out load (an LZA Bootstrap stage firing ~15 CodeBuild
  * actions, a Prepare stage at six live containers), and docker-java surfaces the blip as
- * {@code RuntimeException(IOException)} from inside {@code execute()} — which is exactly where
+ * {@code RuntimeException(IOException)} from inside {@code execute()}, which is exactly where
  * this decorator sits. Guarding call sites one at a time was fixed three separate times
  * ({@code createContainerCmd}, {@code startContainerCmd}, {@code ensureVolume}) while ~60 other
  * docker call sites stayed bare; one guard at the transport boundary covers them all, including
@@ -21,13 +21,13 @@ import java.util.Map;
  *
  * <p>A request is only retried when replaying it cannot change semantics:
  * <ul>
- *   <li>Its body, if any, must live in {@code bodyBytes()} — a plain {@code byte[]} the transport
+ *   <li>Its body, if any, must live in {@code bodyBytes()}, a plain {@code byte[]} the transport
  *       re-reads from scratch on every attempt. A request whose body is only available as a
  *       one-shot {@code InputStream} (the tar upload of {@code copyArchiveToContainerCmd}) may
  *       have been partially consumed by the failed attempt and is never replayed.</li>
  *   <li>It must not carry {@code hijackedInput()} (bidirectional attach streams).</li>
  *   <li>Its path must not contain {@code /exec}: {@code POST /exec/{id}/start} re-runs a shell
- *       command whose first run may have executed before the socket died — a worse bug than the
+ *       command whose first run may have executed before the socket died, a worse bug than the
  *       one retrying fixes. The {@code contains} spelling (not {@code startsWith}) also covers
  *       exec-create ({@code POST /containers/{id}/exec}), where a replay would merely leak an
  *       unused exec ID; that conservative breadth costs nothing.</li>

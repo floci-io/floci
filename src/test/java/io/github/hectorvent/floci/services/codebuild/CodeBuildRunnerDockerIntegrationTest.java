@@ -24,9 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Runs real builds in Docker containers to verify that all buildspec phases share
- * one shell session — unexported variables and the working directory persist across
+ * one shell session, unexported variables and the working directory persist across
  * phases like on real CodeBuild, while shell options (set -e) set by one command
- * entry never leak into the next — and that per-phase status, duration and failure
+ * entry never leak into the next, and that per-phase status, duration and failure
  * contexts on the Build object keep working. The bash image exercises the primary
  * per-entry child-shell driver; busybox (no bash) exercises the sh fallback.
  */

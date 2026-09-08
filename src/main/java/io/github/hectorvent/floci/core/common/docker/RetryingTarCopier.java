@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * container over the Docker API.
  *
  * <p>The transport-level retry ({@link RetryingDockerHttpClient}) must refuse to replay a
- * one-shot {@code InputStream} body — the streamed tar bytes are gone after the first attempt —
+ * one-shot {@code InputStream} body, the streamed tar bytes are gone after the first attempt,
  * so copies retry here instead, where the whole operation (tar bytes or pipe, streamer thread,
  * request) is rebuilt per attempt. Tar extract over the same path is idempotent, so a replay is
  * safe; non-transient failures (daemon rejections) surface after a single attempt, unwrapped.
@@ -35,7 +35,7 @@ public final class RetryingTarCopier {
     /**
      * Buffer for the tar-streaming pipe. The default {@link PipedInputStream} buffer is only 1KB,
      * which forces a writer/reader thread hand-off (wait/notify) every 1KB. Streaming a ~90MB
-     * node_modules through that ran at ~0.5MB/s (≈3 min per cold start) — pure synchronization
+     * node_modules through that ran at ~0.5MB/s (≈3 min per cold start), pure synchronization
      * thrash, not I/O. A large buffer lets the tar writer stream ahead so throughput is bound by
      * the Docker daemon, not the pipe.
      */
@@ -115,7 +115,7 @@ public final class RetryingTarCopier {
                     } catch (Throwable e) {
                         // Recorded and rechecked below instead of just logged: closing the pipe
                         // here without producing output looks like a clean, empty tar to the
-                        // reader — the daemon accepts it and exec() below returns normally,
+                        // reader, the daemon accepts it and exec() below returns normally,
                         // so a writer failure (e.g. the source file went missing) would otherwise
                         // report success while nothing (or a truncated file) was actually copied.
                         writerFailure.set(e);
@@ -129,7 +129,7 @@ public final class RetryingTarCopier {
                         .exec();
                 // Joined before the try-with-resources closes pos/pis on the way out: a real
                 // exec() only returns after consuming the tar to EOF, which the streamer causes
-                // by closing pos once it's done, so this never blocks in production — but closing
+                // by closing pos once it's done, so this never blocks in production, but closing
                 // pos out from under a still-writing streamer (as a mocked/short-circuited exec()
                 // would) turns its own write into a spurious "Pipe closed" failure.
                 streamer.join();

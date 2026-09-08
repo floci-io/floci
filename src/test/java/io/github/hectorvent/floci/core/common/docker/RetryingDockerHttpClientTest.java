@@ -29,7 +29,7 @@ import static org.mockito.Mockito.mock;
  * {@code DockerHttpClient.execute()}. Retrying per call site has now been fixed three separate
  * times ({@code createContainerCmd}, {@code startContainerCmd}, {@code ensureVolume}) while ~60
  * other docker call sites stayed bare. {@link RetryingDockerHttpClient} moves the retry to the
- * transport seam so every call site — present and future — is covered once.
+ * transport seam so every call site, present and future, is covered once.
  *
  * <p>The retry may only fire when replaying the request cannot change semantics: the request must
  * be replayable (no one-shot body stream, no hijacked stdin) and must not be an exec-start, which
@@ -189,7 +189,7 @@ class RetryingDockerHttpClientTest {
     @Test
     void doesNotRetryExecPathsEvenWhenReplayable() {
         // POST /exec/{id}/start carries a small JSON body, so by the replayable-body rule alone it
-        // would be retried — re-running a shell command whose first run may have executed. Exec
+        // would be retried, re-running a shell command whose first run may have executed. Exec
         // paths are excluded outright.
         FakeTransport startDelegate = new FakeTransport(attempt -> {
             throw brokenPipe();
@@ -224,7 +224,7 @@ class RetryingDockerHttpClientTest {
 
         assertThrows(RuntimeException.class, () -> createClient.execute(execCreate));
         assertEquals(1, createDelegate.calls.get(),
-                "exec-create must be excluded too — the /exec exclusion covers both spellings");
+                "exec-create must be excluded too, the /exec exclusion covers both spellings");
     }
 
     @Test

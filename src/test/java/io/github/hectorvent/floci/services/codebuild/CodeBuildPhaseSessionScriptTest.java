@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * each phase's exit code (or SKIPPED) back to the runner. In the primary bash mode
  * each command entry additionally runs in its own child shell with a state snapshot
  * restored in between, so shell options (set -e/-u/-x) and exit never leak from one
- * entry into the next — matching the real CodeBuild agent.
+ * entry into the next, matching the real CodeBuild agent.
  */
 class CodeBuildPhaseSessionScriptTest {
 
@@ -265,7 +265,7 @@ class CodeBuildPhaseSessionScriptTest {
         assertTrue(run.output().contains("saw-failure"), run.output());
     }
 
-    // ── transparent AWS endpoints — combined CA bundle prelude ────────────────
+    // ── transparent AWS endpoints, combined CA bundle prelude ────────────────
 
     @Test
     void caBundleIsBuiltAndExportedBeforeAnyPhase() throws Exception {

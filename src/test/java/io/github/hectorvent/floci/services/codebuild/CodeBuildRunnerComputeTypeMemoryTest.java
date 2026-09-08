@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Build containers are the only launched container type (unlike Lambda/ECS/Batch) that
- * previously got no memory cap at all — an unbounded CodeBuild container run alongside
+ * previously got no memory cap at all, an unbounded CodeBuild container run alongside
  * others during a multi-stage fan-out is a confirmed contributor to guest VM memory
  * exhaustion (see issues/0005). This resolves AWS's published computeType memory tiers
  * so every build container gets a real cgroup limit.

@@ -43,7 +43,7 @@ class DockerRetryTest {
 
     // ConnectionRequestTimeoutException extends InterruptedIOException extends IOException, so the
     // old "any IOException in the cause chain is transient" rule wrongly retried it. It means the
-    // httpclient5 pool has no free connection/lease after waiting the full request timeout — the
+    // httpclient5 pool has no free connection/lease after waiting the full request timeout, the
     // pool is exhausted, not the socket blipping. Retrying just re-enters another full wait and
     // adds more pressure to an already-starved pool, so this must NOT be classified as transient.
     @Test
@@ -53,7 +53,7 @@ class DockerRetryTest {
 
     // A plain InterruptedIOException (e.g. from Thread.interrupt() during a blocking read) signals
     // cancellation/shutdown, not a socket blip. Retrying it masks the interrupt and delays
-    // shutdown, so it must not be classified as transient either — same rule as its
+    // shutdown, so it must not be classified as transient either, same rule as its
     // ConnectionRequestTimeoutException subtype above, just not pool-exhaustion-specific.
     @Test
     void plainInterruptedIoExceptionIsNotTransient() {
@@ -61,7 +61,7 @@ class DockerRetryTest {
     }
 
     // A single forward walk returns true as soon as it hits the outer IOException, never
-    // reaching the InterruptedIOException wrapped inside it — the exclusion must be checked
+    // reaching the InterruptedIOException wrapped inside it, the exclusion must be checked
     // over the whole chain before the general "any IOException is transient" rule applies.
     @Test
     void interruptedIoExceptionWrappedInAnotherIOExceptionIsStillNotTransient() {
