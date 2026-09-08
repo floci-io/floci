@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
@@ -26,11 +28,30 @@ class RedshiftQueryHandlerTest {
 
     private RedshiftQueryHandler handler;
     private RedshiftService service;
+    private RedshiftCredentialBroker credentialBroker;
+    private EmulatorConfig config;
+    private RedshiftIamDbUserResolver iamDbUserResolver;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
         service = mock(RedshiftService.class);
-        handler = new RedshiftQueryHandler(service);
+        credentialBroker = new RedshiftCredentialBroker();
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().redshift().defaultCredentialDurationSeconds()).thenReturn(900);
+        iamDbUserResolver = mock(RedshiftIamDbUserResolver.class);
+        regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("acc");
+        handler = new RedshiftQueryHandler(service, credentialBroker, config, iamDbUserResolver, regionResolver);
+    }
+
+    private Cluster availableCluster(String id) {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier(id);
+        c.setMasterUsername("admin");
+        c.setMasterPassword("SecretPass1");
+        c.setClusterStatus("available");
+        return c;
     }
 
     @Test
@@ -373,5 +394,116 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<Tags>"));
         assertTrue(xml.contains("<Key>env</Key>"));
         assertTrue(xml.contains("<Value>prod</Value>"));
+    }
+
+    // ── GetClusterCredentials ────────────────────────────────────────────────
+
+    @Test
+    void getClusterCredentialsReturnsUserPasswordAndExpiration() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
+
+        Response response = handler.handle("GetClusterCredentials", params);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DbUser>analyst</DbUser>"));
+        assertTrue(xml.contains("<DbPassword>"));
+        assertTrue(xml.contains("<Expiration>"));
+        assertTrue(xml.contains("<GetClusterCredentialsResult>"));
+    }
+
+    @Test
+    void getClusterCredentialsStoresCredentialInBroker() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
+
+        handler.handle("GetClusterCredentials", params);
+
+        assertTrue(credentialBroker.resolve("acc", "c1", "analyst").isPresent());
+    }
+
+    @Test
+    void getClusterCredentialsRejectsMissingDbUser() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetClusterCredentials", params));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void getClusterCredentialsRejectsDurationBelowMinimum() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
+        params.putSingle("DurationSeconds", "899");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetClusterCredentials", params));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void getClusterCredentialsRejectsDurationAboveMaximum() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
+        params.putSingle("DurationSeconds", "3601");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetClusterCredentials", params));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void getClusterCredentialsAutoCreatePrefixesIamOnDbUser() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
+        params.putSingle("AutoCreate", "true");
+
+        Response response = handler.handle("GetClusterCredentials", params);
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DbUser>IAM:analyst</DbUser>"));
+    }
+
+    @Test
+    void getClusterCredentialsEchoesDbGroups() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
+        params.putSingle("DbGroups.member.1", "etl");
+        params.putSingle("DbGroups.member.2", "readonly");
+
+        Response response = handler.handle("GetClusterCredentials", params);
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DbGroup>etl</DbGroup>"));
+        assertTrue(xml.contains("<DbGroup>readonly</DbGroup>"));
+    }
+
+    @Test
+    void getClusterCredentialsPropagatesClusterNotFound() {
+        when(service.describeClusters("missing"))
+                .thenThrow(new AwsException("ClusterNotFound", "Cluster missing not found", 404));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "missing");
+        params.putSingle("DbUser", "analyst");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetClusterCredentials", params));
+        assertEquals("ClusterNotFound", ex.getErrorCode());
     }
 }

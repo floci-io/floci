@@ -356,7 +356,7 @@ public class AwsQueryController {
                     : elbV2QueryHandler.handle(action, formParams, region);
             case "autoscaling" -> autoScalingQueryHandler.handle(action, formParams, region);
             case "elasticbeanstalk" -> elasticBeanstalkQueryHandler.handle(action, formParams, region);
-            case "redshift" -> redshiftQueryHandler.handle(action, formParams);
+            case "redshift" -> redshiftQueryHandler.handle(action, formParams, authorization);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
@@ -605,7 +605,8 @@ public class AwsQueryController {
             "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
             "ModifyClusterParameterGroup",
             "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
-            "CreateTags", "DeleteTags", "DescribeTags"
+            "CreateTags", "DeleteTags", "DescribeTags",
+            "GetClusterCredentials", "GetClusterCredentialsWithIAM"
     );
 
     private String resolveService(String authorization, String action) {

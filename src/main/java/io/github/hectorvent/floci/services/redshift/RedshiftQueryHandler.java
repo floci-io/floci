@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
@@ -13,6 +15,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -22,14 +25,33 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class RedshiftQueryHandler {
+
+    // GetClusterCredentials DurationSeconds bounds, inclusive (AWS: 900 to 3600).
+    private static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
+    private static final int MAX_CREDENTIAL_DURATION_SECONDS = 3600;
+
     private final RedshiftService service;
+    private final RedshiftCredentialBroker credentialBroker;
+    private final EmulatorConfig config;
+    private final RedshiftIamDbUserResolver iamDbUserResolver;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public RedshiftQueryHandler(RedshiftService service) {
+    public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
+                                EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
+                                RegionResolver regionResolver) {
         this.service = service;
+        this.credentialBroker = credentialBroker;
+        this.config = config;
+        this.iamDbUserResolver = iamDbUserResolver;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
+        return handle(action, params, null);
+    }
+
+    public Response handle(String action, MultivaluedMap<String, String> params, String authorizationHeader) {
         switch (action) {
         case "CreateCluster" -> {
             String identifier = params.getFirst("ClusterIdentifier");
@@ -414,8 +436,73 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "GetClusterCredentials" -> {
+            String clusterId = requireParam(params, "ClusterIdentifier");
+            String dbUser = requireParam(params, "DbUser");
+            // describeClusters throws ClusterNotFound (404) for an unknown id.
+            service.describeClusters(clusterId);
+            boolean autoCreate = Boolean.parseBoolean(params.getFirst("AutoCreate"));
+            String effectiveDbUser = autoCreate ? "IAM:" + dbUser : dbUser;
+            int duration = resolveDurationSeconds(params);
+            List<String> dbGroups = memberList(params, "DbGroups");
+
+            TempCredential credential = credentialBroker.issue(
+                    regionResolver.getAccountId(), clusterId, effectiveDbUser, dbGroups, duration);
+            return Response.ok(getClusterCredentialsXml("GetClusterCredentials", credential))
+                    .type(MediaType.APPLICATION_XML).build();
+        }
         default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         }
+    }
+
+    private static String requireParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("InvalidParameterValue", name + " is required", 400);
+        }
+        return value;
+    }
+
+    private int resolveDurationSeconds(MultivaluedMap<String, String> params) {
+        String raw = params.getFirst("DurationSeconds");
+        if (raw == null || raw.isBlank()) {
+            return config.services().redshift().defaultCredentialDurationSeconds();
+        }
+        int duration;
+        try {
+            duration = Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", "DurationSeconds must be an integer", 400);
+        }
+        if (duration < MIN_CREDENTIAL_DURATION_SECONDS || duration > MAX_CREDENTIAL_DURATION_SECONDS) {
+            throw new AwsException("InvalidParameterValue",
+                    "DurationSeconds must be between " + MIN_CREDENTIAL_DURATION_SECONDS
+                            + " and " + MAX_CREDENTIAL_DURATION_SECONDS, 400);
+        }
+        return duration;
+    }
+
+    private String getClusterCredentialsXml(String operation, TempCredential credential) {
+        XmlBuilder builder = new XmlBuilder()
+                .start(operation + "Response")
+                  .start(operation + "Result")
+                    .elem("DbUser", credential.dbUser())
+                    .elem("DbPassword", credential.password())
+                    .elem("Expiration", DateTimeFormatter.ISO_INSTANT.format(credential.expiresAt()));
+        if (!credential.dbGroups().isEmpty()) {
+            builder.start("DbGroups");
+            for (String group : credential.dbGroups()) {
+                builder.elem("DbGroup", group);
+            }
+            builder.end("DbGroups");
+        }
+        return builder
+                  .end(operation + "Result")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end(operation + "Response")
+                .build();
     }
 
     private String buildClusterXml(Cluster cluster) {
@@ -549,6 +636,7 @@ public class RedshiftQueryHandler {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
             case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
+            case "DbGroups" -> quoted + "(\\.member|\\.DbGroup)?\\.\\d+";
             default -> quoted + "(\\.member)?\\.\\d+";
         };
     }
