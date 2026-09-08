@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -553,12 +554,21 @@ public class AutoScalingReconciler {
         if ((ltId == null || ltId.isBlank()) && (ltName == null || ltName.isBlank())) {
             return null;
         }
-        List<LaunchTemplate> launchTemplates = ec2Service.describeLaunchTemplates(
-                asg.getRegion(),
-                ltId == null || ltId.isBlank() ? List.of() : List.of(ltId),
-                ltName == null || ltName.isBlank() ? List.of() : List.of(ltName),
-                Map.of());
-        return launchTemplates.isEmpty() ? null : launchTemplates.get(0);
+        try {
+            List<LaunchTemplate> launchTemplates = ec2Service.describeLaunchTemplates(
+                    asg.getRegion(),
+                    ltId == null || ltId.isBlank() ? List.of() : List.of(ltId),
+                    ltName == null || ltName.isBlank() ? List.of() : List.of(ltName),
+                    Map.of());
+            return launchTemplates.isEmpty() ? null : launchTemplates.get(0);
+        } catch (AwsException e) {
+            if (isMissingLaunchTemplate(e)) {
+                LOG.warnv("ASG {0}: launch template {1} is unavailable", asg.getAutoScalingGroupName(),
+                        ltId == null || ltId.isBlank() ? ltName : ltId);
+                return null;
+            }
+            throw e;
+        }
     }
 
     private MixedInstancesPolicy.LaunchTemplateSpecification mixedInstancesLaunchTemplateSpecification(
@@ -584,12 +594,26 @@ public class AutoScalingReconciler {
             AutoScalingGroup asg, MixedInstancesPolicy.LaunchTemplateSpecification specification) {
         String ltId = specification.getLaunchTemplateId();
         String ltName = specification.getLaunchTemplateName();
-        List<LaunchTemplate> launchTemplates = ec2Service.describeLaunchTemplates(
-                asg.getRegion(),
-                ltId == null || ltId.isBlank() ? List.of() : List.of(ltId),
-                ltName == null || ltName.isBlank() ? List.of() : List.of(ltName),
-                Map.of());
-        return launchTemplates.isEmpty() ? null : launchTemplates.get(0);
+        try {
+            List<LaunchTemplate> launchTemplates = ec2Service.describeLaunchTemplates(
+                    asg.getRegion(),
+                    ltId == null || ltId.isBlank() ? List.of() : List.of(ltId),
+                    ltName == null || ltName.isBlank() ? List.of() : List.of(ltName),
+                    Map.of());
+            return launchTemplates.isEmpty() ? null : launchTemplates.get(0);
+        } catch (AwsException e) {
+            if (isMissingLaunchTemplate(e)) {
+                LOG.warnv("ASG {0}: mixed-instances launch template {1} is unavailable",
+                        asg.getAutoScalingGroupName(), ltId == null || ltId.isBlank() ? ltName : ltId);
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private static boolean isMissingLaunchTemplate(AwsException e) {
+        return "InvalidLaunchTemplateId.NotFound".equals(e.getErrorCode())
+                || "InvalidLaunchTemplateName.NotFoundException".equals(e.getErrorCode());
     }
 
     private String mixedInstancesInstanceType(AutoScalingGroup asg, LaunchTemplate version) {
