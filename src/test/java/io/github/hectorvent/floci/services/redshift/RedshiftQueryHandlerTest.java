@@ -506,4 +506,35 @@ class RedshiftQueryHandlerTest {
                 () -> handler.handle("GetClusterCredentials", params));
         assertEquals("ClusterNotFound", ex.getErrorCode());
     }
+
+    // ── GetClusterCredentialsWithIAM ─────────────────────────────────────────
+
+    @Test
+    void getClusterCredentialsWithIamDerivesDbUserFromCaller() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        when(iamDbUserResolver.resolveDbUser(any())).thenReturn("IAMR:Deployer");
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+
+        Response response = handler.handle("GetClusterCredentialsWithIAM", params);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DbUser>IAMR:Deployer</DbUser>"));
+        assertTrue(xml.contains("<GetClusterCredentialsWithIAMResult>"));
+    }
+
+    @Test
+    void getClusterCredentialsWithIamIgnoresDbUserParam() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        when(iamDbUserResolver.resolveDbUser(any())).thenReturn("IAM:alice");
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "ignored");
+
+        Response response = handler.handle("GetClusterCredentialsWithIAM", params);
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DbUser>IAM:alice</DbUser>"));
+    }
 }

@@ -451,6 +451,18 @@ public class RedshiftQueryHandler {
             return Response.ok(getClusterCredentialsXml("GetClusterCredentials", credential))
                     .type(MediaType.APPLICATION_XML).build();
         }
+        case "GetClusterCredentialsWithIAM" -> {
+            String clusterId = requireParam(params, "ClusterIdentifier");
+            service.describeClusters(clusterId);
+            String dbUser = iamDbUserResolver.resolveDbUser(authorizationHeader);
+            int duration = resolveDurationSeconds(params);
+            List<String> dbGroups = memberList(params, "DbGroups");
+
+            TempCredential credential = credentialBroker.issue(
+                    regionResolver.getAccountId(), clusterId, dbUser, dbGroups, duration);
+            return Response.ok(getClusterCredentialsXml("GetClusterCredentialsWithIAM", credential))
+                    .type(MediaType.APPLICATION_XML).build();
+        }
         default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         }
     }
