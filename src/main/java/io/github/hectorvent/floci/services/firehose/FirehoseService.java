@@ -285,11 +285,16 @@ public class FirehoseService implements ResourceProvider {
     }
 
     /**
-     * Says once, where the configuration is set, that conversion will not be applied.
+     * Says, where the configuration is set, that conversion will not be applied. Fires
+     * on every create and on every update that leaves conversion enabled, including an
+     * update about something else, so a caller who keeps changing the destination keeps
+     * being told.
+     *
      * Deliberately not in the flush path: that runs on every buffered delivery and on
      * every retry after a failed write, so warning there floods the log and needs a
      * per-stream marker whose lifetime has to track creates and deletes. Create and
-     * update are the moments a caller can act on it anyway.
+     * update are caller-driven and rare by comparison, and they are the moments a
+     * caller can act on the warning anyway.
      */
     private static void warnIfConversionEnabled(String name, S3Destination s3) {
         if (s3 != null && s3.isDataFormatConversionEnabled()) {
