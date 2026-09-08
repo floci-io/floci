@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -33,8 +34,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -136,6 +140,35 @@ class FirehoseServiceTest {
     private void verifyNothingDelivered() {
         verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(),
                 anyMap(), any(PutObjectOptions.class));
+    }
+
+    @Test
+    void isolatesSameStreamNameAcrossAccountsAndRegionsIncludingFlushAndDelete() {
+        String firstArn = firehoseService.createDeliveryStream("us-east-1", "111111111111", "shared", null,
+                List.of(), null, null);
+        String secondArn = firehoseService.createDeliveryStream("eu-west-1", "222222222222", "shared", null,
+                List.of(), null, null);
+
+        assertTrue(firstArn.contains(":us-east-1:111111111111:deliverystream/shared"));
+        assertTrue(secondArn.contains(":eu-west-1:222222222222:deliverystream/shared"));
+
+        firehoseService.putRecord("111111111111", "us-east-1", "shared",
+                new Record("first".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.putRecord("222222222222", "eu-west-1", "shared",
+                new Record("second".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.flush("111111111111", "us-east-1", "shared");
+
+        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(),
+                argThat(body -> new String(body, StandardCharsets.UTF_8).equals("first\n")),
+                eq(OCTET_STREAM), anyMap(), any(PutObjectOptions.class));
+        verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+        assertEquals("shared", firehoseService.describeDeliveryStream("222222222222", "eu-west-1", "shared")
+                .getDeliveryStreamName());
+
+        firehoseService.deleteDeliveryStream("111111111111", "us-east-1", "shared");
+        assertEquals("shared", firehoseService.describeDeliveryStream("222222222222", "eu-west-1", "shared")
+                .getDeliveryStreamName());
     }
 
     @Test
