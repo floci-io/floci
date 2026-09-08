@@ -106,8 +106,13 @@ public class FirehoseService implements ResourceProvider {
     private final boolean flusherEnabled;
     private final ScheduledExecutorService flushExecutor;
 
+    private String currentRegion() {
+        String region = regionResolver.getRegion();
+        return region == null || region.isBlank() ? regionResolver.getDefaultRegion() : region;
+    }
+
     private String scopedKey(String streamName) {
-        return scopedKey(regionResolver.getAccountId(), regionResolver.getRegion(), streamName);
+        return scopedKey(regionResolver.getAccountId(), currentRegion(), streamName);
     }
 
     private static String scopedKey(String accountId, String region, String streamName) {
@@ -595,7 +600,7 @@ public class FirehoseService implements ResourceProvider {
     }
 
     public void deleteDeliveryStream(String name) {
-        deleteDeliveryStream(regionResolver.getAccountId(), regionResolver.getRegion(), name);
+        deleteDeliveryStream(regionResolver.getAccountId(), currentRegion(), name);
     }
 
     public void deleteDeliveryStream(String accountId, String region, String name) {
@@ -613,7 +618,7 @@ public class FirehoseService implements ResourceProvider {
     }
 
     public List<String> listDeliveryStreams() {
-        String regionPrefix = regionResolver.getRegion() + "/";
+        String regionPrefix = currentRegion() + "/";
         return streamStore.scan(k -> k.startsWith(regionPrefix)).stream()
                 .map(DeliveryStreamDescription::getDeliveryStreamName).toList();
     }
