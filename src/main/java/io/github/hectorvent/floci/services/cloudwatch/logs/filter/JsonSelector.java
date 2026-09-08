@@ -114,7 +114,11 @@ final class JsonSelector {
                 throw cursor.error("expected an array index, '*' or a quoted property name inside '[ ]'");
             }
             text.append(digits);
-            segment = new Index(Integer.parseInt(digits.toString()));
+            try {
+                segment = new Index(Integer.parseInt(digits.toString()));
+            } catch (NumberFormatException e) {
+                throw cursor.error("array index " + digits + " is too large");
+            }
         }
         if (cursor.peek() != ']') {
             throw cursor.error("expected ']'");
