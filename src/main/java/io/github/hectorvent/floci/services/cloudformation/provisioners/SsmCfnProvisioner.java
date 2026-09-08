@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -41,6 +42,13 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Name", name);
         r.getAttributes().put("Type", type);
         r.getAttributes().put("Value", value);
+        r.getAttributes().put("Arn", parameterArn(name, ctx));
+    }
+
+    /** AWS's form is {@code parameter/<name>} whether or not the name starts with a slash. */
+    private static String parameterArn(String name, ProvisionContext ctx) {
+        String path = name.startsWith("/") ? name : "/" + name;
+        return AwsArnUtils.Arn.of("ssm", ctx.region(), ctx.accountId(), "parameter" + path).toString();
     }
 
     @Override

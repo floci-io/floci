@@ -167,7 +167,7 @@ class TlsConfigSourceMetadataComparisonTest {
         Files.createDirectories(tlsDir);
 
         // Create malformed metadata file
-        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+        Path metadataFile = tlsDir.resolve("floci-server.metadata.json");
         Files.writeString(metadataFile, "{ invalid json }");
 
         List<String> currentHostnames = List.of("localhost", "127.0.0.1");
@@ -186,7 +186,7 @@ class TlsConfigSourceMetadataComparisonTest {
         Files.createDirectories(tlsDir);
 
         // Create metadata with null hostnames field
-        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+        Path metadataFile = tlsDir.resolve("floci-server.metadata.json");
         String json = "{\"generatedAt\":\"" + Instant.now().toString() + "\",\"flociVersion\":\"dev\"}";
         Files.writeString(metadataFile, json);
 
@@ -223,7 +223,7 @@ class TlsConfigSourceMetadataComparisonTest {
      * Helper method to create a metadata file with specified hostnames.
      */
     private void createMetadataFile(Path tlsDir, List<String> hostnames) throws IOException {
-        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+        Path metadataFile = tlsDir.resolve("floci-server.metadata.json");
         CertificateMetadata metadata = CertificateMetadata.create(hostnames, "dev");
 
         ObjectMapper objectMapper = new ObjectMapper();

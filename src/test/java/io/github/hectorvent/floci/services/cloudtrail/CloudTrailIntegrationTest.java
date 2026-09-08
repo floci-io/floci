@@ -354,6 +354,59 @@ class CloudTrailIntegrationTest {
     }
 
     @Test
+    void createTrailWithTagsListIsVisibleThroughListTags() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "created-tagged-" + suffix;
+        String destBucket = "created-tagged-logs-" + suffix;
+
+        createBucket(destBucket);
+        // The Terraform AWS provider never calls AddTags on create: it sends the resource's
+        // tags inside CreateTrail and then reads them back with ListTags on the post-create
+        // refresh, so tags dropped here would show up as a perpetual diff.
+        String trailArn = invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s","TagsList":[{"Key":"Environment","Value":"compat-test"},{"Key":"Owner","Value":"floci"}]}
+                """, trailName, destBucket))
+            .then().statusCode(200)
+            .extract().path("TrailARN");
+
+        invokeCloudTrail("ListTags", String.format("""
+                {"ResourceIdList":["%s"]}
+                """, trailArn))
+            .then().statusCode(200)
+                .body("ResourceTagList[0].ResourceId", equalTo(trailArn))
+                .body("ResourceTagList[0].TagsList", hasSize(2))
+                .body("ResourceTagList[0].TagsList.find { it.Key == 'Environment' }.Value", equalTo("compat-test"))
+                .body("ResourceTagList[0].TagsList.find { it.Key == 'Owner' }.Value", equalTo("floci"));
+    }
+
+    @Test
+    void createTrailWithMoreThanFiftyTagsIsRejected() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "too-many-tags-" + suffix;
+        String destBucket = "too-many-tags-logs-" + suffix;
+
+        createBucket(destBucket);
+        StringBuilder tagsList = new StringBuilder();
+        for (int i = 0; i < 51; i++) {
+            if (i > 0) {
+                tagsList.append(',');
+            }
+            tagsList.append("{\"Key\":\"k").append(i).append("\",\"Value\":\"v\"}");
+        }
+        invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s","TagsList":[%s]}
+                """, trailName, destBucket, tagsList))
+            .then().statusCode(400)
+                .body(containsString("TagsLimitExceededException"));
+
+        // A rejected CreateTrail must not leave a half-created trail behind.
+        invokeCloudTrail("DescribeTrails",
+                String.format("{\"trailNameList\":[\"%s\"]}", trailName))
+            .then().statusCode(200)
+                .body("trailList", hasSize(0));
+    }
+
+    @Test
     void listTagsOmitsValueForTagWithNoValue() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String trailName = "novalue-" + suffix;

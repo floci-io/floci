@@ -53,6 +53,10 @@ class IamRoleCfnProvisionerTest {
 
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
 
+        // resolveStringList delegates to the real engine method; for the literal arrays these
+        // tests use it just walks the array and calls resolve(...) per element, stubbed above.
+        when(engine.resolveStringList(any())).thenCallRealMethod();
+
         when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
                 JsonNode node = inv.getArgument(0);
                 return node != null && node.isTextual() ? node.asText() : node.toString();

@@ -39,6 +39,14 @@ public class LambdaFunction {
     private List<Map<String, Object>> policies = new ArrayList<>();
     private long lastModified;
     private String revisionId;
+    /**
+     * For a published version, the {@code revisionId} that {@code $LATEST} carried when this
+     * version was cut. AWS does not publish a second version when nothing has changed since the
+     * last one, and {@code $LATEST}'s revision is regenerated on every code and configuration
+     * update, so matching it is exactly the "unchanged since" test (issue #2822). Null on
+     * {@code $LATEST} itself, and on versions published before this was recorded.
+     */
+    private String sourceRevisionId;
     private String version = "$LATEST";
     private LambdaUrlConfig urlConfig;
     private Integer reservedConcurrentExecutions;
@@ -147,6 +155,8 @@ public class LambdaFunction {
     public void setLastModified(long lastModified) { this.lastModified = lastModified; }
 
     public String getRevisionId() { return revisionId; }
+    public String getSourceRevisionId() { return sourceRevisionId; }
+    public void setSourceRevisionId(String sourceRevisionId) { this.sourceRevisionId = sourceRevisionId; }
     public void setRevisionId(String revisionId) { this.revisionId = revisionId; }
 
     public String getVersion() { return version; }

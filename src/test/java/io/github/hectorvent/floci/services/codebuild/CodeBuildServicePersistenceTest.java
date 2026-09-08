@@ -34,6 +34,7 @@ class CodeBuildServicePersistenceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
+    private static final String OTHER_ACCOUNT = "111111111111";
 
     @Test
     void durableResourcesSurviveRestart() {
@@ -87,6 +88,59 @@ class CodeBuildServicePersistenceTest {
     }
 
     @Test
+    void buildNumbersContinueAfterRestart() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+
+        CodeBuildService first = serviceWithStorage(storage);
+        first.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                new ProjectEnvironment(), "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+        first.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null);
+        Build second = first.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null);
+
+        CodeBuildService reloaded = serviceWithStorage(storage);
+        Build third = reloaded.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null);
+
+        assertEquals(2, second.getBuildNumber());
+        assertEquals(3, third.getBuildNumber());
+        assertEquals("p1:3", third.getId());
+    }
+
+    @Test
+    void buildNumbersAreIsolatedByAccountAcrossRestart() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+
+        CodeBuildService first = serviceWithStorage(storage);
+        first.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                new ProjectEnvironment(), "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+
+        Build accountBuild = first.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null);
+        Build otherAccountBuild = first.startBuild(REGION, OTHER_ACCOUNT, "p1", null,
+                null, null, null, null, null, null);
+
+        assertEquals(1, accountBuild.getBuildNumber());
+        assertEquals(1, otherAccountBuild.getBuildNumber());
+        assertEquals(accountBuild.getId(), otherAccountBuild.getId());
+        assertEquals(accountBuild.getArn(), first.getBuild(REGION, ACCOUNT, accountBuild.getId()).getArn());
+        assertEquals(otherAccountBuild.getArn(),
+                first.getBuild(REGION, OTHER_ACCOUNT, otherAccountBuild.getId()).getArn());
+
+        CodeBuildService reloaded = serviceWithStorage(storage);
+
+        assertEquals(2, reloaded.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null).getBuildNumber());
+        assertEquals(2, reloaded.startBuild(REGION, OTHER_ACCOUNT, "p1", null,
+                null, null, null, null, null, null).getBuildNumber());
+    }
+
+    @Test
     void startAndRetryBuildResponsesUseAcceptedBuildSnapshot() {
         CodeBuildRunner runner = mock(CodeBuildRunner.class);
         doAnswer(invocation -> {
@@ -108,14 +162,14 @@ class CodeBuildServicePersistenceTest {
         assertEquals("IN_PROGRESS", startResponse.getBuildStatus());
         assertEquals(false, startResponse.getBuildComplete());
         assertEquals("SUBMITTED", startResponse.getCurrentPhase());
-        assertEquals("FAILED", service.getBuild(REGION, startResponse.getId()).getBuildStatus());
+        assertEquals("FAILED", service.getBuild(REGION, ACCOUNT, startResponse.getId()).getBuildStatus());
 
         Build retryResponse = service.retryBuild(REGION, ACCOUNT, startResponse.getId());
         assertEquals("IN_PROGRESS", retryResponse.getBuildStatus());
         assertEquals(false, retryResponse.getBuildComplete());
         assertEquals("SUBMITTED", retryResponse.getCurrentPhase());
         assertTrue(retryResponse.getBuildNumber() > startResponse.getBuildNumber());
-        assertEquals("FAILED", service.getBuild(REGION, retryResponse.getId()).getBuildStatus());
+        assertEquals("FAILED", service.getBuild(REGION, ACCOUNT, retryResponse.getId()).getBuildStatus());
     }
 
     private static ProjectSource source(String type) {

@@ -619,7 +619,8 @@ class StepFunctionsJsonataIntegrationTest {
 
         assertEquals("FAILED", failure.jsonPath().getString("status"));
         assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
-        assertEquals("The provided ReaderConfig.ItemsPointer does not match any valid path in the JSON structure.",
+        assertEquals("An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). "
+                + "The provided ReaderConfig.ItemsPointer does not match any valid path in the JSON structure.",
                 failure.jsonPath().getString("cause"));
     }
 
@@ -672,7 +673,8 @@ class StepFunctionsJsonataIntegrationTest {
 
         assertEquals("FAILED", failure.jsonPath().getString("status"));
         assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
-        assertEquals("Attempting to map over non-iterable node.", failure.jsonPath().getString("cause"));
+        assertEquals("An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). "
+                + "Attempting to map over non-iterable node.", failure.jsonPath().getString("cause"));
     }
 
     @Test
@@ -770,7 +772,8 @@ class StepFunctionsJsonataIntegrationTest {
 
         assertEquals("FAILED", failure.jsonPath().getString("status"));
         assertEquals("States.Runtime", failure.jsonPath().getString("error"));
-        assertEquals("The ItemReader, ItemBatcher and ResultWriter fields are not supported for INLINE maps",
+        assertEquals("An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). "
+                + "The ItemReader, ItemBatcher and ResultWriter fields are not supported for INLINE maps",
                 failure.jsonPath().getString("cause"));
     }
 
@@ -1295,7 +1298,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Output/v' "
+        assertEquals("An error occurred while executing the state 'Transform' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field 'Output/v' "
                 + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
 
         String catching = definition.replace("\"End\": true",
@@ -1390,7 +1394,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Assign/x' "
+        assertEquals("An error occurred while executing the state 'Bind' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field 'Assign/x' "
                 + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1421,7 +1426,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+        assertEquals("An error occurred while executing the state 'Send' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field "
                 + "'Arguments/MessageGroupId' returned nothing (undefined).",
                 failure.jsonPath().getString("cause"));
     }
@@ -1454,7 +1460,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+        assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field "
                 + "'Choices[1]/Condition' returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1516,7 +1523,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+        assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field "
                 + "'Choices[1]/Output/v' returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1546,7 +1554,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+        assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field "
                 + "'Choices[0]/Assign/x' returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1586,7 +1595,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+        assertEquals("An error occurred while executing the state 'Boom' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field "
                 + "'Catch[1]/Output/v' returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1608,7 +1618,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Seconds' "
+        assertEquals("An error occurred while executing the state 'Pause' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field 'Seconds' "
                 + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1631,14 +1642,16 @@ class StepFunctionsJsonataIntegrationTest {
                 createStateMachine("jsonata-fail-error-returned-nothing-test",
                         definition.formatted("{% $states.input.missing %}", "boom")), "{}"));
         assertEquals("States.QueryEvaluationError", errorFailure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Error' "
+        assertEquals("An error occurred while executing the state 'Stop' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field 'Error' "
                 + "returned nothing (undefined).", errorFailure.jsonPath().getString("cause"));
 
         Response causeFailure = waitForExecutionFailure(startExecution(
                 createStateMachine("jsonata-fail-cause-returned-nothing-test",
                         definition.formatted("Boom", "{% $states.input.missing %}")), "{}"));
         assertEquals("States.QueryEvaluationError", causeFailure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Cause' "
+        assertEquals("An error occurred while executing the state 'Stop' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field 'Cause' "
                 + "returned nothing (undefined).", causeFailure.jsonPath().getString("cause"));
     }
 
@@ -1667,7 +1680,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Items' "
+        assertEquals("An error occurred while executing the state 'Fan' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field 'Items' "
                 + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1698,7 +1712,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+        assertEquals("An error occurred while executing the state 'Fan' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field "
                 + "'MaxConcurrency' returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
@@ -1758,7 +1773,8 @@ class StepFunctionsJsonataIntegrationTest {
         Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Output' "
+        assertEquals("An error occurred while executing the state 'Transform' (entered at the event id #2). "
+                + "The JSONata expression '$states.input.missing' specified for the field 'Output' "
                 + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 

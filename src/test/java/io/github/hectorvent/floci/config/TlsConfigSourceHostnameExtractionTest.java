@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Tests the extractCustomHostnames() method to verify:
  * - Extraction from FLOCI_HOSTNAME
  * - Extraction from FLOCI_BASE_URL (DNS names and IP addresses)
+ * - Extraction from FLOCI_SERVICES_IOT_ENDPOINT_ADDRESS (the port, when given, is dropped)
  * - Filtering of default values (localhost, 127.0.0.1, 0.0.0.0)
  * - Deduplication of hostnames
  * - Edge case handling (malformed URLs, missing host, IPv6 addresses)
@@ -24,6 +25,7 @@ class TlsConfigSourceHostnameExtractionTest {
     void cleanupSystemProperties() {
         System.clearProperty("floci.hostname");
         System.clearProperty("floci.base-url");
+        System.clearProperty("floci.services.iot.endpoint-address");
     }
 
     /**
@@ -241,6 +243,79 @@ class TlsConfigSourceHostnameExtractionTest {
         // IPv6 loopback should be extracted (URI.getHost() returns it with brackets)
         assertTrue(hostnames.contains("[::1]"), 
             "Should extract IPv6 address '[::1]' from FLOCI_BASE_URL");
+    }
+
+    /**
+     * The IoT endpoint address is a name devices verify on 8883 and 443, so it joins the SANs.
+     */
+    @Test
+    void testExtractFromIotEndpointAddress() throws Exception {
+        System.setProperty("floci.services.iot.endpoint-address", "iot.example.localhost.floci.io");
+
+        List<String> hostnames = invokeExtractCustomHostnames();
+
+        assertEquals(List.of("iot.example.localhost.floci.io"), hostnames);
+    }
+
+    @Test
+    void testIotEndpointAddressPortIsDropped() throws Exception {
+        System.setProperty("floci.services.iot.endpoint-address", "iot.example.localhost.floci.io:8443");
+
+        List<String> hostnames = invokeExtractCustomHostnames();
+
+        assertEquals(List.of("iot.example.localhost.floci.io"), hostnames);
+    }
+
+    @Test
+    void testIotEndpointAddressKeepsAnIpv6Literal() throws Exception {
+        System.setProperty("floci.services.iot.endpoint-address", "[fd00::10]:8883");
+
+        List<String> hostnames = invokeExtractCustomHostnames();
+
+        assertEquals(List.of("[fd00::10]"), hostnames);
+    }
+
+    @Test
+    void testIotEndpointAddressDefaultHostIsFiltered() throws Exception {
+        System.setProperty("floci.services.iot.endpoint-address", "localhost:4566");
+
+        List<String> hostnames = invokeExtractCustomHostnames();
+
+        assertTrue(hostnames.isEmpty(), "localhost is covered by the default SANs");
+    }
+
+    @Test
+    void testIotEndpointAddressIsDeduplicatedAgainstHostname() throws Exception {
+        System.setProperty("floci.hostname", "floci");
+        System.setProperty("floci.services.iot.endpoint-address", "floci:8883");
+
+        List<String> hostnames = invokeExtractCustomHostnames();
+
+        assertEquals(List.of("floci"), hostnames);
+    }
+
+    @Test
+    void testUnparsableIotEndpointAddressIsSkipped() throws Exception {
+        System.setProperty("floci.services.iot.endpoint-address", "not a host");
+
+        List<String> hostnames = invokeExtractCustomHostnames();
+
+        assertTrue(hostnames.isEmpty(), "an address that is not a host is logged and skipped, not fatal");
+    }
+
+    /**
+     * A URL instead of a host is an operator typo: java.net.URI would read "https" as the host,
+     * so the value is skipped rather than adding a wrong name to the certificate.
+     */
+    @Test
+    void testIotEndpointAddressWithASchemeOrPathIsSkipped() throws Exception {
+        for (String typo : List.of("https://iot.example.localhost.floci.io", "iot.example.localhost.floci.io:8443/",
+                "user@iot.example.localhost.floci.io", "iot.example.localhost.floci.io:abc",
+                "iot.example.localhost.floci.io?x=1", "iot.example.localhost.floci.io#fragment")) {
+            System.setProperty("floci.services.iot.endpoint-address", typo);
+
+            assertTrue(invokeExtractCustomHostnames().isEmpty(), typo);
+        }
     }
 
     // ==================== Helper Methods ====================

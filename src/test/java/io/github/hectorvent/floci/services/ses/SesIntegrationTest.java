@@ -519,8 +519,8 @@ class SesIntegrationTest {
 
     @Test
     @Order(26)
-    void updateAccountSendingEnabled_treatsMissingOrBlankEnabledAsFalse() {
-        // Missing Enabled parameter
+    void updateAccountSendingEnabled_missingEnabledDefaultsToFalse_blankEnabledIsMalformed() {
+        // Missing Enabled parameter defaults to false (probed against real AWS 2026-09-05)
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", authorization("email"))
@@ -540,18 +540,8 @@ class SesIntegrationTest {
             .statusCode(200)
             .body(containsString("<Enabled>false</Enabled>"));
 
-        // restore so the next assertion observes the blank-string default cleanly
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
-            .formParam("Action", "UpdateAccountSendingEnabled")
-            .formParam("Enabled", "true")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-
-        // Blank Enabled parameter (e.g. AWS CLI passing --enabled "") behaves the same
+        // A present-but-blank Enabled (e.g. AWS CLI passing --enabled "") is rejected,
+        // unlike the absent case (probed against real AWS 2026-09-05)
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", authorization("email"))
@@ -560,17 +550,9 @@ class SesIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
-
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("email"))
-            .formParam("Action", "GetAccountSendingEnabled")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<Enabled>false</Enabled>"));
+            .statusCode(400)
+            .body(containsString("<Code>MalformedInput</Code>"))
+            .body(containsString("missing value for boolean type"));
 
         // restore default state for downstream tests
         given()
@@ -645,7 +627,8 @@ class SesIntegrationTest {
 
     @Test
     @Order(28)
-    void updateAccountSendingEnabled_invalidValue_returns400() {
+    void updateAccountSendingEnabled_invalidValue_returnsMalformedInput() {
+        // Probed against real AWS 2026-09-05: non-xsd boolean values are MalformedInput
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", authorization("email"))
@@ -655,6 +638,7 @@ class SesIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("InvalidParameterValue"));
+            .body(containsString("<Code>MalformedInput</Code>"))
+            .body(containsString("boolean must follow xsd1.1 definition"));
     }
 }

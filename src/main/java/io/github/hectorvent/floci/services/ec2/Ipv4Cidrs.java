@@ -26,6 +26,16 @@ final class Ipv4Cidrs {
         return x[0] <= y[1] && y[0] <= x[1];
     }
 
+    /** True when {@code cidr} parses as an IPv4 block, so the other checks can be applied to it. */
+    static boolean isIpv4(String cidr) {
+        try {
+            parse(cidr);
+            return true;
+        } catch (AwsException e) {
+            return false;
+        }
+    }
+
     /**
      * The first /{@code netmask} block inside any of the {@code provisioned}
      * CIDRs (in order) that overlaps none of the {@code occupied} CIDRs, or

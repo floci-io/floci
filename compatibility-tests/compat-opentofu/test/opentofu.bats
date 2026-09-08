@@ -16,6 +16,9 @@ setup_file() {
     create_state_backend
     generate_backend_config
 
+    # 12 MiB source for aws_s3_object.large: above the provider's 5 MiB part size, so it goes multipart
+    head -c $((12 * 1024 * 1024)) /dev/urandom > "$TOFU_DIR/large-object.bin"
+
     echo "# --- tofu init ---" >&3
     run tofu init -backend-config=/tmp/floci-backend.hcl \
         -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color
@@ -53,6 +56,7 @@ teardown_file() {
 
     echo "# --- tofu destroy ---" >&3
     tofu destroy -var="endpoint=${FLOCI_ENDPOINT}" -input=false -auto-approve -no-color || true
+    rm -f "$TOFU_DIR/large-object.bin"
 }
 
 setup() {
@@ -64,6 +68,72 @@ setup() {
 @test "OpenTofu: S3 bucket created" {
     run aws_cmd s3api head-bucket --bucket floci-compat-app
     assert_success
+}
+
+# Base64 of a hex SHA256 digest, the way S3 encodes checksums.
+hex_to_b64() {
+    printf "$(echo "$1" | sed 's/../\\x&/g')" | base64 | tr -d '\n'
+}
+
+# The composite SHA256 S3 stores for a multipart object: cut the local file at the part sizes S3
+# reports, hash each part, hash the concatenated binary digests and append the part count.
+sha256_composite_by_sizes() {
+    local file="$1"
+    shift
+    local joined offset=0 count=0 size hex
+    joined=$(mktemp)
+    for size in "$@"; do
+        hex=$(tail -c +$((offset + 1)) "$file" | head -c "$size" | sha256sum | cut -c1-64)
+        printf "$(echo "$hex" | sed 's/../\\x&/g')" >> "$joined"
+        offset=$((offset + size))
+        count=$((count + 1))
+    done
+    echo "$(hex_to_b64 "$(sha256sum "$joined" | cut -c1-64)")-$count"
+    rm -f "$joined"
+}
+
+@test "OpenTofu: large aws_s3_object is multipart-uploaded with the composite SHA256 checksum" {
+    run aws_cmd s3api head-object --bucket floci-compat-app --key large/multipart.bin \
+        --checksum-mode ENABLED --output json
+    assert_success
+    local checksum type etag
+    checksum=$(echo "$output" | jq -r '.ChecksumSHA256')
+    type=$(echo "$output" | jq -r '.ChecksumType')
+    etag=$(echo "$output" | jq -r '.ETag')
+    [ "$type" = "COMPOSITE" ]
+    [[ "$etag" =~ -[0-9]+\"$ ]]
+
+    run aws_cmd s3api get-object-attributes --bucket floci-compat-app --key large/multipart.bin \
+        --object-attributes Checksum ObjectParts --output json
+    assert_success
+    [ "$(echo "$output" | jq -r '.ObjectParts.TotalPartsCount')" -gt 1 ]
+    local sizes expected
+    sizes=$(echo "$output" | jq -r '.ObjectParts.Parts[].Size')
+    expected=$(sha256_composite_by_sizes "$TOFU_DIR/large-object.bin" $sizes)
+    [ "$checksum" = "$expected" ]
+    # GetObjectAttributes reports the composite without the part-count suffix
+    [ "$(echo "$output" | jq -r '.Checksum.ChecksumSHA256')" = "${expected%-*}" ]
+}
+
+@test "OpenTofu: state holds the composite checksum S3 reports for the large object" {
+    cd "$TOFU_DIR"
+    run tofu output -raw large_object_checksum_sha256
+    assert_success
+    local head_checksum
+    head_checksum=$(aws_cmd s3api head-object --bucket floci-compat-app --key large/multipart.bin \
+        --checksum-mode ENABLED --output json | jq -r '.ChecksumSHA256')
+    [ "$output" = "$head_checksum" ]
+}
+
+@test "OpenTofu: re-planning the large object reports no changes" {
+    cd "$TOFU_DIR"
+    run tofu plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_s3_object.large
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
 }
 
 @test "OpenTofu: SQS queue created" {
@@ -78,6 +148,13 @@ setup() {
     assert_output --partial "floci-compat-events"
 }
 
+@test "OpenTofu: SES receipt filter created" {
+    run aws_cmd ses list-receipt-filters
+    assert_success
+    assert_output --partial "floci-compat-filter"
+    assert_output --partial "10.10.10.0/24"
+}
+
 @test "OpenTofu: SES receipt rule set created and active" {
     run aws_cmd ses describe-receipt-rule-set --rule-set-name floci-compat-rule-set
     assert_success
@@ -86,6 +163,15 @@ setup() {
     run aws_cmd ses describe-active-receipt-rule-set
     assert_success
     assert_output --partial "floci-compat-rule-set"
+    assert_output --partial "X-Floci-Compat"
+}
+
+@test "OpenTofu: SES receipt rule round-trips its actions" {
+    run aws_cmd ses describe-receipt-rule --rule-set-name floci-compat-rule-set --rule-name floci-compat-rule
+    assert_success
+    assert_output --partial "X-Floci-Compat"
+    assert_output --partial "floci-compat-events"
+    assert_output --partial "RuleSet"
 }
 
 @test "OpenTofu: DynamoDB table created" {
@@ -356,4 +442,42 @@ setup() {
         --query "AutoEnableOrganizationMembers" --output text
     assert_success
     assert_output "ALL"
+}
+
+@test "OpenTofu: Transfer Family server created and ONLINE" {
+    run aws_cmd transfer list-servers --query "Servers[0].State" --output text
+    assert_success
+    assert_output "ONLINE"
+}
+
+@test "OpenTofu: CloudTrail trail created, logging and tagged" {
+    run aws_cmd cloudtrail describe-trails --trail-name-list floci-compat-trail \
+        --query "trailList[0].S3BucketName" --output text
+    assert_success
+    assert_output "floci-compat-trail-logs"
+    run aws_cmd cloudtrail get-trail-status --name floci-compat-trail \
+        --query "IsLogging" --output text
+    assert_success
+    assert_output "True"
+    run aws_cmd cloudtrail describe-trails --trail-name-list floci-compat-trail \
+        --query "trailList[0].TrailARN" --output text
+    assert_success
+    TRAIL_ARN="$output"
+    run aws_cmd cloudtrail list-tags --resource-id-list "$TRAIL_ARN" \
+        --query "ResourceTagList[0].TagsList[?Key=='Environment'].Value" --output text
+    assert_success
+    assert_output "compat-test"
+}
+
+# The tag refresh path (issue #2800): a re-plan reads the trail back, including its
+# tags via ListTags, and must not report drift.
+@test "OpenTofu: re-planning CloudTrail reports no changes" {
+    cd "$TOFU_DIR"
+    run tofu plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_cloudtrail.compat
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
 }

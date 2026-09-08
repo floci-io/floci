@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
@@ -94,6 +95,7 @@ public class EmulatorLifecycle {
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
+    private final StepFunctionsService stepFunctionsService;
     private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
 
@@ -127,6 +129,7 @@ public class EmulatorLifecycle {
                              FlociUiManager flociUiManager,
                              InitLifecycleState initLifecycleState,
                              SchemaCreationWorker schemaCreationWorker,
+                             StepFunctionsService stepFunctionsService,
                              jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
                              PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
@@ -159,6 +162,7 @@ public class EmulatorLifecycle {
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
         this.schemaCreationWorker = schemaCreationWorker;
+        this.stepFunctionsService = stepFunctionsService;
         this.containerTeardowns = containerTeardowns;
         this.persistentPathValidator = persistentPathValidator;
     }
@@ -191,6 +195,7 @@ public class EmulatorLifecycle {
         }
         schemaCreationWorker.recoverOrphans();
         schemaCreationWorker.rehydrateSchemas();
+        stepFunctionsService.abortAbandonedExecutions();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();

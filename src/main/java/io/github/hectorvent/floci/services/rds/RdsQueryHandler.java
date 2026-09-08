@@ -92,6 +92,8 @@ public class RdsQueryHandler {
                 case "DescribeOptionGroups" -> handleDescribeOptionGroups(params, region);
                 case "ModifyOptionGroup" -> handleModifyOptionGroup(params, region);
                 case "DeleteOptionGroup" -> handleDeleteOptionGroup(params, region);
+                case "CreateDBSnapshot" -> handleCreateDbSnapshot(params);
+                case "RestoreDBInstanceFromDBSnapshot" -> handleRestoreDbInstanceFromDbSnapshot(params);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
                 case "DescribeDBProxies" -> handleDescribeDbProxies(params, region);
                 case "CreateDBProxy" -> handleCreateDbProxy(params, region);
@@ -114,7 +116,8 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in RDS {0}", action);
-            return Response.serverError().entity("Unexpected error: " + e.getMessage()).build();
+            return AwsQueryResponse.error("InternalFailure",
+                    "Unexpected error: " + e.getMessage(), AwsNamespaces.RDS, 500);
         }
     }
 
@@ -452,6 +455,8 @@ public class RdsQueryHandler {
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String availabilityZone = params.getFirst("AvailabilityZone");
         boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
+        boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
+        String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
 
         if (engineVersion == null) {
             engineVersion = defaultEngineVersion(engine);
@@ -465,7 +470,8 @@ public class RdsQueryHandler {
             DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, paramGroupName,
                     dbSubnetGroupName, availabilityZone, multiAz, region,
-                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause);
+                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -567,13 +573,17 @@ public class RdsQueryHandler {
         String newPassword = params.getFirst("MasterUserPassword");
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
+        String manageStr = params.getFirst("ManageMasterUserPassword");
+        Boolean manageMasterUserPassword = manageStr != null ? Boolean.parseBoolean(manageStr) : null;
+        String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
         try {
             Double serverlessV2Min = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MinCapacity");
             Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
-                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause, region);
+                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -929,12 +939,71 @@ public class RdsQueryHandler {
 
     // ── Snapshots & Proxies (not modeled — empty lists) ───────────────────────
 
+    private Response handleCreateDbSnapshot(MultivaluedMap<String, String> params) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        String instanceId = params.getFirst("DBInstanceIdentifier");
+        if (snapshotId == null || snapshotId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBSnapshotIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        if (instanceId == null || instanceId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = service.createDbSnapshot(snapshotId, instanceId);
+            String result = dbSnapshotXml(snapshot);
+            return Response.ok(AwsQueryResponse.envelope("CreateDBSnapshot", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleRestoreDbInstanceFromDbSnapshot(MultivaluedMap<String, String> params) {
+        String instanceId = params.getFirst("DBInstanceIdentifier");
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        if (instanceId == null || instanceId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        if (snapshotId == null || snapshotId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBSnapshotIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        String dbInstanceClass = params.getFirst("DBInstanceClass");
+        String availabilityZone = params.getFirst("AvailabilityZone");
+        String multiAzStr = params.getFirst("MultiAZ");
+        boolean multiAz = multiAzStr != null && Boolean.parseBoolean(multiAzStr);
+        String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
+
+        java.util.List<String> vpcSecurityGroupIds = new java.util.ArrayList<>();
+        for (int i = 1; ; i++) {
+            String sg = params.getFirst("VpcSecurityGroupIds.VpcSecurityGroupId." + i);
+            if (sg == null) break;
+            vpcSecurityGroupIds.add(sg);
+        }
+
+        java.util.Map<String, String> tags = parseTags(params);
+
+        try {
+            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags);
+            String result = dbInstanceXml(instance);
+            return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
     private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params) {
-        // DB snapshots are not modeled; return the RDS Query API's wire-accurate empty
-        // result (empty <DBSnapshots> wrapper, no <Marker>) so SDK clients complete the
-        // read instead of failing with UnsupportedOperation.
-        String result = new XmlBuilder().start("DBSnapshots").end("DBSnapshots").build();
-        return Response.ok(AwsQueryResponse.envelope("DescribeDBSnapshots", AwsNamespaces.RDS, result)).build();
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        String instanceId = params.getFirst("DBInstanceIdentifier");
+        try {
+            Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> result = service.describeDbSnapshots(snapshotId, instanceId);
+            XmlBuilder xml = new XmlBuilder().start("DBSnapshots");
+            for (io.github.hectorvent.floci.services.rds.model.DbSnapshot s : result) {
+                xml.raw(dbSnapshotXml(s));
+            }
+            xml.end("DBSnapshots");
+            return Response.ok(AwsQueryResponse.envelope("DescribeDBSnapshots", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
     }
 
     private Response handleDescribeDbProxies(MultivaluedMap<String, String> params, String region) {
@@ -1274,6 +1343,26 @@ public class RdsQueryHandler {
         return new XmlBuilder().start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance").build();
     }
 
+    private String dbSnapshotXml(io.github.hectorvent.floci.services.rds.model.DbSnapshot s) {
+        String engineStr = s.getEngine() != null ? s.getEngine().name().toLowerCase() : "";
+        XmlBuilder xml = new XmlBuilder().start("DBSnapshot")
+                .elem("DBSnapshotIdentifier", s.getDbSnapshotIdentifier())
+                .elem("DBInstanceIdentifier", s.getDbInstanceIdentifier())
+                .elem("SnapshotCreateTime", s.getSnapshotCreateTime() != null ? s.getSnapshotCreateTime().toString() : "")
+                .elem("Engine", engineStr)
+                .elem("EngineVersion", s.getEngineVersion())
+                .elem("AllocatedStorage", s.getAllocatedStorage())
+                .elem("Status", s.getStatus())
+                .elem("MasterUsername", s.getMasterUsername());
+        if (s.getAvailabilityZone() != null) xml.elem("AvailabilityZone", s.getAvailabilityZone());
+        if (s.getVpcId() != null) xml.elem("VpcId", s.getVpcId());
+        xml.elem("InstanceCreateTime", s.getInstanceCreateTime() != null ? s.getInstanceCreateTime().toString() : "")
+                .elem("Port", s.getPort())
+                .elem("IAMDatabaseAuthenticationEnabled", s.isIamDatabaseAuthenticationEnabled());
+        if (s.getDbiResourceId() != null) xml.elem("DbiResourceId", s.getDbiResourceId());
+        return xml.end("DBSnapshot").build();
+    }
+
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
         String engineStr = instanceEngine(i);
@@ -1376,16 +1465,19 @@ public class RdsQueryHandler {
             return name;
         }
 
-        String engine = instance.getEngine() != null
-                ? instance.getEngine().name().toLowerCase()
-                : "unknown";
-        return "default." + engine + dbEngineMajorVersion(instance);
+        String engine = instanceEngine(instance);
+        return "default." + (engine.isEmpty() ? "unknown" : engine) + dbEngineMajorVersion(instance, engine);
     }
 
-    private static String dbEngineMajorVersion(DbInstance instance) {
+    /**
+     * AWS uses major.minor for the MySQL family's default parameter group name
+     * (e.g. {@code default.aurora-mysql8.0}), but only the major version for the
+     * Postgres family ({@code default.aurora-postgresql16}).
+     */
+    private static String dbEngineMajorVersion(DbInstance instance, String engine) {
         String engineVersion = instance.getEngineVersion();
         if ((engineVersion == null || engineVersion.isBlank()) && instance.getEngine() != null) {
-            engineVersion = defaultEngineVersion(instance.getEngine().name());
+            engineVersion = defaultEngineVersion(engine);
         }
         if (engineVersion == null || engineVersion.isBlank()) {
             return "";
@@ -1396,7 +1488,18 @@ public class RdsQueryHandler {
         while (end < trimmed.length() && Character.isDigit(trimmed.charAt(end))) {
             end++;
         }
-        return end == 0 ? "" : trimmed.substring(0, end);
+        if (end == 0) {
+            return "";
+        }
+        boolean majorMinor = engine.contains("mysql") || engine.equals("mariadb");
+        if (!majorMinor || end >= trimmed.length() || trimmed.charAt(end) != '.') {
+            return trimmed.substring(0, end);
+        }
+        int minorEnd = end + 1;
+        while (minorEnd < trimmed.length() && Character.isDigit(trimmed.charAt(minorEnd))) {
+            minorEnd++;
+        }
+        return minorEnd == end + 1 ? trimmed.substring(0, end) : trimmed.substring(0, minorEnd);
     }
 
     private static void writeTags(XmlBuilder xml, Map<String, String> tags) {
@@ -1451,6 +1554,15 @@ public class RdsQueryHandler {
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
            .elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn());
+        if (c.getMasterUserSecretArn() != null && !c.getMasterUserSecretArn().isBlank()) {
+            xml.start("MasterUserSecret")
+                    .elem("SecretArn", c.getMasterUserSecretArn())
+                    .elem("SecretStatus", c.getMasterUserSecretStatus() == null ? "active" : c.getMasterUserSecretStatus());
+            if (c.getMasterUserSecretKmsKeyId() != null && !c.getMasterUserSecretKmsKeyId().isBlank()) {
+                xml.elem("KmsKeyId", c.getMasterUserSecretKmsKeyId());
+            }
+            xml.end("MasterUserSecret");
+        }
         if (c.getServerlessV2MinCapacity() != null || c.getServerlessV2MaxCapacity() != null) {
             xml.start("ServerlessV2ScalingConfiguration");
             if (c.getServerlessV2MinCapacity() != null) {

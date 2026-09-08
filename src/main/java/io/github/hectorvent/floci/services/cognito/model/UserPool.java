@@ -35,6 +35,8 @@ public class UserPool {
     private Map<String, Object> verificationMessageTemplate = new HashMap<>();
     private String smsAuthenticationMessage;
     private String mfaConfiguration = "OFF";
+    /** Null until SetUserPoolMfaConfig sets it; absent from responses while null, as AWS omits it. */
+    private Boolean softwareTokenMfaEnabled;
     private Map<String, Object> deviceConfiguration = new HashMap<>();
     private int estimatedNumberOfUsers = 0;
     private Map<String, Object> emailConfiguration = new HashMap<>();
@@ -125,6 +127,10 @@ public class UserPool {
     public void setSmsAuthenticationMessage(String smsAuthenticationMessage) { this.smsAuthenticationMessage = smsAuthenticationMessage; }
 
     public String getMfaConfiguration() { return mfaConfiguration; }
+    public Boolean getSoftwareTokenMfaEnabled() { return softwareTokenMfaEnabled; }
+    public void setSoftwareTokenMfaEnabled(Boolean softwareTokenMfaEnabled) {
+        this.softwareTokenMfaEnabled = softwareTokenMfaEnabled;
+    }
     public void setMfaConfiguration(String mfaConfiguration) { this.mfaConfiguration = mfaConfiguration; }
 
     public Map<String, Object> getDeviceConfiguration() { return deviceConfiguration; }

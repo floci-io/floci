@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -68,7 +69,8 @@ class LambdaArnInvocationAccountTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                new ObjectMapper());
 
         InvokeResult result = service.invokeArn(functionArn, "{}".getBytes(), InvocationType.Event);
 
@@ -129,7 +131,8 @@ class LambdaArnInvocationAccountTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                new ObjectMapper());
 
         InvokeResult versionResult = service.invokeArn(
                 functionArn + ":7", "{}".getBytes(), InvocationType.Event);
@@ -268,6 +271,7 @@ class LambdaArnInvocationAccountTest {
                 null,
                 null,
                 null,
-                null);
+                null,
+                new ObjectMapper());
     }
 }

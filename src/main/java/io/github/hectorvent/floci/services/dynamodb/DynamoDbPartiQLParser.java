@@ -12,7 +12,7 @@ public class DynamoDbPartiQLParser {
         UPDATE, SET, REMOVE, DELETE, AND, BETWEEN,
         IDENT, STRING, NUMBER, BOOL, NULL, QUESTION,
         EQ, NE, LT, LE, GT, GE,
-        LPAREN, RPAREN, LBRACE, RBRACE, COMMA, COLON,
+        LPAREN, RPAREN, LBRACE, RBRACE, COMMA, COLON, DOT,
         EOF
     }
 
@@ -22,7 +22,7 @@ public class DynamoDbPartiQLParser {
 
     public sealed interface Stmt permits Stmt.Select, Stmt.Insert, Stmt.Update, Stmt.Delete {
         String table();
-        record Select(String table, List<String> columns, List<Cond> where) implements Stmt {}
+        record Select(String table, String index, List<String> columns, List<Cond> where) implements Stmt {}
         record Insert(String table, Map<String, PVal> item)                 implements Stmt {}
         record Update(String table, List<Assign> sets, List<String> removes, List<Cond> where) implements Stmt {}
         record Delete(String table, List<Cond> where)                       implements Stmt {}
@@ -116,6 +116,7 @@ public class DynamoDbPartiQLParser {
             if (c == '}') { tokens.add(new Token(TType.RBRACE, "}")); i++; continue; }
             if (c == ',') { tokens.add(new Token(TType.COMMA, ",")); i++; continue; }
             if (c == ':') { tokens.add(new Token(TType.COLON, ":")); i++; continue; }
+            if (c == '.') { tokens.add(new Token(TType.DOT, ".")); i++; continue; }
             if (Character.isDigit(c) || (c == '-' && i + 1 < n && Character.isDigit(input.charAt(i + 1)))) {
                 int start = i;
                 if (c == '-') i++;
@@ -179,7 +180,7 @@ public class DynamoDbPartiQLParser {
         };
     }
 
-    // SELECT col [, col …] | * FROM "Table" [WHERE cond [AND cond …]]
+    // SELECT col [, col …] | * FROM "Table"["." "Index"] [WHERE cond [AND cond …]]
     private Stmt.Select parseSelect() {
         consume(TType.SELECT);
         List<String> cols = new ArrayList<>();
@@ -191,9 +192,14 @@ public class DynamoDbPartiQLParser {
         }
         consume(TType.FROM);
         String table = expectIdent();
+        String index = null;
+        if (peek().type() == TType.DOT) {
+            advance();
+            index = expectIdent();
+        }
         List<Cond> where = new ArrayList<>();
         if (peek().type() == TType.WHERE) { advance(); where = parseConditions(); }
-        return new Stmt.Select(table, cols, where);
+        return new Stmt.Select(table, index, cols, where);
     }
 
     // INSERT INTO "Table" VALUE {'key': val, …}

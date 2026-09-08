@@ -62,15 +62,17 @@ class Ec2FlowLogCfnProvisionerTest {
     @Test
     void flowLogSetsPhysicalIdAndIdAttribute() {
         when(flowLogs.createFlowLog(eq("us-east-1"), eq("vpc-123"), eq("VPC"), eq("ALL"),
-                eq("s3"), eq("arn:aws:s3:::flow-bucket"), eq("${srcaddr}"), eq(60)))
+                eq("cloud-watch-logs"), eq("arn:aws:logs:us-east-1:000000000000:log-group:flows"),
+                eq("arn:aws:iam::000000000000:role/flow-logs-role"), eq("${srcaddr}"), eq(60)))
                 .thenReturn(flowLog("fl-0abc"));
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode()
                 .put("ResourceId", "vpc-123")
                 .put("ResourceType", "VPC")
                 .put("TrafficType", "ALL")
-                .put("LogDestinationType", "s3")
-                .put("LogDestination", "arn:aws:s3:::flow-bucket")
+                .put("LogDestinationType", "cloud-watch-logs")
+                .put("LogDestination", "arn:aws:logs:us-east-1:000000000000:log-group:flows")
+                .put("DeliverLogsPermissionArn", "arn:aws:iam::000000000000:role/flow-logs-role")
                 .put("LogFormat", "${srcaddr}")
                 .put("MaxAggregationInterval", 60);
 
@@ -82,12 +84,12 @@ class Ec2FlowLogCfnProvisionerTest {
 
     @Test
     void omittedAggregationIntervalDefaultsToTenMinutes() {
-        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt()))
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
                 .thenReturn(flowLog("fl-0def"));
 
         provisioner.provision(resource(), mapper.createObjectNode().put("ResourceId", "vpc-9"), ctx());
 
-        verify(flowLogs).createFlowLog("us-east-1", "vpc-9", null, null, null, null, null, 600);
+        verify(flowLogs).createFlowLog("us-east-1", "vpc-9", null, null, null, null, null, null, 600);
     }
 
     @Test
@@ -104,7 +106,7 @@ class Ec2FlowLogCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
 
         // A second flow log here outlives the stack: delete only knows the id recorded last.
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
         assertEquals("fl-0abc", r.getPhysicalId());
         assertEquals("fl-0abc", r.getAttributes().get("Id"));
     }
@@ -123,7 +125,23 @@ class Ec2FlowLogCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
                 mapper.createObjectNode().put("ResourceId", "vpc-123").put("TrafficType", "REJECT"), ctx()));
         assertEquals("ValidationError", e.getErrorCode());
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void changingTheDeliverLogsPermissionArnReportsAnUnsupportedReplacement() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        existing.setDeliverLogsPermissionArn("arn:aws:iam::000000000000:role/old-role");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode().put("ResourceId", "vpc-123")
+                        .put("DeliverLogsPermissionArn", "arn:aws:iam::000000000000:role/new-role"), ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
     }
 
     @Test
@@ -141,7 +159,7 @@ class Ec2FlowLogCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
                 mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx()));
         assertEquals("ValidationError", e.getErrorCode());
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
     }
 
     @Test
@@ -160,7 +178,7 @@ class Ec2FlowLogCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
 
         assertEquals("fl-0abc", r.getPhysicalId());
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
     }
 
     @Test
@@ -183,7 +201,7 @@ class Ec2FlowLogCfnProvisionerTest {
         StackResource r = resource();
         r.setPhysicalId("fl-gone");
         when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-gone"))).thenReturn(List.of());
-        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt()))
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
                 .thenReturn(flowLog("fl-new"));
 
         provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());

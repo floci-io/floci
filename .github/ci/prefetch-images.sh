@@ -20,4 +20,5 @@ grep -q '/elasticache/' "$SHARD_FILE" && { pull valkey/valkey:8; pull memcached:
 grep -q '/memorydb/'    "$SHARD_FILE" && pull valkey/valkey:8
 grep -q '/ecr/'         "$SHARD_FILE" && pull registry:2
 grep -q '/ec2/'         "$SHARD_FILE" && { pull busybox:stable; pull alpine:latest; }
+grep -q '/common/docker/' "$SHARD_FILE" && pull public.ecr.aws/docker/library/python:3.12-alpine
 exit 0

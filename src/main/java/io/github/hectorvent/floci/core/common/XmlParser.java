@@ -1,12 +1,17 @@
 package io.github.hectorvent.floci.core.common;
 
 import org.jboss.logging.Logger;
+import org.w3c.dom.Document;
 
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
+import java.io.ByteArrayInputStream;
 import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,6 +41,23 @@ public final class XmlParser {
     }
 
     private XmlParser() {}
+
+    /**
+     * Parses XML into a namespace-aware DOM document with external entities and
+     * DTD processing disabled. DOM is required by the JDK XML-DSig API.
+     */
+    public static Document parseDocument(String xml) throws Exception {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
+        return factory.newDocumentBuilder().parse(
+                new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+    }
 
     /**
      * Reads the text content of the current element if it is a leaf (contains only text).
@@ -151,6 +173,63 @@ public final class XmlParser {
      */
     public static boolean containsValue(String xml, String elementName, String value) {
         return extractAll(xml, elementName).stream().anyMatch(value::equals);
+    }
+
+    /** A key paired with an optional version id, extracted from a {@code Delete} request's {@code <Object>} block. */
+    public record KeyVersion(String key, String versionId) {}
+
+    /**
+     * Extracts {@code (Key, VersionId)} pairs from an S3 {@code DeleteObjects} request body,
+     * one entry per {@code <Object>} block.
+     *
+     * <p>Unlike {@link #extractAll(String, String)}, which flattens every {@code <Key>} across
+     * the whole document, this keeps each key paired with the {@code VersionId} from the same
+     * {@code <Object>} block. This is needed so a batch delete can target the exact version named,
+     * rather than discarding it and always falling back to "no version specified".
+     *
+     * <p>{@code <VersionId>} is optional per the {@code Delete} request schema; an {@code <Object>}
+     * block that omits it yields an entry with a {@code null} versionId.
+     *
+     * <pre>{@code
+     * List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(body);
+     * }</pre>
+     */
+    public static List<KeyVersion> extractDeleteObjectEntries(String xml) {
+        List<KeyVersion> result = new ArrayList<>();
+        if (xml == null || xml.isEmpty()) {
+            return result;
+        }
+        try {
+            XMLStreamReader r = FACTORY.createXMLStreamReader(new StringReader(xml));
+            boolean inObject = false;
+            String key = null;
+            String versionId = null;
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String local = r.getLocalName();
+                    if ("Object".equals(local)) {
+                        inObject = true;
+                        key = null;
+                        versionId = null;
+                    } else if (inObject && "Key".equals(local)) {
+                        key = r.getElementText();
+                    } else if (inObject && "VersionId".equals(local)) {
+                        versionId = r.getElementText();
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT
+                        && inObject && "Object".equals(r.getLocalName())) {
+                    if (key != null) {
+                        result.add(new KeyVersion(key, versionId));
+                    }
+                    inObject = false;
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+        }
+        return result;
     }
 
     /**

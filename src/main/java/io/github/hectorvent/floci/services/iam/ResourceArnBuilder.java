@@ -143,6 +143,12 @@ public class ResourceArnBuilder {
                     return List.of(toDynamoDbTableArn(tableName, region, accountId));
                 }
             }
+            if (json.path("TableCreationParameters").hasNonNull("TableName")) {
+                var tableName = json.path("TableCreationParameters").get("TableName").asText().trim();
+                if (!tableName.isEmpty()) {
+                    return List.of(toDynamoDbTableArn(tableName, region, accountId));
+                }
+            }
             if (json.hasNonNull("ResourceArn")) {
                 String resourceArn = json.get("ResourceArn").asText().trim();
                 if (!resourceArn.isEmpty()) {
@@ -165,6 +171,12 @@ public class ResourceArnBuilder {
                 String exportArn = json.get("ExportArn").asText().trim();
                 if (!exportArn.isEmpty()) {
                     return List.of(exportArn);
+                }
+            }
+            if (json.hasNonNull("ImportArn")) {
+                var importArn = json.get("ImportArn").asText().trim();
+                if (!importArn.isEmpty()) {
+                    return List.of(importArn);
                 }
             }
             if (json.hasNonNull("RequestItems") && json.get("RequestItems").isObject()) {

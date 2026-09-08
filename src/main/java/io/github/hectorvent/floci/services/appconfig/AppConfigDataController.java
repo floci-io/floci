@@ -48,7 +48,7 @@ public class AppConfigDataController {
                 .header("Content-Type", data.contentType())
                 .header("Version-Label", data.configurationVersion())
                 .header("Next-Poll-Configuration-Token", data.nextPollConfigurationToken())
-                .header("Next-Poll-Interval-In-Seconds", 15)
+                .header("Next-Poll-Interval-In-Seconds", data.nextPollIntervalInSeconds())
                 .build();
     }
 }

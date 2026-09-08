@@ -28,10 +28,12 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -46,6 +48,7 @@ import java.util.UUID;
 public class LambdaUrlInvocationController {
 
     private static final Logger LOG = Logger.getLogger(LambdaUrlInvocationController.class);
+    private static final int FUNCTION_ERROR_STATUS = 502;
 
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
@@ -169,8 +172,13 @@ public class LambdaUrlInvocationController {
         httpNode.put("userAgent", headers.getHeaderString("user-agent"));
 
         if (body != null && body.length > 0) {
-            root.put("body", new String(body));
-            root.put("isBase64Encoded", false);
+            if (isTextMediaType(headers.getHeaderString(HttpHeaders.CONTENT_TYPE))) {
+                root.put("body", new String(body, StandardCharsets.UTF_8));
+                root.put("isBase64Encoded", false);
+            } else {
+                root.put("body", Base64.getEncoder().encodeToString(body));
+                root.put("isBase64Encoded", true);
+            }
         } else {
             root.putNull("body");
             root.put("isBase64Encoded", false);
@@ -179,7 +187,23 @@ public class LambdaUrlInvocationController {
         return root.toString();
     }
 
+    /**
+     * Mirrors how AWS decides isBase64Encoded for Function URL / API Gateway proxy
+     * integration requests: it is driven by the Content-Type header, not by whether
+     * the raw bytes happen to be valid UTF-8. Same content-type allowlist already used
+     * for the equivalent ALB-Lambda integration in ElbV2DataPlane, normalized to
+     * lowercase first since media types are case-insensitive.
+     */
+    private boolean isTextMediaType(String contentType) {
+        String normalized = contentType == null ? null : contentType.toLowerCase(Locale.ROOT);
+        return normalized == null || normalized.startsWith("text/") || normalized.contains("json")
+                || normalized.contains("xml") || normalized.contains("form");
+    }
+
     private Response buildResponse(InvokeResult result) {
+        if (result.getFunctionError() != null) {
+            return buildFunctionErrorResponse(result);
+        }
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getStatusCode()).build();
         }
@@ -191,10 +215,13 @@ public class LambdaUrlInvocationController {
                 if (node.has("headers")) {
                     node.get("headers").fields().forEachRemaining(e -> builder.header(e.getKey(), e.getValue().asText()));
                 }
+                if (node.has("cookies") && node.get("cookies").isArray()) {
+                    node.get("cookies").forEach(cookie -> builder.header("Set-Cookie", cookie.asText()));
+                }
                 if (node.has("body")) {
                     String body = node.get("body").asText();
                     boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
-                    byte[] bytes = isBase64 ? Base64.getDecoder().decode(body) : body.getBytes();
+                    byte[] bytes = isBase64 ? Base64.getDecoder().decode(body) : body.getBytes(StandardCharsets.UTF_8);
                     builder.entity(bytes);
                 }
                 return builder.build();
@@ -204,6 +231,16 @@ public class LambdaUrlInvocationController {
         } catch (Exception e) {
             return Response.ok(result.getPayload()).build();
         }
+    }
+
+    /**
+     * Real Function URLs never surface the raw invocation error payload (stack traces,
+     * error types, internal fields) to the caller. A raw error payload has no "body"
+     * field, so, matching ApiGatewayController's Lambda proxy integration, the response
+     * carries the 502 status with no entity at all.
+     */
+    private Response buildFunctionErrorResponse(InvokeResult result) {
+        return Response.status(FUNCTION_ERROR_STATUS).build();
     }
 
     private String jsonMessage(String message) {

@@ -3,12 +3,14 @@ package io.github.hectorvent.floci.services.ecs;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
+import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
@@ -16,9 +18,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -82,6 +86,35 @@ class EcsJsonHandlerTaskDefinitionPersistenceTest {
         assertEquals("/host/data", td.getVolumes().getFirst().hostSourcePath());
     }
 
+    @Test
+    void updateServiceForceNewDeploymentMintsNewDeploymentId(@TempDir Path dataDir) throws Exception {
+        FileStorageFactory storage = new FileStorageFactory(dataDir);
+        ObjectMapper objectMapper = new ObjectMapper();
+        EcsService service = serviceWithStorage(storage);
+        EcsJsonHandler handler = new EcsJsonHandler(service, objectMapper);
+
+        JsonNode registerReq = objectMapper.readTree("""
+                {
+                  "family": "force-fam",
+                  "containerDefinitions": [{"name": "app", "image": "alpine:latest"}]
+                }
+                """);
+        handler.handle("RegisterTaskDefinition", registerReq, REGION);
+
+        var created = service.createService(null, "force-svc", "force-fam:1", 0,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        String firstId = created.getDeploymentId();
+
+        ObjectNode req = objectMapper.createObjectNode();
+        req.put("service", "force-svc");
+        req.put("forceNewDeployment", true);
+        Response resp = handler.handle("UpdateService", req, REGION);
+
+        JsonNode svc = objectMapper.readTree(resp.getEntity().toString()).path("service");
+        String newId = svc.path("deployments").path(0).path("id").asText();
+        assertNotEquals(firstId, newId);
+    }
+
     private static EcsService serviceWithStorage(StorageFactory storage) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(true);
@@ -92,7 +125,8 @@ class EcsJsonHandlerTaskDefinitionPersistenceTest {
                 mock(EcsContainerManager.class),
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                storage);
+                storage,
+                null);
         service.initializeStorage();
         return service;
     }

@@ -398,8 +398,8 @@ class AcmEdgeCaseTest {
     // ==================== Key Algorithm Tests ====================
 
     @Test
-    void allKeyAlgorithmsSupported() {
-        String[] algorithms = {"RSA_2048", "RSA_3072", "RSA_4096", "EC_prime256v1", "EC_secp384r1", "EC_secp521r1"};
+    void requestableKeyAlgorithmsAccepted() {
+        String[] algorithms = {"RSA_2048", "EC_prime256v1", "EC_secp384r1"};
 
         for (String algo : algorithms) {
             given()
@@ -416,6 +416,35 @@ class AcmEdgeCaseTest {
             .then()
                 .statusCode(200)
                 .body("CertificateArn", startsWith("arn:aws:acm:"));
+        }
+    }
+
+    @Test
+    void unsupportedKeyAlgorithmsRejected() {
+        // Real ACM rejects these on RequestCertificate. The RSA_4096 message carries the
+        // account id where the region goes, an AWS quirk replicated verbatim.
+        Map<String, String> expected = Map.of(
+            "RSA_1024", "Encryption Algorithm RSA_1024 is not supported in us-east-1 region",
+            "RSA_3072", "Encryption Algorithm RSA_3072 is not supported in us-east-1 region",
+            "RSA_4096", "Encryption Algorithm RSA_4096 is not supported in 000000000000 region",
+            "EC_secp521r1", "Encryption Algorithm EC_secp521r1 is not supported in us-east-1 region");
+
+        for (Map.Entry<String, String> entry : expected.entrySet()) {
+            given()
+                .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+                .contentType(ACM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "DomainName": "%s.example.com",
+                        "KeyAlgorithm": "%s"
+                    }
+                    """.formatted(entry.getKey().toLowerCase().replace("_", "-"), entry.getKey()))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(entry.getValue()));
         }
     }
 }

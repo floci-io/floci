@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.OutputStream;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Dummy response builder for Bedrock Runtime. Stateless.
@@ -78,32 +80,32 @@ public class StubBackend implements BedrockBackend {
     }
 
     @Override
-    public byte[] converseStream(String modelId, ObjectNode bedrockRequest) {
-        ObjectNode messageStart = objectMapper.createObjectNode();
-        messageStart.put("role", "assistant");
+    public Consumer<OutputStream> converseStream(String modelId, ObjectNode bedrockRequest) {
+        return output -> {
+            BedrockStreamEncoder.writeEvent(objectMapper, output, "messageStart",
+                    objectMapper.createObjectNode().put("role", "assistant"));
 
-        ObjectNode contentBlockDelta = objectMapper.createObjectNode();
-        contentBlockDelta.put("contentBlockIndex", 0);
-        contentBlockDelta.putObject("delta").put("text", "Floci stub response for model=" + modelId);
+            List<String> flociStubResponse = List.of("Floci stub response", " for model=", modelId);
+            for (String fragment : flociStubResponse) {
+                ObjectNode contentBlockDelta = objectMapper.createObjectNode();
+                contentBlockDelta.put("contentBlockIndex", 0);
+                contentBlockDelta.putObject("delta").put("text", fragment);
+                BedrockStreamEncoder.writeEvent(objectMapper, output, "contentBlockDelta", contentBlockDelta);
+            }
 
-        ObjectNode contentBlockStop = objectMapper.createObjectNode();
-        contentBlockStop.put("contentBlockIndex", 0);
+            BedrockStreamEncoder.writeEvent(objectMapper, output, "contentBlockStop",
+                    objectMapper.createObjectNode().put("contentBlockIndex", 0));
 
-        ObjectNode messageStop = objectMapper.createObjectNode();
-        messageStop.put("stopReason", "end_turn");
+            BedrockStreamEncoder.writeEvent(objectMapper, output, "messageStop",
+                    objectMapper.createObjectNode().put("stopReason", "end_turn"));
 
-        ObjectNode metadata = objectMapper.createObjectNode();
-        metadata.putObject("usage")
-                .put("inputTokens", 10)
-                .put("outputTokens", 12)
-                .put("totalTokens", 22);
-        metadata.putObject("metrics").put("latencyMs", 1);
-
-        return BedrockStreamEncoder.encode(objectMapper, List.of(
-                new BedrockStreamEncoder.Event("messageStart", messageStart),
-                new BedrockStreamEncoder.Event("contentBlockDelta", contentBlockDelta),
-                new BedrockStreamEncoder.Event("contentBlockStop", contentBlockStop),
-                new BedrockStreamEncoder.Event("messageStop", messageStop),
-                new BedrockStreamEncoder.Event("metadata", metadata)));
+            ObjectNode metadata = objectMapper.createObjectNode();
+            metadata.putObject("usage")
+                    .put("inputTokens", 10)
+                    .put("outputTokens", 12)
+                    .put("totalTokens", 22);
+            metadata.putObject("metrics").put("latencyMs", 1);
+            BedrockStreamEncoder.writeEvent(objectMapper, output, "metadata", metadata);
+        };
     }
 }

@@ -10,14 +10,13 @@ import java.util.Optional;
  * {@code services.iam}) can verify {@code sts:AssumeRoleWithWebIdentity} tokens minted for an
  * EKS cluster's IRSA issuer without {@code services.iam} depending on {@code services.eks}.
  *
- * <p>An empty result means the issuer is unknown to Floci. Callers treat that as "not a
- * Floci-issued token" and fall back to permissive handling rather than rejecting, so
- * third-party web-identity tokens keep working.
+ * <p>An empty result means the issuer is unknown to Floci. Callers must reject tokens from
+ * unknown issuers because they cannot be verified against a trusted key.
  */
 public interface OidcIssuerKeyLookup {
 
     /**
-     * Returns the RSA public key for {@code issuer}, or {@link Optional#empty()} if no
+     * Returns the RSA public key for {@code issuer}, or {@link Optional#empty()} if no trusted
      * resource known to Floci issues tokens under that issuer URL.
      */
     Optional<RSAPublicKey> findVerificationKey(String issuer);

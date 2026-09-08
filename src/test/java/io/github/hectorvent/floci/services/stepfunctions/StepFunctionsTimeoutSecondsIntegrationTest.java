@@ -117,7 +117,9 @@ class StepFunctionsTimeoutSecondsIntegrationTest {
         assertTrue(elapsedMillis < 3_000,
                 "the branch's 3-second Wait outlasted the 1-second budget: " + elapsedMillis + " ms");
         JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
-        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ExecutionTimedOut"),
+        // The branch's Wait was entered and never exited: the budget cut it.
+        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
+                        "WaitStateEntered", "ExecutionTimedOut"),
                 eventTypes(events), "history was " + events);
     }
 
@@ -224,8 +226,14 @@ class StepFunctionsTimeoutSecondsIntegrationTest {
         assertTrue(elapsedMillis < 5_000,
                 "the iterations' 10-second Wait outlasted the 1-second budget: " + elapsedMillis + " ms");
         JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
-        assertEquals(List.of("ExecutionStarted", "MapStateEntered", "ExecutionTimedOut"),
-                eventTypes(events), "history was " + events);
+        // Both iterations entered their Wait and neither exited it. They run concurrently, so
+        // the order their events interleave in is theirs to choose.
+        List<String> types = eventTypes(events);
+        assertEquals(List.of("ExecutionStarted", "MapStateEntered", "MapStateStarted"), types.subList(0, 3),
+                "history was " + events);
+        assertEquals(List.of("MapIterationStarted", "MapIterationStarted", "WaitStateEntered", "WaitStateEntered"),
+                types.subList(3, 7).stream().sorted().toList(), "history was " + events);
+        assertEquals(List.of("ExecutionTimedOut"), types.subList(7, types.size()), "history was " + events);
     }
 
     @Test
@@ -259,7 +267,8 @@ class StepFunctionsTimeoutSecondsIntegrationTest {
         assertTrue(elapsedMillis < 5_000,
                 "the single iteration's 10-second Wait outlasted the 1-second budget: " + elapsedMillis + " ms");
         JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
-        assertEquals(List.of("ExecutionStarted", "MapStateEntered", "ExecutionTimedOut"),
+        assertEquals(List.of("ExecutionStarted", "MapStateEntered", "MapStateStarted", "MapIterationStarted",
+                        "WaitStateEntered", "ExecutionTimedOut"),
                 eventTypes(events), "history was " + events);
     }
 

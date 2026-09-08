@@ -244,17 +244,13 @@ public class Route53Controller {
         }
     }
 
-    /**
-     * Authorization is only meaningful when the zone and the VPC belong to different
-     * accounts. Zones are not account-scoped here, so this validates the request and
-     * echoes the authorized VPC back without gating a later associate call.
-     */
+    /** Creates the authorization required before a different account associates its VPC. */
     @POST
     @Path("/hostedzone/{Id}/authorizevpcassociation")
     public Response createVpcAssociationAuthorization(@PathParam("Id") String id, String body) {
         try {
             VpcAssociation vpc = requireVpcAssociation(body);
-            service.getHostedZone(id);
+            service.createVpcAssociationAuthorization(id, vpc);
             String xml = new XmlBuilder()
                     .start("CreateVPCAssociationAuthorizationResponse", NS)
                     .elem("HostedZoneId", id)
@@ -267,21 +263,59 @@ public class Route53Controller {
         }
     }
 
-    /**
-     * Counterpart to {@link #createVpcAssociationAuthorization}; the response has no members,
-     * so this returns the response's root element with nothing inside it.
-     */
+    /** Counterpart to {@link #createVpcAssociationAuthorization}; AWS returns an empty body. */
     @POST
     @Path("/hostedzone/{Id}/deauthorizevpcassociation")
     public Response deleteVpcAssociationAuthorization(@PathParam("Id") String id, String body) {
         try {
-            requireVpcAssociation(body);
-            service.getHostedZone(id);
-            String xml = new XmlBuilder()
-                    .start("DeleteVPCAssociationAuthorizationResponse", NS)
-                    .end("DeleteVPCAssociationAuthorizationResponse")
-                    .build();
-            return Response.ok(xml, XML).build();
+            VpcAssociation vpc = requireVpcAssociation(body);
+            service.deleteVpcAssociationAuthorization(id, vpc);
+            return Response.ok().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/hostedzone/{Id}/authorizevpcassociation")
+    public Response listVpcAssociationAuthorizations(@PathParam("Id") String id,
+                                                     @QueryParam("maxresults") @DefaultValue("50") int maxResults,
+                                                     @QueryParam("nexttoken") String nextToken) {
+        try {
+            if (maxResults <= 0) {
+                throw new AwsException("InvalidInput", "MaxResults must be a positive integer.", 400);
+            }
+            List<VpcAssociation> authorizations = service.listVpcAssociationAuthorizations(id);
+            int start = 0;
+            if (nextToken != null && !nextToken.isEmpty()) {
+                start = -1;
+                for (int i = 0; i < authorizations.size(); i++) {
+                    if (authorizationToken(authorizations.get(i)).equals(nextToken)) {
+                        start = i + 1;
+                        break;
+                    }
+                }
+                if (start < 0) {
+                    throw new AwsException("InvalidPaginationToken",
+                            "Invalid value for NextToken: " + nextToken, 400);
+                }
+            }
+            int end = Math.min(authorizations.size(), start + maxResults);
+            List<VpcAssociation> page = authorizations.subList(start, end);
+
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListVPCAssociationAuthorizationsResponse", NS)
+                    .elem("HostedZoneId", id)
+                    .start("VPCs");
+            for (VpcAssociation vpc : page) {
+                xml.raw(xmlVpcAssociation(vpc));
+            }
+            xml.end("VPCs");
+            if (end < authorizations.size() && !page.isEmpty()) {
+                xml.elem("NextToken", authorizationToken(page.get(page.size() - 1)));
+            }
+            xml.end("ListVPCAssociationAuthorizationsResponse");
+            return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -730,13 +764,17 @@ public class Route53Controller {
         return xml.end("VPCs").build();
     }
 
+    private static String authorizationToken(VpcAssociation association) {
+        return association.getVpcId() + ":" + association.getVpcRegion();
+    }
+
     private String xmlHostedZoneSummary(HostedZone zone) {
         return new XmlBuilder()
                 .start("HostedZoneSummary")
                 .elem("HostedZoneId", zone.getId())
                 .elem("Name", zone.getName())
                 .start("Owner")
-                .elem("OwningAccount", service.getDefaultAccountId())
+                .elem("OwningAccount", service.ownerAccountId(zone))
                 .end("Owner")
                 .end("HostedZoneSummary")
                 .build();

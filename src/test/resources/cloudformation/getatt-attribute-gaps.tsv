@@ -1,6 +1,13 @@
 AWS::CodeBuild::Project	Id	schema gives no description; AWS's Id may differ from the project name Floci uses
 AWS::CodePipeline::CustomActionType	Id	schema gives no description; the custom action has no separate id in Floci
 AWS::CodePipeline::Webhook	Id	schema gives no description; Floci keys webhooks by name
+AWS::EC2::NatGateway	AutoProvisionZones	availability-mode NAT gateways are not emulated
+AWS::EC2::NatGateway	AutoScalingIps	availability-mode NAT gateways are not emulated
+AWS::EC2::NatGateway	EniId	the NAT gateway's network interface is not created
+AWS::EC2::NatGateway	RouteTableId	availability-mode NAT gateways are not emulated
+AWS::EC2::Subnet	BlockPublicAccessStates	VPC block public access is not emulated
+AWS::EC2::Subnet	Ipv6CidrBlocks	IPv6 CIDR association is not emulated
+AWS::EC2::Subnet	NetworkAclAssociationId	the subnet's default network ACL association is not created with the subnet
 AWS::EC2::VPC	CidrBlockAssociations	needs association ids Floci's VPC model does not track
 AWS::EC2::VPC	DefaultNetworkAcl	needs a default network ACL Floci does not create with the VPC
 AWS::EC2::VPC	Ipv6CidrBlocks	IPv6 CIDR association is not emulated

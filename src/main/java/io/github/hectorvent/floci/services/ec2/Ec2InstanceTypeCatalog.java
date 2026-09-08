@@ -8,10 +8,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 @ApplicationScoped
 public class Ec2InstanceTypeCatalog {
@@ -97,12 +99,40 @@ public class Ec2InstanceTypeCatalog {
                 throw new IllegalStateException(
                         "EC2 instance type catalog entry is missing encryptionInTransitSupported: " + name);
             }
+            validateNetworkInfo(instanceType, name);
             CatalogInstanceType previous = index.putIfAbsent(name, instanceType);
             if (previous != null) {
                 throw new IllegalStateException("Duplicate EC2 instance type catalog entry: " + name);
             }
         }
         return Map.copyOf(index);
+    }
+
+    private static void validateNetworkInfo(CatalogInstanceType instanceType, String name) {
+        if (instanceType.defaultNetworkCardIndex == null || instanceType.defaultNetworkCardIndex < 0) {
+            throw new IllegalStateException("EC2 instance type catalog entry has invalid defaultNetworkCardIndex: " + name);
+        }
+        if (instanceType.ipv4AddressesPerInterface == null || instanceType.ipv4AddressesPerInterface <= 0) {
+            throw new IllegalStateException("EC2 instance type catalog entry has invalid ipv4AddressesPerInterface: " + name);
+        }
+        if (instanceType.networkCards == null || instanceType.networkCards.isEmpty()) {
+            throw new IllegalStateException("EC2 instance type catalog entry is missing networkCards: " + name);
+        }
+        if (instanceType.defaultNetworkCardIndex >= instanceType.networkCards.size()) {
+            throw new IllegalStateException("EC2 instance type catalog entry has defaultNetworkCardIndex outside networkCards: " + name);
+        }
+        Set<Integer> cardIndexes = new HashSet<>();
+        for (int position = 0; position < instanceType.networkCards.size(); position++) {
+            CatalogNetworkCard card = instanceType.networkCards.get(position);
+            if (card == null || card.networkCardIndex == null || card.networkCardIndex != position
+                    || !cardIndexes.add(card.networkCardIndex)) {
+                throw new IllegalStateException("EC2 instance type catalog entry has invalid networkCardIndex: " + name);
+            }
+            if (card.maximumNetworkInterfaces == null || card.maximumNetworkInterfaces <= 0) {
+                throw new IllegalStateException(
+                        "EC2 instance type catalog entry has invalid maximumNetworkInterfaces: " + name);
+            }
+        }
     }
 
     private static String require(String value, String field) {
@@ -128,6 +158,9 @@ public class Ec2InstanceTypeCatalog {
         public List<String> supportedArchitectures = List.of();
         public Boolean currentGeneration;
         public Boolean encryptionInTransitSupported;
+        public Integer defaultNetworkCardIndex;
+        public Integer ipv4AddressesPerInterface;
+        public List<CatalogNetworkCard> networkCards = List.of();
 
         public Map<String, Object> toResponseMap() {
             Map<String, Object> type = new LinkedHashMap<>();
@@ -140,8 +173,27 @@ public class Ec2InstanceTypeCatalog {
             type.put("currentGeneration", currentGeneration == null || currentGeneration);
             Map<String, Object> networkInfo = new LinkedHashMap<>();
             networkInfo.put("encryptionInTransitSupported", encryptionInTransitSupported);
+            networkInfo.put("defaultNetworkCardIndex", defaultNetworkCardIndex);
+            networkInfo.put("ipv4AddressesPerInterface", ipv4AddressesPerInterface);
+            networkInfo.put("networkCards", networkCards.stream()
+                    .map(CatalogNetworkCard::toResponseMap)
+                    .toList());
             type.put("networkInfo", networkInfo);
             return type;
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @RegisterForReflection
+    public static final class CatalogNetworkCard {
+        public Integer networkCardIndex;
+        public Integer maximumNetworkInterfaces;
+
+        public Map<String, Object> toResponseMap() {
+            Map<String, Object> card = new LinkedHashMap<>();
+            card.put("networkCardIndex", networkCardIndex);
+            card.put("maximumNetworkInterfaces", maximumNetworkInterfaces);
+            return card;
         }
     }
 }

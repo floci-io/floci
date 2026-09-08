@@ -62,8 +62,10 @@ public class CloudTrailJsonHandler {
         boolean enableLogFileValidation = req.path("EnableLogFileValidation").asBoolean(false);
         boolean isOrganizationTrail = req.path("IsOrganizationTrail").asBoolean(false);
 
+        Map<String, String> tags = parseTagsList(req.path("TagsList"));
+
         Trail trail = service.createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags);
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());

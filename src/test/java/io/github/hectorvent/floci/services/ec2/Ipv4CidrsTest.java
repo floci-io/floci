@@ -28,6 +28,15 @@ class Ipv4CidrsTest {
     }
 
     @Test
+    void isIpv4AcceptsParseableBlocksAndRejectsTheRest() {
+        assertTrue(Ipv4Cidrs.isIpv4("10.0.1.0/24"));
+        assertFalse(Ipv4Cidrs.isIpv4(null));
+        assertFalse(Ipv4Cidrs.isIpv4(""));
+        assertFalse(Ipv4Cidrs.isIpv4("10.0.1.0"));
+        assertFalse(Ipv4Cidrs.isIpv4("2600:1f18::/56"));
+    }
+
+    @Test
     void firstFreeBlockSkipsOccupiedSpaceInOrder() {
         assertEquals("10.0.1.0/24",
                 Ipv4Cidrs.firstFreeBlock(List.of("10.0.0.0/16"), List.of("10.0.0.0/24"), 24));

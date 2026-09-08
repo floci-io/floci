@@ -41,8 +41,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -96,18 +94,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
         return configured;
     }
-
-    /**
-     * In-container location of Floci's CA certificate, injected when TLS is enabled so the
-     * container trusts Floci's self-signed HTTPS endpoint. {@code /etc} exists in every Lambda
-     * base image, so no directory needs to be created.
-     */
-    private static final String FLOCI_CA_DIR = "/etc";
-    private static final String FLOCI_CA_FILE_NAME = "floci-ca.crt";
-    /** Shared with the kubernetes executor, which mounts the CA ConfigMap at the same path. */
-    public static final String FLOCI_CA_CONTAINER_PATH = FLOCI_CA_DIR + "/" + FLOCI_CA_FILE_NAME;
-    /** Self-signed cert filename produced by {@code TlsConfigSource} under {persistent-path}/tls/. */
-    private static final String SELF_SIGNED_CERT_NAME = "floci-selfsigned.crt";
 
     private static final DateTimeFormatter LOG_STREAM_DATE_FMT = DateTimeFormatter.ofPattern("yyyy/MM/dd");
 
@@ -228,13 +214,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         String lambdaRegion = extractRegionFromArn(fn.getFunctionArn(), config.defaultRegion());
         String lambdaAccountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
 
-        // When TLS is on, the container must trust Floci's self-signed cert so HTTPS callbacks
-        // to Floci succeed (e.g. a CDK custom resource's cfn-response, which hardcodes https://).
-        // Short-circuit when TLS is off so cert-path/storage config isn't read needlessly.
-        Optional<Path> flociCaCert = config.tls().enabled()
-                ? resolveFlociCaCertPath(true, config.tls().certPath(), config.storage().persistentPath())
-                : Optional.empty();
-
         // Build env vars
         List<String> env = new ArrayList<>();
         env.add("AWS_LAMBDA_RUNTIME_API=" + runtimeApiEndpoint);
@@ -258,7 +237,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
                 awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
                 roleCredentials, lambdaAccountId));
-        env.addAll(flociCaEnv(flociCaCert));
         if (fn.getEnvironment() != null) {
             boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
             boolean userDefinesFullCredentialTriad = definesFullCredentialTriad(fn.getEnvironment());
@@ -372,7 +350,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
-        containerId = lifecycleManager.create(spec);
+        containerId = createContainer(spec, fn);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
         // Docker now holds the real container-to-volume reference, which removeVolume's own in-use
         // check protects from here on - release the in-flight marker that stood in for it before
@@ -422,15 +400,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     LOG.warnv("Could not resolve layer ARN: {0} for function {1}", layerArn, fn.getFunctionName());
                 }
             }
-        }
-
-        // 4. Copy Floci's CA cert so the container trusts Floci's HTTPS endpoint (TLS mode).
-        //    Placed before start so NODE_EXTRA_CA_CERTS et al. resolve at runtime init.
-        //    An if-block rather than ifPresent(...) because containerId is assigned along the
-        //    code-volume path and so is not effectively final for a lambda capture.
-        if (flociCaCert.isPresent()) {
-            copyFileToContainer(dockerClient, containerId, flociCaCert.get(),
-                    FLOCI_CA_DIR, FLOCI_CA_FILE_NAME, fn.getFunctionName());
         }
 
         // Now start the container with code in place
@@ -513,6 +482,33 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             }
             throw e;
         }
+    }
+
+    private static Optional<String> dockerPlatform(LambdaFunction fn) {
+        List<String> architectures = fn.getArchitectures();
+        if (architectures == null) {
+            return Optional.of("linux/amd64");
+        }
+        if (architectures.size() != 1) {
+            return Optional.empty();
+        }
+        return switch (architectures.getFirst()) {
+            case "arm64" -> Optional.of("linux/arm64");
+            case "x86_64" -> Optional.of("linux/amd64");
+            default -> Optional.empty();
+        };
+    }
+
+    private String createContainer(ContainerSpec spec, LambdaFunction fn) {
+        if (!config.services().lambda().honourArchitectures()) {
+            return lifecycleManager.create(spec);
+        }
+        Optional<String> platform = dockerPlatform(fn);
+        if (platform.isEmpty()) {
+            throw new IllegalStateException("Invalid persisted architectures "
+                    + fn.getArchitectures() + " for function '" + fn.getFunctionName() + "'");
+        }
+        return lifecycleManager.create(spec, platform.get());
     }
 
     public void stop(ContainerHandle handle) {
@@ -876,19 +872,19 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
         // tar-copy the code into it, then discard it — the data persists in the volume.
-        ContainerSpec helperSpec = containerBuilder.newContainer(image)
+        ContainerBuilder.Builder helperBuilder = containerBuilder.newContainer(image)
                 .withName(resolveContainerNamePrefix(config) + "-codevol-" + fn.getFunctionName() + "-" + shortId)
                 .withEnv(java.util.List.of())
                 .withEntrypoint(java.util.List.of("sleep"))
                 .withCmd(java.util.List.of("3600"))
-                .withNamedVolume(volName, TASK_DIR, false)
-                .build();
+                .withNamedVolume(volName, TASK_DIR, false);
+        ContainerSpec helperSpec = helperBuilder.build();
         // Gate the heavy work (helper create + ~90MB tar copy) so a burst of first-time populates
         // doesn't thrash the Docker daemon. Only populates are serialized — plain cold starts aren't.
         acquirePopulatePermit(fn.getFunctionName());
         String helperId = null;
         try {
-            helperId = lifecycleManager.create(helperSpec);
+            helperId = createContainer(helperSpec, fn);
             lifecycleManager.startCreated(helperId, helperSpec);
             copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId,
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
@@ -1340,83 +1336,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     EXTENSIONS_DIR, functionName, e.getMessage());
             return List.of();
         }
-    }
-
-    /**
-     * Resolves the host path of Floci's CA certificate to inject into Lambda containers, or
-     * empty when TLS is disabled or no readable certificate exists. Mirrors {@code TlsConfigSource}:
-     * a user-provided {@code floci.tls.cert-path} wins; otherwise the self-signed cert under
-     * {@code {persistent-path}/tls/}.
-     *
-     * <p>The resolved certificate is injected into containers as a <em>trust anchor</em> (CA), so it
-     * should be a self-signed CA certificate. The auto-generated Floci cert is one; a user-supplied
-     * {@code floci.tls.cert-path} that points at a leaf/server certificate is accepted but only pins
-     * that exact certificate (it cannot validate a chain it signs), so a warning is logged.
-     */
-    public static Optional<Path> resolveFlociCaCertPath(boolean tlsEnabled, Optional<String> userCertPath,
-                                                        String persistentPath) {
-        if (!tlsEnabled) {
-            return Optional.empty();
-        }
-        Optional<String> trimmedUserPath = userCertPath.filter(s -> !s.isBlank());
-        Path certPath = trimmedUserPath
-                .map(Path::of)
-                .orElseGet(() -> Path.of(persistentPath, "tls", SELF_SIGNED_CERT_NAME));
-        if (!Files.isReadable(certPath)) {
-            LOG.warnv("TLS enabled but Floci CA certificate not readable at {0}; "
-                    + "Lambda containers will not trust Floci HTTPS callbacks", certPath);
-            return Optional.empty();
-        }
-        if (trimmedUserPath.isPresent() && !isSelfSignedCaCertificate(certPath)) {
-            LOG.warnv("Configured floci.tls.cert-path {0} is not a self-signed CA certificate; it is "
-                    + "injected into Lambda containers as a trust anchor (CA), which only validates "
-                    + "this exact certificate and not a chain it signs. Provide a self-signed CA "
-                    + "certificate for reliable HTTPS callbacks.", certPath);
-        }
-        return Optional.of(certPath);
-    }
-
-    /**
-     * Returns {@code true} only if {@code certPath} holds a genuinely self-signed CA certificate
-     * (issuer == subject and BasicConstraints {@code CA:true}) — the form usable as a trust anchor.
-     * A leaf/server certificate, or one that cannot be read/parsed as X.509, returns {@code false}.
-     */
-    static boolean isSelfSignedCaCertificate(Path certPath) {
-        try (InputStream in = Files.newInputStream(certPath)) {
-            X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
-                    .generateCertificate(in);
-            boolean selfSigned = cert.getSubjectX500Principal().equals(cert.getIssuerX500Principal());
-            boolean isCa = cert.getBasicConstraints() >= 0; // -1 == not a CA
-            return selfSigned && isCa;
-        } catch (Exception e) {
-            LOG.debugv("Could not inspect TLS certificate {0} for CA suitability: {1}",
-                    certPath, e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Environment entries that make the container <em>add</em> Floci's CA to its trust, without
-     * replacing the system trust store (which would break the Lambda's external HTTPS calls):
-     * <ul>
-     *   <li>{@code NODE_EXTRA_CA_CERTS} appends Floci's cert to Node's built-in CAs, so public TLS
-     *       from the Lambda still works; and</li>
-     *   <li>{@code AWS_CA_BUNDLE} is scoped to AWS SDK/CLI traffic, which Floci redirects to its own
-     *       endpoint via {@code AWS_ENDPOINT_URL} — so pointing it at Floci's cert only affects
-     *       calls that already target Floci.</li>
-     * </ul>
-     * {@code SSL_CERT_FILE} and {@code REQUESTS_CA_BUNDLE} are deliberately <em>not</em> set: each
-     * <em>replaces</em> the entire OpenSSL / Python-requests trust store with only Floci's cert,
-     * which breaks every external HTTPS call (curl, openssl, requests/botocore) the Lambda makes.
-     * Returns an empty list when no CA cert is available (TLS off).
-     */
-    public static List<String> flociCaEnv(Optional<Path> caCert) {
-        if (caCert.isEmpty()) {
-            return List.of();
-        }
-        return List.of(
-                "NODE_EXTRA_CA_CERTS=" + FLOCI_CA_CONTAINER_PATH,
-                "AWS_CA_BUNDLE=" + FLOCI_CA_CONTAINER_PATH);
     }
 
     private static String extractRegionFromArn(String arn, String defaultRegion) {

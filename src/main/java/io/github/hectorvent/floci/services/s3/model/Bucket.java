@@ -34,6 +34,12 @@ public class Bucket {
     private WebsiteConfiguration websiteConfiguration;
     /** CloudWatch request metrics configurations, keyed by the id they were stored under. */
     private Map<String, String> metricsConfigurations;
+    /** Intelligent-Tiering configurations, keyed by the id they were stored under. */
+    private Map<String, String> intelligentTieringConfigurations;
+    /** Storage class analysis configurations, keyed by the id they were stored under. */
+    private Map<String, String> analyticsConfigurations;
+    /** Inventory configurations, keyed by the id they were stored under. */
+    private Map<String, String> inventoryConfigurations;
 
     public Bucket() {
         this.tags = new HashMap<>();
@@ -127,4 +133,19 @@ public class Bucket {
 
     public Map<String, String> getMetricsConfigurations() { return metricsConfigurations; }
     public void setMetricsConfigurations(Map<String, String> metricsConfigurations) { this.metricsConfigurations = metricsConfigurations; }
+
+    public Map<String, String> getIntelligentTieringConfigurations() { return intelligentTieringConfigurations; }
+    public void setIntelligentTieringConfigurations(Map<String, String> intelligentTieringConfigurations) {
+        this.intelligentTieringConfigurations = intelligentTieringConfigurations;
+    }
+
+    public Map<String, String> getAnalyticsConfigurations() { return analyticsConfigurations; }
+    public void setAnalyticsConfigurations(Map<String, String> analyticsConfigurations) {
+        this.analyticsConfigurations = analyticsConfigurations;
+    }
+
+    public Map<String, String> getInventoryConfigurations() { return inventoryConfigurations; }
+    public void setInventoryConfigurations(Map<String, String> inventoryConfigurations) {
+        this.inventoryConfigurations = inventoryConfigurations;
+    }
 }

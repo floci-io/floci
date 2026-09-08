@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
@@ -11,6 +14,7 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -39,9 +43,9 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
     private RedshiftContainerManager cm;
-    private io.github.hectorvent.floci.core.common.RegionResolver regionResolver;
-    private io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager proxyManager;
-    private io.github.hectorvent.floci.core.common.docker.DockerHostResolver dockerHostResolver;
+    private RegionResolver regionResolver;
+    private RedshiftProxyManager proxyManager;
+    private DockerHostResolver dockerHostResolver;
     private RedshiftService service;
 
     @BeforeEach
@@ -54,19 +58,19 @@ class RedshiftServiceTest {
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
-        proxyManager = mock(io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager.class);
-        dockerHostResolver = mock(io.github.hectorvent.floci.core.common.docker.DockerHostResolver.class);
+        proxyManager = mock(RedshiftProxyManager.class);
+        dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("localhost");
 
-        io.github.hectorvent.floci.config.EmulatorConfig config = mock(io.github.hectorvent.floci.config.EmulatorConfig.class);
-        io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig storageConfig = mock(io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig.class);
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.StorageConfig storageConfig = mock(EmulatorConfig.StorageConfig.class);
         when(config.storage()).thenReturn(storageConfig);
         when(storageConfig.persistentPath()).thenReturn("target/test-data");
 
-        io.github.hectorvent.floci.config.EmulatorConfig.ServicesConfig servicesConfig =
-                mock(io.github.hectorvent.floci.config.EmulatorConfig.ServicesConfig.class);
-        io.github.hectorvent.floci.config.EmulatorConfig.RedshiftServiceConfig redshiftConfig =
-                mock(io.github.hectorvent.floci.config.EmulatorConfig.RedshiftServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig =
+                mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.RedshiftServiceConfig redshiftConfig =
+                mock(EmulatorConfig.RedshiftServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.redshift()).thenReturn(redshiftConfig);
         when(redshiftConfig.proxyBasePort()).thenReturn(7100);
@@ -79,7 +83,7 @@ class RedshiftServiceTest {
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
-        regionResolver = new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "111111111111");
+        regionResolver = new RegionResolver("us-east-1", "111111111111");
 
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver);
     }

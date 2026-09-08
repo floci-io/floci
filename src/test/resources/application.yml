@@ -88,6 +88,9 @@ floci:
     presign-secret: test-secret
 
   security:
+    extra-cors-allowed-origins: ${EXTRA_CORS_ALLOWED_ORIGINS:}
+    extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
+    extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
 
   init-hooks:
@@ -127,6 +130,8 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      honour-architectures: false
+      zip-max-entries: 100000
       # aws-config-path:
       hot-reload:
         enabled: true
@@ -174,6 +179,9 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+    redshift-data:
+      enabled: true
+      result-ttl-hours: 24
     neptune:
       enabled: true
       proxy-base-port: 8182
@@ -220,6 +228,9 @@ floci:
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false
+      # Pinned to the shipped default so a test sees what a user sees; the strict-mode test
+      # overrides it with its own profile.
+      allow-stub-unsupported-resource-types: true
     acm:
       enabled: true
       validation-wait-seconds: 0
@@ -340,11 +351,13 @@ floci:
       enabled: true
     iot:
       enabled: true
+      rule-sql-strict: false
       mqtt:
         enabled: true
         auto-start: false
         host: 127.0.0.1
         port: 1883
+        tls-port: 8883
     iotdata:
       enabled: true
     cloudhsmv2:
@@ -365,11 +378,30 @@ floci:
       enabled: true
     ssoadmin:
       enabled: true
+    macie2:
+      enabled: true
+    account:
+      enabled: true
+    controlcatalog:
+      enabled: true
+    accessanalyzer:
+      enabled: true
+    identitystore:
+      enabled: true
+    budgets:
+      enabled: true
+    inspector2:
+      enabled: true
+    detective:
+      enabled: true
     controltower:
       enabled: true
+      seed-landing-zone: true
     route53resolver:
       enabled: true
     connect:
+      enabled: true
+    cognitoidentity:
       enabled: true
     aps:
       enabled: true

@@ -7,16 +7,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.services.cognito.model.EmailMfaSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.acm.model.Certificate;
+import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
@@ -67,6 +72,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -83,6 +89,7 @@ public class CognitoService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String INVALID_ACCESS_TOKEN_MESSAGE = "Invalid access token";
 
     private static final String IDENTITIES_ATTRIBUTE = "identities";
 
@@ -121,16 +128,19 @@ public class CognitoService implements ResourceProvider {
     private final String baseUrl;
     private final RegionResolver regionResolver;
     private final LambdaService lambdaService;
+    private final AcmService acmService;
     private final VerificationCodeService verificationCodeService;
     private final CognitoMessageDispatcher messageDispatcher;
+    private final TlsCertificateManager certificateManager;
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
 
     @Inject
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
-            RegionResolver regionResolver, LambdaService lambdaService, SesService sesService,
-            SnsService snsService, Clock clock) {
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
+            SesService sesService, SnsService snsService, Clock clock,
+            TlsCertificateManager certificateManager) {
         this(
                 storageFactory.create("cognito", "cognito-pools.json",
                         new TypeReference<Map<String, UserPool>>() {}),
@@ -151,8 +161,10 @@ public class CognitoService implements ResourceProvider {
                 trimTrailingSlash(emulatorConfig.effectiveBaseUrl()),
                 regionResolver,
                 lambdaService,
+                acmService,
                 new VerificationCodeService(storageFactory, clock),
-                new CognitoMessageDispatcher(sesService, snsService)
+                new CognitoMessageDispatcher(sesService, snsService),
+                certificateManager
         );
     }
 
@@ -164,10 +176,11 @@ public class CognitoService implements ResourceProvider {
                    StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
                    String baseUrl,
                    RegionResolver regionResolver,
-                   LambdaService lambdaService) {
+                   LambdaService lambdaService,
+                   AcmService acmService) {
         this(poolStore, clientStore, resourceServerStore, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), userStore, groupStore, revokedTokenStore, baseUrl,
-                regionResolver, lambdaService, null, null);
+                regionResolver, lambdaService, acmService, null, null, null);
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -179,9 +192,10 @@ public class CognitoService implements ResourceProvider {
             StorageBackend<String, CognitoGroup> groupStore,
             StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
             String baseUrl,
-            RegionResolver regionResolver, LambdaService lambdaService,
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
             VerificationCodeService verificationCodeService,
-            CognitoMessageDispatcher messageDispatcher) {
+            CognitoMessageDispatcher messageDispatcher,
+            TlsCertificateManager certificateManager) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -193,8 +207,10 @@ public class CognitoService implements ResourceProvider {
         this.baseUrl = baseUrl;
         this.regionResolver = regionResolver;
         this.lambdaService = lambdaService;
+        this.acmService = acmService;
         this.verificationCodeService = verificationCodeService;
         this.messageDispatcher = messageDispatcher;
+        this.certificateManager = certificateManager;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
     }
 
@@ -240,6 +256,9 @@ public class CognitoService implements ResourceProvider {
         UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
         populateUserPool(updatedPool, request);
+        if (request.get("PoolName") instanceof String poolName && !poolName.isBlank()) {
+            updatedPool.setName(poolName);
+        }
 
         updatedPool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         poolStore.put(id, updatedPool);
@@ -359,12 +378,69 @@ public class CognitoService implements ResourceProvider {
 
     public UserPool describeUserPool(String id) {
         UserPool pool = poolStore.get(id)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 400));
+                .orElseThrow(() -> userPoolNotFound(id));
         boolean generatedKeys = ensureJwtSigningKeys(pool);
         boolean generatedSecret = ensureRefreshTokenSecret(pool);
         if (generatedKeys || generatedSecret) {
             poolStore.put(id, pool);
         }
+        return pool;
+    }
+
+    /**
+     * SetUserPoolMfaConfig. Stores the MFA mode and the software-token setting, which is
+     * what GetUserPoolMfaConfig reports back and what the Terraform provider reads to
+     * detect drift on mfa_configuration / software_token_mfa_configuration.
+     *
+     * <p>SMS, email and WebAuthn MFA are accepted and not stored: Floci has no path to
+     * deliver an SMS or email factor, so retaining the config would claim a capability
+     * that does not exist.
+     */
+    /**
+     * @param otherFactorConfigured whether EmailMfaConfiguration or SmsMfaConfiguration was
+     *     present in the request. Both count towards the factor rules below even though
+     *     Floci does not deliver either challenge; WebAuthnConfiguration does not, measured
+     *     against the live service, which accepts it alongside OFF and does not accept it
+     *     as the sole factor for ON or OPTIONAL.
+     */
+    public UserPool setUserPoolMfaConfig(String id, String mfaConfiguration,
+                                         Boolean softwareTokenMfaEnabled,
+                                         boolean otherFactorConfigured) {
+        UserPool pool = describeUserPool(id);
+        // An absent MfaConfiguration means OFF, not "leave the current mode alone":
+        // measured against the live service, which resets a pool that was OPTIONAL back
+        // to OFF when the member is omitted.
+        String mode = mfaConfiguration != null ? mfaConfiguration : "OFF";
+        if (!List.of("OPTIONAL", "OFF", "ON").contains(mode)) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value '" + mode
+                            + "' at 'mfaConfiguration' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, OFF, ON]", 400);
+        }
+        // Presence, not value: the live service rejects OFF alongside
+        // SoftwareTokenMfaConfiguration{Enabled:false} just as it does Enabled:true, and
+        // conversely accepts ON alongside Enabled:false, so the member being there is what
+        // counts, despite the "must be enabled" wording of the second message.
+        boolean anyFactorConfigured = softwareTokenMfaEnabled != null || otherFactorConfigured;
+        if ("OFF".equals(mode) && anyFactorConfigured) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid MFA configuration given, can't turn off MFA and configure an "
+                            + "MFA together.", 400);
+        }
+        if (!"OFF".equals(mode) && !anyFactorConfigured) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid MFA Configuration given. SMS MFA, Email MFA, or Software Token "
+                            + "MFA must be enabled.", 400);
+        }
+        pool.setMfaConfiguration(mode);
+        if ("OFF".equals(mode)) {
+            // Turning MFA off drops the factor configuration with it: the live service
+            // answers OFF alone afterwards, with no SoftwareTokenMfaConfiguration member.
+            pool.setSoftwareTokenMfaEnabled(null);
+        } else if (softwareTokenMfaEnabled != null) {
+            pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
+        }
+        poolStore.put(id, pool);
         return pool;
     }
 
@@ -500,7 +576,7 @@ public class CognitoService implements ResourceProvider {
                                                Boolean enableTokenRevocation) {
 
         UserPool userPool = describeUserPool(userPoolId);
-        String clientId = UUID.randomUUID().toString().replace("-", "").substring(0, 26);
+        String clientId = clientIdFor(userPool, clientName);
         List<String> normalizedAllowedOAuthFlows = normalizeStringList(allowedOAuthFlows);
         List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
         List<String> normalizedCallbackUrls = normalizeStringList(callbackURLs);
@@ -527,15 +603,6 @@ public class CognitoService implements ResourceProvider {
         );
 
         UserPoolClient client = new UserPoolClient();
-        if (userPool.getClientIdOverride() != null) {
-            if (userPool.getClientIdOverride().equalsIgnoreCase("use-name")) {
-                clientId = clientName;
-            } else if (userPool.getClientIdOverride().startsWith("append-to-name:")) {
-                clientId = clientName + userPool.getClientIdOverride().substring(15);
-            } else if (userPool.getClientIdOverride().startsWith("prepend-to-name:")) {
-                clientId = userPool.getClientIdOverride().substring(16) + clientName;
-            }
-        }
         client.setClientId(clientId);
         client.setUserPoolId(userPoolId);
         client.setClientName(clientName);
@@ -585,15 +652,45 @@ public class CognitoService implements ResourceProvider {
     }
 
     public UserPoolClient describeUserPoolClient(String userPoolId, String clientId) {
-        UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+        UserPoolClient client = describeUserPoolClient(clientId);
         if (!client.getUserPoolId().equals(userPoolId)) {
             throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
         }
         return client;
     }
 
+    /**
+     * The id a client created now with this name in this pool would get: derived from the name when
+     * the pool carries the {@code floci:override-cognito-client-id} tag, otherwise null because it
+     * would be random. Lets a caller that must not overwrite an existing client check first.
+     */
+    public String deterministicClientIdFor(String userPoolId, String clientName) {
+        UserPool userPool = describeUserPool(userPoolId);
+        return userPool.getClientIdOverride() == null ? null : clientIdFor(userPool, clientName);
+    }
+
+    private static String clientIdFor(UserPool userPool, String clientName) {
+        String override = userPool.getClientIdOverride();
+        if (override != null) {
+            if (override.equalsIgnoreCase("use-name")) {
+                return clientName;
+            } else if (override.startsWith("append-to-name:")) {
+                return clientName + override.substring(15);
+            } else if (override.startsWith("prepend-to-name:")) {
+                return override.substring(16) + clientName;
+            }
+        }
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 26);
+    }
+
+    /** By id alone, for callers that hold only the client id, such as a CloudFormation stack resource. */
+    public UserPoolClient describeUserPoolClient(String clientId) {
+        return clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+    }
+
     public List<UserPoolClient> listUserPoolClients(String userPoolId) {
+        describeUserPool(userPoolId);
         return clientStore.scan(k -> clientStore.get(k).map(c -> c.getUserPoolId().equals(userPoolId)).orElse(false));
     }
 
@@ -1015,6 +1112,10 @@ public class CognitoService implements ResourceProvider {
 
     // ──────────────────────────── User Pool Domains ────────────────────────────
 
+    private static final String CERTIFICATE_REGION = "us-east-1";
+    private static final String CERTIFICATE_NOT_USABLE = "The specified SSL certificate doesn't exist, "
+            + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain.";
+
     /**
      * Creates either an Amazon Cognito prefix domain ({@code customDomainConfig == null})
      * or a custom domain fronted by an ACM certificate. Domain names are globally unique
@@ -1026,7 +1127,7 @@ public class CognitoService implements ResourceProvider {
         if (domain == null || domain.isBlank()) {
             throw new AwsException("InvalidParameterException", "Domain is required", 400);
         }
-        if (domainStore.get(domain).isPresent()) {
+        if (!findDomains(domain).isEmpty()) {
             throw new AwsException("InvalidParameterException",
                     "Domain " + domain + " already associated with another user pool", 400);
         }
@@ -1046,13 +1147,31 @@ public class CognitoService implements ResourceProvider {
                 throw new AwsException("InvalidParameterException",
                         "CertificateArn is required in CustomDomainConfig", 400);
             }
+            requireUsableCertificate(certificateArn);
             userPoolDomain.setCertificateArn(certificateArn);
             Object securityPolicy = customDomainConfig.get("SecurityPolicy");
             userPoolDomain.setSecurityPolicy(securityPolicy != null ? securityPolicy.toString() : "TLS_V1_2_2021");
             userPoolDomain.setCloudFrontDistribution(generateCloudFrontDomain());
         }
 
-        domainStore.put(domain, userPoolDomain);
+        // Check and write as one step: two accounts racing for one name write to different
+        // account-prefixed keys, so without the lock both would succeed and the name would be
+        // ambiguous for routing.
+        synchronized (domainLock) {
+            if (!findDomains(domain).isEmpty()) {
+                throw new AwsException("InvalidParameterException",
+                        "Domain " + domain + " already associated with another user pool", 400);
+            }
+            if (userPoolDomain.isCustomDomain()) {
+                registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
+            }
+            domainStore.put(domain, userPoolDomain);
+        }
+        // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
+        // A prefix domain is served under amazoncognito.com on AWS, not by Floci; a custom domain is.
+        if (customDomainConfig != null && certificateManager != null) {
+            certificateManager.ensureHost(domain);
+        }
         LOG.infov("Created User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
     }
@@ -1065,13 +1184,166 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
     }
 
+    /**
+     * Resolves a request {@code Host} to the custom domain it names. An OAuth call carries no
+     * SigV4 account, so the lookup spans every account rather than the request's default one.
+     */
+    public Optional<UserPoolDomain> findCustomDomain(String hostname) {
+        List<UserPoolDomain> matches = findDomains(hostname).stream()
+                .filter(UserPoolDomain::isCustomDomain)
+                .toList();
+        if (matches.size() > 1) {
+            LOG.warnv("Custom domain {0} exists in {1} accounts and is not routed; delete the duplicates",
+                    hostname, matches.size());
+            return Optional.empty();
+        }
+        return matches.stream().findFirst();
+    }
+
+    /**
+     * Domain names are one namespace across every account on AWS, so this is also the
+     * uniqueness check {@link #createUserPoolDomain} runs. More than one match can only come
+     * from data persisted before that check spanned accounts.
+     */
+    private List<UserPoolDomain> findDomains(String name) {
+        if (name == null || name.isBlank()) {
+            return List.of();
+        }
+        return allDomains().stream()
+                .filter(d -> name.equalsIgnoreCase(d.getDomain()))
+                .toList();
+    }
+
+    public Optional<UserPoolDomain> findCustomDomainForPool(String poolId) {
+        return allDomains().stream()
+                .filter(d -> d.isCustomDomain() && poolId.equals(d.getUserPoolId()))
+                .findFirst();
+    }
+
+    private List<UserPoolDomain> allDomains() {
+        return domainStore instanceof AccountAwareStorageBackend<UserPoolDomain> aware
+                ? aware.scanAllAccounts()
+                : domainStore.scan(key -> true);
+    }
+
+    /**
+     * Changes a domain in place: the certificate behind a custom domain ({@code CustomDomainConfig})
+     * or the managed login version. As on AWS the domain keeps its CloudFront distribution, so a
+     * DNS alias pointing at it stays valid. A setting the request omits is left unchanged.
+     */
+    public UserPoolDomain updateUserPoolDomain(String domain, String userPoolId,
+            Map<String, Object> customDomainConfig, Integer managedLoginVersion) {
+        describeUserPool(userPoolId);
+        UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
+        if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+        }
+        String previousCertificateArn = userPoolDomain.getCertificateArn();
+        String certificateArn = previousCertificateArn;
+        if (customDomainConfig != null) {
+            if (!userPoolDomain.isCustomDomain()) {
+                throw new AwsException("InvalidParameterException",
+                        "CustomDomainConfig cannot be set on an Amazon Cognito prefix domain", 400);
+            }
+            certificateArn = (String) customDomainConfig.get("CertificateArn");
+            if (certificateArn == null || certificateArn.isBlank()) {
+                throw new AwsException("InvalidParameterException",
+                        "CertificateArn is required in CustomDomainConfig", 400);
+            }
+        }
+        // A new certificate is checked and registered before anything changes, so a failure leaves
+        // the domain on its current certificate.
+        boolean certificateChanged = !Objects.equals(certificateArn, previousCertificateArn);
+        if (certificateChanged) {
+            requireUsableCertificate(certificateArn);
+            registerCertificateUse(certificateArn, userPoolDomain);
+        }
+        if (customDomainConfig != null) {
+            userPoolDomain.setCertificateArn(certificateArn);
+            Object securityPolicy = customDomainConfig.get("SecurityPolicy");
+            if (securityPolicy != null) {
+                userPoolDomain.setSecurityPolicy(securityPolicy.toString());
+            }
+        }
+        if (managedLoginVersion != null) {
+            userPoolDomain.setManagedLoginVersion(managedLoginVersion);
+        }
+        userPoolDomain.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        domainStore.put(domain, userPoolDomain);
+        if (certificateChanged) {
+            acmService.removeInUseBy(previousCertificateArn,
+                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+        }
+        LOG.infov("Updated User Pool Domain: {0} for pool {1}", domain, userPoolId);
+        return userPoolDomain;
+    }
+
     public void deleteUserPoolDomain(String domain, String userPoolId) {
         UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
             throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
         }
         domainStore.delete(domain);
+        if (userPoolDomain.isCustomDomain()) {
+            acmService.removeInUseBy(userPoolDomain.getCertificateArn(),
+                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+        }
         LOG.infov("Deleted User Pool Domain: {0} for pool {1}", domain, userPoolId);
+    }
+
+    /**
+     * Registers the domain on its certificate before the domain is stored or changed, so a
+     * certificate that disappears between the check and the registration leaves nothing behind.
+     */
+    private void registerCertificateUse(String certificateArn, UserPoolDomain userPoolDomain) {
+        try {
+            acmService.addInUseBy(certificateArn, cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+    }
+
+    /**
+     * AWS accepts only an issued ACM certificate from us-east-1 behind a custom domain, and answers
+     * anything else with this one message.
+     */
+    private void requireUsableCertificate(String certificateArn) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(certificateArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+        if (!"acm".equals(arn.service()) || !CERTIFICATE_REGION.equals(arn.region())
+                || !arn.resource().startsWith("certificate/")) {
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+        Certificate certificate;
+        try {
+            certificate = acmService.describeCertificate(certificateArn, CERTIFICATE_REGION);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+        if (certificate.getStatus() != CertificateStatus.ISSUED) {
+            throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+    }
+
+    /**
+     * What a custom domain registers on its certificate: the CloudFront distribution that serves
+     * it, which is what ACM lists on AWS. Floci has no distribution object, so the id is the label
+     * of the generated CloudFront name.
+     */
+    private static String cloudFrontDistributionArn(UserPoolDomain userPoolDomain) {
+        String name = userPoolDomain.getCloudFrontDistribution();
+        String id = name.substring(0, name.indexOf('.')).toUpperCase(Locale.ROOT);
+        return "arn:aws:cloudfront::" + userPoolDomain.getAwsAccountId() + ":distribution/" + id;
     }
 
     private String generateCloudFrontDomain() {
@@ -1384,27 +1656,16 @@ public class CognitoService implements ResourceProvider {
                     "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
         }
 
-        String username = extractUsernameFromToken(accessToken);
-        String poolId = extractPoolIdFromToken(accessToken);
-        String jti = extractJtiFromToken(accessToken);
-
-        if (username == null || poolId == null || jti == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
-        }
-
-        // A token that was already revoked (or issued before an earlier sign-out) cannot
-        // authorize a fresh sign-out.
-        validateTokenNotRevoked(jti, poolId, "access");
-        Long iat = extractIatFromToken(accessToken);
-        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
-
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        String username = token.username();
+        String poolId = token.poolId();
         CognitoUser user;
         try {
             user = adminGetUser(poolId, username);
         } catch (AwsException e) {
             if ("UserNotFoundException".equals(e.getErrorCode())
                     || "ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
             }
             throw e;
         }
@@ -1416,7 +1677,7 @@ public class CognitoService implements ResourceProvider {
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
         UserPool pool = poolStore.get(userPoolId).orElseThrow(
-                () -> new AwsException("ResourceNotFoundException", "User pool not found", 400));
+                () -> userPoolNotFound(userPoolId));
         LinkedHashMap<String, CognitoUser> matches = new LinkedHashMap<>();
         userStore.get(userKey(userPoolId, username))
                 .ifPresent(u -> matches.put(u.getUsername(), u));
@@ -1530,6 +1791,9 @@ public class CognitoService implements ResourceProvider {
     // every mutating path with one lock reproduces that.
     private final Object identityProviderLock = new Object();
 
+    // Domain creation is check-then-act across every account's keys; see createUserPoolDomain.
+    private final Object domainLock = new Object();
+
     public void adminLinkProviderForUser(String userPoolId, String destinationUsername,
             String sourceProviderName, String sourceUserId) {
         if (destinationUsername == null || destinationUsername.isEmpty()) {
@@ -1604,6 +1868,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     public List<CognitoUser> listUsers(String userPoolId, String filter) {
+        describeUserPool(userPoolId);
         String prefix = userPoolId + "::";
         List<CognitoUser> all = userStore.scan(k -> k.startsWith(prefix));
         if (filter == null || filter.isBlank()) {
@@ -2006,8 +2271,10 @@ public class CognitoService implements ResourceProvider {
             try {
                 String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                         VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+                Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                        pool, client, user, "CustomMessage_SignUp");
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
-                        code, List.of(deliveryTarget.deliveryMedium()));
+                        code, List.of(deliveryTarget.deliveryMedium()), customMessage);
             } catch (VerificationCodeException e) {
                 rollbackSignUpConfirmationArtifacts(pool.getId(), user.getUsername(), key);
                 throw mapVerificationCodeException(e);
@@ -2034,9 +2301,9 @@ public class CognitoService implements ResourceProvider {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
-        UserPool pool = poolStore.get(client.getUserPoolId())
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "User pool not found", 400));
+        String userPoolId = client.getUserPoolId();
+        UserPool pool = poolStore.get(userPoolId)
+                .orElseThrow(() -> userPoolNotFound(userPoolId));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         if (verificationCodeService != null && isSignUpConfirmationEnabled(pool)) {
             try {
@@ -2103,8 +2370,10 @@ public class CognitoService implements ResourceProvider {
         try {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+            Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                    pool, client, user, "CustomMessage_ResendCode");
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
-                    code, List.of(deliveryTarget.deliveryMedium()));
+                    code, List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         } catch (RuntimeException e) {
@@ -2176,18 +2445,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
-        String username = extractUsernameFromToken(accessToken);
-        String poolId = extractPoolIdFromToken(accessToken);
-        String jti = extractJtiFromToken(accessToken);
-
-        if (username == null || poolId == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
-        }
-
-        validateTokenNotRevoked(jti, poolId, "access");
-        validateOriginJtiNotRevoked(accessToken, poolId);
-        Long iat = extractIatFromToken(accessToken);
-        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        String username = token.username();
+        String poolId = token.poolId();
 
         CognitoUser user = adminGetUser(poolId, username);
         if (user.getPasswordHash() != null && !user.getPasswordHash().equals(hashPassword(previousPassword))) {
@@ -2212,8 +2472,10 @@ public class CognitoService implements ResourceProvider {
         try {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
+            Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                    pool, client, user, "CustomMessage_ForgotPassword");
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
-                    List.of(deliveryTarget.deliveryMedium()));
+                    List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         }
@@ -2240,19 +2502,10 @@ public class CognitoService implements ResourceProvider {
     }
 
     public Map<String, Object> getUser(String accessToken) {
-        String username = extractUsernameFromToken(accessToken);
-        String poolId = extractPoolIdFromToken(accessToken);
-        String jti = extractJtiFromToken(accessToken);
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        String username = token.username();
+        String poolId = token.poolId();
 
-        if (username == null || poolId == null || jti == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
-        }
-
-        validateTokenNotRevoked(jti, poolId, "access");
-        validateOriginJtiNotRevoked(accessToken, poolId);
-        Long iat = extractIatFromToken(accessToken);
-        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
-        
         CognitoUser user = adminGetUser(poolId, username);
         Map<String, Object> result = new HashMap<>();
         result.put("Username", user.getUsername());
@@ -2263,18 +2516,18 @@ public class CognitoService implements ResourceProvider {
     }
 
     public Map<String, Object> getUserAttributeVerificationCode(String accessToken, String attributeName) {
-        String username = extractUsernameFromToken(accessToken);
-        String poolId = extractPoolIdFromToken(accessToken);
-        String jti = extractJtiFromToken(accessToken);
-
-        if (username == null || poolId == null || jti == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+        VerifiedAccessToken token;
+        try {
+            token = verifyAccessToken(accessToken);
+        } catch (AwsException e) {
+            if ("NotAuthorizedException".equals(e.getErrorCode())
+                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+            }
+            throw e;
         }
-
-        validateTokenNotRevoked(jti, poolId, "access");
-        validateOriginJtiNotRevoked(accessToken, poolId);
-        Long iat = extractIatFromToken(accessToken);
-        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
+        String username = token.username();
+        String poolId = token.poolId();
 
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
@@ -2314,18 +2567,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void updateUserAttributes(String accessToken, Map<String, String> attributes) {
-        String username = extractUsernameFromToken(accessToken);
-        String poolId = extractPoolIdFromToken(accessToken);
-        String jti = extractJtiFromToken(accessToken);
-
-        if (username == null || poolId == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
-        }
-
-        validateTokenNotRevoked(jti, poolId, "access");
-        validateOriginJtiNotRevoked(accessToken, poolId);
-        Long iat = extractIatFromToken(accessToken);
-        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        String username = token.username();
+        String poolId = token.poolId();
 
         String verificationStatusAttribute = attributes.containsKey("email_verified")
                 ? "email_verified"
@@ -2341,24 +2585,22 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void deleteUserAttributes(String accessToken, List<String> attributeNames) {
-        String username = extractUsernameFromToken(accessToken);
-        String poolId = extractPoolIdFromToken(accessToken);
-        String jti = extractJtiFromToken(accessToken);
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        String username = token.username();
+        String poolId = token.poolId();
 
-        if (username == null || poolId == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
-        }
-
-        validateTokenNotRevoked(jti, poolId, "access");
-        validateOriginJtiNotRevoked(accessToken, poolId);
-        Long iat = extractIatFromToken(accessToken);
-        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
-        
         adminDeleteUserAttributes(poolId, username, attributeNames);
     }
 
-    public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope) {
+    /**
+     * @param requiredPoolId the pool owning the custom domain the request arrived on, or
+     *                       {@code null} on Floci's own host. As on AWS, a client of another pool
+     *                       does not exist on that domain.
+     */
+    public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope,
+                                                           String requiredPoolId) {
         UserPoolClient client = clientStore.get(clientId)
+                .filter(c -> requiredPoolId == null || requiredPoolId.equals(c.getUserPoolId()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         UserPool pool = describeUserPool(client.getUserPoolId());
         validateClientAllowsClientCredentials(client);
@@ -2388,15 +2630,30 @@ public class CognitoService implements ResourceProvider {
         return getIssuer(poolId) + "/.well-known/jwks.json";
     }
 
-    public String getTokenEndpoint() {
-        return baseUrl + "/cognito-idp/oauth2/token";
+    /**
+     * A custom domain is HTTPS-only on AWS, so its endpoints are advertised as {@code https}
+     * regardless of Floci's own base URL.
+     */
+    public String getTokenEndpoint(String poolId) {
+        return oauthEndpoint(poolId, "token");
     }
 
-    public String getUserInfoEndpoint() {
-        return baseUrl + "/cognito-idp/oauth2/userInfo";
+    public String getUserInfoEndpoint(String poolId) {
+        return oauthEndpoint(poolId, "userInfo");
+    }
+
+    private String oauthEndpoint(String poolId, String operation) {
+        return findCustomDomainForPool(poolId)
+                .map(d -> "https://" + d.getDomain() + "/oauth2/" + operation)
+                .orElse(baseUrl + "/cognito-idp/oauth2/" + operation);
     }
 
     // ──────────────────────────── Private helpers ────────────────────────────
+
+    private static AwsException userPoolNotFound(String userPoolId) {
+        return new AwsException("ResourceNotFoundException",
+                "User pool " + userPoolId + " does not exist.", 400);
+    }
 
     UserPoolClient findClientById(String clientId) {
         return clientStore.get(clientId)
@@ -2416,14 +2673,14 @@ public class CognitoService implements ResourceProvider {
         String poolId = parts[0];
         String username = parts[1];
         String refreshTokenUuid = parts[4]; // UUID from refresh token
-        
+
         if (!client.getUserPoolId().equals(poolId)) {
             throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
         }
         if (isRefreshTokenExpired(client, parts)) {
             throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
         }
-        
+
         // Check if refresh token has been revoked
         validateTokenNotRevoked(refreshTokenUuid, poolId, "refresh");
         long issuedAt = 0L;
@@ -2431,11 +2688,11 @@ public class CognitoService implements ResourceProvider {
             issuedAt = Long.parseLong(parts[3]);
         } catch (NumberFormatException ignored) {}
         validateUserNotGloballySignedOut(username, poolId, "refresh", issuedAt);
-        
+
         UserPool pool = describeUserPool(poolId);
         CognitoUser user = adminGetUser(poolId, username);
         ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user);
-        
+
         // Use refresh token UUID as origin_jti for derived tokens
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
@@ -2505,7 +2762,7 @@ public class CognitoService implements ResourceProvider {
         String originJti = UUID.randomUUID().toString();
         return generateAuthResult(user, pool, client, override, originJti);
     }
-    
+
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));
@@ -2519,7 +2776,7 @@ public class CognitoService implements ResourceProvider {
     String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client, ClaimsOverride override) {
         return generateSignedJwt(user, pool, type, client, override, null);
     }
-    
+
     String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client, ClaimsOverride override, String originJti) {
         String header = encodeJwtHeader(pool);
         long now = System.currentTimeMillis() / 1000L;
@@ -2544,11 +2801,11 @@ public class CognitoService implements ResourceProvider {
         // Add JWT ID (jti) claim for token revocation support
         String jti = UUID.randomUUID().toString();
         claims.put("jti", jti);
-        
+
         if (("access".equals(type) || "id".equals(type)) && originJti != null && isTokenRevocationEnabled(client)) {
             claims.put("origin_jti", originJti);
         }
-        
+
         String clientId = client != null ? client.getClientId() : null;
         if (clientId != null && !clientId.isBlank()) {
             if ("access".equals(type)) claims.put("client_id", clientId);
@@ -3297,31 +3554,90 @@ public class CognitoService implements ResourceProvider {
         return null;
     }
 
-    private String extractUsernameFromToken(String token) {
+    record VerifiedAccessToken(String username, String poolId, String subject) {}
+
+    /**
+     * Verifies the Cognito access-token contract before any self-service operation uses its claims.
+     * The pool's persisted public key is the trust anchor; claims are never trusted before the
+     * signature, issuer, client, token-use, and lifetime checks succeed.
+     */
+    VerifiedAccessToken verifyAccessToken(String token) {
         try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) return null;
-            String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-            // Simple extraction without full JSON parsing
-            return extractJsonField(payloadJson, "username");
+            if (token == null || token.isBlank()) {
+                throw new IllegalArgumentException("missing token");
+            }
+            String[] parts = token.split("\\.", -1);
+            if (parts.length != 3 || parts[0].isEmpty() || parts[1].isEmpty() || parts[2].isEmpty()) {
+                throw new IllegalArgumentException("malformed JWT");
+            }
+
+            JsonNode header = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[0]));
+            JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
+            if (!"RS256".equals(header.path("alg").asText())
+                    || !"JWT".equalsIgnoreCase(header.path("typ").asText())) {
+                throw new IllegalArgumentException("unsupported JWT algorithm");
+            }
+
+            String issuer = textClaim(claims, "iss");
+            String poolId = null;
+            if (issuer != null && issuer.startsWith(baseUrl + "/")) {
+                poolId = issuer.substring((baseUrl + "/").length());
+            }
+            UserPool pool = poolId == null ? null : poolStore.get(poolId).orElse(null);
+            if (pool == null || !getIssuer(poolId).equals(issuer)
+                    || !getSigningKeyId(pool).equals(textClaim(header, "kid"))) {
+                throw new IllegalArgumentException("invalid issuer or key");
+            }
+
+            Signature verifier = Signature.getInstance("SHA256withRSA");
+            verifier.initVerify(getSigningPublicKey(pool));
+            verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
+            if (!verifier.verify(Base64.getUrlDecoder().decode(parts[2]))) {
+                throw new IllegalArgumentException("invalid signature");
+            }
+
+            String verifiedPoolId = poolId;
+            String username = textClaim(claims, "username");
+            String subject = textClaim(claims, "sub");
+            String jti = textClaim(claims, "jti");
+            String clientId = textClaim(claims, "client_id");
+            long issuedAt = requiredNumericClaim(claims, "iat");
+            long expiresAt = requiredNumericClaim(claims, "exp");
+            if (username == null || subject == null || jti == null || clientId == null
+                    || !"access".equals(textClaim(claims, "token_use"))
+                    || clientStore.get(clientId).filter(c -> verifiedPoolId.equals(c.getUserPoolId())).isEmpty()
+                    || expiresAt <= System.currentTimeMillis() / 1000L) {
+                throw new IllegalArgumentException("invalid access-token claims");
+            }
+
+            String originJti = textClaim(claims, "origin_jti");
+            validateTokenNotRevoked(jti, poolId, "access");
+            if (originJti != null) {
+                validateTokenNotRevoked(originJti, poolId, "access");
+            }
+            validateUserNotGloballySignedOut(username, poolId, "access", issuedAt);
+            return new VerifiedAccessToken(username, poolId, subject);
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
-            return null;
+            LOG.debug("Access token verification failed", e);
+            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
         }
     }
 
-    private String extractPoolIdFromToken(String token) {
-        try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) return null;
-            String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-            String iss = extractJsonField(payloadJson, "iss");
-            if (iss == null) return null;
-            int lastSlash = iss.lastIndexOf('/');
-            return lastSlash >= 0 ? iss.substring(lastSlash + 1) : null;
-        } catch (Exception e) {
-            return null;
-        }
+    private static String textClaim(JsonNode claims, String name) {
+        JsonNode value = claims.path(name);
+        return value.isTextual() && !value.asText().isBlank() ? value.asText() : null;
     }
+
+    private static long requiredNumericClaim(JsonNode claims, String name) {
+        JsonNode value = claims.path(name);
+        if (!value.isIntegralNumber()) {
+            throw new IllegalArgumentException("missing numeric claim");
+        }
+        return value.asLong();
+    }
+
 
     private void validateGroupName(String groupName) {
         if (groupName == null || groupName.isBlank()) {
@@ -3329,16 +3645,6 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
-
-    private String extractJsonField(String json, String field) {
-        String search = "\"" + field + "\":\"";
-        int start = json.indexOf(search);
-        if (start < 0) return null;
-        start += search.length();
-        int end = json.indexOf('"', start);
-        if (end < 0) return null;
-        return json.substring(start, end);
-    }
 
     private String userKey(String poolId, String username) {
         return poolId + "::" + username;
@@ -3379,53 +3685,8 @@ public class CognitoService implements ResourceProvider {
         return updated;
     }
 
-    /**
-     * Extract JWT ID (jti) claim from a JWT token.
-     */
-    private String extractJtiFromToken(String token) {
-        try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) return null;
-            String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-            return extractJsonField(payloadJson, "jti");
-        } catch (Exception e) {
-            return null;
-        }
-    }
 
-    private String extractOriginJtiFromToken(String token) {
-        try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) return null;
-            String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-            return extractJsonField(payloadJson, "origin_jti");
-        } catch (Exception e) {
-            return null;
-        }
-    }
 
-    private Long extractIatFromToken(String token) {
-        try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) return null;
-            String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-            String iatStr = extractJsonField(payloadJson, "iat");
-            if (iatStr != null) {
-                return Long.parseLong(iatStr);
-            }
-            // In case the simple extractor doesn't work for numbers (it extracts strings between quotes usually)
-            // let's use MAPPER for this specific field
-            Map<String, Object> payload = MAPPER.readValue(payloadJson, new TypeReference<>() {});
-            Object iat = payload.get("iat");
-            if (iat instanceof Number n) {
-                return n.longValue();
-            }
-        } catch (Exception e) {
-            return null;
-        }
-        return null;
-    }
-    
     /**
      * Validate that a refresh token has not been revoked, including global user sign-out.
      * Called from CognitoAuthFlowHandler for the REFRESH_TOKEN_AUTH flow.
@@ -3434,7 +3695,7 @@ public class CognitoService implements ResourceProvider {
         validateTokenNotRevoked(jti, poolId, "refresh");
         validateUserNotGloballySignedOut(username, poolId, "refresh", iat);
     }
-    
+
     /**
      * Validate that a token has not been revoked.
      * @param jti The JWT ID to check
@@ -3446,20 +3707,20 @@ public class CognitoService implements ResourceProvider {
         if (jti == null) {
             return; // Skip validation for tokens without jti (legacy tokens)
         }
-        
+
         // Check for specific token revocation
         String revokedKey = revokedTokenKey(poolId, jti);
         Optional<RevokedTokenInfo> revoked = revokedTokenStore.get(revokedKey);
-        
+
         if (revoked.isPresent()) {
             RevokedTokenInfo revokedInfo = revoked.get();
-            
+
             // Clean up expired revocation records
             if (revokedInfo.isExpired()) {
                 revokedTokenStore.delete(revokedKey);
                 return;
             }
-            
+
             // Token has been revoked
             String errorMessage = switch (tokenType) {
                 case "access" -> "Access Token has been revoked";
@@ -3470,13 +3731,7 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("NotAuthorizedException", errorMessage, 400);
         }
     }
-    
-    private void validateOriginJtiNotRevoked(String accessToken, String poolId) {
-        String originJti = extractOriginJtiFromToken(accessToken);
-        if (originJti != null) {
-            validateTokenNotRevoked(originJti, poolId, "access");
-        }
-    }
+
 
     /**
      * Check if a user has been globally signed out (affects all their tokens).
@@ -3485,13 +3740,13 @@ public class CognitoService implements ResourceProvider {
     private void validateUserNotGloballySignedOut(String username, String poolId, String tokenType, long iat) {
         String globalRevokeKey = revokedTokenKey(poolId, "global:" + username);
         Optional<RevokedTokenInfo> globalRevoked = revokedTokenStore.get(globalRevokeKey);
-        
+
         if (globalRevoked.isPresent()) {
             RevokedTokenInfo globalInfo = globalRevoked.get();
             if (!globalInfo.isExpired()) {
                 long revokedAtMs = globalInfo.getRevokedAt();
                 boolean revoked = false;
-                
+
                 if (iat > 1000000000000L) {
                     // iat is in milliseconds (refresh token)
                     revoked = iat <= revokedAtMs;
@@ -3504,7 +3759,7 @@ public class CognitoService implements ResourceProvider {
                 if (revoked) {
                     String errorMessage = switch (tokenType) {
                         case "access" -> "Access Token has been revoked";
-                        case "id" -> "ID Token has been revoked"; 
+                        case "id" -> "ID Token has been revoked";
                         case "refresh" -> "Refresh Token has been revoked";
                         default -> "Token has been revoked";
                     };
@@ -3515,24 +3770,24 @@ public class CognitoService implements ResourceProvider {
             }
         }
     }
-    
+
     /**
      * Revoke all tokens (refresh, access, ID) for a specific user.
      * This implements the core logic for AdminUserGlobalSignOut.
      */
     private void revokeAllUserTokens(String userPoolId, String username) {
         long nowMs = System.currentTimeMillis();
-        
+
         // Note: In a real implementation, we would need to track all active tokens for a user.
         // Since Floci doesn't currently maintain a token registry, we implement a simpler
         // approach that marks the user as globally signed out with a future expiration.
         // This covers the most common use case where tokens are checked at validation time.
-        
+
         // Create a revocation record for the user with a future expiration
         // This will catch any existing tokens when they're next validated
         String globalRevokeKey = revokedTokenKey(userPoolId, "global:" + username);
         long globalExpiration = nowMs + (365L * 24L * 60L * 60L * 1000L); // 1 year from now in ms
-        
+
         RevokedTokenInfo globalRevocation = new RevokedTokenInfo(
             "global:" + username,
             "global",
@@ -3541,12 +3796,12 @@ public class CognitoService implements ResourceProvider {
             nowMs,
             globalExpiration
         );
-        
+
         revokedTokenStore.put(globalRevokeKey, globalRevocation);
-        
+
         LOG.debugv("Created global revocation record for user {0} in pool {1}", username, userPoolId);
     }
-    
+
     /**
      * Generate a storage key for revoked token information.
      */
@@ -3795,37 +4050,14 @@ public class CognitoService implements ResourceProvider {
             Boolean emailEnabled,
             Boolean emailPreferred) {
 
-        String username = extractUsernameFromToken(accessToken);
-        String poolId = extractPoolIdFromToken(accessToken);
-        String jti = extractJtiFromToken(accessToken);
-
-        if (username == null || poolId == null || jti == null) {
-            throw new AwsException(
-                    "NotAuthorizedException",
-                    "Invalid access token",
-                    400
-            );
-        }
-
-        validateTokenNotRevoked(jti, poolId, "access");
-        validateOriginJtiNotRevoked(accessToken, poolId);
-
-        Long iat = extractIatFromToken(accessToken);
-
-        validateUserNotGloballySignedOut(
-                username,
-                poolId,
-                "access",
-                iat != null ? iat : 0L
-        );
-
-        CognitoUser user = adminGetUser(poolId, username);
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        CognitoUser user = adminGetUser(token.poolId(), token.username());
 
         updateEmailMfaPreference(user, emailEnabled, emailPreferred);
 
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
 
-        userStore.put(userKey(poolId, user.getUsername()), user);
+        userStore.put(userKey(token.poolId(), user.getUsername()), user);
     }
 
     private void updateEmailMfaPreference(

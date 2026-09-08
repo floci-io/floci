@@ -285,7 +285,10 @@ public class CloudWatchMetricsQueryHandler {
         } else {
             metricsService.tagResource(arn, tags, region);
         }
-        return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", null)).build();
+        // TagResourceOutput is an empty structure with a declared resultWrapper, so the
+        // wrapper element must be present. The AWS Go SDK v2 unmarshaler, behind the
+        // Terraform AWS provider, fails on a response without it.
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("TagResource", null)).build();
     }
 
     private Response handleUntagResource(MultivaluedMap<String, String> params, String region) {
@@ -301,7 +304,7 @@ public class CloudWatchMetricsQueryHandler {
         } else {
             metricsService.untagResource(arn, keys, region);
         }
-        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", null)).build();
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("UntagResource", null)).build();
     }
 
     // ──────────────────────────── Dashboards ────────────────────────────

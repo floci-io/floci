@@ -51,6 +51,11 @@ public class TableDefinition {
     // Replica regions for a global table (single-process emulator backs them all with this table's
     // data; the list drives the DescribeTable Replicas/GlobalTableVersion projection).
     private List<String> replicaRegions;
+    // Resource-based policy attached via PutResourcePolicy (JSON policy document text), and the
+    // opaque revision id AWS hands back so callers can pass ExpectedRevisionId for optimistic
+    // concurrency on subsequent Put/DeleteResourcePolicy calls. Null when no policy is attached.
+    private String resourcePolicy;
+    private String resourcePolicyRevisionId;
 
     public TableDefinition() {
         this.keySchema = new ArrayList<>();
@@ -206,6 +211,12 @@ public class TableDefinition {
 
     public Integer getOnDemandMaxWriteRequestUnits() { return onDemandMaxWriteRequestUnits; }
     public void setOnDemandMaxWriteRequestUnits(Integer v) { this.onDemandMaxWriteRequestUnits = v; }
+
+    public String getResourcePolicy() { return resourcePolicy; }
+    public void setResourcePolicy(String resourcePolicy) { this.resourcePolicy = resourcePolicy; }
+
+    public String getResourcePolicyRevisionId() { return resourcePolicyRevisionId; }
+    public void setResourcePolicyRevisionId(String resourcePolicyRevisionId) { this.resourcePolicyRevisionId = resourcePolicyRevisionId; }
 
     @JsonIgnore
     public String getPartitionKeyName() {

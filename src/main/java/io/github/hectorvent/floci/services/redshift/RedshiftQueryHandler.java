@@ -425,6 +425,8 @@ public class RedshiftQueryHandler {
             .elem("NodeType", cluster.getNodeType())
             .elem("MasterUsername", cluster.getMasterUsername())
             .elem("ClusterStatus", cluster.getClusterStatus())
+            .elem("ClusterAvailabilityStatus", availabilityStatus(cluster.getClusterStatus()))
+            .elem("AvailabilityZoneRelocationStatus", "disabled")
             .elem("ClusterSubnetGroupName", cluster.getClusterSubnetGroupName());
 
         if (cluster.getVpcSecurityGroupIds() != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
@@ -463,6 +465,21 @@ public class RedshiftQueryHandler {
         }
 
         return builder.end("Cluster").build();
+    }
+
+    // Terraform's AWS provider polls ClusterAvailabilityStatus during create and validates it on
+    // read, so DescribeClusters must always carry it. Floci has no maintenance window concept, and
+    // every transient lifecycle state (creating, deleting, rebooting, modifying) maps to Modifying.
+    private static String availabilityStatus(String clusterStatus) {
+        if (clusterStatus == null) {
+            return "Modifying";
+        }
+        return switch (clusterStatus) {
+            case "available" -> "Available";
+            case "unavailable" -> "Unavailable";
+            case "failed" -> "Failed";
+            default -> "Modifying";
+        };
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {

@@ -137,6 +137,34 @@ class MskServiceTest {
     }
 
     @Test
+    void createClusterStaysCreatingWhileBrokerStarts() {
+        when(config.services().msk().mock()).thenReturn(false);
+        when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(true);
+
+        MskCluster cluster = mskService.createCluster("docker-cluster");
+
+        assertEquals(ClusterState.CREATING, cluster.getState());
+        assertEquals(ClusterState.CREATING,
+                mskService.describeCluster(cluster.getClusterArn()).getState());
+    }
+
+    @Test
+    void createClusterWithoutDockerDaemonStillReachesActive() {
+        // tryStartContainer() returns false when no Docker daemon is reachable. The cluster
+        // record is metadata, so the create still succeeds, reaches ACTIVE, and reports a
+        // placeholder bootstrap address until a daemon appears.
+        when(config.services().msk().mock()).thenReturn(false);
+        when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(false);
+
+        MskCluster cluster = mskService.createCluster("no-docker-cluster");
+
+        assertEquals(ClusterState.ACTIVE, cluster.getState());
+        assertEquals("localhost:9092", cluster.getBootstrapBrokers());
+        assertEquals("no-docker-cluster",
+                mskService.describeCluster(cluster.getClusterArn()).getClusterName());
+    }
+
+    @Test
     void createClusterPersistsRequestMetadata() {
         CreateClusterRequest request = new CreateClusterRequest();
         request.setClusterName("meta-cluster");

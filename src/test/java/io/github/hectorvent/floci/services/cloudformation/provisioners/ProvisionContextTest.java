@@ -15,6 +15,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The shared helpers on {@link ProvisionContext} that extracted provisioners build on. */
@@ -177,4 +179,50 @@ class ProvisionContextTest {
                 "a replacing update derives a different name and must still create");
     }
 
+
+    /**
+     * The whole property node is handed to {@code engine.resolveStringList}, so a list-valued
+     * intrinsic ({@code Fn::Split} over a cross-stack {@code Fn::ImportValue}) expands to its real
+     * values instead of collapsing to one comma-joined string (issue #2937). Resolving each element
+     * in isolation, as the old copy did, would have yielded a single unusable entry.
+     */
+    @Test
+    void resolveStringListRoutesListValuedIntrinsicsThroughTheEngine() {
+        JsonNode props = props("""
+                {
+                  "SubnetIds": {
+                    "Fn::Split": [",", {"Fn::ImportValue": "vpc-stack:PrivateSubnetIds"}]
+                  }
+                }
+                """);
+        when(engine.resolveStringList(props.get("SubnetIds")))
+                .thenReturn(List.of("subnet-a", "subnet-b", "subnet-c"));
+
+        assertEquals(List.of("subnet-a", "subnet-b", "subnet-c"),
+                context(null).resolveStringList(props, "SubnetIds"));
+    }
+
+    @Test
+    void resolveStringListReturnsAMutableEmptyListForAnAbsentPropertyWithoutCallingTheEngine() {
+        List<String> values = context(null).resolveStringList(props("{}"), "ManagedPolicyArns");
+
+        assertEquals(List.of(), values);
+        values.add("still-mutable");
+        verify(engine, never()).resolveStringList(any());
+    }
+
+    @Test
+    void staleTagKeysListsTheCurrentKeysTheTemplateDropped() {
+        Map<String, String> current = new java.util.LinkedHashMap<>();
+        current.put("Keep", "same");
+        current.put("Old", "value");
+        current.put("Gone", "too");
+
+        assertEquals(List.of("Old", "Gone"),
+                ProvisionContext.staleTagKeys(current, Map.of("Keep", "same", "New", "added")));
+        assertEquals(List.of(), ProvisionContext.staleTagKeys(null, Map.of("Keep", "same")),
+                "no stored tags means nothing to untag");
+        assertEquals(List.of("Keep", "Old", "Gone"), ProvisionContext.staleTagKeys(current, Map.of()),
+                "a template with no Tags leaves the resource untagged");
+    }
 }

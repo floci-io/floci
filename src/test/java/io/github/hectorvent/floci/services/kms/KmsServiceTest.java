@@ -16,13 +16,22 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.spec.OAEPParameterSpec;
+import javax.crypto.spec.PSource;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.Security;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -38,6 +47,7 @@ class KmsServiceTest {
     private static final String REGION = "us-east-1";
 
     private KmsService kmsService;
+    private InMemoryStorage<String, KmsKey> keyStore;
 
     @BeforeAll
     static void registerBouncyCastle() {
@@ -48,8 +58,9 @@ class KmsServiceTest {
 
     @BeforeEach
     void setUp() {
+        keyStore = new InMemoryStorage<>();
         kmsService = new KmsService(
-                new InMemoryStorage<>(),
+                keyStore,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000")
@@ -859,6 +870,309 @@ class KmsServiceTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    /**
+     * RSAES-OAEP on RSA keys, issue #3024. Expected ciphertext sizes, error codes and
+     * messages were measured against real AWS KMS in us-east-1.
+     */
+    @Nested
+    class RsaEncryptDecryptTests {
+
+        private static final byte[] PLAINTEXT = "secret payload".getBytes(StandardCharsets.UTF_8);
+
+        private KmsKey createRsaKey() {
+            return kmsService.createKey("rsa key", "ENCRYPT_DECRYPT", "RSA_2048", null, Map.of(), REGION);
+        }
+
+        @Test
+        void oaepSha256RoundTripProducesRawRsaCiphertext() {
+            KmsKey key = createRsaKey();
+
+            KmsService.EncryptResult encrypted =
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_256", REGION);
+
+            assertEquals(256, encrypted.ciphertext().length);
+            assertEquals(key.getArn(), encrypted.keyArn());
+            assertEquals("RSAES_OAEP_SHA_256", encrypted.encryptionAlgorithm());
+
+            KmsService.DecryptResult decrypted = kmsService.decryptAndResolveKey(
+                    encrypted.ciphertext(), Map.of(), REGION, key.getKeyId(), "RSAES_OAEP_SHA_256");
+
+            assertArrayEquals(PLAINTEXT, decrypted.plaintext());
+            assertEquals(key.getArn(), decrypted.keyArn());
+            assertEquals("RSAES_OAEP_SHA_256", decrypted.encryptionAlgorithm());
+        }
+
+        @Test
+        void oaepSha1RoundTripAllowsUpTo214Bytes() {
+            KmsKey key = createRsaKey();
+            byte[] plaintext = new byte[214];
+
+            KmsService.EncryptResult encrypted =
+                    kmsService.encrypt(key.getKeyId(), plaintext, Map.of(), "RSAES_OAEP_SHA_1", REGION);
+            KmsService.DecryptResult decrypted = kmsService.decryptAndResolveKey(
+                    encrypted.ciphertext(), Map.of(), REGION, key.getKeyId(), "RSAES_OAEP_SHA_1");
+
+            assertEquals(256, encrypted.ciphertext().length);
+            assertArrayEquals(plaintext, decrypted.plaintext());
+        }
+
+        @Test
+        void decryptAcceptsCiphertextMadeLocallyWithThePublicKey() throws Exception {
+            KmsKey key = createRsaKey();
+            var publicKey = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(
+                    Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded())));
+            var cipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding");
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
+                    "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, javax.crypto.spec.PSource.PSpecified.DEFAULT));
+            byte[] localCiphertext = cipher.doFinal(PLAINTEXT);
+
+            KmsService.DecryptResult decrypted = kmsService.decryptAndResolveKey(
+                    localCiphertext, Map.of(), REGION, key.getKeyId(), "RSAES_OAEP_SHA_256");
+
+            assertArrayEquals(PLAINTEXT, decrypted.plaintext());
+        }
+
+        @Test
+        void encryptWithDefaultAlgorithmThrowsInvalidKeyUsage() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), null, REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048.", ex.getMessage());
+        }
+
+        @Test
+        void encryptOnSymmetricKeyWithRsaAlgorithmThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey(null, REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm RSAES_OAEP_SHA_256 is incompatible with key spec SYMMETRIC_DEFAULT.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptWithSignVerifyKeyThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for Encrypt.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptWithEncryptionContextThrowsValidation() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of("foo", "bar"), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("EncryptionContext is not supported when encrypting/decrypting with asymmetric CMKs.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptOver190BytesWithOaepSha256ThrowsValidation() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), new byte[191], Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("Algorithm RSAES_OAEP_SHA_256 and key spec RSA_2048 cannot encrypt data larger than 190 bytes.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void decryptWithoutKeyIdThrowsValidation() {
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null, "RSAES_OAEP_SHA_256"));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("KeyId must not be null", ex.getMessage());
+        }
+
+        @Test
+        void decryptGarbageThrowsInvalidCiphertext() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(new byte[256], Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithWrongRsaKeyThrowsInvalidCiphertext() {
+            KmsKey key = createRsaKey();
+            KmsKey otherKey = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION,
+                            otherKey.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithWrongOaepHashThrowsInvalidCiphertext() {
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_1"));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptOnSymmetricKeyWithRsaAlgorithmThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm RSAES_OAEP_SHA_256 is incompatible with key spec SYMMETRIC_DEFAULT.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void symmetricDecryptStillReportsSymmetricDefaultAlgorithm() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, REGION);
+
+            KmsService.DecryptResult result =
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId(), null);
+
+            assertArrayEquals(PLAINTEXT, result.plaintext());
+            assertEquals("SYMMETRIC_DEFAULT", result.encryptionAlgorithm());
+        }
+
+        @Test
+        void decryptWithRsaKeyIdAndDefaultAlgorithmThrowsInvalidCiphertext() {
+            // Real KMS parses the ciphertext before comparing the defaulted SYMMETRIC_DEFAULT
+            // algorithm with the key spec, so raw RSA bytes fail as a bad ciphertext.
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId(), null));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithEncryptionContextThrowsValidation() {
+            KmsKey key = createRsaKey();
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), PLAINTEXT, Map.of(),
+                    "RSAES_OAEP_SHA_256", REGION).ciphertext();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of("foo", "bar"), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("EncryptionContext is not supported when encrypting/decrypting with asymmetric CMKs.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void decryptWithSignVerifyKeyThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(new byte[256], Map.of(), REGION,
+                            key.getKeyId(), "RSAES_OAEP_SHA_256"));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for Decrypt.",
+                    ex.getMessage());
+        }
+
+        @Test
+        void encryptEmptyPlaintextThrowsValidation() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), new byte[0], Map.of(), "RSAES_OAEP_SHA_256", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("Plaintext must be between 1 and 4096 bytes for Encrypt.", ex.getMessage());
+        }
+
+        @Test
+        void encryptOver4096BytesThrowsValidation() {
+            KmsKey key = kmsService.createKey(null, REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(key.getKeyId(), new byte[4097], REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void encryptWithUnknownAlgorithmOnMissingKeyThrowsValidation() {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt("no-such-key", PLAINTEXT, Map.of(), "RSAES_OAEP_SHA_384", REGION));
+
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptBlobWithMalformedPayloadThrowsInvalidCiphertext() {
+            byte[] ciphertext = "kms:v2:some-key:0011223344556677::@@@".getBytes(StandardCharsets.UTF_8);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null, null));
+
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void generateDataKeyWithRsaKeyThrowsInvalidKeyUsage() {
+            KmsKey key = createRsaKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048.", ex.getMessage());
+        }
+
+        @Test
+        void generateDataKeyWithSignVerifyKeyThrowsInvalidKeyUsage() {
+            KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+
+            assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+            assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for GenerateDataKey.",
+                    ex.getMessage());
+        }
+    }
+
     @Nested
     class DecryptAndReEncryptTests {
 
@@ -1259,6 +1573,53 @@ class KmsServiceTest {
     }
 
     @Test
+    void signWithDigestMessageTypePssVerifiesWithExternalVerifier() throws Exception {
+        KmsKey key = kmsService.createKey("rsa pss digest key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        byte[] message = "floci kms pss round-trip".getBytes(StandardCharsets.UTF_8);
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(message);
+
+        byte[] sig = kmsService.sign(key.getKeyId(), digest,
+                "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION);
+
+        // floci's own Verify round-trips, against the digest and against the raw message.
+        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+                "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION));
+        assertTrue(kmsService.verify(key.getKeyId(), message, sig,
+                "RSASSA_PSS_SHA_256", KmsMessageType.RAW, REGION));
+
+        // External verifier with the PSS parameters AWS documents for RSASSA_PSS_SHA_256.
+        byte[] der = Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded());
+        PublicKey pub = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
+        Signature verifier = Signature.getInstance("RSASSA-PSS");
+        verifier.setParameter(new PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1));
+        verifier.initVerify(pub);
+        verifier.update(message);
+        assertTrue(verifier.verify(sig), "DIGEST PSS signature must verify as real RSASSA-PSS");
+    }
+
+    @Test
+    void signWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.sign(key.getKeyId(), "sign me".getBytes(StandardCharsets.UTF_8), "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+    }
+
+    @Test
+    void verifyWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
+        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        var message = "sign me".getBytes(StandardCharsets.UTF_8);
+        var sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+
+        var ex = assertThrows(AwsException.class, () ->
+                kmsService.verify(key.getKeyId(), message, sig, "NOT_AN_ALGORITHM", REGION));
+
+        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+    }
+
+    @Test
     void verifyWithWrongSignatureReturnsFalse() {
         KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
         byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
@@ -1274,7 +1635,7 @@ class KmsServiceTest {
 
         assertNotNull(publicKeyInfo.getPublicKeyEncoded());
         byte[] derBytes = Base64.getDecoder().decode(publicKeyInfo.getPublicKeyEncoded());
-        
+
         // Verify it can be parsed as a standard Java PublicKey
         KeyFactory factory = KeyFactory.getInstance("EC");
         PublicKey pub = factory.generatePublic(new X509EncodedKeySpec(derBytes));
@@ -1763,5 +2124,462 @@ class KmsServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.generateMac(keyId, message, "HMAC_SHA_256", REGION));
         assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+    }
+
+    @Nested
+    class ImportedKeyMaterial {
+
+        private static final String OAEP_SHA_256 = "RSAES_OAEP_SHA_256";
+
+        private KmsKey externalKey(String keySpec, String keyUsage) {
+            return kmsService.createKey("external", keyUsage, keySpec, null, Map.of(), "EXTERNAL", REGION);
+        }
+
+        private KmsKey externalSymmetricKey() {
+            return externalKey("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        }
+
+        private byte[] material(int length, byte seed) {
+            byte[] material = new byte[length];
+            Arrays.fill(material, seed);
+            return material;
+        }
+
+        /** Wraps material the way a caller would, with the public key GetParametersForImport returned. */
+        private byte[] wrap(String publicKeyEncoded, String wrappingAlgorithm, byte[] material) throws Exception {
+            PublicKey wrappingKey = KeyFactory.getInstance("RSA")
+                    .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyEncoded)));
+            String digest = "RSAES_OAEP_SHA_1".equals(wrappingAlgorithm) ? "SHA-1" : "SHA-256";
+            Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, wrappingKey, new OAEPParameterSpec(digest, "MGF1",
+                    new MGF1ParameterSpec(digest), PSource.PSpecified.DEFAULT));
+            return cipher.doFinal(material);
+        }
+
+        private KmsKey importInto(KmsKey key, byte[] rawMaterial, String wrappingAlgorithm) throws Exception {
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), wrappingAlgorithm, "RSA_2048", REGION);
+            return kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(),
+                    wrap(parameters.publicKeyEncoded(), wrappingAlgorithm, rawMaterial),
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+        }
+
+        @Test
+        void externalOriginCreatesAKeyWithoutMaterial() {
+            KmsKey key = externalSymmetricKey();
+
+            assertEquals("EXTERNAL", key.getOrigin());
+            assertEquals("PendingImport", key.getKeyState());
+            assertFalse(key.isEnabled());
+            assertNull(key.getPrivateKeyEncoded());
+        }
+
+        @Test
+        void encryptIsRejectedWhileTheKeyHasNoMaterial() {
+            String keyId = externalSymmetricKey().getKeyId();
+            byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(keyId, plaintext, REGION));
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"RSAES_OAEP_SHA_256", "RSAES_OAEP_SHA_1"})
+        void everySupportedWrappingAlgorithmCompletesAnImport(String wrappingAlgorithm) throws Exception {
+            KmsKey key = externalSymmetricKey();
+
+            KmsKey imported = importInto(key, material(32, (byte) 7), wrappingAlgorithm);
+
+            assertEquals("Enabled", imported.getKeyState());
+            assertTrue(imported.isEnabled());
+            assertNull(imported.getImportParameters());
+            assertNotNull(kmsService.encrypt(key.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION));
+        }
+
+        @Test
+        void materialWrappedForAnotherKeyIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsKey otherKey = externalSymmetricKey();
+            KmsService.ImportParameters foreign =
+                    kmsService.getParametersForImport(otherKey.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            KmsService.ImportParameters own =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrongly = wrap(foreign.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 1));
+
+            String keyId = key.getKeyId();
+            String token = own.importToken();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrongly, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(keyId, REGION).getKeyState());
+        }
+
+        @Test
+        void materialOfTheWrongLengthIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material(16, (byte) 1), OAEP_SHA_256));
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+        }
+
+        @Test
+        void aSupersededImportTokenIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters first =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(first.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 1));
+
+            String keyId = key.getKeyId();
+            String staleToken = first.importToken();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, staleToken, wrapped, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
+            assertEquals("InvalidImportTokenException", ex.getErrorCode());
+        }
+
+        @Test
+        void importWithoutOutstandingParametersIsRejected() {
+            String keyId = externalSymmetricKey().getKeyId();
+            byte[] anything = material(32, (byte) 1);
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, "some-token", anything, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
+            assertEquals("InvalidImportTokenException", ex.getErrorCode());
+        }
+
+        @Test
+        void anImportTokenIsSpentByTheImportThatUsedIt() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 3));
+            kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+
+            String keyId = key.getKeyId();
+            String spentToken = parameters.importToken();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, spentToken, wrapped, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
+            assertEquals("InvalidImportTokenException", ex.getErrorCode());
+        }
+
+        /**
+         * AWS requires ValidTo to be in the future, so the only honest way to reach an expired key
+         * is to let the clock pass it. Rewinding the stored ValidTo stands in for that wait.
+         */
+        @Test
+        void expiringMaterialReturnsTheKeyToPendingImport() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 9));
+            kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_EXPIRES", Instant.now().getEpochSecond() + 3600, null, REGION);
+
+            KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            stored.setValidTo(Instant.now().getEpochSecond() - 60);
+            keyStore.put(REGION + "::" + key.getKeyId(), stored);
+
+            KmsKey expired = kmsService.describeKey(key.getKeyId(), REGION);
+            assertEquals("PendingImport", expired.getKeyState());
+            assertFalse(expired.isEnabled());
+            assertNull(expired.getPrivateKeyEncoded());
+            assertEquals(0, expired.getValidTo());
+            assertNull(expired.getExpirationModel());
+        }
+
+        @Test
+        void validToInThePastIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 1));
+
+            String keyId = key.getKeyId();
+            String token = parameters.importToken();
+            long past = Instant.now().getEpochSecond() - 60;
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrapped, "KEY_MATERIAL_EXPIRES", past, null, REGION));
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void validToBeyondThreeHundredSixtyFiveDaysIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 1));
+
+            String keyId = key.getKeyId();
+            String token = parameters.importToken();
+            long tooFar = Instant.now().plus(Duration.ofDays(366)).getEpochSecond();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrapped, "KEY_MATERIAL_EXPIRES", tooFar, null, REGION));
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void theKeyMaterialIdIsDerivedFromTheKeyAndTheMaterial() throws Exception {
+            byte[] sharedMaterial = material(32, (byte) 21);
+            KmsKey first = externalSymmetricKey();
+            KmsKey second = externalSymmetricKey();
+
+            String firstId = importInto(first, sharedMaterial, OAEP_SHA_256).getKeyMaterialId();
+            String secondId = importInto(second, sharedMaterial, OAEP_SHA_256).getKeyMaterialId();
+
+            assertTrue(firstId.matches("[a-f0-9]{64}"));
+            assertNotEquals(firstId, secondId);
+
+            kmsService.deleteImportedKeyMaterial(first.getKeyId(), REGION);
+            assertEquals(firstId, importInto(first, sharedMaterial, OAEP_SHA_256).getKeyMaterialId());
+        }
+
+        @Test
+        void deprecatedPkcs1WrappingIsRejected() {
+            String keyId = externalSymmetricKey().getKeyId();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.getParametersForImport(keyId, "RSAES_PKCS1_V1_5", "RSA_2048", REGION));
+            assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        }
+
+        @Test
+        void importingNewMaterialIntoAKeyThatAlreadyHasSomeIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 5), OAEP_SHA_256);
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 6));
+
+            String keyId = key.getKeyId();
+            String token = parameters.importToken();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrapped, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, "NEW_KEY_MATERIAL", REGION));
+            assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        }
+
+        @Test
+        void reimportingExistingMaterialIntoAFreshKeyIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 6));
+
+            String keyId = key.getKeyId();
+            String token = parameters.importToken();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrapped, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, "EXISTING_KEY_MATERIAL", REGION));
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+        }
+
+        @Test
+        void anUnmodelledImportTypeIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 6));
+
+            String keyId = key.getKeyId();
+            String token = parameters.importToken();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrapped, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, "ROTATE", REGION));
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void deletingMaterialFromAKeyPendingDeletionLeavesItPendingDeletion() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 5), OAEP_SHA_256);
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+            KmsKey deleted = kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            assertEquals("PendingDeletion", deleted.getKeyState());
+            assertNull(deleted.getPrivateKeyEncoded());
+        }
+
+        @Test
+        void keyMaterialExpiresRequiresValidTo() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 1));
+
+            String keyId = key.getKeyId();
+            String token = parameters.importToken();
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrapped, "KEY_MATERIAL_EXPIRES", null, null, REGION));
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void keyMaterialDoesNotExpireRejectsValidTo() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrap(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 1));
+
+            String keyId = key.getKeyId();
+            String token = parameters.importToken();
+            long validTo = Instant.now().getEpochSecond() + 3600;
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
+                    keyId, token, wrapped, "KEY_MATERIAL_DOES_NOT_EXPIRE", validTo, null, REGION));
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+
+        @Test
+        void deletingImportedMaterialReturnsTheKeyToPendingImport() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 5), OAEP_SHA_256);
+
+            KmsKey deleted = kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            assertEquals("PendingImport", deleted.getKeyState());
+            assertFalse(deleted.isEnabled());
+            assertNull(deleted.getPrivateKeyEncoded());
+        }
+
+        @Test
+        void reimportingTheSameMaterialRestoresTheKey() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            byte[] rawMaterial = material(32, (byte) 5);
+            importInto(key, rawMaterial, OAEP_SHA_256);
+            kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            KmsKey reimported = importInto(key, rawMaterial, OAEP_SHA_256);
+
+            assertEquals("Enabled", reimported.getKeyState());
+            assertTrue(reimported.isEnabled());
+        }
+
+        @Test
+        void reimportingDifferentMaterialIsRejected() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 5), OAEP_SHA_256);
+            kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material(32, (byte) 6), OAEP_SHA_256));
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+        }
+
+        @Test
+        void anHmacKeyMacsWithTheMaterialThatWasImported() throws Exception {
+            KmsKey key = externalKey("HMAC_256", "GENERATE_VERIFY_MAC");
+            byte[] rawMaterial = material(32, (byte) 42);
+            byte[] message = "hello".getBytes(StandardCharsets.UTF_8);
+            importInto(key, rawMaterial, OAEP_SHA_256);
+
+            byte[] mac = kmsService.generateMac(key.getKeyId(), message, "HMAC_SHA_256", REGION);
+
+            Mac expected = Mac.getInstance("HmacSHA256");
+            expected.init(new SecretKeySpec(rawMaterial, "HmacSHA256"));
+            assertArrayEquals(expected.doFinal(message), mac);
+        }
+
+        @Test
+        void macIsRejectedWhileTheHmacKeyHasNoMaterial() {
+            String keyId = externalKey("HMAC_256", "GENERATE_VERIFY_MAC").getKeyId();
+            byte[] message = "hello".getBytes(StandardCharsets.UTF_8);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.generateMac(keyId, message, "HMAC_SHA_256", REGION));
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        }
+
+        @Test
+        void cancellingDeletionLeavesAKeyWithNoMaterialInPendingImport() {
+            KmsKey key = externalSymmetricKey();
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+            kmsService.cancelKeyDeletion(key.getKeyId(), REGION);
+
+            KmsKey restored = kmsService.describeKey(key.getKeyId(), REGION);
+            assertEquals("PendingImport", restored.getKeyState());
+            assertFalse(restored.isEnabled());
+        }
+
+        @Test
+        void cancellingDeletionAfterTheMaterialWasDeletedKeepsTheKeyUnusable() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 5), OAEP_SHA_256);
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+            kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            kmsService.cancelKeyDeletion(key.getKeyId(), REGION);
+
+            String keyId = key.getKeyId();
+            assertEquals("PendingImport", kmsService.describeKey(keyId, REGION).getKeyState());
+            byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.encrypt(keyId, plaintext, REGION));
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        }
+
+        @Test
+        void cancellingDeletionRestoresAKeyThatStillHasItsMaterial() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 5), OAEP_SHA_256);
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+            kmsService.cancelKeyDeletion(key.getKeyId(), REGION);
+
+            KmsKey restored = kmsService.describeKey(key.getKeyId(), REGION);
+            assertEquals("Enabled", restored.getKeyState());
+            assertTrue(restored.isEnabled());
+            assertNotNull(kmsService.encrypt(key.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION));
+        }
+
+        /**
+         * The AWS key state table marks DeleteImportedKeyMaterial as successful in the Pending
+         * import column, so a key with nothing to delete is not an error.
+         */
+        @Test
+        void deletingMaterialFromAKeyThatHasNoneSucceeds() {
+            String keyId = externalSymmetricKey().getKeyId();
+
+            KmsKey deleted = kmsService.deleteImportedKeyMaterial(keyId, REGION);
+
+            assertEquals("PendingImport", deleted.getKeyState());
+            assertNull(deleted.getKeyMaterialId());
+        }
+
+        @Test
+        void asymmetricKeySpecsCannotUseExternalOrigin() {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    externalKey("RSA_2048", "ENCRYPT_DECRYPT"));
+            assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        }
+
+        @Test
+        void importIsRejectedOnAKeyWhoseMaterialKmsGenerated() {
+            String keyId = kmsService.createKey("aws managed", REGION).getKeyId();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.getParametersForImport(keyId, OAEP_SHA_256, "RSA_2048", REGION));
+            assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        }
+
+        @Test
+        void automaticRotationIsRejectedForImportedMaterial() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 5), OAEP_SHA_256);
+
+            String keyId = key.getKeyId();
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.enableKeyRotation(keyId, REGION));
+            assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        }
+
+        @Test
+        void anUnsupportedWrappingAlgorithmIsRejectedBeforeParametersAreIssued() {
+            String keyId = externalSymmetricKey().getKeyId();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.getParametersForImport(keyId, "RSA_AES_KEY_WRAP_SHA_256", "RSA_2048", REGION));
+            assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        }
     }
 }

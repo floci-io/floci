@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.guardduty.model.AdminAccount;
 import io.github.hectorvent.floci.services.guardduty.model.Detector;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
+import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationFeature;
@@ -32,7 +33,7 @@ class GuardDutyServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final GuardDutyService service =
-            new GuardDutyService(new InMemoryStorage<>(), new InMemoryStorage<>());
+            new GuardDutyService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
 
     @Test
     void createDetectorAppliesDefaultsAndGeneratesIdentifiers() throws Exception {
@@ -319,10 +320,13 @@ class GuardDutyServiceTest {
     void detectorSurvivesPersistentStorageReloadWithOrderIntact(@TempDir Path tempDir) throws Exception {
         Path detectorFile = tempDir.resolve("detectors.json");
         Path adminFile = tempDir.resolve("admins.json");
+        Path memberFile = tempDir.resolve("members.json");
         GuardDutyService firstService = new GuardDutyService(
                 loadedStore(detectorFile, new TypeReference<Map<String, Detector>>() {
                 }),
                 loadedStore(adminFile, new TypeReference<Map<String, AdminAccount>>() {
+                }),
+                loadedStore(memberFile, new TypeReference<Map<String, MemberAccount>>() {
                 }));
         Detector created = firstService.createDetector(REGION, ACCOUNT, request("""
                 {"enable":true,"tags":{"env":"test"},"features":[
@@ -340,6 +344,8 @@ class GuardDutyServiceTest {
                 loadedStore(detectorFile, new TypeReference<Map<String, Detector>>() {
                 }),
                 loadedStore(adminFile, new TypeReference<Map<String, AdminAccount>>() {
+                }),
+                loadedStore(memberFile, new TypeReference<Map<String, MemberAccount>>() {
                 }));
         Detector reloaded = reloadedService.getDetector(REGION, created.getId());
 

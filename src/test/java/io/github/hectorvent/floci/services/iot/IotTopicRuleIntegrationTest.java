@@ -39,6 +39,7 @@ class IotTopicRuleIntegrationTest {
                   "topicRulePayload": {
                     "sql": "SELECT * FROM 'devices/phase8/crud'",
                     "description": "phase 8 metadata",
+                    "awsIotSqlVersion": "2016-03-23",
                     "ruleDisabled": false,
                     "actions": [
                       {
@@ -47,7 +48,13 @@ class IotTopicRuleIntegrationTest {
                           "topic": "devices/phase8/target"
                         }
                       }
-                    ]
+                    ],
+                    "errorAction": {
+                      "republish": {
+                        "roleArn": "arn:aws:iam::000000000000:role/iot-rule-role",
+                        "topic": "devices/phase8/errors"
+                      }
+                    }
                   }
                 }
                 """)
@@ -69,6 +76,8 @@ class IotTopicRuleIntegrationTest {
             .body("rule.description", equalTo("phase 8 metadata"))
             .body("rule.ruleDisabled", equalTo(false))
             .body("rule.actions[0].republish.topic", equalTo("devices/phase8/target"))
+            .body("rule.awsIotSqlVersion", equalTo("2016-03-23"))
+            .body("rule.errorAction.republish.topic", equalTo("devices/phase8/errors"))
             .body("rule.createdAt", notNullValue());
 
         given()
@@ -210,6 +219,44 @@ class IotTopicRuleIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("sqs-rule-payload"));
+    }
+
+    @Test
+    void aFailingActionDoesNotFailThePublishAndTheErrorActionReceivesTheFailure() {
+        String queueUrl = createQueue("phase8-iot-rule-isolation-queue", "us-east-1");
+        String errorQueueUrl = createQueue("phase8-iot-rule-error-queue", "us-east-1");
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "topicRulePayload": {
+                    "sql": "SELECT * FROM 'devices/phase8/isolation'",
+                    "actions": [
+                      {"sqs": {"roleArn": "arn:aws:iam::000000000000:role/iot-rule-role", "queueUrl": "http://localhost:4566/000000000000/phase8-missing-queue"}},
+                      {"sqs": {"roleArn": "arn:aws:iam::000000000000:role/iot-rule-role", "queueUrl": "%s"}}
+                    ],
+                    "errorAction": {"sqs": {"roleArn": "arn:aws:iam::000000000000:role/iot-rule-role", "queueUrl": "%s"}}
+                  }
+                }
+                """.formatted(queueUrl, errorQueueUrl))
+        .when()
+            .put("/rules/phase8IsolationRule")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("text/plain")
+            .body("isolation-rule-payload")
+        .when()
+            .post("/topics/devices/phase8/isolation")
+        .then()
+            .statusCode(200);
+
+        receiveMessage(queueUrl, "us-east-1").body(containsString("isolation-rule-payload"));
+        receiveMessage(errorQueueUrl, "us-east-1")
+            .body(containsString("phase8IsolationRule"))
+            .body(containsString("SqsAction"))
+            .body(containsString("phase8-missing-queue"));
     }
 
     @Test

@@ -65,8 +65,10 @@ import java.util.stream.Collectors;
  *       {@code ~/.kube/config}), current-context only, with a static bearer token or a
  *       client-certificate/client-key credential (PKCS#8 only). {@code insecure-skip-tls-verify}
  *       is honored (skips both chain and hostname validation, matching kubectl), which covers
- *       most kind/minikube configs. exec/auth-provider plugins (e.g. {@code aws eks get-token})
- *       are not supported and fail with a clear error.</li>
+ *       most kind/minikube configs. The {@code aws eks get-token --cluster-name <name>} exec
+ *       plugin is also recognized and its token minted natively, see {@link EksTokenMinter};
+ *       any other exec command, {@code --role-arn}, or an auth-provider plugin (e.g. gcloud)
+ *       is not supported and fails with a clear error.</li>
  * </ul>
  */
 @ApplicationScoped
@@ -371,12 +373,17 @@ public class KubernetesApiClient {
         }
 
         var token = user.path("token").asText(null);
-        if (token == null && keyManagers == null) {
+        Supplier<String> execTokenSupplier = user.has("exec")
+                ? EksTokenMinter.tokenSupplierIfRecognized(user.path("exec")).orElse(null)
+                : null;
+        if (token == null && keyManagers == null && execTokenSupplier == null) {
             if (user.has("exec") || user.has("auth-provider")) {
                 throw new IllegalStateException(
                         "kubeconfig user '" + userName + "' uses an exec or auth-provider credential "
-                                + "plugin, which the kubernetes Lambda executor does not support. Use a "
-                                + "static token or client-certificate/client-key credential instead.");
+                                + "plugin the kubernetes Lambda executor does not recognize (only 'aws eks "
+                                + "get-token --cluster-name <name> [--region <region>]' is supported). Use "
+                                + "a static token, client-certificate/client-key credential, or that exec "
+                                + "shape instead.");
             }
             throw new IllegalStateException("kubeconfig user '" + userName
                     + "' has no supported credential (token or client-certificate/client-key) in " + path);
@@ -394,7 +401,8 @@ public class KubernetesApiClient {
             httpBuilder.sslParameters(sslParameters);
         }
         this.http = httpBuilder.build();
-        this.tokenSupplier = token == null ? null : () -> token;
+        this.tokenSupplier = execTokenSupplier != null ? execTokenSupplier
+                : token == null ? null : () -> token;
     }
 
     private static Path kubeconfigPath() {

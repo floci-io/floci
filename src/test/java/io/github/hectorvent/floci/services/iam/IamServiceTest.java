@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -346,6 +348,74 @@ class IamServiceTest {
         assertEquals("arn:aws:iam::000000000000:policy/ReadOnly", policy.getArn());
         assertEquals("v1", policy.getDefaultVersionId());
         assertEquals(doc, policy.getDefaultDocument());
+    }
+
+    @Test
+    void awsManagedReadOnlyPolicyAllowsReadsButDeniesWrites() {
+        String arn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        IamPolicy policy = iamService.getPolicy(arn);
+
+        assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
+        assertEquals("v1", policy.getDefaultVersionId());
+        assertEquals(IamPolicyEvaluator.Decision.ALLOW,
+                new IamPolicyEvaluator(new com.fasterxml.jackson.databind.ObjectMapper())
+                        .evaluate(List.of(policy.getDefaultDocument()), "s3:GetObject", "arn:aws:s3:::bucket/key"));
+        assertEquals(IamPolicyEvaluator.Decision.DENY,
+                new IamPolicyEvaluator(new com.fasterxml.jackson.databind.ObjectMapper())
+                        .evaluate(List.of(policy.getDefaultDocument()), "s3:PutObject", "arn:aws:s3:::bucket/key"));
+    }
+
+    @Test
+    void serviceScopedAndAdministratorManagedPoliciesUseTheirDocumentedScopes() {
+        IamPolicy s3ReadOnly = iamService.getPolicy(
+                AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess");
+        IamPolicy administrator = iamService.getPolicy(
+                AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess");
+        IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
+
+        assertEquals(IamPolicyEvaluator.Decision.DENY,
+                evaluator.evaluate(List.of(s3ReadOnly.getDefaultDocument()),
+                        "ec2:RunInstances", "*"));
+        assertEquals(IamPolicyEvaluator.Decision.ALLOW,
+                evaluator.evaluate(List.of(administrator.getDefaultDocument()),
+                        "s3:PutObject", "arn:aws:s3:::bucket/key"));
+        assertEquals(IamPolicyEvaluator.Decision.ALLOW,
+                evaluator.evaluate(List.of(administrator.getDefaultDocument()),
+                        "ec2:RunInstances", "*"));
+    }
+
+    @Test
+    void managedPolicyActsAsPermissionsBoundary() {
+        IamUser user = iamService.createUser("boundary-user", "/");
+        String adminArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        String boundaryArn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        iamService.attachUserPolicy(user.getUserName(), adminArn);
+        iamService.putUserPermissionsBoundary(user.getUserName(), boundaryArn);
+
+        CallerContext caller = iamService.resolvePrincipalContext(user.getArn());
+        IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
+
+        assertEquals(IamPolicyEvaluator.Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/key", null));
+        assertEquals(IamPolicyEvaluator.Decision.DENY,
+                evaluator.evaluate(caller, null, "s3:PutObject", "arn:aws:s3:::bucket/key", null));
+        assertEquals(IamPolicyEvaluator.Decision.DENY,
+                evaluator.evaluate(caller, null, "ec2:RunInstances", "*", null));
+    }
+
+    @Test
+    void managedPolicyRetrievalPreservesFieldsAndUnavailableVersionFailsWithNoSuchEntity() {
+        String arn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        IamPolicy policy = iamService.getPolicy(arn);
+        assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
+        assertEquals(arn, policy.getArn());
+        assertEquals("v1", policy.getDefaultVersionId());
+        assertTrue(policy.getDefaultDocument().contains("s3:Get*"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.getPolicyVersion(arn, "v9"));
+        assertEquals("NoSuchEntity", error.getErrorCode());
+        assertEquals(404, error.getHttpStatus());
     }
 
     @Test

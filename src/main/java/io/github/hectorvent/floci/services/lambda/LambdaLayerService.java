@@ -131,6 +131,11 @@ public class LambdaLayerService {
 
         // Resolve the zip content
         byte[] zipBytes = resolveLayerContent(content);
+        if (content.get("ZipFile") != null
+                && zipBytes.length > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
+            throw new AwsException("RequestEntityTooLargeException",
+                    "Request must be smaller than 52428800 bytes.", 413);
+        }
 
         // Determine the next version number
         long nextVersion = layerStore.getLatestVersion(region, layerName) + 1;
@@ -138,7 +143,7 @@ public class LambdaLayerService {
         // Extract the layer zip to disk
         Path layerPath = getLayerCodePath(layerName, nextVersion);
         try {
-            zipExtractor.extractTo(zipBytes, layerPath);
+            zipExtractor.extractTo(zipBytes, layerPath, configuredZipMaxEntries());
         } catch (IOException e) {
             throw new AwsException("InvalidParameterValueException",
                     "Failed to extract layer archive: " + e.getMessage(), 400);
@@ -179,6 +184,16 @@ public class LambdaLayerService {
         layerStore.save(region, layerVersion);
         LOG.infov("Published layer version: {0} v{1} in region {2}", layerName, nextVersion, region);
         return layerVersion;
+    }
+
+    private int configuredZipMaxEntries() {
+        int configured = config.services().lambda().zipMaxEntries();
+        if (configured < 1) {
+            LOG.warnv("Ignoring invalid Lambda ZIP entry limit {0}; using {1}",
+                    configured, ZipExtractor.DEFAULT_MAX_ENTRIES);
+            return ZipExtractor.DEFAULT_MAX_ENTRIES;
+        }
+        return configured;
     }
 
     /**

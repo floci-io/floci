@@ -11,9 +11,14 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.GenericEntity;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import org.jboss.logging.Logger;
+
+import java.io.OutputStream;
+import java.util.function.Consumer;
 
 /**
  * AWS Bedrock Runtime REST JSON endpoints.
@@ -87,11 +92,15 @@ public class BedrockRuntimeController {
 
         JsonNode messages = validateMessages(request);
 
-        byte[] response = service.buildConverseStreamResponse(modelId, request);
+        Consumer<OutputStream> stream = service.buildConverseStreamResponse(modelId, request);
         LOG.debugv("Bedrock Converse Stream: modelId={0}, messages={1}", modelId, messages.size());
-        return Response.ok(response)
+        return Response.ok(streaming(stream))
                 .header("Content-Type", "application/vnd.amazon.eventstream")
                 .build();
+    }
+
+    private static GenericEntity<StreamingOutput> streaming(Consumer<OutputStream> stream) {
+        return new GenericEntity<>(stream::accept, StreamingOutput.class);
     }
 
     private static JsonNode validateMessages(ObjectNode request) {

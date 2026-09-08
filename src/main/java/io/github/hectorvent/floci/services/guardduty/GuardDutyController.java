@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.guardduty.model.AdminAccount;
+import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.Detector;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
@@ -140,6 +140,41 @@ public class GuardDutyController {
     }
 
     @GET
+    @Path("/detector/{detectorId}/member")
+    public Response listMembers(@Context HttpHeaders headers, @PathParam("detectorId") String detectorId,
+                                @QueryParam("maxResults") String maxResults,
+                                @QueryParam("nextToken") String nextToken,
+                                @QueryParam("onlyAssociated") String onlyAssociated) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode members = response.putArray("members");
+        GuardDutyService.Page<MemberAccount> page = service.listMembers(
+                regionResolver.resolveRegion(headers), detectorId, maxResults, nextToken, onlyAssociated);
+        for (MemberAccount member : page.items()) {
+            ObjectNode node = members.addObject();
+            node.put("accountId", member.accountId());
+            node.put("administratorId", member.administratorId());
+            node.put("masterId", member.administratorId());
+            node.put("detectorId", member.detectorId());
+            node.put("email", member.email());
+            node.put("invitedAt", member.invitedAt());
+            node.put("relationshipStatus", member.relationshipStatus());
+            node.put("updatedAt", member.updatedAt());
+        }
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+    @POST
+    @Path("/detector/{detectorId}/member")
+    public Response createMembers(@Context HttpHeaders headers, @PathParam("detectorId") String detectorId, String body) {
+        service.createMembers(regionResolver.resolveRegion(headers), detectorId, parse(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.putArray("unprocessedAccounts");
+        return Response.ok(response).build();
+    }
+
+    @GET
     @Path("/detector/{detectorId}/admin")
     public Response describeOrganizationConfiguration(
             @Context HttpHeaders headers, @PathParam("detectorId") String detectorId) {
@@ -179,24 +214,5 @@ public class GuardDutyController {
     public Response disableOrganizationAdminAccount(@Context HttpHeaders headers, String body) {
         service.disableOrganizationAdminAccount(regionResolver.resolveRegion(headers), parse(body));
         return Response.ok(objectMapper.createObjectNode()).build();
-    }
-
-    @GET
-    @Path("/admin")
-    public Response listOrganizationAdminAccounts(
-            @Context HttpHeaders headers,
-            @QueryParam("maxResults") String maxResults,
-            @QueryParam("nextToken") String nextToken) {
-        GuardDutyService.Page<AdminAccount> page = service.listOrganizationAdminAccounts(
-                regionResolver.resolveRegion(headers), maxResults, nextToken);
-        ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode accounts = response.putArray("adminAccounts");
-        for (AdminAccount account : page.items()) {
-            accounts.add(objectMapper.valueToTree(account));
-        }
-        if (page.nextToken() != null) {
-            response.put("nextToken", page.nextToken());
-        }
-        return Response.ok(response).build();
     }
 }

@@ -159,6 +159,89 @@ class CloudFrontControllerTest {
     }
 
     @Test
+    void defaultCacheBehaviorEchoesTrustedSignersSoTheAwsProviderDoesNotSegfault() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-ts");
+            d.setEtag("etag-ts");
+            return d;
+        });
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+
+        when(service.getDistribution("dist-ts")).thenReturn(captor.getValue());
+
+        // The Terraform AWS provider reads DefaultCacheBehavior.TrustedSigners.Items with no nil
+        // guard, so an omitted object segfaults it on read-back. AWS always echoes the disabled form.
+        try (Response dist = controller.getDistribution("dist-ts")) {
+            String xml = (String) dist.getEntity();
+            int ts = xml.indexOf("<TrustedSigners>");
+            assertTrue(ts >= 0, "DefaultCacheBehavior must echo a TrustedSigners object");
+            String block = xml.substring(ts, xml.indexOf("</TrustedSigners>", ts));
+            assertTrue(block.contains("<Enabled>false</Enabled>"), "TrustedSigners.Enabled=false");
+            assertTrue(block.contains("<Quantity>0</Quantity>"), "TrustedSigners.Quantity=0");
+        }
+    }
+
+    @Test
+    void defaultCacheBehaviorEchoesCachedMethodsWithoutDuplicatingAllowedMethods() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        // AWS nests CachedMethods inside AllowedMethods. A parser that doesn't scope Method
+        // elements to the right block folds the CachedMethods items into AllowedMethods too,
+        // producing duplicates (["GET","HEAD","GET","HEAD","OPTIONS"]) and dropping CachedMethods.
+        String body = distributionConfigBody("").replace(
+                """
+                <AllowedMethods><Quantity>2</Quantity><Items>
+                      <Method>GET</Method><Method>HEAD</Method></Items></AllowedMethods>""",
+                """
+                <AllowedMethods><Quantity>3</Quantity><Items>
+                      <Method>GET</Method><Method>HEAD</Method><Method>OPTIONS</Method></Items>
+                      <CachedMethods><Quantity>2</Quantity><Items>
+                        <Method>GET</Method><Method>HEAD</Method></Items></CachedMethods>
+                    </AllowedMethods>""");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-cm");
+            d.setEtag("etag-cm");
+            return d;
+        });
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+
+        when(service.getDistribution("dist-cm")).thenReturn(captor.getValue());
+
+        try (Response dist = controller.getDistribution("dist-cm")) {
+            String xml = (String) dist.getEntity();
+            int start = xml.indexOf("<AllowedMethods>");
+            int end = xml.indexOf("</AllowedMethods>") + "</AllowedMethods>".length();
+            String block = xml.substring(start, end);
+
+            int cachedStart = block.indexOf("<CachedMethods>");
+            assertTrue(cachedStart >= 0, "AllowedMethods must echo a nested CachedMethods object");
+            String outer = block.substring(0, cachedStart);
+            String cached = block.substring(cachedStart);
+
+            assertEquals(List.of("GET", "HEAD", "OPTIONS"), XmlParser.extractAll(outer, "Method"),
+                    "AllowedMethods.Items must not include CachedMethods entries");
+            assertEquals(List.of("GET", "HEAD"), XmlParser.extractAll(cached, "Method"));
+        }
+    }
+
+    @Test
     void orderedCacheBehaviorRoundTripsLambdaFunctionAssociations() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);

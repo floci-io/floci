@@ -8,15 +8,21 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerHandle;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneClusterSettings;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneInstance;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneInstanceSettings;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -200,5 +206,210 @@ class NeptuneServiceTest {
         // Delete must not reach for a container that was never created.
         service.deleteDbCluster("no-docker-cluster");
         verify(containerManager, never()).stop(any());
+    }
+
+    private static NeptuneClusterSettings settings(Integer port, Integer backupRetentionPeriod,
+                                                   Boolean deletionProtection, List<String> vpcSecurityGroupIds,
+                                                   List<String> enableLogTypes, List<String> disableLogTypes) {
+        return new NeptuneClusterSettings(null, port, backupRetentionPeriod, null, null, null, null,
+                vpcSecurityGroupIds, null, null, null, deletionProtection, null, enableLogTypes, disableLogTypes,
+                null, null, null);
+    }
+
+    @Test
+    void createDbClusterStoresEverySettingAndTheTags() {
+        NeptuneClusterSettings requested = new NeptuneClusterSettings(
+                List.of("us-east-1a", "us-east-1b"), null, 7, "03:00-04:00", "Sun:05:00-Sun:06:00",
+                "my-subnets", "my-params", List.of("sg-1"), false, null, "iopt1", true, true,
+                List.of("audit"), null, null, 2.5, 8.0);
+
+        NeptuneCluster c = service.createDbCluster("settings", "1.3.2.1", false, requested, Map.of("Name", "settings"));
+
+        assertEquals(List.of("us-east-1a", "us-east-1b"), c.getAvailabilityZones());
+        assertEquals(7, c.getBackupRetentionPeriod());
+        assertEquals("03:00-04:00", c.getPreferredBackupWindow());
+        assertEquals("sun:05:00-sun:06:00", c.getPreferredMaintenanceWindow());
+        assertEquals("my-subnets", c.getDbSubnetGroupName());
+        assertEquals("my-params", c.getDbClusterParameterGroupName());
+        assertEquals(List.of("sg-1"), c.getVpcSecurityGroupIds());
+        assertFalse(c.isStorageEncrypted());
+        assertEquals("iopt1", c.getStorageType());
+        assertTrue(c.isDeletionProtection());
+        assertTrue(c.isCopyTagsToSnapshot());
+        assertEquals(List.of("audit"), c.getEnabledCloudwatchLogsExports());
+        assertEquals(Double.valueOf(2.5), c.getServerlessV2MinCapacity());
+        assertEquals(Double.valueOf(8.0), c.getServerlessV2MaxCapacity());
+        assertEquals(Map.of("Name", "settings"), c.getTags());
+    }
+
+    @Test
+    void storageEncryptedDefaultsToFalseLikeAws() {
+        NeptuneCluster c = service.createDbCluster("plain", "1.3.2.1", false);
+        assertFalse(c.isStorageEncrypted());
+        assertEquals(1, c.getBackupRetentionPeriod());
+        assertTrue(c.getAvailabilityZones().isEmpty());
+        assertTrue(c.getTags().isEmpty());
+    }
+
+    @Test
+    void requestedPortIsHonouredWhenFreeInTheProxyRangeAndFallsBackOtherwise() {
+        assertEquals(18190, service.createDbCluster("p1", "1.3.2.1", false,
+                settings(18190, null, null, null, null, null), Map.of()).getPort());
+        assertEquals(18182, service.createDbCluster("p2", "1.3.2.1", false,
+                settings(18190, null, null, null, null, null), Map.of()).getPort());
+        assertEquals(18183, service.createDbCluster("p3", "1.3.2.1", false,
+                settings(9999, null, null, null, null, null), Map.of()).getPort());
+
+        service.deleteDbCluster("p1");
+        assertEquals(18190, service.createDbCluster("p4", "1.3.2.1", false,
+                settings(18190, null, null, null, null, null), Map.of()).getPort());
+    }
+
+    @Test
+    void invalidSettingsAreRejectedBeforeAPortIsReserved() {
+        AwsException e = assertThrows(AwsException.class, () -> service.createDbCluster("bad", "1.3.2.1", false,
+                settings(null, 99, null, null, null, null), Map.of()));
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals(18182, service.createDbCluster("good", "1.3.2.1", false).getPort());
+    }
+
+    @Test
+    void deleteIsRefusedWhileDeletionProtectionIsOn() {
+        service.createDbCluster("protected", "1.3.2.1", false,
+                settings(null, null, true, null, null, null), Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deleteDbCluster("protected"));
+        assertEquals("InvalidParameterCombination", e.getErrorCode());
+        assertTrue(service.hasCluster("protected"));
+
+        service.modifyDbCluster("protected", null, null, settings(null, null, false, null, null, null));
+        service.deleteDbCluster("protected");
+        assertFalse(service.hasCluster("protected"));
+    }
+
+    @Test
+    void modifyMergesLogExportsAndClearsSecurityGroupsWithAnEmptyList() {
+        service.createDbCluster("logs", "1.3.2.1", false,
+                settings(null, null, null, List.of("sg-1"), List.of("audit"), null), Map.of());
+
+        NeptuneCluster c = service.modifyDbCluster("logs", null, null,
+                settings(null, 3, null, List.of(), List.of("slowquery"), List.of("audit")));
+
+        assertEquals(List.of("slowquery"), c.getEnabledCloudwatchLogsExports());
+        assertTrue(c.getVpcSecurityGroupIds().isEmpty());
+        assertEquals(3, c.getBackupRetentionPeriod());
+
+        NeptuneCluster unchanged = service.modifyDbCluster("logs", null, null, NeptuneClusterSettings.unchanged());
+        assertEquals(List.of("slowquery"), unchanged.getEnabledCloudwatchLogsExports());
+        assertEquals(3, unchanged.getBackupRetentionPeriod());
+    }
+
+    @Test
+    void rolesAreAssociatedOnceAndRemovedByArn() {
+        service.createDbCluster("roles", "1.3.2.1", false);
+        String roleArn = "arn:aws:iam::000000000000:role/neptune-load";
+
+        assertEquals(List.of(roleArn), service.addRoleToDbCluster("roles", roleArn).getAssociatedRoleArns());
+        assertEquals("DBClusterRoleAlreadyExists",
+                assertThrows(AwsException.class, () -> service.addRoleToDbCluster("roles", roleArn)).getErrorCode());
+
+        assertTrue(service.removeRoleFromDbCluster("roles", roleArn).getAssociatedRoleArns().isEmpty());
+        assertEquals("DBClusterRoleNotFound",
+                assertThrows(AwsException.class, () -> service.removeRoleFromDbCluster("roles", roleArn)).getErrorCode());
+    }
+
+    @Test
+    void tagsAreResolvedByTheExactArnOnly() {
+        NeptuneCluster c = service.createDbCluster("tagged", "1.3.2.1", false,
+                NeptuneClusterSettings.defaults(), Map.of("env", "test"));
+        String arn = c.getDbClusterArn();
+
+        assertTrue(service.hasResourceWithArn(arn));
+        assertEquals(Map.of("env", "test"), service.listTagsForResource(arn));
+
+        service.addTagsToResource(arn, Map.of("team", "graph"));
+        service.removeTagsFromResource(arn, List.of("env", "absent"));
+        assertEquals(Map.of("team", "graph"), service.listTagsForResource(arn));
+
+        String foreign = arn.replace("us-east-1", "eu-west-1");
+        assertFalse(service.hasResourceWithArn(foreign));
+        assertEquals("DBClusterNotFoundFault",
+                assertThrows(AwsException.class, () -> service.listTagsForResource(foreign)).getErrorCode());
+        assertEquals("InvalidParameterValue",
+                assertThrows(AwsException.class, () -> service.listTagsForResource("tagged")).getErrorCode());
+
+        NeptuneInstance instance = service.createDbInstance("tagged-db", "tagged", null, null, false,
+                Map.of("role", "writer"));
+        assertTrue(service.hasResourceWithArn(instance.getDbInstanceArn()));
+        assertEquals(Map.of("role", "writer"), service.listTagsForResource(instance.getDbInstanceArn()));
+    }
+
+    @Test
+    void parameterGroupFamilyFollowsTheEngineMajorAndMinor() {
+        assertEquals("neptune1", NeptuneService.parameterGroupFamily("1.0.5.1"));
+        assertEquals("neptune1", NeptuneService.parameterGroupFamily("1.1.1.0"));
+        assertEquals("neptune1.2", NeptuneService.parameterGroupFamily("1.2.1.0"));
+        assertEquals("neptune1.3", NeptuneService.parameterGroupFamily("1.3.2.1"));
+        assertEquals("neptune1.4", NeptuneService.parameterGroupFamily("1.4.5.1"));
+        assertEquals("neptune1.3", NeptuneService.parameterGroupFamily(null));
+        assertEquals("neptune1.3", NeptuneService.parameterGroupFamily("latest"));
+    }
+
+    // --- Instance settings the Terraform aws_neptune_cluster_instance resource reads back ---
+
+    @Test
+    void createDbInstanceStoresTheRequestedSettingsAndAwsDefaultsOtherwise() {
+        service.createDbCluster("instance-settings", "1.3.2.1", false);
+
+        NeptuneInstance requested = service.createDbInstance("with-settings", "instance-settings",
+                "db.r5.large", null, false,
+                new NeptuneInstanceSettings("us-east-1b", false, 0, true, "custom-params", "custom-subnets",
+                        "07:00-08:00", "Sun:05:00-Sun:06:00"),
+                Map.of("Name", "with-settings"));
+        assertEquals("us-east-1b", requested.getAvailabilityZone());
+        assertFalse(requested.isAutoMinorVersionUpgrade());
+        assertEquals(0, requested.getPromotionTier());
+        assertTrue(requested.isPubliclyAccessible());
+        assertEquals("custom-params", requested.getDbParameterGroupName());
+        assertEquals("custom-subnets", requested.getDbSubnetGroupName());
+        assertEquals("07:00-08:00", requested.getPreferredBackupWindow());
+        assertEquals("sun:05:00-sun:06:00", requested.getPreferredMaintenanceWindow());
+        assertEquals("with-settings", requested.getTags().get("Name"));
+
+        NeptuneInstance defaults = service.createDbInstance("bare", "instance-settings", "db.r5.large", null, false);
+        assertTrue(defaults.isAutoMinorVersionUpgrade());
+        assertEquals(1, defaults.getPromotionTier());
+        assertFalse(defaults.isPubliclyAccessible());
+        assertNull(defaults.getAvailabilityZone());
+        assertNull(defaults.getDbParameterGroupName());
+        assertNull(defaults.getPreferredMaintenanceWindow());
+    }
+
+    @Test
+    void modifyDbInstanceAppliesOnlyTheSettingsTheRequestCarries() {
+        service.createDbCluster("instance-modify", "1.3.2.1", false);
+        service.createDbInstance("to-modify", "instance-modify", "db.r5.large", null, false,
+                new NeptuneInstanceSettings(null, true, 2, null, null, null, null, null), Map.of());
+
+        NeptuneInstance modified = service.modifyDbInstance("to-modify", null, null,
+                new NeptuneInstanceSettings(null, false, null, null, "tuned", null, null, "Mon:02:00-Mon:03:00"));
+
+        assertFalse(modified.isAutoMinorVersionUpgrade());
+        assertEquals(2, modified.getPromotionTier(), "An omitted PromotionTier must keep its value");
+        assertEquals("tuned", modified.getDbParameterGroupName());
+        assertEquals("mon:02:00-mon:03:00", modified.getPreferredMaintenanceWindow());
+        assertEquals("db.r5.large", modified.getDbInstanceClass(), "An omitted DBInstanceClass must keep its value");
+    }
+
+    @Test
+    void instanceSettingsRejectAPromotionTierOutsideTheAwsRange() {
+        service.createDbCluster("instance-invalid", "1.3.2.1", false);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createDbInstance("bad-tier",
+                "instance-invalid", "db.r5.large", null, false,
+                new NeptuneInstanceSettings(null, null, 16, null, null, null, null, null), Map.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertFalse(service.hasInstance("bad-tier"), "A rejected create must not leave an instance behind");
     }
 }

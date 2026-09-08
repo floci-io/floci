@@ -34,6 +34,11 @@ Cloud Control.
   which is broader than the read side. A resource created through Cloud Control but
   outside the read-side type list is still readable via `GetResource`, from
   create-time state, but will not appear in `ListResources`.
+- **`ListResources` on an unlisted type**: `TypeName` values outside the list above
+  fail with `UnsupportedActionException` (HTTP 400) instead of returning an empty
+  `ResourceDescriptions`. This applies to any type Floci does not enumerate on the
+  read side, whether or not the type is real in AWS, since Floci has no CloudFormation
+  type registry to tell the two apart.
 - **Delete needs create-time state**: types whose delete depends on attributes
   captured at create time (currently `AWS::EKS::Nodegroup` and `AWS::IAM::Policy`, plus
   any `Custom::*` / `AWS::CloudFormation::CustomResource`) fail `DeleteResource` with a

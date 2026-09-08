@@ -17,7 +17,7 @@ import java.util.Objects;
  * changes.
  * 
  * <p>
- * The metadata file is stored as JSON at {@code {persistent-path}/tls/floci-selfsigned.metadata.json}.
+ * The metadata file is stored as JSON at {@code {persistent-path}/tls/floci-server.metadata.json}.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @RegisterForReflection
@@ -29,6 +29,13 @@ public class CertificateMetadata {
      * from FLOCI_HOSTNAME and FLOCI_BASE_URL configuration.
      */
     private List<String> hostnames;
+
+    /**
+     * Hostnames added at runtime by {@link TlsCertificateManager#ensureHost(String)} (API Gateway,
+     * IoT and Cognito custom domains). Kept apart from {@link #hostnames} so a change in the
+     * configured list is detected without losing what was learned.
+     */
+    private List<String> learnedHostnames = List.of();
 
     /**
      * ISO-8601 timestamp when the certificate was generated.
@@ -80,6 +87,14 @@ public class CertificateMetadata {
         this.hostnames = hostnames;
     }
 
+    public List<String> getLearnedHostnames() {
+        return learnedHostnames == null ? List.of() : learnedHostnames;
+    }
+
+    public void setLearnedHostnames(List<String> learnedHostnames) {
+        this.learnedHostnames = learnedHostnames == null ? List.of() : List.copyOf(learnedHostnames);
+    }
+
     public String getGeneratedAt() {
         return generatedAt;
     }
@@ -102,19 +117,21 @@ public class CertificateMetadata {
         if (o == null || getClass() != o.getClass()) return false;
         CertificateMetadata that = (CertificateMetadata) o;
         return Objects.equals(hostnames, that.hostnames) &&
+               Objects.equals(getLearnedHostnames(), that.getLearnedHostnames()) &&
                Objects.equals(generatedAt, that.generatedAt) &&
                Objects.equals(flociVersion, that.flociVersion);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(hostnames, generatedAt, flociVersion);
+        return Objects.hash(hostnames, getLearnedHostnames(), generatedAt, flociVersion);
     }
 
     @Override
     public String toString() {
         return "CertificateMetadata{" +
                "hostnames=" + hostnames +
+               ", learnedHostnames=" + learnedHostnames +
                ", generatedAt='" + generatedAt + '\'' +
                ", flociVersion='" + flociVersion + '\'' +
                '}';

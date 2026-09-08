@@ -167,8 +167,10 @@ class WebIdentityTokenVerifierTest {
                         + "\"sub\":\"system:serviceaccount:my-namespace:my-service-account\","
                         + "\"exp\":" + expired + "}");
 
-        WebIdentityTokenVerifier.InvalidTokenException thrown = assertThrows(
-                WebIdentityTokenVerifier.InvalidTokenException.class,
+        // The distinct subtype is what lets STS answer ExpiredTokenException instead of the
+        // generic InvalidIdentityToken it returns for every other verification failure.
+        WebIdentityTokenVerifier.ExpiredTokenException thrown = assertThrows(
+                WebIdentityTokenVerifier.ExpiredTokenException.class,
                 () -> verifier.verify(token, (RSAPublicKey) keyPair.getPublic(), ISSUER,
                         EksOidcService.STS_AUDIENCE));
         assertTrue(thrown.getMessage().contains("expired"));

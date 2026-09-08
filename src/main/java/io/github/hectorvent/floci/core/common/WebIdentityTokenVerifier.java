@@ -26,10 +26,10 @@ import jakarta.inject.Inject;
  * JWTs with plain {@code java.security} primitives, and this only needs the one algorithm EKS IRSA
  * uses.
  *
- * <p>Two-stage design, which is what keeps existing permissive behaviour intact. {@link #peekIssuer}
- * reads the {@code iss} claim <em>without</em> verifying anything, so a caller can ask "is this a
- * token Floci issued?" before deciding to enforce. Only when the issuer resolves to a known key does
- * {@link #verify} run and reject on any failure.
+ * <p>Two-stage design lets the caller select a trusted key before verification. {@link #peekIssuer}
+ * reads the {@code iss} claim <em>without</em> verifying anything. The caller must reject tokens
+ * when the issuer does not resolve to a trusted key; {@link #verify} then rejects any verification
+ * failure for a known issuer.
  */
 @ApplicationScoped
 public class WebIdentityTokenVerifier {
@@ -54,8 +54,19 @@ public class WebIdentityTokenVerifier {
     }
 
     /**
+     * Thrown when a token is past its {@code exp} claim. STS reports this as
+     * {@code ExpiredTokenException} rather than {@code InvalidIdentityToken}, so callers can tell
+     * a stale token apart from one that can never verify.
+     */
+    public static class ExpiredTokenException extends InvalidTokenException {
+        public ExpiredTokenException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * Reads the {@code iss} claim without verifying the signature. Returns empty when {@code token}
-     * is not a parseable JWT at all — the caller then treats it as an opaque third-party token.
+     * is not a parseable JWT at all — the caller must reject it.
      */
     public Optional<String> peekIssuer(String token) {
         return parseClaims(token).map(claims -> claims.path("iss").asText(null))
@@ -123,7 +134,7 @@ public class WebIdentityTokenVerifier {
             throw new InvalidTokenException("The web identity token has no expiration claim");
         }
         if (now > exp.asLong() + CLOCK_SKEW_SECONDS) {
-            throw new InvalidTokenException("The web identity token has expired");
+            throw new ExpiredTokenException("The web identity token has expired");
         }
 
         JsonNode nbf = claims.get("nbf");
@@ -169,8 +180,7 @@ public class WebIdentityTokenVerifier {
             return Optional.empty();
         }
         // Limit -1 for the same reason as verify(): without it an unsigned "header.payload." token
-        // splits into two parts, so its issuer would go unseen and the caller would treat a token
-        // that names a Floci issuer as opaque, skipping validation entirely.
+        // splits into two parts, so its issuer would go unseen and validation could be skipped.
         String[] parts = token.split("\\.", -1);
         return parts.length == 3 ? decodeJson(parts[1]) : Optional.empty();
     }

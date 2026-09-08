@@ -4,7 +4,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.ses.model.ReceiptAction;
+import io.github.hectorvent.floci.services.ses.model.ReceiptFilter;
+import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -13,19 +19,23 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
- * Owns the SES receipt-rule-set domain (the {@code receiptRuleSetStore}). Extracted from
- * {@link SesService} as the first step of the store-based domain split: a leaf
- * domain with no cross-service coupling, reached only through the {@code SesService} facade, which
- * now delegates its {@code *ReceiptRuleSet*} methods here.
+ * Owns the SES inbound-mail management domain: receipt rule sets and their rules (the
+ * {@code receiptRuleSetStore}) and receipt IP filters (the {@code receiptFilterStore}). Extracted from {@link SesService} in the store-based domain split and reached only through
+ * that facade. Action-target validation couples this domain to {@link S3Service},
+ * {@link SnsService}, and {@link LambdaService}, reproducing the checks real SES runs against the
+ * account; the bounce-sender check arrives as a predicate the facade binds to
+ * {@code SesIdentityService}, keeping identity resolution out of this class's dependencies.
  *
- * <p>Floci has no inbound-mail endpoint, so receipt rule sets are stored inertly: a set never holds
- * any rules and routes no mail. They exist only so the management API round-trips (enough to unblock
- * tools such as Terraform that declare a rule set during bootstrap).
+ * <p>Floci has no inbound-mail endpoint, so everything here is stored inertly: stored rules
+ * route no mail, their actions never execute, and a filter never blocks or allows any connection. The management API round-trips (enough to unblock
+ * tools such as Terraform that declare inbound configuration during bootstrap).
  */
 @ApplicationScoped
 public class SesReceiptRuleService {
@@ -39,22 +49,60 @@ public class SesReceiptRuleService {
     // start/end with an alphanumeric is a service-level "Not a valid ruleSetName" InvalidParameterValue.
     // Re-verify against live SES (not the model, which can't confirm it) if these ever need to change.
     private static final Pattern RULE_SET_NAME_CHARS = Pattern.compile("^[a-zA-Z0-9_.-]+$");
+    private static final int MAX_RULES_PER_SET = 200;
+    // The Smithy cap on a ReorderReceiptRuleSet RuleNames member (probed 2026-09: distinct from
+    // the 64-char service-level name checks; see ruleNamesMemberViolation).
+    private static final int MAX_REORDER_RULE_NAME_LENGTH = 100;
+    private static final int MAX_ACTIONS_PER_RULE = 10;
+    // Probed: a value that is not a well-formed topic/function ARN (a bare name, or an ARN with
+    // missing segments) gets the "Invalid ..." message before any existence lookup. There is no
+    // recipient-count limit (101 recipients are accepted).
+    private static final Pattern SNS_TOPIC_ARN = Pattern.compile("^arn:aws[a-zA-Z-]*:sns:[a-z0-9-]+:\\d{12}:.+$");
+    private static final Pattern LAMBDA_FUNCTION_ARN =
+            Pattern.compile("^arn:aws[a-zA-Z-]*:lambda:[a-z0-9-]+:\\d{12}:function:.+$");
+    // RFC 5322 ftext: printable US-ASCII excluding the colon. Real SES rejects anything else with
+    // "Invalid header name: <name>" (probed 2026-09).
+    private static final Pattern HEADER_NAME_CHARS = Pattern.compile("^[\\x21-\\x39\\x3B-\\x7E]+$");
+    private static final Pattern IPV4_OCTETS = Pattern.compile(
+            "^((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)$");
+    private static final int MAX_FILTERS = 100;
 
     private final StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore;
+    private final StorageBackend<String, ReceiptFilter> receiptFilterStore;
     // Serializes receipt-rule-set create (check-then-put) and set-active (clear-then-set) so the
-    // one-active-per-region invariant and duplicate-name rejection hold under concurrency.
+    // one-active-per-region invariant and duplicate-name rejection hold under concurrency. Rule
+    // mutations (create/update/delete/set-position, all read-modify-write on the set record) take
+    // the same lock.
     private final Object receiptRuleSetLock = new Object();
+    private final S3Service s3Service;
+    private final SnsService snsService;
+    private final LambdaService lambdaService;
+    // Serializes filter create (duplicate check, then the 100-filter cap, then put).
+    private final Object receiptFilterLock = new Object();
     private final Clock clock;
 
     @Inject
-    public SesReceiptRuleService(StorageFactory storageFactory, Clock clock) {
+    public SesReceiptRuleService(StorageFactory storageFactory, S3Service s3Service,
+                                 SnsService snsService, LambdaService lambdaService, Clock clock) {
         this.receiptRuleSetStore = storageFactory.create("ses", "ses-receipt-rule-sets.json",
                 new TypeReference<Map<String, ReceiptRuleSet>>() {});
+        this.receiptFilterStore = storageFactory.create("ses", "ses-receipt-filters.json",
+                new TypeReference<Map<String, ReceiptFilter>>() {});
+        this.s3Service = s3Service;
+        this.snsService = snsService;
+        this.lambdaService = lambdaService;
         this.clock = clock;
     }
 
-    SesReceiptRuleService(StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore, Clock clock) {
+    SesReceiptRuleService(StorageBackend<String, ReceiptRuleSet> receiptRuleSetStore,
+                          StorageBackend<String, ReceiptFilter> receiptFilterStore,
+                          S3Service s3Service, SnsService snsService, LambdaService lambdaService,
+                          Clock clock) {
         this.receiptRuleSetStore = receiptRuleSetStore;
+        this.receiptFilterStore = receiptFilterStore;
+        this.s3Service = s3Service;
+        this.snsService = snsService;
+        this.lambdaService = lambdaService;
         this.clock = clock;
     }
 
@@ -139,6 +187,670 @@ public class SesReceiptRuleService {
         }
     }
 
+    public void createReceiptRule(String ruleSetName, ReceiptRule rule, String after, String region,
+                                  Predicate<String> verifiedSender) {
+        requireRuleSetName(ruleSetName);
+        List<String> violations = new ArrayList<>();
+        collectRuleNameParamViolations(after, "after", violations);
+        collectRuleShapeViolations(rule, violations);
+        throwViolations(violations);
+        requireValidRuleName(rule.getName());
+        synchronized (receiptRuleSetLock) {
+            ReceiptRuleSet ruleSet = requireRuleSet(ruleSetName, region);
+            List<ReceiptRule> rules = new ArrayList<>(ruleSet.getRules());
+            if (rules.stream().anyMatch(r -> rule.getName().equals(r.getName()))) {
+                throw new AwsException("AlreadyExists", "Rule already exists: " + rule.getName(), 400);
+            }
+            if (rules.size() >= MAX_RULES_PER_SET) {
+                // Probed: the 201st rule in a set is rejected.
+                throw new AwsException("LimitExceeded", "Too many rules", 400);
+            }
+            // AWS inserts at the FRONT when After is absent (probed); After places the rule
+            // immediately behind the named one.
+            int index = after == null ? 0 : indexOfRule(rules, after) + 1;
+            validateActionTargets(rule, region, verifiedSender);
+            applyRuleDefaults(rule);
+            rules.add(index, rule);
+            replaceRules(ruleSet, rules, ruleSetName, region);
+        }
+        LOG.infov("Created SES receipt rule {0} in rule set {1} ({2})", rule.getName(), ruleSetName, region);
+    }
+
+    public ReceiptRule describeReceiptRule(String ruleSetName, String ruleName, String region) {
+        requireRuleSetName(ruleSetName);
+        requireRuleNameParam(ruleName, "ruleName");
+        ReceiptRuleSet ruleSet = requireRuleSet(ruleSetName, region);
+        List<ReceiptRule> rules = ruleSet.getRules();
+        return rules.get(indexOfRule(rules, ruleName));
+    }
+
+    public void updateReceiptRule(String ruleSetName, ReceiptRule rule, String region,
+                                  Predicate<String> verifiedSender) {
+        requireRuleSetName(ruleSetName);
+        List<String> violations = new ArrayList<>();
+        collectRuleShapeViolations(rule, violations);
+        throwViolations(violations);
+        requireValidRuleName(rule.getName());
+        synchronized (receiptRuleSetLock) {
+            ReceiptRuleSet ruleSet = requireRuleSet(ruleSetName, region);
+            List<ReceiptRule> rules = new ArrayList<>(ruleSet.getRules());
+            // AWS replaces the whole rule in place (omitted members reset to their defaults) and
+            // keeps its position; an unknown name is an error, so update cannot rename.
+            int index = indexOfRule(rules, rule.getName());
+            validateActionTargets(rule, region, verifiedSender);
+            applyRuleDefaults(rule);
+            rules.set(index, rule);
+            replaceRules(ruleSet, rules, ruleSetName, region);
+        }
+        LOG.infov("Updated SES receipt rule {0} in rule set {1} ({2})", rule.getName(), ruleSetName, region);
+    }
+
+    public void deleteReceiptRule(String ruleSetName, String ruleName, String region) {
+        requireRuleSetName(ruleSetName);
+        requireRuleNameParam(ruleName, "ruleName");
+        synchronized (receiptRuleSetLock) {
+            // The rule set must exist, but deleting an absent rule is idempotent (probed).
+            ReceiptRuleSet ruleSet = requireRuleSet(ruleSetName, region);
+            List<ReceiptRule> rules = new ArrayList<>(ruleSet.getRules());
+            if (rules.removeIf(r -> ruleName.equals(r.getName()))) {
+                replaceRules(ruleSet, rules, ruleSetName, region);
+            }
+        }
+        LOG.infov("Deleted SES receipt rule {0} from rule set {1} ({2})", ruleName, ruleSetName, region);
+    }
+
+    public void setReceiptRulePosition(String ruleSetName, String ruleName, String after, String region) {
+        requireRuleSetName(ruleSetName);
+        requireRuleNamePresent(ruleName);
+        List<String> violations = new ArrayList<>();
+        collectRuleNameParamViolations(ruleName, "ruleName", violations);
+        collectRuleNameParamViolations(after, "after", violations);
+        throwViolations(violations);
+        requireValidRuleName(ruleName);
+        synchronized (receiptRuleSetLock) {
+            ReceiptRuleSet ruleSet = requireRuleSet(ruleSetName, region);
+            List<ReceiptRule> rules = new ArrayList<>(ruleSet.getRules());
+            int index = indexOfRule(rules, ruleName);
+            if (ruleName.equals(after)) {
+                // AWS answers 200 for a rule positioned after itself (probed); nothing moves.
+                return;
+            }
+            if (after != null) {
+                indexOfRule(rules, after);
+            }
+            ReceiptRule moved = rules.remove(index);
+            int target = after == null ? 0 : indexOfRule(rules, after) + 1;
+            rules.add(target, moved);
+            replaceRules(ruleSet, rules, ruleSetName, region);
+        }
+        LOG.infov("Positioned SES receipt rule {0} in rule set {1} ({2})", ruleName, ruleSetName, region);
+    }
+
+    public void reorderReceiptRuleSet(String ruleSetName, List<String> ruleNames, String region) {
+        if (ruleSetName == null) {
+            throw new AwsException("InvalidParameterValue", "RuleSetName is required.", 400);
+        }
+        List<String> violations = new ArrayList<>();
+        collectRuleNameParamViolations(ruleSetName, "ruleSetName", violations);
+        // Probed: RuleNames members validate under the bare 'ruleNames' path with a nested
+        // list-member constraint whose length cap is 100 (not the 64 of the service-level
+        // name checks), and there is no "Not a valid ruleName" stage after it: a 65-char
+        // pattern-valid name falls through to RuleDoesNotExist. The violation carries no
+        // member index and appears at most once, however many members are malformed.
+        if (ruleNames.stream().anyMatch(name -> name.isEmpty()
+                || name.length() > MAX_REORDER_RULE_NAME_LENGTH
+                || !RULE_SET_NAME_CHARS.matcher(name).matches())) {
+            violations.add(ruleNamesMemberViolation());
+        }
+        throwViolations(violations);
+        requireValidRuleSetName(ruleSetName);
+        synchronized (receiptRuleSetLock) {
+            ReceiptRuleSet ruleSet = requireRuleSet(ruleSetName, region);
+            // Probed precedence, matching a build-the-position-map-first algorithm: a duplicate
+            // request name is rejected before anything else (even when the duplicated name is not
+            // in the set), then set rules absent from the request, then request names not in the
+            // set (first in request order).
+            Map<String, Integer> positions = new HashMap<>();
+            for (int i = 0; i < ruleNames.size(); i++) {
+                if (positions.putIfAbsent(ruleNames.get(i), i) != null) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Multiple positions found for rule: " + ruleNames.get(i), 400);
+                }
+            }
+            List<ReceiptRule> rules = ruleSet.getRules();
+            List<String> missing = rules.stream()
+                    .map(ReceiptRule::getName)
+                    .filter(name -> !positions.containsKey(name))
+                    .toList();
+            if (!missing.isEmpty()) {
+                throw new AwsException("InvalidParameterValue",
+                        "Positions for rules not found: " + String.join(", ", missing), 400);
+            }
+            if (positions.size() > rules.size()) {
+                for (String name : ruleNames) {
+                    if (rules.stream().noneMatch(r -> name.equals(r.getName()))) {
+                        throw new AwsException("RuleDoesNotExist", "Rule does not exist: " + name, 400);
+                    }
+                }
+            }
+            List<ReceiptRule> reordered = new ArrayList<>(rules);
+            reordered.sort(Comparator.comparingInt(rule -> positions.get(rule.getName())));
+            replaceRules(ruleSet, reordered, ruleSetName, region);
+        }
+        LOG.infov("Reordered SES receipt rule set {0} in region {1}", ruleSetName, region);
+    }
+
+    public ReceiptRuleSet cloneReceiptRuleSet(String ruleSetName, String originalRuleSetName, String region) {
+        if (ruleSetName == null) {
+            throw new AwsException("InvalidParameterValue", "RuleSetName is required.", 400);
+        }
+        if (originalRuleSetName == null) {
+            throw new AwsException("InvalidParameterValue", "OriginalRuleSetName is required.", 400);
+        }
+        List<String> violations = new ArrayList<>();
+        // Probed: with both members malformed, the combined message lists originalRuleSetName
+        // before ruleSetName; the service-level checks then run target before source.
+        collectRuleNameParamViolations(originalRuleSetName, "originalRuleSetName", violations);
+        collectRuleNameParamViolations(ruleSetName, "ruleSetName", violations);
+        throwViolations(violations);
+        requireValidRuleSetName(ruleSetName);
+        requireValidRuleSetName(originalRuleSetName);
+        // The clone gets its own creation time and starts inactive; neither is copied (probed:
+        // cloning the active rule set leaves the clone inactive and the active set unchanged).
+        ReceiptRuleSet clone = new ReceiptRuleSet(ruleSetName, Instant.now(clock));
+        synchronized (receiptRuleSetLock) {
+            if (receiptRuleSetStore.get(receiptRuleSetKey(region, ruleSetName)).isPresent()) {
+                // Probed: an existing target wins over a missing source.
+                throw new AwsException("AlreadyExists", "Rule set already exists: " + ruleSetName, 400);
+            }
+            ReceiptRuleSet original = requireRuleSet(originalRuleSetName, region);
+            clone.setRules(original.getRules().stream().map(ReceiptRule::copy).toList());
+            receiptRuleSetStore.put(receiptRuleSetKey(region, ruleSetName), clone);
+        }
+        LOG.infov("Cloned SES receipt rule set {0} from {1} in region {2}",
+                ruleSetName, originalRuleSetName, region);
+        return clone;
+    }
+
+    /**
+     * Swaps in a freshly built rules list and persists the set. Mutations never touch the list a
+     * previously returned rule set holds: the storage backends hand out live object references, so
+     * a describe caller may still be iterating the old list after the lock is released.
+     */
+    private void replaceRules(ReceiptRuleSet ruleSet, List<ReceiptRule> rules,
+                              String ruleSetName, String region) {
+        ruleSet.setRules(rules);
+        receiptRuleSetStore.put(receiptRuleSetKey(region, ruleSetName), ruleSet);
+    }
+
+    private ReceiptRuleSet requireRuleSet(String name, String region) {
+        return receiptRuleSetStore.get(receiptRuleSetKey(region, name))
+                .orElseThrow(() -> ruleSetDoesNotExist(name));
+    }
+
+    private static int indexOfRule(List<ReceiptRule> rules, String name) {
+        for (int i = 0; i < rules.size(); i++) {
+            if (name.equals(rules.get(i).getName())) {
+                return i;
+            }
+        }
+        throw new AwsException("RuleDoesNotExist", "Rule does not exist: " + name, 400);
+    }
+
+    /**
+     * The Smithy-model layer of rule validation, reproduced from probing real SES: violations
+     * across the rule name, TlsPolicy, and every action member collect into one
+     * {@code ValidationError} ("N validation errors detected: ...; ..."). A type's required
+     * members are enforced whenever the action carries any member at all; an action struct with
+     * no members never reaches this layer, because it serializes to no Query keys and AWS then
+     * rejects the padded empty slot in the parser (probed).
+     */
+    private static void collectRuleShapeViolations(ReceiptRule rule, List<String> violations) {
+        String name = rule.getName();
+        if (name == null || name.isEmpty()) {
+            violations.add(lengthViolation("rule.name"));
+            violations.add(patternViolation("rule.name"));
+        } else if (!RULE_SET_NAME_CHARS.matcher(name).matches()) {
+            violations.add(patternViolation("rule.name"));
+        }
+        if (rule.getTlsPolicy() != null && !"Optional".equals(rule.getTlsPolicy())
+                && !"Require".equals(rule.getTlsPolicy())) {
+            violations.add(enumViolation("rule.tlsPolicy", "[Optional, Require]"));
+        }
+        int i = 1;
+        for (ReceiptAction action : rule.getActions()) {
+            String prefix = "rule.actions." + i + ".member.";
+            if (action.is("AddHeaderAction")) {
+                requireMember(violations, action, "HeaderName", prefix + "addHeaderAction.headerName");
+                requireMember(violations, action, "HeaderValue", prefix + "addHeaderAction.headerValue");
+            } else if (action.is("BounceAction")) {
+                // Probed order: smtpReplyCode, then sender, then message.
+                requireMember(violations, action, "SmtpReplyCode", prefix + "bounceAction.smtpReplyCode");
+                requireMember(violations, action, "Sender", prefix + "bounceAction.sender");
+                requireMember(violations, action, "Message", prefix + "bounceAction.message");
+            } else if (action.is("ConnectAction")) {
+                requireMember(violations, action, "InstanceARN", prefix + "connectAction.instanceARN");
+                requireMember(violations, action, "IAMRoleARN", prefix + "connectAction.iAMRoleARN");
+            } else if (action.is("WorkmailAction")) {
+                requireMember(violations, action, "OrganizationArn", prefix + "workmailAction.organizationArn");
+            } else if (action.is("LambdaAction")) {
+                requireMember(violations, action, "FunctionArn", prefix + "lambdaAction.functionArn");
+                if (invalidEnum(action, "InvocationType", "RequestResponse", "Event")) {
+                    violations.add(enumViolation(prefix + "lambdaAction.invocationType",
+                            "[RequestResponse, Event]"));
+                }
+            } else if (action.is("SNSAction")) {
+                // Probed order: the encoding enum violation is reported before the missing topic.
+                if (invalidEnum(action, "Encoding", "Base64", "UTF-8")) {
+                    violations.add(enumViolation(prefix + "sNSAction.encoding", "[Base64, UTF-8]"));
+                }
+                requireMember(violations, action, "TopicArn", prefix + "sNSAction.topicArn");
+            } else if (action.is("S3Action")) {
+                requireMember(violations, action, "BucketName", prefix + "s3Action.bucketName");
+            } else if (action.is("StopAction")) {
+                requireMember(violations, action, "Scope", prefix + "stopAction.scope");
+                if (invalidEnum(action, "Scope", "RuleSet")) {
+                    violations.add(enumViolation(prefix + "stopAction.scope", "[RuleSet]"));
+                }
+            }
+            i++;
+        }
+    }
+
+    private static void throwViolations(List<String> violations) {
+        if (violations.isEmpty()) {
+            return;
+        }
+        String label = violations.size() == 1 ? "1 validation error detected: "
+                : violations.size() + " validation errors detected: ";
+        throw new AwsException("ValidationError", label + String.join("; ", violations), 400);
+    }
+
+    /**
+     * Smithy-layer checks for the top-level RuleName and After parameters, which real SES
+     * validates with the same length and pattern constraints as Rule.Name but under their own
+     * wire member paths ('ruleName' / 'after', probed on describe, delete, set-position, and
+     * the create After parameter). An absent parameter is left to the caller.
+     */
+    private static void collectRuleNameParamViolations(String value, String path, List<String> violations) {
+        if (value == null) {
+            return;
+        }
+        if (value.isEmpty()) {
+            violations.add(lengthViolation(path));
+            violations.add(patternViolation(path));
+        } else if (!RULE_SET_NAME_CHARS.matcher(value).matches()) {
+            violations.add(patternViolation(path));
+        }
+    }
+
+    /**
+     * Full validation of a required top-level RuleName parameter: presence, then the Smithy
+     * layers, then the service-level "Not a valid ruleName" boundary check (probed on
+     * describe and delete).
+     */
+    private static void requireRuleNameParam(String ruleName, String path) {
+        requireRuleNamePresent(ruleName);
+        List<String> violations = new ArrayList<>();
+        collectRuleNameParamViolations(ruleName, path, violations);
+        throwViolations(violations);
+        requireValidRuleName(ruleName);
+    }
+
+    private static void requireMember(List<String> violations, ReceiptAction action,
+                                      String member, String path) {
+        if (action.property(member) == null) {
+            violations.add("Value at '" + path + "' failed to satisfy constraint: "
+                    + "Member must not be null");
+        }
+    }
+
+    private static boolean invalidEnum(ReceiptAction action, String member, String... allowed) {
+        String value = action.property(member);
+        if (value == null) {
+            return false;
+        }
+        for (String candidate : allowed) {
+            if (candidate.equals(value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String patternViolation(String path) {
+        return "Value at '" + path + "' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_.-]+$";
+    }
+
+    private static String lengthViolation(String path) {
+        return "Value at '" + path + "' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1";
+    }
+
+    private static String enumViolation(String path, String valueSet) {
+        return "Value at '" + path + "' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: " + valueSet;
+    }
+
+    /**
+     * The one violation shape a malformed ReorderReceiptRuleSet RuleNames member produces,
+     * probed: empty, longer than 100, and pattern-breaking names all get this same nested
+     * list-member constraint under the bare 'ruleNames' path, with no member index.
+     */
+    private static String ruleNamesMemberViolation() {
+        return "Value at 'ruleNames' failed to satisfy constraint: Member must satisfy constraint: "
+                + "[Member must have length less than or equal to " + MAX_REORDER_RULE_NAME_LENGTH
+                + ", Member must have length greater than or equal to 1, "
+                + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_.-]+$]";
+    }
+
+    /**
+     * Validates every resource an action points at against the local emulator, reproducing the
+     * checks real SES runs on create/update: any TopicArn must be a publishable SNS topic, an
+     * S3 bucket must exist, a Lambda function must be invokable, and a bounce sender must be a
+     * verified identity. Each check fires only when its member is present, matching AWS.
+     */
+    private void validateActionTargets(ReceiptRule rule, String region, Predicate<String> verifiedSender) {
+        if (rule.getActions().size() > MAX_ACTIONS_PER_RULE) {
+            // Probed: the 11th action is rejected at the service layer, like the rules-per-set cap.
+            throw new AwsException("LimitExceeded", "Too many actions", 400);
+        }
+        for (int i = 0; i < rule.getActions().size() - 1; i++) {
+            // Probed: a stop action anywhere but the last position is rejected.
+            if (rule.getActions().get(i).is("StopAction")) {
+                throw new AwsException("InvalidParameterValue",
+                        "Stop action, if any, must be placed at the end of the actions list", 400);
+            }
+        }
+        for (ReceiptAction action : rule.getActions()) {
+            String headerName = action.property("HeaderName");
+            if (action.is("AddHeaderAction") && headerName != null
+                    && !HEADER_NAME_CHARS.matcher(headerName).matches()) {
+                throw new AwsException("InvalidParameterValue", "Invalid header name: " + headerName, 400);
+            }
+            // Empty members get their own service-level messages before the existence checks
+            // (probed: they never reach the "no such resource" family).
+            String topicArn = action.property("TopicArn");
+            if (topicArn != null) {
+                // The shape check covers the probed empty-string case too (same message).
+                if (!SNS_TOPIC_ARN.matcher(topicArn).matches()) {
+                    throw new AwsException("InvalidSnsTopic", "Invalid SNS topic: " + topicArn, 400);
+                }
+                if (!snsService.topicExists(topicArn, region)) {
+                    throw new AwsException("InvalidSnsTopic",
+                            "Could not publish to SNS topic: " + topicArn, 400);
+                }
+            }
+            String bucketName = action.property("BucketName");
+            if (action.is("S3Action") && bucketName != null) {
+                if (bucketName.isEmpty()) {
+                    throw new AwsException("InvalidParameterValue", "Bucket name must not be empty", 400);
+                }
+                if (!s3Service.bucketExists(bucketName)) {
+                    throw new AwsException("InvalidS3Configuration", "No such bucket: " + bucketName, 400);
+                }
+            }
+            String functionArn = action.property("FunctionArn");
+            if (action.is("LambdaAction") && functionArn != null) {
+                if (functionArn.isEmpty()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Lambda function ARN must not be empty", 400);
+                }
+                // A bare function name or malformed ARN gets its own message before the
+                // existence lookup (probed), so a same-named local function cannot make a
+                // non-ARN value pass.
+                if (!LAMBDA_FUNCTION_ARN.matcher(functionArn).matches()) {
+                    throw new AwsException("InvalidLambdaFunction",
+                            "Invalid Lambda function: " + functionArn, 400);
+                }
+                if (!lambdaService.functionExists(region, functionArn)) {
+                    throw new AwsException("InvalidLambdaFunction",
+                            "Could not invoke Lambda function: " + functionArn, 400);
+                }
+            }
+            if (action.is("BounceAction")) {
+                String smtpReplyCode = action.property("SmtpReplyCode");
+                if (smtpReplyCode != null && smtpReplyCode.isEmpty()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Invalid SMTP reply code: " + smtpReplyCode, 400);
+                }
+                String message = action.property("Message");
+                if (message != null && message.isEmpty()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Invalid SMTP response message: " + message, 400);
+                }
+                String sender = action.property("Sender");
+                if (sender != null && !verifiedSender.test(sender)) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Identity is not verified: " + sender, 400);
+                }
+            }
+        }
+    }
+
+    private static void applyRuleDefaults(ReceiptRule rule) {
+        if (rule.getTlsPolicy() == null) {
+            rule.setTlsPolicy("Optional");
+        }
+        for (ReceiptAction action : rule.getActions()) {
+            // AWS fills in the SNS encoding default on the stored rule (probed: UTF-8 comes back
+            // from Describe without ever being sent).
+            if (action.is("SNSAction") && action.property("TopicArn") != null
+                    && action.property("Encoding") == null) {
+                action.getProperties().put("Encoding", "UTF-8");
+            }
+        }
+    }
+
+    private static void requireRuleNamePresent(String ruleName) {
+        // Only an ABSENT parameter takes this error; a supplied empty or whitespace-only value
+        // falls through to the Smithy length/pattern violations probed under the 'ruleName' path.
+        if (ruleName == null) {
+            throw new AwsException("InvalidParameterValue", "RuleName is required.", 400);
+        }
+    }
+
+    /**
+     * The service-level rule name check that runs after the Smithy pattern passes, mirroring
+     * {@link #requireRuleSetName}: too long or not alphanumeric at both ends.
+     */
+    private static void requireValidRuleName(String name) {
+        if (name.length() > 64
+                || !Character.isLetterOrDigit(name.charAt(0))
+                || !Character.isLetterOrDigit(name.charAt(name.length() - 1))) {
+            throw new AwsException("InvalidParameterValue", "Not a valid ruleName: " + name, 400);
+        }
+    }
+
+    public void createReceiptFilter(ReceiptFilter filter, String region) {
+        validateFilterShape(filter);
+        requireValidFilterName(filter.getName());
+        requireValidCidr(filter.getCidr());
+        String key = receiptFilterKey(region, filter.getName());
+        synchronized (receiptFilterLock) {
+            if (receiptFilterStore.get(key).isPresent()) {
+                throw new AwsException("AlreadyExists",
+                        "Filter already exists: " + filter.getName(), 400);
+            }
+            // Probed: the account/region holds at most 100 filters; the next create is rejected.
+            if (receiptFilterStore.scan(k -> k.startsWith(receiptFilterPrefix(region))).size()
+                    >= MAX_FILTERS) {
+                throw new AwsException("LimitExceeded", "Too many filters", 400);
+            }
+            receiptFilterStore.put(key, filter);
+        }
+        LOG.infov("Created SES receipt filter: {0} in region {1}", filter.getName(), region);
+    }
+
+    public List<ReceiptFilter> listReceiptFilters(String region) {
+        List<ReceiptFilter> all = new ArrayList<>(
+                receiptFilterStore.scan(k -> k.startsWith(receiptFilterPrefix(region))));
+        // The wire ordering is not pinned by the probe (creation order and name order coincided);
+        // sorting by name keeps the response deterministic across storage backends.
+        all.sort(Comparator.comparing(ReceiptFilter::getName, Comparator.nullsLast(Comparator.naturalOrder())));
+        return all;
+    }
+
+    public void deleteReceiptFilter(String filterName, String region) {
+        if (filterName == null) {
+            // Probed: an absent FilterName is the one case the wire rejects; deleting a missing
+            // or malformed name succeeds without error.
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'filterName' failed to satisfy "
+                            + "constraint: Member must not be null", 400);
+        }
+        receiptFilterStore.delete(receiptFilterKey(region, filterName));
+        LOG.infov("Deleted SES receipt filter: {0} in region {1}", filterName, region);
+    }
+
+    /**
+     * The Smithy-model layer of filter validation, probed: an absent IpFilter, Policy, or Cidr
+     * is a not-null violation under the 'filter.ipFilter' paths, and a present Policy outside
+     * [Allow, Block] (the empty string included) is an enum violation. Unlike rule and
+     * rule-set names, a PRESENT filter name has no Smithy layer: every malformed non-null
+     * shape lands on the service-level messages in {@link #requireValidFilterName}. Only an
+     * absent name takes the not-null violation above (extrapolated; the SDKs cannot put an
+     * absent name on the wire to probe it).
+     */
+    private static void validateFilterShape(ReceiptFilter filter) {
+        if (filter == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: " + notNullViolation("filter"), 400);
+        }
+        List<String> violations = new ArrayList<>();
+        if (filter.getName() == null) {
+            violations.add(notNullViolation("filter.name"));
+        }
+        boolean hasIpFilter = filter.getPolicy() != null || filter.getCidr() != null;
+        if (!hasIpFilter) {
+            violations.add(notNullViolation("filter.ipFilter"));
+        } else {
+            if (filter.getPolicy() == null) {
+                violations.add(notNullViolation("filter.ipFilter.policy"));
+            } else if (!"Allow".equals(filter.getPolicy()) && !"Block".equals(filter.getPolicy())) {
+                violations.add("Value at 'filter.ipFilter.policy' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [Allow, Block]");
+            }
+            if (filter.getCidr() == null) {
+                violations.add(notNullViolation("filter.ipFilter.cidr"));
+            }
+        }
+        if (!violations.isEmpty()) {
+            String label = violations.size() == 1 ? "1 validation error detected: "
+                    : violations.size() + " validation errors detected: ";
+            throw new AwsException("ValidationError", label + String.join("; ", violations), 400);
+        }
+    }
+
+    private static String notNullViolation(String path) {
+        return "Value at '" + path + "' failed to satisfy constraint: Member must not be null";
+    }
+
+    /**
+     * Service-level filter name checks, probed: empty gets its own message, and every other
+     * malformed shape (bad character, longer than 64, non-alphanumeric start or end) shares
+     * the "Not a valid filterName" message.
+     */
+    private static void requireValidFilterName(String name) {
+        if (name.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "filterName must not be empty", 400);
+        }
+        if (!RULE_SET_NAME_CHARS.matcher(name).matches()
+                || name.length() > 64
+                || !Character.isLetterOrDigit(name.charAt(0))
+                || !Character.isLetterOrDigit(name.charAt(name.length() - 1))) {
+            throw new AwsException("InvalidParameterValue", "Not a valid filterName: " + name, 400);
+        }
+    }
+
+    /**
+     * Probed CIDR acceptance: a single IPv4 or IPv6 address, or a CIDR block with an in-range
+     * mask (0-32 for IPv4, 0-128 for IPv6). Everything else is the probed
+     * "Invalid CIDR block" message, the empty string included.
+     */
+    private static void requireValidCidr(String cidr) {
+        if (!isValidCidr(cidr)) {
+            throw new AwsException("InvalidParameterValue", "Invalid CIDR block: " + cidr, 400);
+        }
+    }
+
+    private static boolean isValidCidr(String cidr) {
+        String address = cidr;
+        int slash = cidr.indexOf('/');
+        Integer mask = null;
+        if (slash >= 0) {
+            address = cidr.substring(0, slash);
+            String maskPart = cidr.substring(slash + 1);
+            if (maskPart.isEmpty() || maskPart.length() > 3
+                    || !maskPart.chars().allMatch(c -> c >= '0' && c <= '9')) {
+                return false;
+            }
+            mask = Integer.parseInt(maskPart);
+        }
+        if (IPV4_OCTETS.matcher(address).matches()) {
+            return mask == null || mask <= 32;
+        }
+        if (isValidIpv6(address)) {
+            return mask == null || mask <= 128;
+        }
+        return false;
+    }
+
+    /**
+     * Strict IPv6 literal check, probed: bracketed ({@code [2001:db8::1]}), zone-scoped
+     * ({@code fe80::1%eth0}), and IPv4-mapped ({@code ::ffff:192.0.2.1}) spellings are all
+     * rejected by real SES, so the lenient {@code InetAddress} parser cannot be used here.
+     * Accepted: colon-separated 1-4 digit hex groups, eight of them, or fewer with a single
+     * {@code ::} compression.
+     */
+    private static boolean isValidIpv6(String address) {
+        if (address.isEmpty() || address.indexOf('%') >= 0 || address.indexOf('.') >= 0
+                || address.indexOf('[') >= 0 || address.indexOf(']') >= 0) {
+            return false;
+        }
+        int compression = address.indexOf("::");
+        if (compression != address.lastIndexOf("::")) {
+            return false;
+        }
+        if (compression < 0) {
+            return hexGroupCount(address) == 8;
+        }
+        int headGroups = hexGroupCount(address.substring(0, compression));
+        int tailGroups = hexGroupCount(address.substring(compression + 2));
+        return headGroups >= 0 && tailGroups >= 0 && headGroups + tailGroups <= 7;
+    }
+
+    /** Returns the number of valid 1-4 digit hex groups, or -1 when any group is malformed. */
+    private static int hexGroupCount(String colonSeparated) {
+        if (colonSeparated.isEmpty()) {
+            return 0;
+        }
+        String[] groups = colonSeparated.split(":", -1);
+        for (String group : groups) {
+            if (group.isEmpty() || group.length() > 4) {
+                return -1;
+            }
+            for (int i = 0; i < group.length(); i++) {
+                // Explicit ASCII grammar: Character.digit also recognizes non-ASCII Unicode
+                // digits, which real SES rejects (probed with fullwidth digits).
+                char c = group.charAt(i);
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                    return -1;
+                }
+            }
+        }
+        return groups.length;
+    }
+
+    private static String receiptFilterPrefix(String region) {
+        return "receiptFilter::" + region + "::";
+    }
+
+    private static String receiptFilterKey(String region, String name) {
+        return receiptFilterPrefix(region) + name;
+    }
+
     private void clearActiveReceiptRuleSet(String region) {
         String prefix = "receiptRuleSet::" + region + "::";
         for (ReceiptRuleSet rs : receiptRuleSetStore.scan(k -> k.startsWith(prefix))) {
@@ -158,6 +870,15 @@ public class SesReceiptRuleService {
                     "1 validation error detected: Value at 'ruleSetName' failed to satisfy constraint: "
                             + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_.-]+$", 400);
         }
+        requireValidRuleSetName(name);
+    }
+
+    /**
+     * The service-level rule set name check that runs after the Smithy pattern passes. Reorder
+     * and clone reach it directly: their empty-name case is a Smithy length violation on the
+     * wire (probed), not the "RuleSetName is required." of {@link #requireRuleSetName}.
+     */
+    private static void requireValidRuleSetName(String name) {
         if (name.length() > 64
                 || !Character.isLetterOrDigit(name.charAt(0))
                 || !Character.isLetterOrDigit(name.charAt(name.length() - 1))) {

@@ -6,6 +6,11 @@ instanceTypes:
       - x86_64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 2
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 2
 
   - instanceType: t3.micro
     vcpu: 2
@@ -14,6 +19,11 @@ instanceTypes:
       - x86_64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 2
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 2
 
   - instanceType: t3.small
     vcpu: 2
@@ -22,6 +32,11 @@ instanceTypes:
       - x86_64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 4
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: t3.medium
     vcpu: 2
@@ -30,6 +45,11 @@ instanceTypes:
       - x86_64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 6
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: m5.large
     vcpu: 2
@@ -38,6 +58,11 @@ instanceTypes:
       - x86_64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: t4g.micro
     vcpu: 2
@@ -46,6 +71,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 2
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 2
 
   - instanceType: t4g.small
     vcpu: 2
@@ -54,6 +84,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 4
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: t4g.medium
     vcpu: 2
@@ -62,6 +97,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 6
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: m6gd.large
     vcpu: 2
@@ -71,6 +111,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: m6gd.2xlarge
     vcpu: 8
@@ -80,6 +125,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
 
   - instanceType: m7gd.large
     vcpu: 2
@@ -89,6 +139,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: m7gd.2xlarge
     vcpu: 8
@@ -98,6 +153,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
 
   - instanceType: m8gd.medium
     vcpu: 1
@@ -107,6 +167,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 4
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 2
 
   - instanceType: m8gd.large
     vcpu: 2
@@ -116,6 +181,11 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
 
   - instanceType: m8gd.2xlarge
     vcpu: 8
@@ -125,3 +195,8 @@ instanceTypes:
       - arm64
     currentGeneration: true
     encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4

@@ -75,9 +75,30 @@ public class CloudTrailService {
                              String snsTopicArn, boolean includeGlobalServiceEvents,
                              boolean isMultiRegionTrail, boolean enableLogFileValidation,
                              boolean isOrganizationTrail) {
+        return createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
+                includeGlobalServiceEvents, isMultiRegionTrail, enableLogFileValidation,
+                isOrganizationTrail, Map.of());
+    }
+
+    /**
+     * Creates a trail, optionally tagged from the outset. CreateTrail carries a {@code TagsList}
+     * on the wire, and the Terraform AWS provider always sends the resource's tags there rather
+     * than through a follow-up AddTags, then reads them back with ListTags on every refresh, so
+     * tags dropped here would surface as a perpetual diff on {@code aws_cloudtrail}.
+     */
+    public Trail createTrail(String region, String name, String s3BucketName, String s3KeyPrefix,
+                             String snsTopicArn, boolean includeGlobalServiceEvents,
+                             boolean isMultiRegionTrail, boolean enableLogFileValidation,
+                             boolean isOrganizationTrail, Map<String, String> tags) {
         validateTrailName(name);
         if (s3BucketName == null || s3BucketName.isEmpty()) {
             throw new AwsException("S3BucketDoesNotExistException", "S3 bucket name is required.", 400);
+        }
+        Map<String, String> initialTags = tags == null ? Map.of() : tags;
+        if (initialTags.size() > MAX_TAGS_PER_RESOURCE) {
+            throw new AwsException("TagsLimitExceededException",
+                    "Tag limit exceeded for trail " + name
+                            + ". Maximum allowed: " + MAX_TAGS_PER_RESOURCE + ".", 400);
         }
         String key = regionKey(region, name);
         if (store.get(key).isPresent()) {
@@ -90,7 +111,7 @@ public class CloudTrailService {
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
                 enableLogFileValidation, false, false, isOrganizationTrail);
-        store.put(key, new CloudTrailEntry(trail, List.of(), List.of(), false, null, null, Map.of()));
+        store.put(key, new CloudTrailEntry(trail, List.of(), List.of(), false, null, null, initialTags));
         return trail;
     }
 

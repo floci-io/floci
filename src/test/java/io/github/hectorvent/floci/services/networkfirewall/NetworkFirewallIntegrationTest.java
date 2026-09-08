@@ -278,7 +278,7 @@ class NetworkFirewallIntegrationTest {
     @Test
     void updateFirewallDescription_cannotSmuggleProtectedMappingsPastChangeProtection() {
         // The UpdateFirewall* ops each model a specific mutable field. Extra fields in the
-        // raw request (SubnetMappings here) must not be persisted — otherwise a plain
+        // raw request (SubnetMappings here) must not be persisted, otherwise a plain
         // UpdateFirewallDescription bypasses SubnetChangeProtection entirely.
         String name = "SmuggledMappingsFirewall";
         createFirewall(name, "\"SubnetChangeProtection\":true,", "subnet-88888888888888888");
@@ -300,7 +300,7 @@ class NetworkFirewallIntegrationTest {
         // Each UpdateFirewall* operation models exactly one mutable field (botocore
         // 2020-11-12). A raw UpdateFirewallDescription request that also carries
         // DeleteProtection (only modeled on UpdateFirewallDeleteProtection) must not
-        // persist it — otherwise DeleteProtection can be flipped without ever calling
+        // persist it, otherwise DeleteProtection can be flipped without ever calling
         // UpdateFirewallDeleteProtection, and DescribeFirewall reports a change that op
         // never made.
         String name = "SmuggledDeleteProtectionFirewall";
@@ -473,6 +473,21 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void createFirewall_whenAlreadyPresent_isRejectedAsAnInvalidRequest() {
+        String name = "DuplicateNameFirewall";
+        createFirewall(name, "", "subnet-11111111111111121");
+
+        call("CreateFirewall", "{\"FirewallName\":\"" + name + "\","
+                + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-other-policy\","
+                + "\"VpcId\":\"vpc-0123456789abcdef1\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-11111111111111122\"}]}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("Firewall already exists: " + name));
+    }
+
+    @Test
     void createRuleGroup_whenAlreadyPresent_namesTheResourceKindInTheError() {
         String body = "{\"RuleGroupName\":\"duplicate-rule-group\",\"Type\":\"STATEFUL\","
                 + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}";
@@ -480,7 +495,7 @@ class NetworkFirewallIntegrationTest {
 
         call("CreateRuleGroup", body)
             .statusCode(400)
-            .body("__type", equalTo("ResourceAlreadyExistsException"))
+            .body("__type", equalTo("InvalidRequestException"))
             .body("message", equalTo("RuleGroup already exists: duplicate-rule-group"));
     }
 
@@ -673,6 +688,138 @@ class NetworkFirewallIntegrationTest {
         call("UpdateFirewallAnalysisSettings", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
             .statusCode(200)
             .body("EnabledAnalysisTypes", contains("TLS_SNI"));
+    }
+
+    @Test
+    void describeFirewall_exposesTheCurrentUpdateTokenAtTheTopLevel() {
+        String name = "TokenExposedFirewall";
+        createFirewall(name, "", "subnet-11111111111111123");
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("UpdateToken", not(emptyOrNullString()))
+            .body("Firewall", not(hasKey("UpdateToken")));
+    }
+
+    @Test
+    void updateFirewallDescription_withTheCurrentToken_succeedsAndRotatesTheToken() {
+        String name = "CurrentTokenFirewall";
+        createFirewall(name, "", "subnet-11111111111111124");
+        String currentToken = currentUpdateToken(name);
+
+        String newToken = call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"UpdateToken\":\"" + currentToken + "\",\"Description\":\"checked in\"}")
+            .statusCode(200)
+            .body("Description", equalTo("checked in"))
+            .body("UpdateToken", not(equalTo(currentToken)))
+            .extract().path("UpdateToken");
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("UpdateToken", equalTo(newToken));
+    }
+
+    @Test
+    void updateFirewallDescription_withAStaleToken_isRejectedAndLeavesTheFirewallUntouched() {
+        String name = "StaleTokenFirewall";
+        createFirewall(name, "", "subnet-11111111111111125");
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"UpdateToken\":\"00000000-0000-0000-0000-000000000000\","
+                + "\"Description\":\"should not stick\"}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidTokenException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.Description", nullValue());
+    }
+
+    @Test
+    void updateFirewallDescription_withoutAToken_appliesUnconditionally() {
+        String name = "UnconditionalUpdateFirewall";
+        createFirewall(name, "", "subnet-11111111111111126");
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"Description\":\"no token needed\"}")
+            .statusCode(200)
+            .body("Description", equalTo("no token needed"));
+    }
+
+    @Test
+    void associateSubnets_withAStaleToken_isRejectedAndLeavesTheMappingsUntouched() {
+        String name = "StaleTokenAssociateFirewall";
+        createFirewall(name, "", "subnet-11111111111111127");
+
+        call("AssociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"UpdateToken\":\"00000000-0000-0000-0000-000000000000\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-11111111111111128\"}]}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidTokenException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings", hasSize(1));
+    }
+
+    @Test
+    void associateSubnets_withTheCurrentToken_succeedsAndReturnsANewToken() {
+        String name = "CurrentTokenAssociateFirewall";
+        createFirewall(name, "", "subnet-11111111111111129");
+        String currentToken = currentUpdateToken(name);
+
+        call("AssociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"UpdateToken\":\"" + currentToken + "\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-1111111111111112a\"}]}")
+            .statusCode(200)
+            .body("UpdateToken", not(equalTo(currentToken)));
+    }
+
+    @Test
+    void associateFirewallPolicy_withAStaleToken_isRejectedAndLeavesThePolicyUntouched() {
+        String name = "StaleTokenPolicyFirewall";
+        String initialPolicyArn = "arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-policy";
+        createFirewall(name, "", "subnet-1111111111111112b");
+
+        call("CreateFirewallPolicy", "{\"FirewallPolicyName\":\"" + name + "-new-policy\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:pass\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:pass\"]}}")
+            .statusCode(200);
+
+        call("AssociateFirewallPolicy", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"UpdateToken\":\"00000000-0000-0000-0000-000000000000\","
+                + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-new-policy\"}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidTokenException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.FirewallPolicyArn", equalTo(initialPolicyArn));
+    }
+
+    @Test
+    void associateFirewallPolicy_returnsTheRotatedUpdateToken() {
+        String name = "PolicyResponseTokenFirewall";
+        createFirewall(name, "", "subnet-1111111111111112c");
+
+        call("CreateFirewallPolicy", "{\"FirewallPolicyName\":\"" + name + "-new-policy\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:pass\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:pass\"]}}")
+            .statusCode(200);
+
+        call("AssociateFirewallPolicy", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-new-policy\"}")
+            .statusCode(200)
+            .body("UpdateToken", not(emptyOrNullString()));
+    }
+
+    private static String currentUpdateToken(String firewallName) {
+        return call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(firewallName) + "\"}")
+            .statusCode(200)
+            .extract().path("UpdateToken");
     }
 
     private static String firewallArn(String name) {

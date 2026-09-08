@@ -171,6 +171,33 @@ class AslExecutorLambdaInvokeResultTest {
     }
 
     @Test
+    void resultSelectorUnwrapsPayloadWhenFunctionNameIsABareName() throws Exception {
+        // Scenario (c) of issue #2544: the function is referenced by its bare name and the
+        // documented "$.Payload" selector must reach the function output, not resolve to null.
+        Execution execution = run("""
+                {
+                  "StartAt": "T",
+                  "States": {
+                    "T": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {"FunctionName": "%s", "Payload.$": "$"},
+                      "ResultSelector": {"unwrapped.$": "$.Payload"},
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(FUNCTION_NAME));
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        JsonNode output = objectMapper.readTree(execution.getOutput());
+        assertTrue(output.path("unwrapped").isObject(), "$.Payload must resolve to the function output");
+        assertEquals("RET", output.path("unwrapped").path("marker").asText());
+        assertEquals(1, output.path("unwrapped").path("echo").path("in").asInt());
+        assertEquals(1, output.size());
+    }
+
+    @Test
     void outputPathPayloadUnwrapsTheOptimizedInvokeResult() throws Exception {
         Execution execution = run("""
                 {

@@ -1,6 +1,10 @@
 package io.github.hectorvent.floci.services.bedrockruntime.backend;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.ws.rs.core.StreamingOutput;
+
+import java.io.OutputStream;
+import java.util.function.Consumer;
 
 /**
  * Executes Bedrock Runtime Converse/InvokeModel requests against a concrete backend
@@ -12,5 +16,5 @@ public interface BedrockBackend {
 
     byte[] invokeModel(String modelId, byte[] body);
 
-    byte[] converseStream(String modelId, ObjectNode bedrockRequest);
+    Consumer<OutputStream> converseStream(String modelId, ObjectNode bedrockRequest);
 }

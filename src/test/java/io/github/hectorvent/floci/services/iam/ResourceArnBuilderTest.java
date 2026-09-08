@@ -197,6 +197,13 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void dynamoDbBuildsArnFromTableCreationParameters() {
+        setJsonBody("{\"TableCreationParameters\":{\"TableName\":\"ImportTarget\"},\"InputFormat\":\"DYNAMODB_JSON\"}");
+        var arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/ImportTarget", arn);
+    }
+
+    @Test
     void dynamoDbReturnsWildcardWhenNoTableSpecified() {
         setJsonBody("{}");
         String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");

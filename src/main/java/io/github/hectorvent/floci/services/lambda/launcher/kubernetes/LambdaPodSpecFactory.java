@@ -3,8 +3,8 @@ package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -60,7 +60,7 @@ public class LambdaPodSpecFactory {
      * @param providedRuntime  whether the runtime is provided.* (bootstrap needs an exec bit)
      * @param handlerOrNull    function handler used as the runtime container arg (Zip functions)
      * @param imageConfig      Image-package-type entrypoint/command/workingdir; empty lists/null when unset
-     * @param caConfigMapName  ConfigMap holding Floci's CA cert, mounted at /etc/floci-ca.crt when present
+     * @param caConfigMapName  ConfigMap holding the CA bundle, mounted at /etc/floci-ca-bundle.pem when present
      */
     public ObjectNode buildPod(String podName,
                         String functionName,
@@ -100,7 +100,7 @@ public class LambdaPodSpecFactory {
                     .set("configMap", nodes.objectNode().put("name", cm)));
             runtimeMounts.add(nodes.objectNode()
                     .put("name", "floci-ca")
-                    .put("mountPath", ContainerLauncher.FLOCI_CA_CONTAINER_PATH)
+                    .put("mountPath", ContainerCaBundle.CONTAINER_PATH)
                     .put("subPath", KubernetesPodLauncher.CA_CONFIG_MAP_KEY)
                     .put("readOnly", true));
         });

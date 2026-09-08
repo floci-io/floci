@@ -53,7 +53,12 @@ class CloudWatchLogsHandlerTest {
                 10_000,
                 new RegionResolver(REGION, ACCOUNT)
         );
-        handler = new CloudWatchLogsHandler(service, MAPPER);
+        handler = new CloudWatchLogsHandler(
+                service,
+                new CloudWatchLogsCrossAccountService(
+                        new InMemoryStorage<>(), new InMemoryStorage<>(),
+                        new RegionResolver(REGION, ACCOUNT), MAPPER),
+                MAPPER);
 
         service.createLogGroup(GROUP, null, null, REGION);
         service.createLogStream(GROUP, STREAM, REGION);

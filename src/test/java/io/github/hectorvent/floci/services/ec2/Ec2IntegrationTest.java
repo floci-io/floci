@@ -794,6 +794,14 @@ class Ec2IntegrationTest {
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB", equalTo("474"))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.encryptionInTransitSupported",
                     equalTo("false"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.defaultNetworkCardIndex",
+                    equalTo("0"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.ipv4AddressesPerInterface",
+                    equalTo("15"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.networkCards.item.networkCardIndex",
+                    equalTo("0"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.networkCards.item.maximumNetworkInterfaces",
+                    equalTo("4"))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     equalTo("arm64"));
     }
@@ -825,6 +833,14 @@ class Ec2IntegrationTest {
                     everyItem(equalTo("118")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.encryptionInTransitSupported",
                     everyItem(equalTo("false")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.defaultNetworkCardIndex",
+                    everyItem(equalTo("0")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.ipv4AddressesPerInterface",
+                    everyItem(equalTo("10")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.networkCards.item.networkCardIndex",
+                    everyItem(equalTo("0")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.networkInfo.networkCards.item.maximumNetworkInterfaces",
+                    everyItem(equalTo("3")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     everyItem(equalTo("arm64")));
     }
@@ -1101,6 +1117,24 @@ class Ec2IntegrationTest {
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("MissingParameter"))
             .body("Response.Errors.Error.Message", equalTo("The request must contain the parameter VpcId"));
+    }
+
+    @Test
+    @Order(21)
+    void createSubnetWithConflictingCidrReturnsInvalidSubnetConflict() {
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpcId)
+            .formParam("CidrBlock", "10.0.1.128/25")
+            .formParam("AvailabilityZone", "us-east-1a")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidSubnet.Conflict"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The CIDR '10.0.1.128/25' conflicts with another subnet"));
     }
 
     @Test
@@ -1979,6 +2013,35 @@ class Ec2IntegrationTest {
                     equalTo(launchTemplateId))
             .body("DescribeLaunchTemplatesResponse.launchTemplates.item.launchTemplateName",
                     equalTo("sample-template"));
+    }
+
+    @Test
+    @Order(44)
+    void describeLaunchTemplatesRejectsMissingName() {
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateName.1", "no-such-template")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidLaunchTemplateName.NotFoundException"));
+    }
+
+    @Test
+    @Order(44)
+    void describeLaunchTemplatesWithNoMatchingFilterStaysAnEmptyList() {
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("Filter.1.Name", "launch-template-name")
+            .formParam("Filter.1.Value.1", "no-such-template")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<item>")));
     }
 
     @Test

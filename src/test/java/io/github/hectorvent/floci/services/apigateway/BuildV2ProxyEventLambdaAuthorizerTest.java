@@ -50,7 +50,7 @@ class BuildV2ProxyEventLambdaAuthorizerTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null,
                 regionResolver, MAPPER, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null
         );
     }
 

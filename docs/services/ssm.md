@@ -91,6 +91,18 @@ aws ssm send-command --endpoint-url $AWS_ENDPOINT_URL \
   --parameters commands='["echo hello"]'
 ```
 
+## Public AMI Parameters
+
+AWS publishes AMI id lookup parameters under `/aws/service/ami-amazon-linux-latest/` in every
+account, and Terraform modules read them without any setup. Floci answers the documented Amazon
+Linux 2 and Amazon Linux 2023 names from its EC2 image catalog, so `GetParameter`, `GetParameters`
+and `GetParametersByPath` resolve them to the catalog's AMI ids. As on AWS they are read-only and
+belong to no account, so they do not appear in `DescribeParameters`.
+
+```bash
+aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+```
+
 ## Parameter Types
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.

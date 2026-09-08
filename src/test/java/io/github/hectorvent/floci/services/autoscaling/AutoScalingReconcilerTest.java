@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
@@ -25,6 +26,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -465,6 +467,48 @@ class AutoScalingReconcilerTest {
                 eq("An instance was started in response to a desired capacity change."),
                 eq("Successful"));
         verify(asgService, times(2)).saveAutoScalingGroup(asg);
+    }
+
+    @Test
+    void deletedLaunchTemplateDoesNotAbortTheReconcilePass() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        AutoScalingGroup asg = asgWhoseLaunchTemplateLookupFails(ec2Service,
+                new AwsException("InvalidLaunchTemplateName.NotFoundException",
+                        "The launch template 'app-lt' does not exist.", 400));
+        AutoScalingReconciler reconciler =
+                new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(asgService).completeInstanceRefreshIfSettled("us-east-1", "app-asg");
+    }
+
+    @Test
+    void otherLaunchTemplateErrorsSurfaceRatherThanSilentlySkippingScaling() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        AutoScalingGroup asg = asgWhoseLaunchTemplateLookupFails(ec2Service,
+                new AwsException("RequestLimitExceeded", "Request limit exceeded.", 503));
+        AutoScalingReconciler reconciler =
+                new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+
+        AwsException thrown = assertThrows(AwsException.class, () -> reconciler.reconcile(asg));
+
+        assertEquals("RequestLimitExceeded", thrown.getErrorCode());
+    }
+
+    private static AutoScalingGroup asgWhoseLaunchTemplateLookupFails(Ec2Service ec2Service,
+                                                                      AwsException failure) {
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(1);
+        asg.setLaunchTemplateName("app-lt");
+        when(ec2Service.describeLaunchTemplates("us-east-1", List.of(), List.of("app-lt"), Map.of()))
+                .thenThrow(failure);
+        return asg;
     }
 
     private static AsgInstance instance(String lifecycleState) {

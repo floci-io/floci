@@ -59,6 +59,7 @@ public class Ec2QueryHandler {
             return switch (action) {
                 // Instances
                 case "RunInstances" -> handleRunInstances(params, region);
+                case "CreateFleet" -> handleCreateFleet(params, region);
                 case "DescribeInstances" -> handleDescribeInstances(params, region);
                 case "DescribeIamInstanceProfileAssociations" ->
                         handleDescribeIamInstanceProfileAssociations(params, region);
@@ -69,6 +70,7 @@ public class Ec2QueryHandler {
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
+                case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
                 // EBS encryption defaults
                 case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
                 case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(region);
@@ -209,6 +211,11 @@ public class Ec2QueryHandler {
                 case "CreateNatGateway" -> handleCreateNatGateway(params, region);
                 case "DescribeNatGateways" -> handleDescribeNatGateways(params, region);
                 case "DeleteNatGateway" -> handleDeleteNatGateway(params, region);
+                // Capacity Reservations
+                case "CreateCapacityReservation" -> handleCreateCapacityReservation(params, region);
+                case "DescribeCapacityReservations" -> handleDescribeCapacityReservations(params, region);
+                case "ModifyCapacityReservation" -> handleModifyCapacityReservation(params, region);
+                case "CancelCapacityReservation" -> handleCancelCapacityReservation(params, region);
                 // Elastic IPs
                 case "AllocateAddress" -> handleAllocateAddress(params, region);
                 case "AssociateAddress" -> handleAssociateAddress(params, region);
@@ -652,8 +659,15 @@ public class Ec2QueryHandler {
             }
         }
 
+        // Absent fields stay null so the launch default, or the launch template's value, applies.
+        LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
+
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
         if (launchTemplateData != null) {
+            if (launchTemplateData.getMetadataOptions() != null) {
+                metadataOptions = LaunchTemplateData.MetadataOptions.merge(
+                        launchTemplateData.getMetadataOptions(), metadataOptions);
+            }
             imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
             instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
             keyName = firstNonBlank(keyName, launchTemplateData.getKeyName());
@@ -673,7 +687,7 @@ public class Ec2QueryHandler {
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex);
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -709,6 +723,291 @@ public class Ec2QueryHandler {
         }
         return service.resolveLaunchTemplateData(region, id, name, version);
     }
+
+    /**
+     * Handles the synchronous EC2 Fleet form used by Karpenter for node launches and
+     * authorization dry-runs. Floci does not model fleet requests as a separate long-lived
+     * resource: an instant fleet is represented by the instances it launches, which keeps
+     * DescribeInstances and termination behavior consistent with RunInstances.
+     *
+     * <p>The EC2 Query model calls this member {@code LaunchTemplateConfigs}, while the wire
+     * location name emitted by SDK serializers is {@code LaunchTemplateConfig.N}. Accept both
+     * spellings because callers in the ecosystem use both forms.</p>
+     */
+    private Response handleCreateFleet(MultivaluedMap<String, String> p, String region) {
+        String fleetType = firstNonBlank(p.getFirst("Type"), "instant");
+        if (!"instant".equals(fleetType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Only instant fleets are supported for local EC2 launches.", 400);
+        }
+        String capacityType = firstNonBlank(
+                p.getFirst("TargetCapacitySpecification.DefaultTargetCapacityType"), "on-demand");
+        if (!Set.of("on-demand", "spot").contains(capacityType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "DefaultTargetCapacityType must be on-demand or spot.", 400);
+        }
+
+        int targetCapacity = parseIntParam(p, "TargetCapacitySpecification.TotalTargetCapacity", 0);
+        if (targetCapacity <= 0) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter TargetCapacitySpecification.TotalTargetCapacity.", 400);
+        }
+
+        List<FleetLaunch> launches = parseFleetLaunches(p, region);
+        if (launches.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter LaunchTemplateConfigs.", 400);
+        }
+
+        // Resolve and validate every launch template before honoring DryRun. AWS returns
+        // DryRunOperation only after it has established that the request could succeed.
+        for (FleetLaunch launch : launches) {
+            if (launch.imageId() == null || launch.imageId().isBlank()) {
+                throw new AwsException("MissingParameter",
+                        "Each fleet launch must specify an ImageId in the launch template or override.", 400);
+            }
+            if (launch.instanceType() == null || launch.instanceType().isBlank()) {
+                throw new AwsException("MissingParameter",
+                        "Each fleet launch must specify an InstanceType in the launch template or override.", 400);
+            }
+        }
+        checkDryRun(p);
+
+        List<FleetLaunchResult> results = new ArrayList<>(targetCapacity);
+        List<String> launchedInstanceIds = new ArrayList<>(targetCapacity);
+        try {
+            for (int i = 0; i < targetCapacity; i++) {
+                FleetLaunch launch = launches.get(i % launches.size());
+                Reservation reservation = service.runInstances(
+                        region,
+                        launch.imageId(),
+                        launch.instanceType(),
+                        1,
+                        1,
+                        launch.keyName(),
+                        launch.securityGroupIds(),
+                        launch.subnetId(),
+                        p.getFirst("ClientToken"),
+                        launch.instanceTags(),
+                        launch.userData(),
+                        launch.iamInstanceProfileArn(),
+                        null,
+                        null,
+                        0,
+                        launch.availabilityZone());
+                Instance instance = reservation.getInstances().get(0);
+                launchedInstanceIds.add(instance.getInstanceId());
+                results.add(new FleetLaunchResult(instance, launch));
+            }
+        } catch (RuntimeException e) {
+            if (!launchedInstanceIds.isEmpty()) {
+                LOG.warnv("CreateFleet failed after launching instances {0}; rolling them back: {1}",
+                        launchedInstanceIds, e.getMessage());
+                List<String> rollbackFailureInstanceIds = new ArrayList<>();
+                List<RuntimeException> rollbackFailures = new ArrayList<>();
+                for (String instanceId : launchedInstanceIds) {
+                    try {
+                        service.terminateInstances(region, List.of(instanceId));
+                    } catch (RuntimeException cleanupFailure) {
+                        rollbackFailureInstanceIds.add(instanceId);
+                        rollbackFailures.add(cleanupFailure);
+                        LOG.errorv(cleanupFailure, "CreateFleet rollback failed for instance {0}: {1}",
+                                instanceId, cleanupFailure.getMessage());
+                    }
+                }
+                if (!rollbackFailures.isEmpty()) {
+                    String rollbackMessage = "CreateFleet rollback incomplete for instance(s): "
+                            + String.join(", ", rollbackFailureInstanceIds);
+                    if (e instanceof AwsException awsFailure) {
+                        AwsException enrichedFailure = new AwsException(
+                                awsFailure.getErrorCode(),
+                                awsFailure.getMessage() + " " + rollbackMessage,
+                                awsFailure.getHttpStatus());
+                        enrichedFailure.addSuppressed(e);
+                        rollbackFailures.forEach(enrichedFailure::addSuppressed);
+                        throw enrichedFailure;
+                    }
+                    rollbackFailures.forEach(e::addSuppressed);
+                }
+            }
+            throw e;
+        }
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateFleetResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("fleetId", "fleet-" + UUID.randomUUID().toString().replace("-", ""))
+                .start("fleetInstanceSet");
+        // AWS groups instances that share a launch template and overrides into one fleet
+        // instance entry. Keep the first-seen order stable while collecting all instance IDs.
+        Map<FleetLaunchKey, List<FleetLaunchResult>> groupedResults = new LinkedHashMap<>();
+        for (FleetLaunchResult result : results) {
+            groupedResults.computeIfAbsent(FleetLaunchKey.from(result.launch()), ignored -> new ArrayList<>())
+                    .add(result);
+        }
+        for (List<FleetLaunchResult> group : groupedResults.values()) {
+            FleetLaunchResult first = group.getFirst();
+            Instance instance = first.instance();
+            FleetLaunch launch = first.launch();
+            xml.start("item")
+                    .start("instanceIds");
+            for (FleetLaunchResult result : group) {
+                xml.elem("item", result.instance().getInstanceId());
+            }
+            xml.end("instanceIds")
+                    .elem("instanceType", instance.getInstanceType())
+                    .elem("availabilityZone", instance.getPlacement() != null
+                            ? instance.getPlacement().getAvailabilityZone() : null)
+                    .elem("subnetId", instance.getSubnetId())
+                    .elem("lifecycle", capacityType)
+                    .start("launchTemplateAndOverrides")
+                    .start("launchTemplateSpecification")
+                    .elem("launchTemplateId", launch.launchTemplateId())
+                    .elem("launchTemplateName", launch.launchTemplateName())
+                    .elem("version", launch.launchTemplateVersion())
+                    .end("launchTemplateSpecification")
+                    .start("overrides")
+                    .elem("instanceType", launch.instanceType())
+                    .elem("imageId", launch.imageId())
+                    .elem("subnetId", launch.subnetId())
+                    .elem("availabilityZone", launch.availabilityZone())
+                    .end("overrides")
+                    .end("launchTemplateAndOverrides")
+                    .end("item");
+        }
+        xml.end("fleetInstanceSet")
+                .end("CreateFleetResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private List<FleetLaunch> parseFleetLaunches(MultivaluedMap<String, String> p, String region) {
+        List<FleetLaunch> launches = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = fleetConfigBase(p, i);
+            if (base == null) {
+                break;
+            }
+            String launchTemplateId = p.getFirst(base + ".LaunchTemplateSpecification.LaunchTemplateId");
+            String launchTemplateName = p.getFirst(base + ".LaunchTemplateSpecification.LaunchTemplateName");
+            String version = p.getFirst(base + ".LaunchTemplateSpecification.Version");
+            LaunchTemplateData template = service.resolveLaunchTemplateData(
+                    region, launchTemplateId, launchTemplateName, version);
+            List<Tag> fleetInstanceTags = parseTagsForResource(p, "instance");
+
+            boolean hasOverride = false;
+            for (int j = 1; ; j++) {
+                String overrideBase = base + ".Overrides." + j;
+                String instanceType = p.getFirst(overrideBase + ".InstanceType");
+                String imageId = p.getFirst(overrideBase + ".ImageId");
+                String subnetId = p.getFirst(overrideBase + ".SubnetId");
+                String availabilityZone = p.getFirst(overrideBase + ".AvailabilityZone");
+                if (instanceType == null && imageId == null && subnetId == null && availabilityZone == null) {
+                    break;
+                }
+                hasOverride = true;
+                launches.add(fleetLaunch(region, template, launchTemplateId, launchTemplateName, version,
+                        instanceType, imageId, subnetId, availabilityZone, fleetInstanceTags));
+            }
+            if (!hasOverride) {
+                launches.add(fleetLaunch(region, template, launchTemplateId, launchTemplateName, version,
+                        null, null, null, null, fleetInstanceTags));
+            }
+        }
+        return launches;
+    }
+
+    private FleetLaunch fleetLaunch(String region, LaunchTemplateData template, String launchTemplateId,
+                                    String launchTemplateName, String version,
+                                    String overrideInstanceType, String overrideImageId,
+                                    String overrideSubnetId, String overrideAvailabilityZone,
+                                    List<Tag> fleetInstanceTags) {
+        Map<String, Tag> tags = new LinkedHashMap<>();
+        for (Tag tag : template.getInstanceTags()) {
+            tags.put(tag.getKey(), tag);
+        }
+        for (Tag tag : fleetInstanceTags) {
+            tags.put(tag.getKey(), tag);
+        }
+        String templateSubnetId = template.getNetworkInterfaces().stream()
+                .map(networkInterface -> networkInterface.getSubnetId())
+                .filter(Objects::nonNull)
+                .filter(value -> !value.isBlank())
+                .findFirst()
+                .orElse(null);
+        String subnetId = firstNonBlank(overrideSubnetId, templateSubnetId);
+        String templateAvailabilityZone = template.getPlacement() != null
+                ? template.getPlacement().getAvailabilityZone() : null;
+        String availabilityZone = resolveFleetAvailabilityZone(
+                region, templateSubnetId, templateAvailabilityZone, overrideSubnetId, overrideAvailabilityZone);
+        return new FleetLaunch(
+                launchTemplateId,
+                launchTemplateName,
+                version,
+                firstNonBlank(overrideInstanceType, template.getInstanceType()),
+                firstNonBlank(overrideImageId, template.getImageId()),
+                subnetId,
+                availabilityZone,
+                template.getKeyName(),
+                template.getUserData(),
+                service.iamInstanceProfileArn(template),
+                template.effectiveSecurityGroupIds(),
+                new ArrayList<>(tags.values()));
+    }
+
+    /**
+     * Resolves the placement represented by one CreateFleet launch override.
+     *
+     * <p>A subnet supplied by an override replaces the subnet inherited from the launch template.
+     * Its availability zone therefore also replaces a template placement zone when the override
+     * does not carry an explicit zone. Passing the template zone through in that case creates a
+     * valid subnet-only AWS override that is incorrectly rejected as a subnet/AZ mismatch. Resolve
+     * the subnet here so both the launch request and the response describe the same placement.</p>
+     */
+    private String resolveFleetAvailabilityZone(String region, String templateSubnetId,
+                                                String templateAvailabilityZone, String overrideSubnetId,
+                                                String overrideAvailabilityZone) {
+        if (isSet(overrideAvailabilityZone)) {
+            return overrideAvailabilityZone;
+        }
+        if (isSet(overrideSubnetId)) {
+            return service.requireSubnet(region, overrideSubnetId).getAvailabilityZone();
+        }
+        if (isSet(templateAvailabilityZone)) {
+            return templateAvailabilityZone;
+        }
+        if (isSet(templateSubnetId)) {
+            return service.requireSubnet(region, templateSubnetId).getAvailabilityZone();
+        }
+        return null;
+    }
+
+    private String fleetConfigBase(MultivaluedMap<String, String> p, int index) {
+        String singular = "LaunchTemplateConfig." + index;
+        String plural = "LaunchTemplateConfigs." + index;
+        if (anyParamStartsWith(p, singular + ".")) {
+            return singular;
+        }
+        if (anyParamStartsWith(p, plural + ".")) {
+            return plural;
+        }
+        return null;
+    }
+
+    private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
+                               String instanceType, String imageId, String subnetId, String availabilityZone,
+                               String keyName, String userData, String iamInstanceProfileArn,
+                               List<String> securityGroupIds, List<Tag> instanceTags) {}
+
+    private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
+                                  String instanceType, String imageId, String subnetId, String availabilityZone) {
+        private static FleetLaunchKey from(FleetLaunch launch) {
+            return new FleetLaunchKey(launch.launchTemplateId(), launch.launchTemplateName(),
+                    launch.launchTemplateVersion(), launch.instanceType(), launch.imageId(), launch.subnetId(),
+                    launch.availabilityZone());
+        }
+    }
+
+    private record FleetLaunchResult(Instance instance, FleetLaunch launch) {}
 
     private static String firstNonBlank(String first, String fallback) {
         return first != null && !first.isBlank() ? first : fallback;
@@ -973,6 +1272,43 @@ public class Ec2QueryHandler {
         return booleanResponse("ModifyInstanceAttribute");
     }
 
+    private Response handleModifyInstanceMetadataOptions(MultivaluedMap<String, String> p, String region) {
+        String instanceId = p.getFirst("InstanceId");
+        if (instanceId == null || instanceId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
+        }
+        Instance inst = service.modifyInstanceMetadataOptions(region, instanceId, parseMetadataOptions(p, ""));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyInstanceMetadataOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("instanceId", instanceId);
+        appendMetadataOptions(xml, "instanceMetadataOptions", inst.effectiveMetadataOptions());
+        xml.end("ModifyInstanceMetadataOptionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /** Reads the MetadataOptions fields under {@code prefix}, leaving unspecified ones null. */
+    private LaunchTemplateData.MetadataOptions parseMetadataOptions(MultivaluedMap<String, String> p, String prefix) {
+        LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
+        options.setHttpTokens(p.getFirst(prefix + "HttpTokens"));
+        options.setHttpPutResponseHopLimit(intParam(p, prefix + "HttpPutResponseHopLimit"));
+        options.setHttpEndpoint(p.getFirst(prefix + "HttpEndpoint"));
+        options.setHttpProtocolIpv6(p.getFirst(prefix + "HttpProtocolIpv6"));
+        options.setInstanceMetadataTags(p.getFirst(prefix + "InstanceMetadataTags"));
+        return options;
+    }
+
+    private void appendMetadataOptions(XmlBuilder xml, String element, LaunchTemplateData.MetadataOptions options) {
+        xml.start(element)
+                .elem("state", options.getState() != null ? options.getState() : "applied")
+                .elem("httpTokens", options.getHttpTokens())
+                .elem("httpPutResponseHopLimit", str(options.getHttpPutResponseHopLimit()))
+                .elem("httpEndpoint", options.getHttpEndpoint())
+                .elem("httpProtocolIpv6", options.getHttpProtocolIpv6())
+                .elem("instanceMetadataTags", options.getInstanceMetadataTags())
+                .end(element);
+    }
+
     // ─── VPC handlers ─────────────────────────────────────────────────────────
 
     private Response handleCreateVpc(MultivaluedMap<String, String> p, String region) {
@@ -1126,6 +1462,7 @@ public class Ec2QueryHandler {
         if (logDestination == null) {
             logDestination = p.getFirst("LogDestinationArn");
         }
+        String deliverLogsPermissionArn = p.getFirst("DeliverLogsPermissionArn");
         String logFormat = p.getFirst("LogFormat");
         int maxAgg = parseIntParam(p, "MaxAggregationInterval", 600);
 
@@ -1143,7 +1480,7 @@ public class Ec2QueryHandler {
                 .start("flowLogIdSet");
         for (String resourceId : resourceIds) {
             FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
-                    logDestinationType, logDestination, logFormat, maxAgg);
+                    logDestinationType, logDestination, deliverLogsPermissionArn, logFormat, maxAgg);
             xml.elem("item", fl.getFlowLogId());
         }
         xml.end("flowLogIdSet")
@@ -1169,6 +1506,7 @@ public class Ec2QueryHandler {
                     .elem("trafficType", fl.getTrafficType())
                     .elem("logDestinationType", fl.getLogDestinationType())
                     .elem("logDestination", fl.getLogDestination())
+                    .elem("deliverLogsPermissionArn", fl.getDeliverLogsPermissionArn())
                     .elem("flowLogStatus", fl.getFlowLogStatus())
                     .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
                     .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
@@ -3213,6 +3551,105 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    // ─── Capacity Reservation handlers ────────────────────────────────────────
+
+    private Response handleCreateCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        CapacityReservation reservation = service.createCapacityReservation(
+                region,
+                p.getFirst("InstanceType"),
+                p.getFirst("InstancePlatform"),
+                p.getFirst("AvailabilityZone"),
+                p.getFirst("AvailabilityZoneId"),
+                intOrNull(p, "InstanceCount"),
+                p.getFirst("Tenancy"),
+                p.getFirst("EbsOptimized") != null ? Boolean.valueOf(p.getFirst("EbsOptimized")) : null,
+                p.getFirst("EphemeralStorage") != null ? Boolean.valueOf(p.getFirst("EphemeralStorage")) : null,
+                p.getFirst("EndDateType"),
+                instantOrNull(p, "EndDate"),
+                p.getFirst("InstanceMatchCriteria"),
+                p.getFirst("OutpostArn"),
+                p.getFirst("PlacementGroupArn"));
+        applyResourceTags(p, region, "capacity-reservation", reservation.getCapacityReservationId());
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateCapacityReservationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("capacityReservation").raw(capacityReservationXml(reservation)).end("capacityReservation")
+                .end("CreateCapacityReservationResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeCapacityReservations(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "CapacityReservationId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<CapacityReservation> reservations = service.describeCapacityReservations(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeCapacityReservationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("capacityReservationSet");
+        for (CapacityReservation reservation : reservations) {
+            xml.start("item").raw(capacityReservationXml(reservation)).end("item");
+        }
+        xml.end("capacityReservationSet").end("DescribeCapacityReservationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        service.modifyCapacityReservation(
+                region,
+                p.getFirst("CapacityReservationId"),
+                intOrNull(p, "InstanceCount"),
+                instantOrNull(p, "EndDate"),
+                p.getFirst("EndDateType"),
+                p.getFirst("InstanceMatchCriteria"));
+        return booleanResponse("ModifyCapacityReservation");
+    }
+
+    private Response handleCancelCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        service.cancelCapacityReservation(region, p.getFirst("CapacityReservationId"));
+        return booleanResponse("CancelCapacityReservation");
+    }
+
+    private String capacityReservationXml(CapacityReservation reservation) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("capacityReservationId", reservation.getCapacityReservationId())
+                .elem("ownerId", reservation.getOwnerId())
+                .elem("capacityReservationArn", reservation.getCapacityReservationArn())
+                .elem("availabilityZoneId", reservation.getAvailabilityZoneId())
+                .elem("availabilityZone", reservation.getAvailabilityZone())
+                .elem("instanceType", reservation.getInstanceType())
+                .elem("instancePlatform", reservation.getInstancePlatform())
+                .elem("tenancy", reservation.getTenancy())
+                .elem("totalInstanceCount", reservation.getTotalInstanceCount())
+                .elem("availableInstanceCount", reservation.getAvailableInstanceCount())
+                .elem("ebsOptimized", reservation.isEbsOptimized())
+                .elem("ephemeralStorage", reservation.isEphemeralStorage())
+                .elem("state", reservation.getState())
+                .elem("startDate", reservation.getStartDate() != null ? ISO_FMT.format(reservation.getStartDate()) : null)
+                .elem("endDate", reservation.getEndDate() != null ? ISO_FMT.format(reservation.getEndDate()) : null)
+                .elem("endDateType", reservation.getEndDateType())
+                .elem("instanceMatchCriteria", reservation.getInstanceMatchCriteria())
+                .elem("createDate", reservation.getCreateDate() != null ? ISO_FMT.format(reservation.getCreateDate()) : null)
+                .elem("outpostArn", reservation.getOutpostArn())
+                .elem("placementGroupArn", reservation.getPlacementGroupArn())
+                .raw(tagSetXml(reservation.getTags()));
+        return xml.build();
+    }
+
+    // Unlike intOrNull's silent skip of absent values, a present but unparseable timestamp is a
+    // caller mistake and is rejected rather than coerced to null.
+    private java.time.Instant instantOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return java.time.Instant.parse(value);
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "The specified value for " + name + " is not valid.", 400);
+        }
+    }
+
     // ─── Elastic IP handlers ──────────────────────────────────────────────────
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
@@ -3375,6 +3812,16 @@ public class Ec2QueryHandler {
             xml.start("networkInfo")
                     .elem("encryptionInTransitSupported",
                             String.valueOf(networkInfo.get("encryptionInTransitSupported")))
+                    .elem("defaultNetworkCardIndex", (Integer) networkInfo.get("defaultNetworkCardIndex"))
+                    .elem("ipv4AddressesPerInterface", (Integer) networkInfo.get("ipv4AddressesPerInterface"))
+                    .start("networkCards");
+            for (Map<String, Object> card : (List<Map<String, Object>>) networkInfo.get("networkCards")) {
+                xml.start("item")
+                        .elem("networkCardIndex", (Integer) card.get("networkCardIndex"))
+                        .elem("maximumNetworkInterfaces", (Integer) card.get("maximumNetworkInterfaces"))
+                        .end("item");
+            }
+            xml.end("networkCards")
                     .end("networkInfo")
                     .end("item");
         }
@@ -3731,16 +4178,9 @@ public class Ec2QueryHandler {
         xml.start("cpuOptions")
                 .elem("coreCount", "1")
                 .elem("threadsPerCore", "1")
-                .end("cpuOptions")
-                .start("metadataOptions")
-                .elem("state", "applied")
-                .elem("httpTokens", "optional")
-                .elem("httpPutResponseHopLimit", "1")
-                .elem("httpEndpoint", "enabled")
-                .elem("httpProtocolIpv6", "disabled")
-                .elem("instanceMetadataTags", "disabled")
-                .end("metadataOptions")
-                .start("maintenanceOptions")
+                .end("cpuOptions");
+        appendMetadataOptions(xml, "metadataOptions", inst.effectiveMetadataOptions());
+        xml.start("maintenanceOptions")
                 .elem("autoRecovery", "default")
                 .end("maintenanceOptions")
                 .start("enclaveOptions")
@@ -4276,13 +4716,7 @@ public class Ec2QueryHandler {
         data.setTagSpecifications(parseLaunchTemplateTagSpecifications(p, prefix));
 
         if (anyParamStartsWith(p, prefix + ".MetadataOptions.")) {
-            LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
-            options.setHttpTokens(p.getFirst(prefix + ".MetadataOptions.HttpTokens"));
-            options.setHttpPutResponseHopLimit(intParam(p, prefix + ".MetadataOptions.HttpPutResponseHopLimit"));
-            options.setHttpEndpoint(p.getFirst(prefix + ".MetadataOptions.HttpEndpoint"));
-            options.setHttpProtocolIpv6(p.getFirst(prefix + ".MetadataOptions.HttpProtocolIpv6"));
-            options.setInstanceMetadataTags(p.getFirst(prefix + ".MetadataOptions.InstanceMetadataTags"));
-            data.setMetadataOptions(options);
+            data.setMetadataOptions(parseMetadataOptions(p, prefix + ".MetadataOptions."));
         }
 
         Boolean monitoringEnabled = boolParam(p, prefix + ".Monitoring.Enabled");

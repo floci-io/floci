@@ -11,7 +11,9 @@ Every image tag combines two independent choices: **what's inside** (variant) an
 | **Standard** | Floci native binary only | General use: CI, local dev, Testcontainers **(recommended)** |
 | **Compat** | Floci + Python 3 + AWS CLI + boto3 | Workflows that need AWS tooling available inside the container |
 
-The compat image is built on top of the standard image, so startup time and memory footprint are identical. Only the image size increases.
+The compat image runs the same native binary as the standard image, so startup time and memory footprint are identical. Only the image size increases.
+
+The standard image is built on Red Hat UBI 9 micro. Besides Floci it contains only bash and coreutils. There is no package manager, curl, grep or sed inside. Pick the compat image when you need tools inside the container.
 
 ## Axis 2: Channel (how stable)
 
@@ -119,7 +121,7 @@ ghcr.io/example/floci@sha256:...
 
 ## What's in the Compat Image
 
-The compat image installs the following on top of the standard image:
+The compat image adds the following to the standard image contents:
 
 - Python 3 + pip
 - [AWS CLI](https://pypi.org/project/awscli/) (via pip)

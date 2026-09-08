@@ -1065,4 +1065,98 @@ class SqsServiceTest {
         assertTrue(staleResult.get().isEmpty(),
                 "The pre-delete long poll must not consume the recreated queue's delivery");
     }
+
+
+    // --- ReceiveMessage falls back to the queue's ReceiveMessageWaitTimeSeconds ---
+
+    @Test
+    void receiveMessageWithoutWaitTimeUsesQueueReceiveMessageWaitTimeSeconds() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-default-longpoll",
+                Map.of("ReceiveMessageWaitTimeSeconds", "1"), region);
+
+        long start = System.nanoTime();
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, null, region);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertTrue(result.isEmpty());
+        assertTrue(elapsedMs >= 900,
+                "A receive that omits WaitTimeSeconds must long poll for the queue's ReceiveMessageWaitTimeSeconds, but returned after " + elapsedMs + "ms");
+    }
+
+    @Test
+    void explicitWaitTimeOverridesQueueReceiveMessageWaitTimeSeconds() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-longpoll-override",
+                Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
+
+        long start = System.nanoTime();
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertTrue(result.isEmpty());
+        assertTrue(elapsedMs < 1000,
+                "WaitTimeSeconds=0 in the request must override the queue attribute, but returned after " + elapsedMs + "ms");
+    }
+
+    @Test
+    void receiveMessageWithoutWaitTimeReturnsImmediatelyWhenQueueDoesNotLongPoll() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-no-longpoll", null, region);
+        assertEquals("0", queue.getAttributes().get("ReceiveMessageWaitTimeSeconds"));
+
+        long start = System.nanoTime();
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, null, region);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertTrue(result.isEmpty());
+        assertTrue(elapsedMs < 1000,
+                "A queue without ReceiveMessageWaitTimeSeconds must short poll, but returned after " + elapsedMs + "ms");
+    }
+
+    @Test
+    void receiveMessageRejectsWaitTimeOutsideAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-longpoll-range",
+                Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
+        String queueUrl = queue.getQueueUrl();
+
+        for (int invalid : new int[]{-1, 21}) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> sqsService.receiveMessage(queueUrl, 1, 30, invalid, region));
+            assertEquals("InvalidParameterValue", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("WaitTimeSeconds"),
+                    "The error must name the offending parameter, got: " + ex.getMessage());
+        }
+
+        sqsService.sendMessage(queueUrl, "in-range", 0, region);
+        List<Message> result = sqsService.receiveMessage(queueUrl, 1, 30, 20, region);
+        assertEquals(1, result.size(), "WaitTimeSeconds=20 is the AWS maximum and must be accepted");
+    }
+
+    @Test
+    void queueDefaultLongPollReturnsAsSoonAsAMessageArrives() throws InterruptedException {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-longpoll-wakeup", null, region);
+        String queueUrl = queue.getQueueUrl();
+        sqsService.setQueueAttributes(queueUrl, Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
+
+        final var pollerEntered = new CountDownLatch(1);
+        final var result = new AtomicReference<List<Message>>();
+        Thread poller = new Thread(() -> {
+            pollerEntered.countDown();
+            result.set(sqsService.receiveMessage(queueUrl, 1, 30, null, region));
+        });
+        poller.start();
+        assertTrue(pollerEntered.await(5, TimeUnit.SECONDS));
+        Thread.sleep(300);
+
+        sqsService.sendMessage(queueUrl, "wake-up", 0, region);
+        poller.join(3000);
+
+        assertFalse(poller.isAlive(),
+                "A long poll driven by the queue attribute must return as soon as a message arrives");
+        assertEquals(1, result.get().size());
+        assertEquals("wake-up", result.get().get(0).getBody());
+    }
 }

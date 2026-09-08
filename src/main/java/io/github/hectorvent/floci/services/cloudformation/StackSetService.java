@@ -2,12 +2,18 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackInstance;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
+import io.github.hectorvent.floci.services.cloudformation.model.StackSetAutoDeploymentTarget;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperation;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.organizations.model.Organization;
+import io.github.hectorvent.floci.services.organizations.model.OrganizationAccount;
+import io.github.hectorvent.floci.services.organizations.model.OrganizationalUnit;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -16,10 +22,13 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Future;
+import java.util.regex.Pattern;
 
 /**
  * CloudFormation StackSets — manages stack sets and provisions their instances across target
@@ -34,16 +43,32 @@ import java.util.concurrent.Future;
 public class StackSetService {
 
     private static final Logger LOG = Logger.getLogger(StackSetService.class);
+    private static final String STACKSETS_SERVICE_PRINCIPAL = "stacksets.cloudformation.amazonaws.com";
     private static final String INSTANCE_CHANGE_SET = "stackset-instance";
     private static final String UPDATE_CHANGE_SET = "stackset-update";
+    private static final String ORGANIZATIONS_ACCESS_KEY = "organizations-access";
+    private static final int STACK_SET_LIMIT = 1000;
+    private static final Pattern STACK_SET_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9-]{0,127}");
+    private static final Pattern OPERATION_ID = Pattern.compile("[A-Za-z0-9][-A-Za-z0-9]{0,127}");
+    private static final Pattern OU_OR_ROOT_ID = Pattern.compile("(?:ou-[a-z0-9]{4,32}-[a-z0-9]{8,32}|r-[a-z0-9]{4,32})");
+    private static final Pattern REGION_PATTERN = Pattern.compile("[A-Za-z0-9-]{1,128}");
 
     private final CloudFormationService cfnService;
     private final StorageBackend<String, StackSet> stackSets;
     private final StorageBackend<String, StackInstance> instances;
     private final StorageBackend<String, StackSetOperation> operations;
+    private final StorageBackend<String, String> organizationsAccess;
+    private final StorageBackend<String, StackSetAutoDeploymentTarget> autoDeploymentTargets;
+    private final OrganizationsService organizationsService;
+    private final RegionResolver regionResolver;
+
+    StackSetService(CloudFormationService cfnService, StorageFactory storageFactory) {
+        this(cfnService, storageFactory, null, new RegionResolver("us-east-1", "000000000000"));
+    }
 
     @Inject
-    public StackSetService(CloudFormationService cfnService, StorageFactory storageFactory) {
+    public StackSetService(CloudFormationService cfnService, StorageFactory storageFactory,
+                           OrganizationsService organizationsService, RegionResolver regionResolver) {
         this.cfnService = cfnService;
         this.stackSets = storageFactory.create("cloudformation", "cloudformation-stacksets.json",
                 new TypeReference<Map<String, StackSet>>() {});
@@ -51,43 +76,98 @@ public class StackSetService {
                 new TypeReference<Map<String, StackInstance>>() {});
         this.operations = storageFactory.create("cloudformation", "cloudformation-stackset-operations.json",
                 new TypeReference<Map<String, StackSetOperation>>() {});
+        this.organizationsAccess = storageFactory.create("cloudformation", "cloudformation-organizations-access.json",
+                new TypeReference<Map<String, String>>() {});
+        this.autoDeploymentTargets = storageFactory.create("cloudformation", "cloudformation-stackset-auto-targets.json",
+                new TypeReference<Map<String, StackSetAutoDeploymentTarget>>() {});
+        this.organizationsService = organizationsService;
+        this.regionResolver = regionResolver;
     }
 
     // ── StackSet lifecycle ─────────────────────────────────────────────────────
 
     public StackSet createStackSet(String name, String templateBody, Map<String, String> parameters,
                                    List<String> capabilities, Map<String, String> tags, String description) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("ValidationError", "StackSetName must not be empty", 400);
-        }
+        return createStackSet(name, templateBody, parameters, capabilities, tags, description,
+                "SELF_MANAGED", false, false, false);
+    }
+
+    public synchronized StackSet createStackSet(String name, String templateBody, Map<String, String> parameters,
+                                                List<String> capabilities, Map<String, String> tags, String description,
+                                                String permissionModel, boolean autoDeploymentEnabled,
+                                                boolean retainStacksOnAccountRemoval, boolean managedExecutionActive) {
+        validateStackSetName(name);
         if (stackSets.get(name).isPresent()) {
-            throw new AwsException("NameAlreadyExistsException",
-                    "StackSet already exists: " + name, 409);
+            throw new AwsException("NameAlreadyExistsException", "StackSet already exists: " + name, 409);
         }
-        // AWS rejects CreateStackSet with no template; the handler resolves TemplateBody/TemplateURL
-        // to null when neither is supplied. Without this guard a later CreateStackInstances would
-        // deploy empty ("{}") stacks into every target account.
+        if (stackSets.scan(key -> true).size() >= STACK_SET_LIMIT) {
+            throw new AwsException("LimitExceededException", "The StackSet quota has been reached.", 400);
+        }
         if (templateBody == null || templateBody.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "Either TemplateBody or TemplateURL must be specified", 400);
+            throw new AwsException("ValidationError", "Either TemplateBody or TemplateURL must be specified", 400);
         }
+        if (templateBody.length() > 51_200) {
+            throw new AwsException("ValidationError", "TemplateBody must be no larger than 51200 bytes.", 400);
+        }
+        if (description != null && (description.isBlank() || description.length() > 1024)) {
+            throw new AwsException("ValidationError", "Description must be between 1 and 1024 characters.", 400);
+        }
+        if (tags != null && tags.size() > 50) {
+            throw new AwsException("ValidationError", "A StackSet can have at most 50 tags.", 400);
+        }
+        String resolvedPermissionModel = permissionModel == null || permissionModel.isBlank()
+                ? "SELF_MANAGED" : permissionModel;
+        if (!Set.of("SELF_MANAGED", "SERVICE_MANAGED").contains(resolvedPermissionModel)) {
+            throw new AwsException("ValidationError", "PermissionModel must be SELF_MANAGED or SERVICE_MANAGED.", 400);
+        }
+        if ("SERVICE_MANAGED".equals(resolvedPermissionModel) && !isOrganizationsAccessEnabled()) {
+            throw new AwsException("ValidationError",
+                    "Activate trusted access with AWS Organizations before creating a service-managed StackSet.", 400);
+        }
+        if ("SELF_MANAGED".equals(resolvedPermissionModel) && (autoDeploymentEnabled || retainStacksOnAccountRemoval)) {
+            throw new AwsException("ValidationError", "AutoDeployment is valid only for SERVICE_MANAGED StackSets.", 400);
+        }
+
         StackSet ss = new StackSet();
         ss.setStackSetName(name);
         ss.setStackSetId(name + ":" + UUID.randomUUID());
         ss.setTemplateBody(templateBody);
         ss.setDescription(description);
-        if (parameters != null) {
-            ss.setParameters(new LinkedHashMap<>(parameters));
-        }
-        if (capabilities != null) {
-            ss.getCapabilities().addAll(capabilities);
-        }
-        if (tags != null) {
-            ss.getTags().putAll(tags);
-        }
+        ss.setPermissionModel(resolvedPermissionModel);
+        ss.setAutoDeploymentEnabled(autoDeploymentEnabled);
+        ss.setRetainStacksOnAccountRemoval(retainStacksOnAccountRemoval);
+        ss.setManagedExecutionActive(managedExecutionActive);
+        if (parameters != null) ss.setParameters(new LinkedHashMap<>(parameters));
+        if (capabilities != null) ss.getCapabilities().addAll(capabilities);
+        if (tags != null) ss.getTags().putAll(tags);
         stackSets.put(name, ss);
         LOG.infov("Created StackSet: {0}", name);
         return ss;
+    }
+
+    public boolean isOrganizationsAccessEnabled() {
+        return "ENABLED".equals(organizationsAccess.get(ORGANIZATIONS_ACCESS_KEY).orElse("DISABLED"));
+    }
+
+    public synchronized void activateOrganizationsAccess() {
+        String caller = regionResolver.getAccountId();
+        try {
+            Organization organization = organizationsService.describeOrganization(caller);
+            if (!caller.equals(organization.getMasterAccountId())) {
+                throw new AwsException("InvalidOperationException",
+                        "Only the organization management account can activate trusted access.", 400);
+            }
+            if (!"ALL".equals(organization.getFeatureSet())) {
+                throw new AwsException("InvalidOperationException",
+                        "AWS Organizations must have all features enabled before activating trusted access.", 400);
+            }
+            organizationsService.enableAWSServiceAccess(caller, STACKSETS_SERVICE_PRINCIPAL);
+        } catch (AwsException e) {
+            if ("InvalidOperationException".equals(e.getErrorCode())) throw e;
+            throw new AwsException("InvalidOperationException",
+                    "The calling account must be the management account of an AWS Organization.", 400);
+        }
+        organizationsAccess.put(ORGANIZATIONS_ACCESS_KEY, "ENABLED");
     }
 
     public StackSet describeStackSet(String name) {
@@ -101,7 +181,19 @@ public class StackSetService {
     public StackSetOperation updateStackSet(String name, String templateBody, Map<String, String> parameters,
                                             List<String> capabilities, Map<String, String> tags,
                                             String description) {
+        return updateStackSet(name, templateBody, parameters, capabilities, tags, description,
+                null, null, null, null);
+    }
+
+    public synchronized StackSetOperation updateStackSet(String name, String templateBody,
+                                                         Map<String, String> parameters,
+                                                         List<String> capabilities, Map<String, String> tags,
+                                                         String description, String requestedOperationId,
+                                                         Boolean autoDeploymentEnabled,
+                                                         Boolean retainStacksOnAccountRemoval,
+                                                         Boolean managedExecutionActive) {
         StackSet ss = getStackSetOrThrow(name);
+        String operationId = reserveOperation(name, "UPDATE", requestedOperationId).getOperationId();
         if (templateBody != null && !templateBody.isBlank()) {
             ss.setTemplateBody(templateBody);
         }
@@ -119,16 +211,50 @@ public class StackSetService {
         if (description != null) {
             ss.setDescription(description);
         }
+        if (autoDeploymentEnabled != null) {
+            if (!"SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+                completeOperation(name, operationId, "FAILED");
+                throw new AwsException("InvalidOperationException",
+                        "AutoDeployment is valid only for SERVICE_MANAGED StackSets.", 400);
+            }
+            ss.setAutoDeploymentEnabled(autoDeploymentEnabled);
+        }
+        if (retainStacksOnAccountRemoval != null) ss.setRetainStacksOnAccountRemoval(retainStacksOnAccountRemoval);
+        if (managedExecutionActive != null) ss.setManagedExecutionActive(managedExecutionActive);
         stackSets.put(name, ss);
 
-        // Re-apply the updated definition to every existing instance, refreshing each record.
         List<StackInstance> deployed = new ArrayList<>();
-        for (StackInstance inst : listStackInstances(name, null, null)) {
-            StackInstance updated = deployInstance(ss, inst.getAccount(), inst.getRegion(), UPDATE_CHANGE_SET, "UPDATE");
-            instances.put(instanceKey(name, updated.getAccount(), updated.getRegion()), updated);
-            deployed.add(updated);
+        try {
+            for (StackInstance inst : listStackInstances(name, null, null)) {
+                // An instance whose stack is terminal - a failed create that rolled back, or a phase
+                // some earlier operation abandoned - is one the single-stack engine refuses to update.
+                // That is one instance failing, not a malformed request: AWS leaves such an instance
+                // INOPERABLE, updates the rest, and reports the operation FAILED. Deploying into it
+                // anyway would raise the refusal out of here and fail the whole UpdateStackSet call
+                // with a 400, updating no instance at all.
+                String stackStatus = cfnService.stackStatus(
+                        inst.getStackName(), inst.getRegion(), inst.getAccount());
+                if (CloudFormationService.refusesUpdate(stackStatus)) {
+                    inst.setStatus("INOPERABLE");
+                    inst.setDetailedStatus("FAILED");
+                    inst.setStatusReason("Stack instance is in " + stackStatus
+                            + " state and can not be updated");
+                    instances.put(instanceKey(name, inst.getAccount(), inst.getRegion()), inst);
+                    deployed.add(inst);
+                    continue;
+                }
+                StackInstance updated =
+                        deployInstance(ss, inst.getAccount(), inst.getRegion(), UPDATE_CHANGE_SET, "UPDATE");
+                applyDeploymentTargets(updated, deploymentTargetsFor(inst));
+                instances.put(instanceKey(name, updated.getAccount(), updated.getRegion()), updated);
+                deployed.add(updated);
+            }
+            completeOperation(name, operationId, deriveOperationStatus(deployed));
+            return describeStackSetOperation(name, operationId);
+        } catch (RuntimeException e) {
+            completeOperation(name, operationId, "FAILED");
+            throw e;
         }
-        return recordOperation(name, "UPDATE", deriveOperationStatus(deployed));
     }
 
     public void deleteStackSet(String name) {
@@ -144,29 +270,84 @@ public class StackSetService {
     // ── Instances ──────────────────────────────────────────────────────────────
 
     public StackSetOperation createStackInstances(String name, List<String> accounts, List<String> regions) {
+        return createStackInstances(name, accounts, regions, List.of(), null);
+    }
+
+    public StackSetOperation createStackInstances(String name, List<String> accounts, List<String> regions,
+                                                  List<String> organizationalUnits) {
+        return createStackInstances(name, accounts, regions, organizationalUnits, null);
+    }
+
+    public synchronized StackSetOperation createStackInstances(String name, List<String> accounts, List<String> regions,
+                                                               List<String> organizationalUnits, String requestedOperationId) {
         StackSet ss = getStackSetOrThrow(name);
-        if (accounts == null || accounts.isEmpty() || regions == null || regions.isEmpty()) {
-            throw new AwsException("ValidationError",
-                    "Accounts and Regions must each contain at least one value", 400);
+        validateRegions(regions);
+        List<String> directAccounts = accounts == null ? List.of() : accounts;
+        List<String> targetOus = organizationalUnits == null ? List.of() : organizationalUnits;
+        if (!directAccounts.isEmpty() && !targetOus.isEmpty()) {
+            throw new AwsException("InvalidOperationException",
+                    "Specify Accounts or DeploymentTargets, but not both.", 400);
         }
-        if (accounts.stream().anyMatch(account -> account == null || !account.matches("[0-9]{12}"))) {
+        if (directAccounts.isEmpty() && targetOus.isEmpty()) {
+            throw new AwsException("ValidationError", "Accounts or DeploymentTargets must contain at least one value.", 400);
+        }
+        if (!targetOus.isEmpty() && !"SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "DeploymentTargets can be used only with SERVICE_MANAGED StackSets.", 400);
+        }
+        if (!directAccounts.isEmpty() && "SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "Accounts can be used only with SELF_MANAGED StackSets. Use DeploymentTargets for SERVICE_MANAGED StackSets.", 400);
+        }
+        if (directAccounts.stream().anyMatch(account -> account == null || !account.matches("[0-9]{12}"))) {
             throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + accounts
+                    "1 validation error detected: Value '" + directAccounts
                             + "' at 'accounts' failed to satisfy constraint: Member must satisfy constraint: "
                             + "[Member must have length less than or equal to 12, Member must have length "
                             + "greater than or equal to 12, Member must satisfy regular expression pattern: "
-                            + "^[0-9]{12}$]",
-                    400);
+                            + "^[0-9]{12}$]", 400);
         }
+        for (String ou : targetOus) validateOuOrRoot(ou);
+
+        String operationId = reserveOperation(name, "CREATE", requestedOperationId).getOperationId();
+        List<TargetAccount> targets = !directAccounts.isEmpty()
+                ? directAccounts.stream().map(account -> new TargetAccount(account, Set.of())).toList()
+                : resolveOrganizationTargets(targetOus, regions, name);
+
         List<StackInstance> deployed = new ArrayList<>();
-        for (String account : accounts) {
+        for (TargetAccount target : targets) {
             for (String region : regions) {
-                StackInstance inst = deployInstance(ss, account, region, INSTANCE_CHANGE_SET, "CREATE");
-                instances.put(instanceKey(name, account, region), inst);
+                String instanceKey = instanceKey(name, target.accountId(), region);
+                StackInstance existing = instances.get(instanceKey).orElse(null);
+                if (existing != null && !"OUTDATED".equals(existing.getStatus())) {
+                    if (!target.organizationalUnitIds().isEmpty()) {
+                        Set<String> associations = deploymentTargetsFor(existing);
+                        if (associations.addAll(target.organizationalUnitIds())) {
+                            applyDeploymentTargets(existing, associations);
+                            instances.put(instanceKey, existing);
+                        }
+                    }
+                    continue;
+                }
+                StackInstance inst = deployInstance(ss, target.accountId(), region, INSTANCE_CHANGE_SET, "CREATE");
+                Set<String> associations = existing == null
+                        ? new LinkedHashSet<>() : deploymentTargetsFor(existing);
+                associations.addAll(target.organizationalUnitIds());
+                applyDeploymentTargets(inst, associations);
+                instances.put(instanceKey, inst);
                 deployed.add(inst);
             }
         }
-        return recordOperation(name, "CREATE", deriveOperationStatus(deployed));
+        completeOperation(name, operationId, deriveOperationStatus(deployed));
+        return describeStackSetOperation(name, operationId);
+    }
+
+    public List<StackSetAutoDeploymentTarget> listStackSetAutoDeploymentTargets(String name) {
+        getStackSetOrThrow(name);
+        String prefix = name + "::";
+        return autoDeploymentTargets.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(java.util.Comparator.comparing(StackSetAutoDeploymentTarget::getOrganizationalUnitId))
+                .toList();
     }
 
     public List<StackInstance> listStackInstances(String name, String accountFilter, String regionFilter) {
@@ -191,38 +372,87 @@ public class StackSetService {
 
     public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions,
                                                   boolean retainStacks) {
-        getStackSetOrThrow(name);
-        if (accounts == null || accounts.isEmpty() || regions == null || regions.isEmpty()) {
-            throw new AwsException("ValidationError",
-                    "Accounts and Regions must each contain at least one value", 400);
+        return deleteStackInstances(name, accounts, regions, List.of(), retainStacks);
+    }
+
+    public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions,
+                                                  List<String> organizationalUnits, boolean retainStacks) {
+        StackSet stackSet = getStackSetOrThrow(name);
+        validateRegions(regions);
+        List<String> directAccounts = accounts == null ? List.of() : accounts;
+        List<String> targetOus = organizationalUnits == null ? List.of() : organizationalUnits;
+        if (!directAccounts.isEmpty() && !targetOus.isEmpty()) {
+            throw new AwsException("InvalidOperationException",
+                    "Specify Accounts or DeploymentTargets, but not both.", 400);
         }
+        if (directAccounts.isEmpty() && targetOus.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Accounts or DeploymentTargets must contain at least one value.", 400);
+        }
+        if (!targetOus.isEmpty() && !"SERVICE_MANAGED".equals(stackSet.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "DeploymentTargets can be used only with SERVICE_MANAGED StackSets.", 400);
+        }
+        if (!directAccounts.isEmpty() && "SERVICE_MANAGED".equals(stackSet.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "Accounts can be used only with SELF_MANAGED StackSets. Use DeploymentTargets for SERVICE_MANAGED StackSets.", 400);
+        }
+        for (String account : directAccounts) {
+            validateAccountId(account);
+        }
+        for (String ou : targetOus) {
+            validateOuOrRoot(ou);
+        }
+
+        Set<String> requestedRegions = Set.copyOf(regions);
+        Set<String> requestedAccounts = Set.copyOf(directAccounts);
+        Set<String> requestedDeploymentTargets = Set.copyOf(targetOus);
+        List<StackInstance> targetInstances = listStackInstances(name, null, null).stream()
+                .filter(inst -> requestedRegions.contains(inst.getRegion()))
+                .filter(inst -> !requestedAccounts.isEmpty()
+                        ? requestedAccounts.contains(inst.getAccount())
+                        : deploymentTargetsFor(inst).stream().anyMatch(requestedDeploymentTargets::contains))
+                .toList();
+
         List<StackInstance> results = new ArrayList<>();
-        for (String account : accounts) {
-            for (String region : regions) {
-                String key = instanceKey(name, account, region);
-                StackInstance inst = instances.get(key).orElse(null);
-                if (inst == null) {
-                    continue;
-                }
-                // RetainStacks=true detaches the instance from the StackSet but leaves the
-                // underlying CloudFormation stack and its resources in the target account.
-                if (!retainStacks && !await(cfnService.deleteStack(inst.getStackName(), region, account))) {
-                    // The underlying stack delete failed. Match AWS: retain the instance record
-                    // (now INOPERABLE) and report the operation as FAILED, rather than silently
-                    // dropping the instance and claiming success.
-                    inst.setStatus("INOPERABLE");
-                    inst.setDetailedStatus("FAILED");
-                    inst.setStatusReason("Stack instance deletion failed");
+        for (StackInstance inst : targetInstances) {
+            String account = inst.getAccount();
+            String region = inst.getRegion();
+            String key = instanceKey(name, account, region);
+            // Service-managed instances can be covered by multiple DeploymentTargets when a
+            // parent OU and one of its descendants are both targeted. Removing one target must not
+            // tear down the backing stack while another recorded target still covers the instance.
+            if (!requestedDeploymentTargets.isEmpty()) {
+                Set<String> remainingTargets = deploymentTargetsFor(inst);
+                remainingTargets.removeAll(requestedDeploymentTargets);
+                if (!remainingTargets.isEmpty()) {
+                    applyDeploymentTargets(inst, remainingTargets);
                     instances.put(key, inst);
+                    inst.setDetailedStatus("SUCCEEDED");
                     results.add(inst);
                     continue;
                 }
-                inst.setDetailedStatus("SUCCEEDED");
-                instances.delete(key);
-                results.add(inst);
             }
+            if (!retainStacks && !await(cfnService.deleteStack(inst.getStackName(), region, account))) {
+                // The underlying stack delete failed. Match AWS: retain the instance record
+                // (now INOPERABLE) and report the operation as FAILED, rather than silently
+                // dropping the instance and claiming success.
+                inst.setStatus("INOPERABLE");
+                inst.setDetailedStatus("FAILED");
+                inst.setStatusReason("Stack instance deletion failed");
+                instances.put(key, inst);
+                results.add(inst);
+                continue;
+            }
+            inst.setDetailedStatus("SUCCEEDED");
+            instances.delete(key);
+            results.add(inst);
         }
-        return recordOperation(name, "DELETE", deriveOperationStatus(results));
+        String operationStatus = deriveOperationStatus(results);
+        if ("SUCCEEDED".equals(operationStatus) && !requestedDeploymentTargets.isEmpty()) {
+            removeDeploymentTargetRegions(name, requestedDeploymentTargets, requestedRegions);
+        }
+        return recordOperation(name, "DELETE", operationStatus);
     }
 
     public List<StackSetOperation> listStackSetOperations(String name) {
@@ -245,6 +475,150 @@ public class StackSetService {
 
     // ── Internal helpers ────────────────────────────────────────────────────────
 
+    private void removeDeploymentTargetRegions(String stackSetName, Set<String> organizationalUnits,
+                                               Set<String> regions) {
+        for (String organizationalUnit : organizationalUnits) {
+            String key = stackSetName + "::" + organizationalUnit;
+            StackSetAutoDeploymentTarget target = autoDeploymentTargets.get(key).orElse(null);
+            if (target == null) {
+                continue;
+            }
+            List<String> remainingRegions = target.getRegions().stream()
+                    .filter(region -> !regions.contains(region))
+                    .toList();
+            if (remainingRegions.isEmpty()) {
+                autoDeploymentTargets.delete(key);
+            } else {
+                target.setRegions(remainingRegions);
+                autoDeploymentTargets.put(key, target);
+            }
+        }
+    }
+
+    private List<TargetAccount> resolveOrganizationTargets(List<String> organizationalUnits,
+                                                           List<String> regions, String stackSetName) {
+        return resolveOrganizationTargets(organizationalUnits, regions, stackSetName, true);
+    }
+
+    private List<TargetAccount> resolveOrganizationTargets(List<String> organizationalUnits,
+                                                           List<String> regions, String stackSetName,
+                                                           boolean persistTargets) {
+        String caller = regionResolver.getAccountId();
+        Organization organization;
+        try {
+            organization = organizationsService.describeOrganization(caller);
+        } catch (AwsException e) {
+            throw new AwsException("InvalidOperationException",
+                    "SERVICE_MANAGED StackSets require an AWS Organization.", 400);
+        }
+        LinkedHashMap<String, TargetAccount> targets = new LinkedHashMap<>();
+        for (String ou : organizationalUnits) {
+            collectOrganizationTargets(caller, organization, ou, ou, targets);
+            if (persistTargets) {
+                autoDeploymentTargets.put(stackSetName + "::" + ou,
+                        new StackSetAutoDeploymentTarget(stackSetName, ou, regions));
+            }
+        }
+        return new ArrayList<>(targets.values());
+    }
+
+    private void collectOrganizationTargets(String caller, Organization organization, String parentId,
+                                            String requestedTargetId,
+                                            LinkedHashMap<String, TargetAccount> targets) {
+        for (OrganizationAccount account : organizationsService.listAccountsForParent(caller, parentId)) {
+            if (!organization.getMasterAccountId().equals(account.getId()) && "ACTIVE".equals(account.getStatus())) {
+                targets.compute(account.getId(), (ignored, existing) -> {
+                    Set<String> associations = existing == null
+                            ? new LinkedHashSet<>() : new LinkedHashSet<>(existing.organizationalUnitIds());
+                    associations.add(requestedTargetId);
+                    return new TargetAccount(account.getId(), associations);
+                });
+            }
+        }
+        for (OrganizationalUnit child : organizationsService.listOrganizationalUnitsForParent(caller, parentId)) {
+            collectOrganizationTargets(caller, organization, child.getId(), requestedTargetId, targets);
+        }
+    }
+
+    private StackSetOperation reserveOperation(String stackSetName, String action, String requestedOperationId) {
+        String operationId = requestedOperationId == null || requestedOperationId.isBlank()
+                ? UUID.randomUUID().toString() : requestedOperationId;
+        if (!OPERATION_ID.matcher(operationId).matches()) {
+            throw new AwsException("ValidationError", "OperationId is invalid.", 400);
+        }
+        if (operations.get(stackSetName + ":" + operationId).isPresent()) {
+            throw new AwsException("OperationIdAlreadyExistsException",
+                    "OperationId " + operationId + " already exists for StackSet " + stackSetName + ".", 409);
+        }
+        boolean running = operations.scan(key -> key.startsWith(stackSetName + ":")).stream()
+                .anyMatch(operation -> "RUNNING".equals(operation.getStatus()));
+        if (running) {
+            throw new AwsException("OperationInProgressException",
+                    "Another operation is currently in progress for StackSet " + stackSetName + ".", 409);
+        }
+        StackSetOperation operation = new StackSetOperation(operationId, stackSetName, action);
+        operation.setStatus("RUNNING");
+        operation.setEndTimestamp(null);
+        operations.put(stackSetName + ":" + operationId, operation);
+        return operation;
+    }
+
+    private void completeOperation(String stackSetName, String operationId, String status) {
+        StackSetOperation operation = operations.get(stackSetName + ":" + operationId)
+                .orElseThrow(() -> new AwsException("OperationNotFoundException",
+                        "Operation " + operationId + " not found for stack set " + stackSetName, 404));
+        operation.setStatus(status);
+        operation.setEndTimestamp(Instant.now());
+        operations.put(stackSetName + ":" + operationId, operation);
+    }
+
+    private static void validateStackSetName(String name) {
+        if (name == null || !STACK_SET_NAME.matcher(name).matches()) {
+            throw new AwsException("ValidationError",
+                    "StackSetName must start with a letter, contain only alphanumeric characters and hyphens, and be at most 128 characters.", 400);
+        }
+    }
+
+    private static void validateAccountId(String account) {
+        if (account == null || !account.matches("[0-9]{12}")) {
+            throw new AwsException("ValidationError", "Accounts must contain 12 digit account IDs.", 400);
+        }
+    }
+
+    private static void validateOuOrRoot(String value) {
+        if (value == null || !OU_OR_ROOT_ID.matcher(value).matches()) {
+            throw new AwsException("ValidationError", "DeploymentTargets contains an invalid organizational unit or root ID.", 400);
+        }
+    }
+
+    private static void validateRegions(List<String> regions) {
+        if (regions == null || regions.isEmpty()) {
+            throw new AwsException("ValidationError", "Regions must contain at least one value.", 400);
+        }
+        if (regions.stream().anyMatch(region -> region == null || !REGION_PATTERN.matcher(region).matches())) {
+            throw new AwsException("ValidationError", "Regions contains an invalid region name.", 400);
+        }
+    }
+
+    private static Set<String> deploymentTargetsFor(StackInstance instance) {
+        LinkedHashSet<String> targets = new LinkedHashSet<>();
+        if (instance.getDeploymentTargetIds() != null) {
+            targets.addAll(instance.getDeploymentTargetIds());
+        }
+        if (targets.isEmpty() && instance.getOrganizationalUnitId() != null) {
+            targets.add(instance.getOrganizationalUnitId());
+        }
+        return targets;
+    }
+
+    private static void applyDeploymentTargets(StackInstance instance, Set<String> targets) {
+        List<String> orderedTargets = new ArrayList<>(targets);
+        instance.setDeploymentTargetIds(orderedTargets);
+        instance.setOrganizationalUnitId(orderedTargets.isEmpty() ? null : orderedTargets.getFirst());
+    }
+
+    private record TargetAccount(String accountId, Set<String> organizationalUnitIds) {}
+
     /**
      * Drives the single-stack engine to materialize one instance's resources into the target
      * account's namespace, then returns a {@link StackInstance} describing it.
@@ -266,7 +640,7 @@ public class StackSetService {
         inst.setRegion(region);
         inst.setStackName(stackName);
         inst.setStackId(resolveStackId(stackName, region, account));
-        List<Stack> stacks = cfnService.describeStacks(stackName, region);
+        List<Stack> stacks = cfnService.describeStacks(stackName, region, account);
         String stackStatus = stacks.isEmpty() ? null : stacks.get(0).getStatus();
         // Only a clean create/update is a success. A failed resource rolls the stack back, so its
         // terminal status is ROLLBACK_COMPLETE (not *_FAILED) — treat anything that is not COMPLETE
@@ -282,7 +656,7 @@ public class StackSetService {
     }
 
     private String resolveStackId(String stackName, String region, String account) {
-        List<Stack> stacks = cfnService.describeStacks(stackName, region);
+        List<Stack> stacks = cfnService.describeStacks(stackName, region, account);
         if (!stacks.isEmpty() && stacks.get(0).getStackId() != null) {
             return stacks.get(0).getStackId();
         }

@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Mount;
@@ -29,8 +30,11 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -39,11 +43,17 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiPredicate;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
@@ -71,8 +81,9 @@ public class Ec2ContainerManager {
      *  10 MB decompressed, and it bounds how much a caller-controlled gzip stream can expand
      *  to in the shared emulator JVM. */
     private static final int MAX_DECOMPRESSED_USER_DATA_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_EXEC_OUTPUT_BYTES = 2048;
     /** Caps concurrent UserData gzip decompressions across ALL instance launches, not just one.
-     *  Launches run independently on {@link #executor}, an unbounded cached thread pool, so the
+     *  Launches run independently on {@link #executor}, so the
      *  per-payload cap above only bounds a single launch's allocation: without this, N concurrent
      *  RunInstances/CreateLaunchConfiguration calls, each smuggling a near-cap gzip payload, could
      *  together decompress N * 10 MB at once in the shared emulator JVM with no aggregate ceiling.
@@ -85,10 +96,59 @@ public class Ec2ContainerManager {
     /** Gates entry to {@link #gunzip}; see {@link #MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS}. */
     private static final Semaphore USER_DATA_DECOMPRESSION_BUDGET =
             new Semaphore(MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS);
+    private static final int LAUNCH_CORE_THREADS = 4;
+    private static final int LAUNCH_MAX_THREADS = 8;
+    private static final int LAUNCH_QUEUE_CAPACITY = 64;
+    private static final long USER_DATA_EXECUTION_TIMEOUT_MINUTES = 30;
+    // Wait for capacity so accepted launches are not dropped, but never run launch work on callers.
+    static final RejectedExecutionHandler BLOCKING_BACKPRESSURE = (runnable, executor) -> {
+        if (executor.isShutdown()) {
+            throw new RejectedExecutionException("EC2 container manager is stopped");
+        }
+        try {
+            executor.getQueue().put(runnable);
+            if (executor.isShutdown() && executor.getQueue().remove(runnable)) {
+                throw new RejectedExecutionException("EC2 container manager is stopped");
+            }
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RejectedExecutionException("Interrupted while waiting for EC2 launch capacity", e);
+        }
+    };
     /** Test seam: when non-null, invoked by {@link #gunzip} right after it acquires a
      *  decompression-budget permit and before it starts decompressing, so tests can observe and
      *  serialize concurrent decompressions deterministically. Always null in production. */
     static volatile Runnable userDataDecompressionTestHook;
+
+    /**
+     * Label identifying the Floci process that created an EC2 instance container, by its API
+     * port. {@link #reconcileOrphanedContainers} lists on the existing {@code io.floci.service=ec2}
+     * identity label (see {@link ContainerStorageHelper#resourceIdentityLabels}) and then keeps
+     * only containers carrying <em>this</em> process's owner port: several emulators can share one
+     * Docker daemon, and an unscoped sweep would reap a sibling's live instances.
+     * {@code floci_namespace} is the documented scoping mechanism for that, but it is absent
+     * unless a resource namespace is configured, so it cannot scope the default configuration.
+     * Containers created before this label existed carry no owner and are therefore never swept.
+     */
+    static final String LABEL_OWNER_PORT = "floci_owner_port";
+
+    /**
+     * Identity of the Floci deployment that owns a container, for scoping the startup sweep.
+     * The API port alone collides when two independently namespaced Flocis share a Docker daemon
+     * on the same internal port, and each would then reap the other's live containers. Composing
+     * the documented resource namespace in front of it separates exactly those deployments; an
+     * unnamespaced single Floci keeps the bare port it already stamped.
+     */
+    private String ownerIdentity() {
+        String ns = config.docker() == null || config.docker().resourceNamespace() == null
+                ? "" : config.docker().resourceNamespace().orElse("");
+        return ns.isBlank() ? String.valueOf(config.port()) : ns + "/" + config.port();
+    }
+    static final String LABEL_SERVICE = "io.floci.service";
+    static final String SERVICE_VALUE = "ec2";
+    static final String LABEL_RESOURCE_ID = "io.floci.resource-id";
+    static final String LABEL_REGION = "io.floci.region";
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
@@ -105,12 +165,11 @@ public class Ec2ContainerManager {
     private final Ec2PortForwardManager portForwardManager;
     private final RegionResolver regionResolver;
     private final ContainerNetworkReachability containerNetworkReachability;
+    private final ExecutorService executor;
+    private final Duration userDataExecutionTimeout;
+    private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
 
-    private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "ec2-container-launcher");
-        t.setDaemon(true);
-        return t;
-    });
+    private volatile boolean dockerUnavailableLogged;
 
     @Inject
     public Ec2ContainerManager(ContainerBuilder containerBuilder,
@@ -125,6 +184,26 @@ public class Ec2ContainerManager {
                                Ec2PortForwardManager portForwardManager,
                                RegionResolver regionResolver,
                                ContainerNetworkReachability containerNetworkReachability) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
+                portAllocator, config, metadataServer, portForwardManager, regionResolver,
+                containerNetworkReachability, createLaunchExecutor(),
+                Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
+    }
+
+    Ec2ContainerManager(ContainerBuilder containerBuilder,
+                        ContainerLifecycleManager lifecycleManager,
+                        ContainerLogStreamer logStreamer,
+                        ContainerDetector containerDetector,
+                        DockerHostResolver dockerHostResolver,
+                        DockerClient dockerClient,
+                        PortAllocator portAllocator,
+                        EmulatorConfig config,
+                        Ec2MetadataServer metadataServer,
+                        Ec2PortForwardManager portForwardManager,
+                        RegionResolver regionResolver,
+                        ContainerNetworkReachability containerNetworkReachability,
+                        ExecutorService executor,
+                        Duration userDataExecutionTimeout) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -137,17 +216,37 @@ public class Ec2ContainerManager {
         this.metadataServer = metadataServer;
         this.portForwardManager = portForwardManager;
         this.containerNetworkReachability = containerNetworkReachability;
+        this.executor = executor;
+        this.userDataExecutionTimeout = userDataExecutionTimeout;
+    }
+
+    private static ExecutorService createLaunchExecutor() {
+        return new ThreadPoolExecutor(
+                LAUNCH_CORE_THREADS,
+                LAUNCH_MAX_THREADS,
+                60L,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(LAUNCH_QUEUE_CAPACITY),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "ec2-container-launcher");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                BLOCKING_BACKPRESSURE);
     }
 
     @PreDestroy
     void stop() {
+        closeActiveUserDataCallbacks();
         executor.shutdownNow();
+        closeActiveUserDataCallbacks();
     }
 
     /**
      * Launches a Docker container for the given EC2 instance.
      * The instance starts in pending state; an async thread transitions it to running
-     * and handles SSH key injection and UserData execution.
+     * and handles SSH key injection and UserData execution. With no Docker daemon
+     * reachable the instance goes straight to running as metadata only.
      *
      * @param instance    the EC2 instance model (mutated in-place as state transitions occur)
      * @param dockerImage Docker image URI resolved from the instance's AMI ID
@@ -169,9 +268,20 @@ public class Ec2ContainerManager {
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region, Set<Integer> appPorts) {
         instance.setState(InstanceState.pending());
 
-        executor.submit(() -> {
-            try {
-                String instanceId = instance.getInstanceId();
+        // An instance record is metadata: id, addresses, tags and lifecycle state are all
+        // served without a container runtime. Only the guest itself (SSH, UserData, SSM
+        // commands) needs Docker, so when no daemon is reachable the instance still runs
+        // instead of dying: Floci in Docker without a mounted socket, or a stopped daemon
+        // on the host, would otherwise terminate every instance the moment it launched.
+        if (!isDockerAvailable()) {
+            markContainerlessRunning(instance);
+            return;
+        }
+
+        try {
+            executor.execute(() -> {
+                try {
+                    String instanceId = instance.getInstanceId();
                 // IMDS endpoint that this container should use
                 String flociHost = dockerHostResolver.resolve();
                 int imdsPort = config.services().ec2().imdsPort();
@@ -269,14 +379,26 @@ public class Ec2ContainerManager {
                     executeUserData(containerId, instanceId, userData, region);
                 }
 
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                failLaunch(instance);
-            } catch (Exception e) {
-                LOG.warnv("Failed to launch EC2 instance {0}: {1}", instance.getInstanceId(), e.getMessage());
-                failLaunch(instance);
-            }
-        });
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    failLaunch(instance);
+                } catch (Exception e) {
+                    LOG.warnv("Failed to launch EC2 instance {0}: {1}", instance.getInstanceId(), e.getMessage());
+                    // The daemon can disappear between the probe above and any of the calls in
+                    // this block. Losing Docker is not the instance's fault, so degrade to a
+                    // metadata-only instance; a genuine container failure still fails the launch.
+                    if (isDockerAvailable()) {
+                        failLaunch(instance);
+                    } else {
+                        markContainerlessRunning(instance);
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            LOG.warnv("Could not schedule EC2 instance {0} launch because the launch executor is saturated or stopping",
+                    instance.getInstanceId());
+            failLaunch(instance);
+        }
     }
 
     private StartedContainer createAndStartContainer(Instance instance, ResolvedAmiImage image, String region,
@@ -298,7 +420,9 @@ public class Ec2ContainerManager {
             String containerId = null;
             boolean recorded = false;
             try {
-                containerId = lifecycleManager.create(spec);
+                containerId = image.dockerPlatform() == null
+                        ? lifecycleManager.create(spec)
+                        : lifecycleManager.create(spec, image.dockerPlatform());
                 if (!recordCreatedContainer(instance, containerId, sshHostPort)) {
                     lifecycleManager.removeIfExists(containerId);
                     portAllocator.release(sshHostPort);
@@ -344,6 +468,9 @@ public class Ec2ContainerManager {
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "ec2", instanceId, regionResolver.getAccountId(), region))
+                // Which Floci owns this container, so the startup reconciler cannot reap a
+                // sibling emulator's live instances off a shared daemon. See LABEL_OWNER_PORT.
+                .withLabels(Map.of(LABEL_OWNER_PORT, ownerIdentity()))
                 // EC2 instances expose IMDS on 169.254.169.254. Floci needs network administration
                 // privileges in the local container to attach that link-local address.
                 .withPrivileged(true)
@@ -485,6 +612,40 @@ public class Ec2ContainerManager {
     }
 
     /**
+     * Reports whether a Docker daemon is reachable, logging the transition in each
+     * direction once rather than on every launch.
+     */
+    public boolean isDockerAvailable() {
+        try {
+            dockerClient.pingCmd().exec();
+            if (dockerUnavailableLogged) {
+                dockerUnavailableLogged = false;
+                LOG.info("Docker daemon is reachable again; new EC2 instances get a backing container.");
+            }
+            return true;
+        } catch (Exception e) {
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). EC2 instances are emulated as "
+                        + "metadata only: they reach running and honour stop, start and terminate, but have "
+                        + "no backing container, so SSH, UserData and SSM command execution stay unavailable "
+                        + "until a daemon is reachable.", e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Brings an instance to running with no container behind it. Stop, start, terminate and
+     * reboot already handle a null container id, so the rest of the lifecycle keeps working.
+     */
+    private void markContainerlessRunning(Instance instance) {
+        LOG.infov("EC2 instance {0} is running without a backing container (no Docker daemon reachable)",
+                instance.getInstanceId());
+        instance.setState(InstanceState.running());
+    }
+
+    /**
      * Synchronous stop for emulator shutdown: tears down the port-forward sidecars and
      * stops the container with a short timeout so N instances cannot exhaust the SIGTERM
      * grace window. Unlike {@link #stop}, runs on the caller's thread (the async executor
@@ -575,6 +736,62 @@ public class Ec2ContainerManager {
 
     boolean isContainerRunning(String containerId) {
         return containerId != null && !containerId.isBlank() && lifecycleManager.isContainerRunning(containerId);
+    }
+
+    /**
+     * Removes EC2 instance containers this Floci left behind on a previous run.
+     *
+     * <p>{@link #terminate} removes the container asynchronously after flipping the record to
+     * {@code shutting-down}, and {@code launch} persists the container id only once Docker has
+     * created it. A process killed across either edge — SIGKILL, OOM, {@code docker kill} — leaves
+     * a container on the daemon that no surviving record refers to, so nothing on the next run
+     * would ever collect it. {@code Ec2Service.stopManagedContainers} only covers the graceful
+     * ShutdownEvent path, and {@code restoreMetadataRegistration} deliberately skips records in
+     * {@code terminated}/{@code shutting-down}, so neither reaches these.
+     *
+     * <p><strong>Stopped instances are not orphans.</strong> Floci stops every running container
+     * on shutdown and keeps the id so StartInstances can revive it; those records come back as
+     * {@code stopped} and {@code stillDeclared} keeps them. Only containers with no surviving
+     * record, or whose record is already terminated/shutting-down, are removed.
+     *
+     * @param stillDeclared answers whether (region, instanceId) is still a live instance record
+     * @return the number of containers removed
+     */
+    public int reconcileOrphanedContainers(BiPredicate<String, String> stillDeclared) {
+        if (!config.services().ec2().reconcileContainersOnStartup()) {
+            return 0;
+        }
+        String owner = ownerIdentity();
+        int removed = 0;
+        try {
+            List<Container> containers = dockerClient.listContainersCmd()
+                    .withShowAll(true)
+                    .withLabelFilter(Map.of(LABEL_SERVICE, SERVICE_VALUE))
+                    .exec();
+            for (Container container : containers) {
+                Map<String, String> labels = container.getLabels() == null ? Map.of() : container.getLabels();
+                if (!owner.equals(labels.get(LABEL_OWNER_PORT))) {
+                    continue;
+                }
+                String instanceId = labels.get(LABEL_RESOURCE_ID);
+                String region = labels.get(LABEL_REGION);
+                if (instanceId != null && !instanceId.isBlank()
+                        && region != null && !region.isBlank()
+                        && stillDeclared.test(region, instanceId)) {
+                    continue;
+                }
+                lifecycleManager.removeIfExists(container.getId());
+                removed++;
+                LOG.infov("Reconciled orphaned EC2 container {0} (instance {1}) left by a previous run",
+                        container.getId(), String.valueOf(instanceId));
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not reconcile orphaned EC2 containers: {0}", e.getMessage());
+        }
+        if (removed > 0) {
+            LOG.infov("Removed {0} orphaned EC2 container(s)", String.valueOf(removed));
+        }
+        return removed;
     }
 
     boolean restoreMetadataRegistration(Instance instance) {
@@ -828,6 +1045,9 @@ public class Ec2ContainerManager {
                         logGroup, logStream, region
                 );
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warnv("UserData execution interrupted for EC2 instance {0}", instanceId);
         } catch (Exception e) {
             LOG.warnv("UserData execution failed for EC2 instance {0}: {1}", instanceId, e.getMessage());
         }
@@ -852,14 +1072,32 @@ public class Ec2ContainerManager {
                 .exec()
                 .getId();
 
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        BoundedOutput output = new BoundedOutput(MAX_EXEC_OUTPUT_BYTES);
         CountDownLatch latch = new CountDownLatch(1);
 
-        dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+        AtomicBoolean cancelled = new AtomicBoolean();
+        ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
+            @Override
+            public void onStart(Closeable stream) {
+                if (cancelled.get()) {
+                    closeUserDataStream(stream, instanceId);
+                    return;
+                }
+                super.onStart(stream);
+                if (cancelled.get()) {
+                    closeUserDataStream(stream, instanceId);
+                }
+            }
+
             @Override
             public void onNext(Frame frame) {
+                if (cancelled.get()) {
+                    return;
+                }
                 byte[] payload = frame.getPayload();
-                if (payload == null) return;
+                if (payload == null) {
+                    return;
+                }
                 try { output.write(payload); } catch (IOException ignored) {}
                 String line = new String(payload, StandardCharsets.UTF_8).stripTrailing();
                 if (!line.isEmpty()) {
@@ -870,23 +1108,58 @@ public class Ec2ContainerManager {
             public void onComplete() { latch.countDown(); }
             @Override
             public void onError(Throwable t) { latch.countDown(); }
-        });
+            @Override
+            public void close() throws IOException {
+                cancelled.set(true);
+                super.close();
+            }
+        };
+        activeUserDataCallbacks.add(callback);
 
-        boolean completed = latch.await(30, TimeUnit.MINUTES);
-        if (!completed) {
-            LOG.warnv("UserData shellscript part {0}/{1} timed out for EC2 instance {2}", partNumber, partCount, instanceId);
-            return;
+        try {
+            dockerClient.execStartCmd(execId).exec(callback);
+
+            boolean completed = latch.await(userDataExecutionTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            if (!completed) {
+                LOG.warnv("UserData shellscript part {0}/{1} timed out for EC2 instance {2}",
+                        partNumber, partCount, instanceId);
+                return;
+            }
+
+            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
+            if (exitCode != null && exitCode != 0) {
+                LOG.warnv("UserData shellscript part {0}/{1} failed for EC2 instance {2} with exit code {3}: {4}",
+                        partNumber, partCount, instanceId, exitCode, summarizeUserDataOutput(output));
+                return;
+            }
+
+            LOG.infov("UserData shellscript part {0}/{1} completed for EC2 instance {2}: {3}",
+                    partNumber, partCount, instanceId, summarizeUserDataOutput(output));
+        } finally {
+            activeUserDataCallbacks.remove(callback);
+            closeUserDataCallback(callback, instanceId);
         }
+    }
 
-        Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-        if (exitCode != null && exitCode != 0) {
-            LOG.warnv("UserData shellscript part {0}/{1} failed for EC2 instance {2} with exit code {3}: {4}",
-                    partNumber, partCount, instanceId, exitCode, summarizeUserDataOutput(output));
-            return;
+    private void closeActiveUserDataCallbacks() {
+        activeUserDataCallbacks.forEach(callback -> closeUserDataCallback(callback, "active UserData"));
+    }
+
+    private void closeUserDataCallback(ResultCallback<Frame> callback, String context) {
+        try {
+            callback.close();
+        } catch (IOException e) {
+            LOG.warnv("Could not close Docker UserData callback for {0}: {1}", context, e.getMessage());
         }
+    }
 
-        LOG.infov("UserData shellscript part {0}/{1} completed for EC2 instance {2}: {3}",
-                partNumber, partCount, instanceId, summarizeUserDataOutput(output));
+    private void closeUserDataStream(Closeable stream, String instanceId) {
+        try {
+            stream.close();
+        } catch (IOException e) {
+            LOG.warnv("Could not close Docker UserData stream for EC2 instance {0}: {1}",
+                    instanceId, e.getMessage());
+        }
     }
 
     static List<String> userDataShellScripts(String userData) {
@@ -1156,13 +1429,110 @@ public class Ec2ContainerManager {
                 "AWS_SESSION_TOKEN=test-session-token");
     }
 
-    private static String summarizeUserDataOutput(ByteArrayOutputStream output) {
-        String text = output.toString(StandardCharsets.UTF_8).stripTrailing();
+    static String summarizeUserDataOutput(BoundedOutput output) {
+        String text = output.utf8Tail().stripTrailing();
         if (text.isBlank()) {
-            return "(no output)";
+            text = "(no output)";
         }
-        int start = Math.max(0, text.length() - 2048);
-        return text.substring(start);
+        if (output.truncated()) {
+            return "(output truncated; showing last " + output.capacity() + " bytes)\n" + text;
+        }
+        return text;
+    }
+
+    static final class BoundedOutput extends OutputStream {
+        private final byte[] buffer;
+        private int size;
+        private long totalBytes;
+
+        BoundedOutput(int capacity) {
+            if (capacity <= 0) {
+                throw new IllegalArgumentException("capacity must be positive");
+            }
+            buffer = new byte[capacity];
+        }
+
+        @Override
+        public void write(int value) {
+            write(new byte[]{(byte) value}, 0, 1);
+        }
+
+        @Override
+        public void write(byte[] source, int offset, int length) {
+            Objects.checkFromIndexSize(offset, length, source.length);
+            if (length == 0) {
+                return;
+            }
+            totalBytes += length;
+            if (length >= buffer.length) {
+                System.arraycopy(source, offset + length - buffer.length, buffer, 0, buffer.length);
+                size = buffer.length;
+                return;
+            }
+            int overflow = Math.max(0, size + length - buffer.length);
+            if (overflow > 0) {
+                System.arraycopy(buffer, overflow, buffer, 0, size - overflow);
+                size -= overflow;
+            }
+            System.arraycopy(source, offset, buffer, size, length);
+            size += length;
+        }
+
+        String utf8Tail() {
+            int start = 0;
+            while (start < size) {
+                int sequenceLength = utf8SequenceLength(buffer[start]);
+                if (sequenceLength == 0) {
+                    start++;
+                    continue;
+                }
+                if (sequenceLength == 1) {
+                    break;
+                }
+                if (sequenceLength <= size - start && hasContinuationBytes(start, sequenceLength)) {
+                    break;
+                }
+                start++;
+            }
+            return new String(buffer, start, size - start, StandardCharsets.UTF_8);
+        }
+
+        boolean truncated() {
+            return totalBytes > buffer.length;
+        }
+
+        int capacity() {
+            return buffer.length;
+        }
+
+        private boolean hasContinuationBytes(int start, int sequenceLength) {
+            for (int i = 1; i < sequenceLength; i++) {
+                if ((buffer[start + i] & 0xC0) != 0x80) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static int utf8SequenceLength(byte value) {
+            int unsigned = value & 0xFF;
+            if (unsigned < 0x80) {
+                return 1;
+            }
+            if ((unsigned & 0xC0) == 0x80) {
+                return 0;
+            }
+            if ((unsigned & 0xE0) == 0xC0) {
+                return 2;
+            }
+            if ((unsigned & 0xF0) == 0xE0) {
+                return 3;
+            }
+            if ((unsigned & 0xF8) == 0xF0) {
+                return 4;
+            }
+            return 1;
+        }
     }
 
     private void configureLinkLocalMetadataEndpoint(String containerId, String instanceId, String flociHost, int imdsPort) {
@@ -1200,7 +1570,7 @@ public class Ec2ContainerManager {
                 .getId();
 
         CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        BoundedOutput output = new BoundedOutput(MAX_EXEC_OUTPUT_BYTES);
         dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {

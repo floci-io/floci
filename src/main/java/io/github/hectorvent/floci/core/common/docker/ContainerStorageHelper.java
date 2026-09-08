@@ -168,7 +168,11 @@ public final class ContainerStorageHelper {
      * they are treated as named-volume mode.
      */
     public static boolean isNamedVolumeMode(EmulatorConfig config) {
-        return !config.storage().hostPersistentPath().startsWith("/");
+        String path = config.storage().hostPersistentPath();
+        if (path == null || path.isBlank()) {
+            return true;
+        }
+        return !java.nio.file.Paths.get(path).isAbsolute() && !path.startsWith("/");
     }
 
     /**

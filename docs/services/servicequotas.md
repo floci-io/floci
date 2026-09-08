@@ -8,8 +8,10 @@ Floci answers Service Quotas lookups from a generated in-memory catalog. Every s
 resolves to a quota list: a curated set with real AWS quota codes where tooling depends on
 them — CodeBuild's `L-2DC20C30` ("Concurrently running builds") and Lambda's `L-B99A9384`
 ("Concurrent executions") — plus a deterministic generic set for any other service code. All
-values are deliberately generous (5000) so local pipelines that gate on quota headroom, such
-as AWS Landing Zone Accelerator, never stall on a limit the emulator does not enforce.
+values are deliberately generous so local pipelines that gate on quota headroom, such
+as AWS Landing Zone Accelerator, never stall on a limit the emulator does not enforce. The
+Organizations `Maximum number of accounts` quota uses AWS quota code `L-E619E033` and a local value
+of 50.
 
 Applied quotas and AWS default quotas return the same data, and quota values are static.
 `RequestServiceQuotaIncrease` is accepted and validated but does not change any quota value —
@@ -25,6 +27,7 @@ see Limitations.
 | `GetAWSDefaultServiceQuota` | Same as GetServiceQuota; defaults equal applied values |
 | `ListAWSDefaultServiceQuotas` | Same as ListServiceQuotas; defaults equal applied values |
 | `RequestServiceQuotaIncrease` | Validates and echoes an increase request as `PENDING`; not persisted, quota unchanged |
+| `ListRequestedServiceQuotaChangeHistoryByQuota` | Validates the service/quota pair and returns the locally recorded request history; currently empty for the static catalog |
 <!-- floci:actions:end -->
 
 ## Limitations

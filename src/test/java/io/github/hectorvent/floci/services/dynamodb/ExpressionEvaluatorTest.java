@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -594,6 +593,98 @@ class ExpressionEvaluatorTest {
                 assertEquals(400, e.getHttpStatus());
                 assertEquals("Invalid ConditionExpression: Syntax error; token: \"" + ch + "\", near: \"a " + ch + " b\"", e.getMessage());
             }
+        }
+
+        @Test
+        void reversedBetweenBoundsAreRejectedAtParseTime() {
+            var mapper = new ObjectMapper();
+            var values = mapper.createObjectNode();
+            values.set(":hi", mapper.createObjectNode().put("N", "10"));
+            values.set(":lo", mapper.createObjectNode().put("N", "1"));
+
+            var e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("n BETWEEN :hi AND :lo",
+                            "ConditionExpression", null, values));
+            assertEquals("ValidationException", e.getErrorCode());
+            assertEquals("1 validation error detected: Invalid ConditionExpression: The BETWEEN operator "
+                    + "requires upper bound to be greater than or equal to lower bound; lower bound operand: "
+                    + "AttributeValue: {N:10}, upper bound operand: AttributeValue: {N:1}", e.getMessage());
+        }
+
+        // Checked against real DynamoDB (us-east-1, 2026-09-07): U+E000 as the lower bound
+        // and U+10000 as the upper bound is accepted, because DynamoDB orders strings by
+        // their UTF-8 bytes. Java's UTF-16 ordering puts them the other way round.
+        @Test
+        void stringBoundsAreOrderedByUtf8Bytes() {
+            var mapper = new ObjectMapper();
+            var values = mapper.createObjectNode();
+            values.set(":lo", mapper.createObjectNode().put("S", "\uE000"));
+            values.set(":hi", mapper.createObjectNode().put("S", "\uD800\uDC00"));
+
+            assertDoesNotThrow(() -> ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
+                    "ConditionExpression", null, values));
+
+            var reversed = mapper.createObjectNode();
+            reversed.set(":lo", mapper.createObjectNode().put("S", "\uD800\uDC00"));
+            reversed.set(":hi", mapper.createObjectNode().put("S", "\uE000"));
+
+            var e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
+                            "ConditionExpression", null, reversed));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+
+        // Checked against real DynamoDB (us-east-1, 2026-09-07): binary bounds compare by
+        // unsigned bytes, and a bound that is not valid base64 fails the request with a 400
+        // SerializationException before any comparison happens.
+        @Test
+        void binaryBoundsCompareByBytesAndRejectMalformedBase64() {
+            var mapper = new ObjectMapper();
+            var reversed = mapper.createObjectNode();
+            reversed.set(":lo", mapper.createObjectNode().put("B", "/w=="));
+            reversed.set(":hi", mapper.createObjectNode().put("B", "AA=="));
+
+            var e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
+                            "ConditionExpression", null, reversed));
+            assertEquals("ValidationException", e.getErrorCode());
+
+            var malformed = mapper.createObjectNode();
+            malformed.set(":lo", mapper.createObjectNode().put("B", "!!!not-base64!!!"));
+            malformed.set(":hi", mapper.createObjectNode().put("B", "@@@@"));
+
+            var serialization = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
+                            "ConditionExpression", null, malformed));
+            assertEquals("SerializationException", serialization.getErrorCode());
+            assertEquals(400, serialization.getHttpStatus());
+        }
+
+        // A FilterExpression carries the same text without the envelope on AWS.
+        @Test
+        void filterExpressionReportsTheReversedBoundsWithoutTheEnvelope() {
+            var mapper = new ObjectMapper();
+            var values = mapper.createObjectNode();
+            values.set(":hi", mapper.createObjectNode().put("N", "10"));
+            values.set(":lo", mapper.createObjectNode().put("N", "1"));
+
+            var e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("n BETWEEN :hi AND :lo",
+                            "FilterExpression", null, values));
+            assertEquals("Invalid FilterExpression: The BETWEEN operator requires upper bound to be "
+                    + "greater than or equal to lower bound; lower bound operand: AttributeValue: {N:10}, "
+                    + "upper bound operand: AttributeValue: {N:1}", e.getMessage());
+        }
+
+        @Test
+        void orderedBetweenBoundsAreAccepted() {
+            var mapper = new ObjectMapper();
+            var values = mapper.createObjectNode();
+            values.set(":lo", mapper.createObjectNode().put("N", "1"));
+            values.set(":hi", mapper.createObjectNode().put("N", "10"));
+
+            assertDoesNotThrow(() -> ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
+                    "ConditionExpression", null, values));
         }
 
         @Test

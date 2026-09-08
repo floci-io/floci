@@ -236,16 +236,10 @@ public class ApiGatewayV2OpenApiImporter {
                                 + enforced + " is enforced and the remaining schemes are dropped");
                     });
 
-            // AWS_IAM is recorded on the route because that is what AWS records, but the HTTP API
-            // dispatcher only enforces JWT and CUSTOM, so nothing checks the signature. Say so
-            // rather than let a sigv4-protected document look enforced locally.
-            security.stream()
-                    .flatMap(requirement -> requirement.keySet().stream())
-                    .filter(scheme -> "AWS_IAM".equals(bindable.get(scheme)))
-                    .findFirst()
-                    .ifPresent(scheme -> reported.add("Security scheme " + scheme + " on " + routeKey
-                            + " imports as AWS_IAM, which this emulator records but does not enforce;"
-                            + " requests reach the integration without a verified SigV4 signature"));
+            // An awsSigv4 scheme used to warn here, because dispatch recorded AWS_IAM without
+            // enforcing it. Dispatch now verifies the caller's SigV4 signature before the
+            // integration runs, so the document's guarantee holds locally and a
+            // warning would only make failOnWarnings reject a document Floci honours.
         };
 
         List<SecurityRequirement> globalSecurity = openAPI.getSecurity();

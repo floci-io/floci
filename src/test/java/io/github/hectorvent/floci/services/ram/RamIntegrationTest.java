@@ -49,9 +49,9 @@ class RamIntegrationTest {
 
     @Test
     void getResourceShareInvitations_returnsEmptyJson() {
-        // LZA's Custom::GetResourceShare Lambda pages this first; under organization
-        // sharing there are never invitations. The response must be JSON (restJson1) —
-        // an XML fallthrough here is exactly the SyntaxError seen in run b81f0999.
+        // LZA's Custom::GetResourceShare Lambda pages this first, before any share has been
+        // created in this test's account. The response must be JSON (restJson1): an XML
+        // fallthrough here is exactly the SyntaxError seen in run b81f0999.
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
@@ -67,7 +67,7 @@ class RamIntegrationTest {
     @Test
     void ownerCanTagAndDeleteItsOwnShareOverHttp() {
         // Mutations resolve the share within the caller's account, so the identity stamped at
-        // create time has to be the identity resolved at tag/delete time — otherwise LZA's
+        // create time has to be the identity resolved at tag/delete time, otherwise LZA's
         // AWS::RAM::ResourceShare teardown would fail against a share it had just created.
         String shareArn =
             given()
@@ -227,8 +227,8 @@ class RamIntegrationTest {
     }
 
     /**
-     * A present-but-unmodelled resourceOwner — including a non-string that {@code asText}
-     * coerces — has to reach the service check and come back as InvalidParameterException on the
+     * A present-but-unmodelled resourceOwner, including a non-string that {@code asText}
+     * coerces, has to reach the service check and come back as InvalidParameterException on the
      * wire, which is the path LZA actually takes.
      */
     @Test
@@ -263,7 +263,7 @@ class RamIntegrationTest {
 
     /**
      * resourceOwner is a required member on all three read operations. Substituting SELF for an
-     * absent one answered a question the caller never asked — and answered it with the caller's
+     * absent one answered a question the caller never asked, and answered it with the caller's
      * own shares, which is the more dangerous of the two branches to guess at.
      */
     @Test
@@ -345,5 +345,68 @@ class RamIntegrationTest {
             .body("resources[0].arn", equalTo(tgwArn))
             .body("resources[0].type", equalTo("ec2:TransitGateway"))
             .body("resources[0].resourceShareArn", equalTo(shareArn));
+    }
+
+    @Test
+    void acceptResourceShareInvitationOverHttp() {
+        // A bare account-id principal (not an OU/organization ARN) gets a real PENDING
+        // invitation; targeting this test's own account keeps the whole flow within one
+        // Authorization header, same as the rest of this class.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "name": "http-invitation-share",
+                    "principals": ["000000000000"],
+                    "resourceArns": ["arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0inv"]
+                }
+                """)
+        .when()
+            .post("/createresourceshare")
+        .then()
+            .statusCode(200);
+
+        String invitationArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("{}")
+            .when()
+                .post("/getresourceshareinvitations")
+            .then()
+                .statusCode(200)
+                .body("resourceShareInvitations.find { it.resourceShareName == 'http-invitation-share' }.status",
+                        equalTo("PENDING"))
+            .extract()
+                .path("resourceShareInvitations.find { it.resourceShareName == 'http-invitation-share' }" +
+                        ".resourceShareInvitationArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "resourceShareInvitationArn": "%s", "clientToken": "test-token" }
+                """.formatted(invitationArn))
+        .when()
+            .post("/acceptresourceshareinvitation")
+        .then()
+            .statusCode(200)
+            .contentType("application/json")
+            .body("resourceShareInvitation.status", equalTo("ACCEPTED"))
+            .body("resourceShareInvitation.resourceShareInvitationArn", equalTo(invitationArn))
+            .body("clientToken", equalTo("test-token"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "resourceShareInvitationArn": "%s" }
+                """.formatted(invitationArn))
+        .when()
+            .post("/acceptresourceshareinvitation")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceShareInvitationAlreadyAcceptedException"));
     }
 }

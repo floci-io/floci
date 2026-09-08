@@ -22,8 +22,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * the {@code arn:aws:states:::aws-sdk:sfn:describeMapRun} Task integration.
  *
  * <p>Every asserted value was measured against us-east-1 with a distributed Map run of the same
- * shape. A Map run only becomes describable once its {@code ResultWriter} has minted the Map run
- * ARN and returned it in the Map result, which is also the only way an ASL author obtains it.
+ * shape. Every run is describable through the {@code mapRunArn} of its {@code MapRunStarted}
+ * event. A run with a {@code ResultWriter} also returns that ARN in the Map result.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -240,6 +240,44 @@ class StepFunctionsDescribeMapRunIntegrationTest {
         assertEquals(0, response.jsonPath().getInt(set + ".pendingRedrive"));
     }
 
+    @Test
+    @Order(10)
+    void describeMapRunResolvesTheArnOfAMapWithoutResultWriter() throws Exception {
+        var smArn = createStateMachine("describe-map-run-no-writer", distributedMapWithoutWriter(
+                "[1, 2]", "Keep", "{\"Keep\": {\"Type\": \"Pass\", \"End\": true}}"));
+        var execArn = startExecution(smArn, "{}");
+        var describe = waitForTerminalState(execArn);
+        assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
+                "cause: " + describe.jsonPath().getString("cause"));
+
+        var mapRunArn = mapRunArnFromHistory(execArn);
+        var response = describeMapRun(mapRunArn);
+        response.then().statusCode(200);
+        assertEquals(mapRunArn, response.jsonPath().getString("mapRunArn"));
+        assertEquals(execArn, response.jsonPath().getString("executionArn"));
+        assertEquals("SUCCEEDED", response.jsonPath().getString("status"));
+        assertCounters(response, "itemCounts", 2);
+        assertCounters(response, "executionCounts", 2);
+    }
+
+    @Test
+    @Order(11)
+    void describeMapRunReportsARunWhoseItemFailed() throws Exception {
+        var smArn = createStateMachine("describe-map-run-failed", distributedMapWithoutWriter(
+                "[1]", "Boom", "{\"Boom\": {\"Type\": \"Fail\", \"Error\": \"Boom\", \"Cause\": \"item failed\"}}"));
+        var execArn = startExecution(smArn, "{}");
+        assertEquals("FAILED", waitForTerminalState(execArn).jsonPath().getString("status"));
+
+        var response = describeMapRun(mapRunArnFromHistory(execArn));
+        response.then().statusCode(200);
+        assertEquals("FAILED", response.jsonPath().getString("status"));
+        assertEquals(0, response.jsonPath().getInt("itemCounts.succeeded"));
+        assertEquals(1, response.jsonPath().getInt("itemCounts.failed"));
+        assertEquals(0, response.jsonPath().getInt("itemCounts.aborted"));
+        assertEquals(1, response.jsonPath().getInt("itemCounts.total"));
+        assertEquals(1, response.jsonPath().getInt("itemCounts.resultsWritten"));
+    }
+
     private static void assertTaskCounters(JsonNode counts, int items) {
         assertEquals(0, counts.path("Pending").asInt());
         assertEquals(0, counts.path("Running").asInt());
@@ -282,6 +320,44 @@ class StepFunctionsDescribeMapRunIntegrationTest {
                 .replace("CONCURRENCY",
                         maxConcurrency == null ? "" : "\"MaxConcurrency\": " + maxConcurrency + ",")
                 .replace("BUCKET", bucket);
+    }
+
+    private static String distributedMapWithoutWriter(String items, String startAt, String states) {
+        return """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Fan",
+                  "States": {
+                    "Fan": {
+                      "Type": "Map",
+                      "End": true,
+                      "Items": ITEMS,
+                      "ItemProcessor": {
+                        "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                        "StartAt": "START_AT",
+                        "States": STATES
+                      }
+                    }
+                  }
+                }
+                """.replace("ITEMS", items).replace("START_AT", startAt).replace("STATES", states);
+    }
+
+    private static String mapRunArnFromHistory(String execArn) throws Exception {
+        var history = given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("""
+                        {"executionArn": "%s"}
+                        """.formatted(execArn))
+                .when().post("/");
+        history.then().statusCode(200);
+        for (JsonNode event : mapper.readTree(history.asString()).path("events")) {
+            if ("MapRunStarted".equals(event.path("type").asText())) {
+                return event.path("mapRunStartedEventDetails").path("mapRunArn").asText();
+            }
+        }
+        return fail("no MapRunStarted event in the history of " + execArn);
     }
 
     private static Response describeMapRun(String mapRunArn) {

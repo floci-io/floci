@@ -42,7 +42,7 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_TLS_ENABLED` | `false` | Enable TLS/HTTPS on all endpoints (HTTP remains available simultaneously) |
 | `FLOCI_TLS_CERT_PATH` | _(none)_ | Path to a PEM certificate file. When set, disables auto-generation |
 | `FLOCI_TLS_KEY_PATH` | _(none)_ | Path to a PEM private key file. Required when `FLOCI_TLS_CERT_PATH` is set |
-| `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate and persist a self-signed certificate when no cert/key paths are provided |
+| `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate and persist a server certificate signed by Floci's local CA when no cert/key paths are provided |
 
 See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss://`) support.
 
@@ -297,6 +297,8 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDFORMATION_ENABLED` | `true` | Enable the CloudFormation service |
+| `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_LAMBDA_CODE` | `false` | Fall back to the built-in stub handler for an `AWS::Lambda::Function` whose S3 code cannot be read. Off matches real CloudFormation, which fails the resource and rolls the stack back |
+| `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES` | `true` | Stub a resource whose type has no provisioner (synthetic physical ID, `arn:aws:stub:::` ARN attribute, `CREATE_COMPLETE`), logged at `WARN` with a resource status reason. Set `false` to fail the resource instead, which rolls the stack back |
 
 ### ACM (Certificate Manager)
 
@@ -321,6 +323,19 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_PIPES_ENABLED` | `true` | Enable the EventBridge Pipes service |
+
+### IoT Core
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_IOT_ENABLED` | `true` | Enable the IoT Core service |
+| `FLOCI_SERVICES_IOT_ENDPOINT_ADDRESS` | _(none)_ | Value `DescribeEndpoint` returns for every endpoint type, and the domain name of the AWS-managed domain configurations. Set it to a bare hostname when the AWS IoT ports (8883, 443, 8443) reach Floci; the name is added to the server certificate. Defaults to the host and port of `FLOCI_BASE_URL`, with `FLOCI_HOSTNAME` applied |
+| `FLOCI_SERVICES_IOT_RULE_SQL_STRICT` | `false` | Reject topic rules whose SQL falls outside the evaluated subset, as AWS does |
+| `FLOCI_SERVICES_IOT_MQTT_ENABLED` | `true` | Run the embedded MQTT broker |
+| `FLOCI_SERVICES_IOT_MQTT_AUTO_START` | `false` | Start the broker at boot instead of on the first IoT API call |
+| `FLOCI_SERVICES_IOT_MQTT_HOST` | `0.0.0.0` | Address the broker listens on |
+| `FLOCI_SERVICES_IOT_MQTT_PORT` | `1883` | Plaintext MQTT port |
+| `FLOCI_SERVICES_IOT_MQTT_TLS_PORT` | `8883` | MQTT over TLS port, opened while `FLOCI_TLS_ENABLED` is `true`; `0` disables it |
 
 ---
 
@@ -394,6 +409,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Enable TLS for the ECR registry |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Keep the ECR registry container running when Floci stops |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
+| `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
 | `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | _(none)_ | Docker network for the ECR registry container |
 
 ### EKS (Elastic Kubernetes Service)
@@ -454,6 +470,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_TEXTRACT_ENABLED` | `true` | Enable the Textract service |
 | `FLOCI_SERVICES_TRANSFER_ENABLED` | `true` | Enable the Transfer Family service |
 | `FLOCI_SERVICES_ROUTE53_ENABLED` | `true` | Enable the Route 53 service |
+| `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Simulated processing window for Route 53 VPC association/auth mutations; positive values make documented overlap errors (`PriorRequestNotComplete` / `ConcurrentModification`) reproducible for retry tests |
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable the ELBv2 (ALB/NLB) service |
 | `FLOCI_SERVICES_ELBV2_MOCK` | `false` | When `true`, load balancers are registered but no containers are spawned |
 | `FLOCI_SERVICES_AUTOSCALING_ENABLED` | `true` | Enable the Auto Scaling service |

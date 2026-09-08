@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.kinesis;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.BinaryNode;
@@ -7,6 +8,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +32,14 @@ class KinesisJsonHandlerTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "123456789012";
     private static final String STREAM_ARN = "arn:aws:kinesis:us-east-1:123456789012:stream/test-stream";
+    private static final String MAX_HASH_KEY_PLUS_ONE = "340282366920938463463374607431768211456";
+    private static final String NON_DECIMAL_HASH_KEY = "1.5";
+    private static final long NUMERIC_EXPLICIT_HASH_KEY = 12345L;
+    private static final String MIN_HASH_KEY = "0";
+    private static final String MAX_HASH_KEY = "340282366920938463463374607431768211455";
+    private static final int TWO_SHARDS = 2;
+    private static final String FIRST_SHARD_ID = "shardId-000000000000";
+    private static final String SECOND_SHARD_ID = "shardId-000000000001";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private KinesisService service;
@@ -45,9 +56,13 @@ class KinesisJsonHandlerTest {
     }
 
     private void createStream(String name) {
+        createStream(name, 1);
+    }
+
+    private void createStream(String name, int shardCount) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("StreamName", name);
-        req.put("ShardCount", 1);
+        req.put("ShardCount", shardCount);
         assertThat(handler.handle("CreateStream", req, REGION).getStatus(), is(200));
     }
 
@@ -419,6 +434,97 @@ class KinesisJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutRecord", req, REGION));
         assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordRejectsExplicitHashKeyOutsideHashKeySpace() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", "dGVzdA==");
+        req.put("PartitionKey", "pk1");
+        req.put("ExplicitHashKey", MAX_HASH_KEY_PLUS_ONE);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordsRejectsNonDecimalExplicitHashKey() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject()
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk1")
+                .put("ExplicitHashKey", NON_DECIMAL_HASH_KEY);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordRejectsNumericExplicitHashKey() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", "dGVzdA==");
+        req.put("PartitionKey", "pk1");
+        // A JSON number is not the string-shaped field AWS accepts; asText coercion must not
+        // silently turn it into a valid decimal hash key.
+        req.put("ExplicitHashKey", NUMERIC_EXPLICIT_HASH_KEY);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordsRejectNumericExplicitHashKey() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject()
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk1")
+                .put("ExplicitHashKey", NUMERIC_EXPLICIT_HASH_KEY);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordMigratesLegacyOverlappingShardRangesForExplicitHashKey() {
+        // A multi-shard stream persisted before disjoint ranges existed carries the full 128-bit
+        // span on every open shard, so an explicit key matches all of them. Naive first-match
+        // routing would then collapse every explicit key onto the first shard.
+        createStream("legacy-stream", TWO_SHARDS);
+        KinesisStream stream = service.describeStream("legacy-stream", REGION);
+        for (KinesisShard shard : stream.getShards()) {
+            shard.setHashKeyRange(new KinesisShard.HashKeyRange(MIN_HASH_KEY, MAX_HASH_KEY));
+        }
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "legacy-stream");
+        req.put("Data", "dGVzdA==");
+        req.put("PartitionKey", "pk1");
+        req.put("ExplicitHashKey", MAX_HASH_KEY);
+
+        ObjectNode resp = responseEntity(handler.handle("PutRecord", req, REGION));
+        assertEquals(SECOND_SHARD_ID, resp.get("ShardId").asText());
+
+        req.put("ExplicitHashKey", MIN_HASH_KEY);
+        ObjectNode respMin = responseEntity(handler.handle("PutRecord", req, REGION));
+        assertEquals(FIRST_SHARD_ID, respMin.get("ShardId").asText());
     }
 
     @Test
@@ -1114,5 +1220,149 @@ class KinesisJsonHandlerTest {
 
         assertEquals(Map.of("Foo", "Bar", "gw:example", "kinesis"),
                 service.listTagsForStream("test-stream", REGION));
+    }
+
+    @Test
+    void createStreamRejectsANonStringTagValueBeforeCreatingTheStream() {
+        for (ObjectNode tags : nonStringTagValues()) {
+            ObjectNode create = MAPPER.createObjectNode();
+            create.put("StreamName", "rejected-tags-stream");
+            create.put("ShardCount", 1);
+            create.set("Tags", tags);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("CreateStream", create, REGION));
+            assertEquals("SerializationException", ex.getErrorCode());
+            assertEquals("Tags must be a map of string values.", ex.getMessage());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("StreamName", "rejected-tags-stream");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("DescribeStream", describe, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void createStreamRejectsANonObjectTagsMember() {
+        for (JsonNode tags : List.of(MAPPER.getNodeFactory().textNode("Foo=Bar"),
+                MAPPER.getNodeFactory().numberNode(5), MAPPER.createArrayNode().add("Foo"))) {
+            ObjectNode create = MAPPER.createObjectNode();
+            create.put("StreamName", "rejected-tags-stream");
+            create.put("ShardCount", 1);
+            create.set("Tags", tags);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("CreateStream", create, REGION));
+            assertEquals("SerializationException", ex.getErrorCode());
+        }
+    }
+
+    @Test
+    void createStreamWithANullTagsMemberLeavesTheStreamUntagged() {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", "null-tags-stream");
+        create.put("ShardCount", 1);
+        create.putNull("Tags");
+        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+        assertTrue(service.listTagsForStream("null-tags-stream", REGION).isEmpty());
+    }
+
+    @Test
+    void addTagsToStreamRejectsANonStringTagValueWithoutTouchingExistingTags() {
+        createStream("test-stream");
+        ObjectNode add = MAPPER.createObjectNode();
+        add.put("StreamName", "test-stream");
+        add.putObject("Tags").put("Foo", "Bar");
+        assertThat(handler.handle("AddTagsToStream", add, REGION).getStatus(), is(200));
+
+        for (ObjectNode tags : nonStringTagValues()) {
+            ObjectNode bad = MAPPER.createObjectNode();
+            bad.put("StreamName", "test-stream");
+            bad.set("Tags", tags);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("AddTagsToStream", bad, REGION));
+            assertEquals("SerializationException", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        assertEquals(Map.of("Foo", "Bar"), service.listTagsForStream("test-stream", REGION));
+    }
+
+    @Test
+    void removeTagsFromStreamRejectsANonStringTagKey() {
+        createStream("test-stream");
+        ObjectNode add = MAPPER.createObjectNode();
+        add.put("StreamName", "test-stream");
+        add.putObject("Tags").put("Foo", "Bar");
+        assertThat(handler.handle("AddTagsToStream", add, REGION).getStatus(), is(200));
+
+        for (JsonNode tagKeys : List.of(MAPPER.createArrayNode().add(5), MAPPER.createArrayNode().add(true),
+                MAPPER.createArrayNode().addNull(), MAPPER.createArrayNode().add("Foo").add(5),
+                MAPPER.getNodeFactory().textNode("Foo"), MAPPER.createObjectNode().put("a", "Foo"))) {
+            ObjectNode remove = MAPPER.createObjectNode();
+            remove.put("StreamName", "test-stream");
+            remove.set("TagKeys", tagKeys);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("RemoveTagsFromStream", remove, REGION));
+            assertEquals("SerializationException", ex.getErrorCode());
+            assertEquals("TagKeys must be a list of strings.", ex.getMessage());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        assertEquals(Map.of("Foo", "Bar"), service.listTagsForStream("test-stream", REGION));
+    }
+
+    @Test
+    void removeTagsFromStreamStillRemovesStringTagKeys() {
+        createStream("test-stream");
+        ObjectNode add = MAPPER.createObjectNode();
+        add.put("StreamName", "test-stream");
+        add.putObject("Tags").put("Foo", "Bar").put("Baz", "Qux");
+        assertThat(handler.handle("AddTagsToStream", add, REGION).getStatus(), is(200));
+
+        ObjectNode remove = MAPPER.createObjectNode();
+        remove.put("StreamName", "test-stream");
+        remove.putArray("TagKeys").add("Foo");
+        assertThat(handler.handle("RemoveTagsFromStream", remove, REGION).getStatus(), is(200));
+
+        assertEquals(Map.of("Baz", "Qux"), service.listTagsForStream("test-stream", REGION));
+    }
+
+    @Test
+    void removeTagsFromStreamWithANullOrMissingTagKeysLeavesTagsUntouched() {
+        createStream("test-stream");
+        ObjectNode add = MAPPER.createObjectNode();
+        add.put("StreamName", "test-stream");
+        add.putObject("Tags").put("Foo", "Bar");
+        assertThat(handler.handle("AddTagsToStream", add, REGION).getStatus(), is(200));
+
+        ObjectNode nullKeys = MAPPER.createObjectNode();
+        nullKeys.put("StreamName", "test-stream");
+        nullKeys.putNull("TagKeys");
+        assertThat(handler.handle("RemoveTagsFromStream", nullKeys, REGION).getStatus(), is(200));
+        ObjectNode missingKeys = MAPPER.createObjectNode();
+        missingKeys.put("StreamName", "test-stream");
+        assertThat(handler.handle("RemoveTagsFromStream", missingKeys, REGION).getStatus(), is(200));
+
+        assertEquals(Map.of("Foo", "Bar"), service.listTagsForStream("test-stream", REGION));
+    }
+
+    /** Every non-string tag value shape — number, boolean, null, object, array — plus a map mixing a valid and an invalid value. */
+    private static List<ObjectNode> nonStringTagValues() {
+        ObjectNode number = MAPPER.createObjectNode();
+        number.put("Foo", 5);
+        ObjectNode bool = MAPPER.createObjectNode();
+        bool.put("Foo", true);
+        ObjectNode nul = MAPPER.createObjectNode();
+        nul.putNull("Foo");
+        ObjectNode object = MAPPER.createObjectNode();
+        object.putObject("Foo");
+        ObjectNode array = MAPPER.createObjectNode();
+        array.putArray("Foo");
+        ObjectNode mixed = MAPPER.createObjectNode();
+        mixed.put("Foo", "Bar");
+        mixed.put("Baz", 5);
+        return List.of(number, bool, nul, object, array, mixed);
     }
 }

@@ -325,7 +325,7 @@ public class DocDbService {
                 throw new IllegalStateException("DocDbService was built without an Ec2Service");
             }
             for (String groupId : securityGroups) {
-                boolean known = ec2Service.describeSecurityGroups(region, List.of(groupId), null, Map.of())
+                boolean known = ec2Service.describeSecurityGroups(region, List.of(groupId), List.of(), Map.of())
                         .stream().anyMatch(sg -> groupId.equals(sg.getGroupId()));
                 if (!known) {
                     throw new AwsException("InvalidParameterValue",

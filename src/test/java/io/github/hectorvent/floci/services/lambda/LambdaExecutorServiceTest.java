@@ -95,6 +95,30 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void resultAfterConfiguredDeadline_timesOutAndDestroysHandle() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-late", "test-fn", rtas, ContainerState.WARM);
+
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.prepareForDispatch();
+            pi.markDispatched();
+            CompletableFuture.delayedExecutor(1200, TimeUnit.MILLISECONDS)
+                    .execute(() -> pi.getResultFuture().complete(
+                            new InvokeResult(200, null, "{\"ok\":true}".getBytes(), null, "req-late")));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        verify(warmPool).destroyHandle(handle);
+        verify(warmPool, never()).release(handle);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("Function.TimedOut"));
+    }
+
+    @Test
     void timeoutResponse_containsCorrectErrorPayload() {
         fn.setTimeout(2);
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);

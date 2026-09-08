@@ -120,10 +120,21 @@ public class CloudFormationTemplateEngine {
             return node;
         }
         if (node.isObject()) {
+            if (node.has("Fn::If")) {
+                // Unlike the other intrinsics below, Fn::If's two branches can be any JSON shape
+                // (array, object, or scalar) - it just forwards one of them verbatim. Collapsing it
+                // through resolve() like the scalar-only intrinsics would stringify a chosen array or
+                // object instead of preserving it, so a conditional list (e.g. a Tags property) reads
+                // as unresolvable everywhere a caller checks isArray() on the result.
+                JsonNode branch = selectIfBranch(node.get("Fn::If"));
+                return branch == null ? TextNode.valueOf("") : resolveNode(branch);
+            }
+            if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
+                return objectMapper.valueToTree(resolveList(node));
+            }
             if (node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join") ||
-                    node.has("Fn::Select") || node.has("Fn::If") || node.has("Fn::Base64") ||
-                    node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::Split") ||
-                    node.has("Fn::GetAZs") || node.has("Fn::Cidr") || node.has("Fn::FindInMap")) {
+                    node.has("Fn::Select") || node.has("Fn::Base64") ||
+                    node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::FindInMap")) {
                 return TextNode.valueOf(resolve(node));
             }
             // Plain object — resolve each field
@@ -236,15 +247,7 @@ public class CloudFormationTemplateEngine {
             return "";
         }
         String delimiter = join.get(0).asText("");
-        JsonNode parts = join.get(1);
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.size(); i++) {
-            if (i > 0) {
-                sb.append(delimiter);
-            }
-            sb.append(resolve(parts.get(i)));
-        }
-        return sb.toString();
+        return String.join(delimiter, resolveList(join.get(1)));
     }
 
     private String resolveSelect(JsonNode select) {
@@ -261,8 +264,8 @@ public class CloudFormationTemplateEngine {
 
     /**
      * Resolves a node that represents a list — a literal array, a list-producing intrinsic
-     * ({@code Fn::GetAZs}, {@code Fn::Cidr}, {@code Fn::Split}), or a comma-delimited scalar
-     * (e.g. a {@code Ref} to a {@code List<>} parameter).
+     * ({@code Fn::GetAZs}, {@code Fn::Cidr}, {@code Fn::Split}), an {@code Fn::If} choosing between
+     * two such lists, or a comma-delimited scalar (e.g. a {@code Ref} to a {@code List<>} parameter).
      */
     private List<String> resolveList(JsonNode node) {
         List<String> out = new ArrayList<>();
@@ -270,12 +273,17 @@ public class CloudFormationTemplateEngine {
             return out;
         }
         if (node.isArray()) {
-            for (JsonNode item : node) {
-                out.add(resolve(item));
-            }
-            return out;
+            return resolveListElements(node);
         }
         if (node.isObject()) {
+            if (node.has("Fn::If")) {
+                // Fn::If's branch can itself be any of the shapes this method already handles
+                // (literal array, Fn::Split, ...), so recurse into it rather than falling through
+                // to the scalar branch below, which would stringify a list-shaped branch instead
+                // of splitting it.
+                JsonNode branch = selectIfBranch(node.get("Fn::If"));
+                return branch == null ? out : resolveList(branch);
+            }
             if (node.has("Fn::GetAZs")) {
                 return resolveAvailabilityZones(node.get("Fn::GetAZs"));
             }
@@ -291,6 +299,70 @@ public class CloudFormationTemplateEngine {
             out.addAll(Arrays.asList(scalar.split(",", -1)));
         }
         return out;
+    }
+
+    /**
+     * Expands a literal array's elements, recursing into any element that is itself a
+     * list-valued intrinsic ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}, or an
+     * {@code Fn::If} evaluating to one) so it contributes its own elements rather than one
+     * comma-joined string. Unlike {@link #resolveStringList}, this keeps blank entries: a
+     * literal array is positional (consumed by {@code Fn::Select} via {@link #resolveList}),
+     * so dropping a blank element ahead of the selected index would shift every later index.
+     */
+    private List<String> resolveListElements(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode element : node) {
+            if (isListValuedIntrinsic(element)) {
+                out.addAll(resolveList(element));
+            } else {
+                out.add(resolve(element));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Resolves a node to a flat list of strings, expanding list-valued intrinsics
+     * ({@code Fn::Split}, {@code Fn::GetAZs}, {@code Fn::Cidr}, or an {@code Fn::If} evaluating
+     * to one) whether the node itself is one or they appear as elements of a literal array,
+     * and dropping blank entries.
+     *
+     * <p>Provisioners read list properties (SubnetIds, VPCZoneIdentifier, …) with this so a
+     * cross-stack {@code Fn::Split} over {@code Fn::ImportValue} — the shape CDK emits when a
+     * VPC exports its subnet ids as one comma-joined value — resolves to the real ids instead
+     * of a single comma-joined string or an empty list (issue #2937).
+     */
+    public List<String> resolveStringList(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return out;
+        }
+        if (node.isArray()) {
+            out.addAll(resolveListElements(node));
+        } else {
+            out.addAll(resolveList(node));
+        }
+        out.removeIf(value -> value == null || value.isBlank());
+        return out;
+    }
+
+    private boolean isListValuedIntrinsic(JsonNode node) {
+        if (node == null) {
+            return false;
+        }
+        if (node.isArray()) {
+            return true;
+        }
+        if (node.isObject()) {
+            if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
+                return true;
+            }
+            if (node.has("Fn::If")) {
+                JsonNode branch = selectIfBranch(node.get("Fn::If"));
+                return branch != null && isListValuedIntrinsic(branch);
+            }
+        }
+        return false;
     }
 
     private List<String> resolveSplit(JsonNode split) {
@@ -375,12 +447,19 @@ public class CloudFormationTemplateEngine {
     }
 
     private String resolveIf(JsonNode ifNode) {
+        JsonNode branch = selectIfBranch(ifNode);
+        return branch == null ? "" : resolve(branch);
+    }
+
+    /** Picks Fn::If's true/false branch without resolving it further, so the caller decides
+     *  whether to collapse it to a scalar ({@link #resolve}) or preserve its shape ({@link #resolveNode}). */
+    private JsonNode selectIfBranch(JsonNode ifNode) {
         if (!ifNode.isArray() || ifNode.size() < 3) {
-            return "";
+            return null;
         }
         String conditionName = ifNode.get(0).asText();
         boolean condValue = conditions.getOrDefault(conditionName, false);
-        return resolve(condValue ? ifNode.get(1) : ifNode.get(2));
+        return condValue ? ifNode.get(1) : ifNode.get(2);
     }
 
     private String resolveGetAtt(JsonNode getAtt) {
