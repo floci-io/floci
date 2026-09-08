@@ -457,6 +457,24 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
     }
 
     @Test
+    void whitespaceOnlyLogGroupIsReadAsNotSuppliedRatherThanRejected() {
+        // The guard is isBlank(), not isEmpty(), so a whitespace-only value takes the same
+        // deliberate not-supplied path as "". Pinned separately because the javadoc claims
+        // both and an empty-string-only test would let isBlank() be narrowed to isEmpty()
+        // without anything going red.
+        createFunction("logging-ws-group-fn", """
+            ,
+                "LoggingConfig": {"LogGroup": "   "}""");
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/logging-ws-group-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("LoggingConfig.LogGroup", equalTo("/aws/lambda/logging-ws-group-fn"));
+    }
+
+    @Test
     void loggingConfigRejectsLogGroupLongerThanFiveHundredTwelveCharacters() {
         String tooLong = "a".repeat(513);
 
