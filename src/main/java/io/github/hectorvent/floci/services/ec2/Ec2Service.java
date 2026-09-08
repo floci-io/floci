@@ -4417,8 +4417,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     public List<LaunchTemplate> describeLaunchTemplates(String region, List<String> ids,
                                                         List<String> names, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        return launchTemplates.scan(k -> true).stream()
+        List<LaunchTemplate> regionalTemplates = launchTemplates.scan(k -> true).stream()
                 .filter(lt -> lt.getRegion().equals(region))
+                .toList();
+        for (String id : ids) {
+            if (regionalTemplates.stream().noneMatch(lt -> id.equals(lt.getLaunchTemplateId()))) {
+                throw new AwsException("InvalidLaunchTemplateId.NotFound",
+                        "The specified launch template does not exist.", 400);
+            }
+        }
+        for (String name : names) {
+            if (regionalTemplates.stream().noneMatch(lt -> name.equals(lt.getLaunchTemplateName()))) {
+                throw new AwsException("InvalidLaunchTemplateName.NotFoundException",
+                        "The specified launch template does not exist.", 400);
+            }
+        }
+        return regionalTemplates.stream()
                 .filter(lt -> ids.isEmpty() || ids.contains(lt.getLaunchTemplateId()))
                 .filter(lt -> names.isEmpty() || names.contains(lt.getLaunchTemplateName()))
                 .filter(lt -> matchesFilters(lt, filters, region))
