@@ -167,15 +167,11 @@ public class FirehoseService implements ResourceProvider {
     }
 
     private Optional<Map<String, String>> iteratorGet(String key) {
-        String accountId = accountFromScopedKey(key);
-        String logicalKey = logicalKeyFromScopedKey(key);
-        String streamName = streamNameFromScopedKey(key);
-        // An unscoped checkpoint is safe to migrate only after the delivery stream itself has
-        // proved the account and region. Account-prefixed account/name checkpoints are safe by
-        // their prefix and cover the format written before region became part of the key.
-        boolean streamExists = streamGet(key).isPresent();
-        return sourceIteratorStore.getForAccountMigratingLegacyKeys(accountId, logicalKey,
-                List.of(streamName), ignored -> true, streamExists);
+        // Do not migrate the old account/name checkpoint key: its opaque iterator token has no
+        // region, so with same-named streams in multiple regions there is no safe way to tell
+        // which stream it belongs to. Leaving it untouched makes the regional stream start from
+        // its configured delivery timestamp instead of risking a cross-region checkpoint.
+        return sourceIteratorStore.getForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key));
     }
 
     private void iteratorPut(String key, Map<String, String> value) {
