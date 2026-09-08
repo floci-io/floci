@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
@@ -164,6 +165,7 @@ public class MemoryDbService {
     }
 
     public Collection<Cluster> describeClusters(String filterName, String region) {
+        migrateLegacyClusters(region);
         if (filterName != null && !filterName.isBlank()) {
             return List.of(getCluster(filterName, region));
         }
@@ -196,7 +198,7 @@ public class MemoryDbService {
 
         if (cluster.getContainerId() != null) {
             containerManager.stop(new MemoryDbContainerHandle(
-                    cluster.getContainerId(), name, cluster.getContainerHost(), cluster.getContainerPort()));
+                    cluster.getContainerId(), identity, cluster.getContainerHost(), cluster.getContainerPort()));
         }
 
         releaseProxyPort(cluster.getProxyPort());
@@ -268,6 +270,7 @@ public class MemoryDbService {
                             : java.util.Optional.empty())
                     .orElseThrow(() -> new AwsException("UserNotFoundFault", "User not found.", 404));
         }
+        migrateLegacyUsers(region);
         List<User> all = new ArrayList<>();
         all.add(builtinDefaultUser(region));
         all.addAll(users.scan(k -> k.startsWith(region + ":")));
@@ -342,6 +345,7 @@ public class MemoryDbService {
                             : java.util.Optional.empty())
                     .orElseThrow(() -> new AwsException("ACLNotFoundFault", "ACL not found.", 404));
         }
+        migrateLegacyAcls(region);
         List<Acl> all = new ArrayList<>();
         all.add(builtinOpenAccessAcl(region));
         all.addAll(acls.scan(k -> k.startsWith(region + ":")));
@@ -374,6 +378,7 @@ public class MemoryDbService {
     }
 
     public List<String> aclNamesForUser(String userName, String region) {
+        migrateLegacyAcls(region);
         List<String> result = new ArrayList<>();
         if (DEFAULT_USER.equals(userName)) {
             result.add(DEFAULT_ACL);
@@ -391,6 +396,7 @@ public class MemoryDbService {
     }
 
     public List<String> clustersUsingAcl(String aclName, String region) {
+        migrateLegacyClusters(region);
         return clusters.scan(k -> k.startsWith(region + ":")).stream()
                 .filter(c -> aclName.equals(c.getAclName()))
                 .map(Cluster::getName)
@@ -528,6 +534,7 @@ public class MemoryDbService {
         } catch (IllegalArgumentException e) {
             throw new AwsException("ClusterNotFoundFault", "Cluster not found.", 404);
         }
+        migrateLegacyClusters(currentRegion());
         return clusters.scan(k -> k.startsWith(currentRegion() + ":")).stream()
                 .filter(c -> resourceArn.equals(c.getArn()))
                 .findFirst()
@@ -651,6 +658,71 @@ public class MemoryDbService {
             store.delete(name);
         }
         return legacy;
+    }
+
+    private void migrateLegacyClusters(String region) {
+        migrateLegacy(clusters, region, Cluster.class);
+    }
+
+    private void migrateLegacyUsers(String region) {
+        migrateLegacy(users, region, User.class);
+    }
+
+    private void migrateLegacyAcls(String region) {
+        migrateLegacy(acls, region, Acl.class);
+    }
+
+    private <V> void migrateLegacy(StorageBackend<String, V> store, String region, Class<V> type) {
+        if (!isDefaultOwner(region) || !(store instanceof AccountAwareStorageBackend<V> aware)) {
+            return;
+        }
+        String accountId = regionResolver.getAccountId();
+        for (V legacy : aware.scanUnscopedLegacy(value -> type.isInstance(value))) {
+            String name = resourceName(legacy);
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            aware.getForAccountMigratingLegacyKeys(accountId, name, List.of(), value -> type.isInstance(value))
+                    .ifPresent(value -> migrateLegacyValue(aware, accountId, value, region));
+        }
+        // A named lookup through AccountAwareStorageBackend may have already moved an old
+        // unscoped record to account/name without adding the new region component. Move those
+        // intermediate keys as well so unfiltered operations cannot omit them.
+        for (String legacyKey : aware.keysForAccount(accountId)) {
+            if (legacyKey.contains(":")) {
+                continue;
+            }
+            aware.getForAccount(accountId, legacyKey)
+                    .filter(type::isInstance)
+                    .ifPresent(value -> migrateLegacyValue(aware, accountId, value, region));
+        }
+    }
+
+    private <V> void migrateLegacyValue(AccountAwareStorageBackend<V> aware, String accountId,
+                                         V legacy, String region) {
+        String name = resourceName(legacy);
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        setOwner(legacy, region);
+        aware.putForAccount(accountId, key(region, name), legacy);
+        aware.deleteForAccount(accountId, name);
+    }
+
+    private String resourceName(Object resource) {
+        return switch (resource) {
+            case Cluster cluster -> cluster.getName();
+            case User user -> user.getName();
+            case Acl acl -> acl.getName();
+            default -> null;
+        };
+    }
+
+    private boolean isDefaultOwner(String region) {
+        String defaultAccount = regionResolver.getDefaultAccountId();
+        String defaultRegion = regionResolver.getDefaultRegion();
+        return (defaultAccount == null || java.util.Objects.equals(defaultAccount, regionResolver.getAccountId()))
+                && (defaultRegion == null || java.util.Objects.equals(defaultRegion, region));
     }
 
     private void setOwner(Object resource, String region) {
