@@ -66,7 +66,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> true);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -128,7 +128,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> true);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -184,7 +184,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
-                                (user, pass) -> true);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -282,7 +282,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
-                                (user, pass) -> true);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }

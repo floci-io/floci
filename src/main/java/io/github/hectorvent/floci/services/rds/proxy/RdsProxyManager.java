@@ -30,7 +30,7 @@ public class RdsProxyManager {
                                         int proxyPort, String backendHost, int backendPort,
                                         String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
-                                        RdsAuthProxy.PasswordValidator passwordValidator) {
+                                        RdsAuthProxy.MasterPasswordCheck passwordValidator) {
         tlsCertificates.ensureHost(advertisedHost);
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,

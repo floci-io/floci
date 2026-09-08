@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
-import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -46,7 +46,7 @@ public class RedshiftProxyManager {
     public synchronized void startProxy(String relayKey, int proxyPort,
                                         String backendHost, int backendPort, String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
-                                        RdsAuthProxy.PasswordValidator passwordValidator) {
+                                        PasswordValidator passwordValidator) {
         // A prior unclosable entry for this key is left in place: its listener may still
         // be bound, and only a successful stop (never a fresh start) may drop it.
         // Make sure the self-signed proxy certificate covers the host clients will connect to,

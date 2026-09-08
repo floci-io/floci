@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -34,7 +35,7 @@ class RedshiftProxyManagerTest {
 
     private static void start(RedshiftProxyManager manager, String key, int proxyPort) {
         manager.startProxy(key, proxyPort, "localhost", 1, "localhost",
-                "admin", "secret", "dev", (user, password) -> true);
+                "admin", "secret", "dev", (user, password) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
     }
 
     @Test

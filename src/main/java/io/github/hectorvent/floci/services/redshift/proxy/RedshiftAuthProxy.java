@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.PostgresProtocolHandler;
-import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -32,7 +32,7 @@ public class RedshiftAuthProxy {
     private final String dbName;
     private final RdsSigV4Validator sigV4;
     private final RdsProxyTlsCertificates tlsCertificates;
-    private final RdsAuthProxy.PasswordValidator passwordValidator;
+    private final PasswordValidator passwordValidator;
     private final S3Service s3Service;
 
     private volatile boolean running;
@@ -41,7 +41,7 @@ public class RedshiftAuthProxy {
     public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
                              String masterUsername, String masterPassword, String dbName,
                              RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
-                             RdsAuthProxy.PasswordValidator passwordValidator,
+                             PasswordValidator passwordValidator,
                              S3Service s3Service) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
@@ -145,7 +145,7 @@ public class RedshiftAuthProxy {
             PostgresProtocolHandler.AuthenticatedSession session =
                     PostgresProtocolHandler.authenticate(
                             client, backend, masterUsername, masterPassword, dbName,
-                            false, sigV4, tlsCertificates, passwordValidator::validate);
+                            false, sigV4, tlsCertificates, passwordValidator);
             if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.

@@ -5032,8 +5032,8 @@ class RdsServiceTest {
 
         restoredService.restorePersistedRuntime();
 
-        ArgumentCaptor<RdsAuthProxy.PasswordValidator> validator =
-                ArgumentCaptor.forClass(RdsAuthProxy.PasswordValidator.class);
+        ArgumentCaptor<RdsAuthProxy.MasterPasswordCheck> validator =
+                ArgumentCaptor.forClass(RdsAuthProxy.MasterPasswordCheck.class);
         verify(restoredProxyManager).startProxy(eq("db-proxy:" + proxy.getDbProxyArn()),
                 eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(5432), eq("127.0.0.1"), eq(15432), any(), eq("admin"),

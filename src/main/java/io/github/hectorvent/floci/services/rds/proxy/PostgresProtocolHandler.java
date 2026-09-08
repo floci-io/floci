@@ -54,6 +54,26 @@ public class PostgresProtocolHandler {
      */
     public record AuthenticatedSession(Socket client, String iamRole) {}
 
+    /** The username/password the proxy opens the backend PostgreSQL connection with. */
+    record BackendLogin(String user, String password) {}
+
+    /**
+     * Picks the backend login: the cluster master whenever the proxy is the authority for this
+     * connection (an IAM token, the master user itself, or a client the validator vouched for),
+     * otherwise the client's own credentials so the backend enforces its ACLs.
+     */
+    static BackendLogin resolveBackendLogin(boolean isMaster, boolean isIam,
+                                            PasswordValidator.AuthResult result,
+                                            String masterUsername, String masterPassword,
+                                            String clientUsername, String clientPassword) {
+        boolean useMaster = isIam || isMaster
+                || result == PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+        if (useMaster) {
+            return new BackendLogin(masterUsername, masterPassword);
+        }
+        return new BackendLogin(clientUsername, clientPassword);
+    }
+
     public static AuthenticatedSession authenticate(Socket client, Socket backend,
                                       String masterUsername, String masterPassword, String dbName,
                                       boolean iamEnabled, RdsSigV4Validator sigV4,
@@ -84,12 +104,15 @@ public class PostgresProtocolHandler {
 
         // Phase 4: Validate credentials.
         // - IAM tokens: validated locally via SigV4.
-        // - Master user (plain password): validated at the proxy via passwordValidator, which
-        //   reads from RdsService and therefore reflects modifyDBInstance password changes.
-        // - Non-master users: pass through — the backend is the authority for their passwords.
+        // - Every non-IAM client: classified by passwordValidator into REJECT / PASSTHROUGH /
+        //   MASTER_EQUIVALENT. PASSTHROUGH keeps the legacy non-master behaviour (the backend is
+        //   the authority for the password); MASTER_EQUIVALENT means the proxy vouched for the
+        //   client, so the backend leg runs as the cluster master. The RDS validator reads from
+        //   RdsService, so a master login still reflects modifyDBInstance password changes.
         boolean isIam = iamEnabled && clientPassword.contains("X-Amz-Signature");
         boolean isMaster = masterUsername.equals(clientUsername);
 
+        PasswordValidator.AuthResult authResult = PasswordValidator.AuthResult.PASSTHROUGH;
         if (isIam) {
             if (!sigV4.validate(clientPassword, clientUsername)) {
                 sendErrorResponse(clientOut, "FATAL", "28P01",
@@ -99,8 +122,9 @@ public class PostgresProtocolHandler {
                 closeQuietly(backend);
                 return null;
             }
-        } else if (isMaster) {
-            if (!passwordValidator.validate(clientUsername, clientPassword)) {
+        } else {
+            authResult = passwordValidator.validate(clientUsername, clientPassword);
+            if (authResult == PasswordValidator.AuthResult.REJECT) {
                 sendErrorResponse(clientOut, "FATAL", "28P01",
                         "password authentication failed for user \"" + clientUsername + "\"");
                 clientOut.flush();
@@ -113,13 +137,16 @@ public class PostgresProtocolHandler {
         // Phase 5: Connect to backend PostgreSQL.
         // IAM and master: use master credentials — the backend has the original container password
         // and is never updated directly, so the proxy always authenticates as master.
-        // Non-master: forward the client's own credentials so the backend enforces its own ACLs.
+        // Non-master: forward the client's own credentials so the backend enforces its own ACLs,
+        // unless the proxy vouched for the client (MASTER_EQUIVALENT).
         InputStream backendIn = backend.getInputStream();
         OutputStream backendOut = backend.getOutputStream();
 
         String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
-        String backendUser = (isIam || isMaster) ? masterUsername : clientUsername;
-        String backendPass = (isIam || isMaster) ? masterPassword : clientPassword;
+        BackendLogin backendLogin = resolveBackendLogin(isMaster, isIam, authResult,
+                masterUsername, masterPassword, clientUsername, clientPassword);
+        String backendUser = backendLogin.user();
+        String backendPass = backendLogin.password();
         sendStartupToBackend(backendOut, backendUser, effectiveDbName);
         backendOut.flush();
 

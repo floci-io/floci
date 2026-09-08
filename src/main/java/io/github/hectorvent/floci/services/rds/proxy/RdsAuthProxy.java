@@ -27,7 +27,7 @@ public class RdsAuthProxy {
     private final DatabaseEngine engine;
     private final RdsSigV4Validator sigV4;
     private final RdsProxyTlsCertificates tlsCertificates;
-    private final PasswordValidator passwordValidator;
+    private final MasterPasswordCheck passwordValidator;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -36,7 +36,7 @@ public class RdsAuthProxy {
                         DatabaseEngine engine, boolean iamEnabled,
                         String masterUsername, String masterPassword, String dbName,
                         RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
-                        PasswordValidator passwordValidator) {
+                        MasterPasswordCheck passwordValidator) {
         this.instanceId = instanceId;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -99,19 +99,30 @@ public class RdsAuthProxy {
             backend = new Socket(backendHost, backendPort);
             backend.setTcpNoDelay(true);
 
+            // RDS only proxy-validates the master user; a non-master user passes through so the
+            // backend enforces its own credentials.
+            PasswordValidator authAdapter = (user, pass) -> {
+                if (!masterUsername.equals(user)) {
+                    return PasswordValidator.AuthResult.PASSTHROUGH;
+                }
+                return passwordValidator.validate(user, pass)
+                        ? PasswordValidator.AuthResult.MASTER_EQUIVALENT
+                        : PasswordValidator.AuthResult.REJECT;
+            };
+
             switch (engine) {
                 case POSTGRES -> {
                     PostgresProtocolHandler.AuthenticatedSession session =
                             PostgresProtocolHandler.authenticate(
                                     client, backend, masterUsername, masterPassword, dbName,
-                                    iamEnabled, sigV4, tlsCertificates, passwordValidator::validate);
+                                    iamEnabled, sigV4, tlsCertificates, authAdapter);
                     if (session != null) {
                         PostgresProtocolHandler.bridge(session, backend);
                     }
                 }
                 case MYSQL, MARIADB -> MySqlProtocolHandler.handleAuth(
                         client, backend, masterUsername, masterPassword,
-                        iamEnabled, sigV4, tlsCertificates, passwordValidator::validate);
+                        iamEnabled, sigV4, tlsCertificates, authAdapter);
             }
         } catch (Exception e) {
             LOG.debugv("RDS connection error for instance {0}: {1}", instanceId, e.getMessage());
@@ -135,10 +146,12 @@ public class RdsAuthProxy {
     }
 
     /**
-     * Callback for password validation — implemented by RdsService.
+     * Callback for master-password validation, implemented by RdsService. Returns true when the
+     * supplied master credentials are current. Non-master users are never asked here: the backend
+     * database is the authority for their passwords.
      */
     @FunctionalInterface
-    public interface PasswordValidator {
+    public interface MasterPasswordCheck {
         boolean validate(String username, String password);
     }
 }
