@@ -6144,6 +6144,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // 2026-08-25: it matches only the primary block, not a secondary
                 // cidr-block-association entry).
                 case "cidr", "cidr-block" -> matchesValue(values, vpc.getCidrBlock());
+                case "cidr-block-association.association-id" -> vpc.getCidrBlockAssociationSet().stream()
+                        .anyMatch(a -> matchesValue(values, a.getAssociationId()));
+                case "cidr-block-association.cidr-block" -> vpc.getCidrBlockAssociationSet().stream()
+                        .anyMatch(a -> matchesValue(values, a.getCidrBlock()));
+                case "cidr-block-association.state" -> vpc.getCidrBlockAssociationSet().stream()
+                        .anyMatch(a -> matchesValue(values, a.getCidrBlockState()));
+                case "ipv6-cidr-block-association.association-id" -> vpc.getIpv6CidrBlockAssociationSet().stream()
+                        .anyMatch(a -> matchesValue(values, a.getAssociationId()));
+                case "ipv6-cidr-block-association.ipv6-cidr-block" -> vpc.getIpv6CidrBlockAssociationSet().stream()
+                        .anyMatch(a -> matchesValue(values, a.getIpv6CidrBlock()));
+                case "ipv6-cidr-block-association.state" -> vpc.getIpv6CidrBlockAssociationSet().stream()
+                        .anyMatch(a -> matchesValue(values, a.getIpv6CidrBlockState()));
                 default -> true;
             };
         }
