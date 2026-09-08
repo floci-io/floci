@@ -2632,7 +2632,7 @@ public class Ec2QueryHandler {
                 .start("cidrBlockAssociation")
                 .elem("associationId", assoc.getAssociationId())
                 .elem("cidrBlock", assoc.getCidrBlock())
-                .elem("cidrBlockState", assoc.getCidrBlockState())
+                .start("cidrBlockState").elem("state", assoc.getCidrBlockState()).end("cidrBlockState")
                 .end("cidrBlockAssociation")
                 .end("AssociateVpcCidrBlockResponse");
         return xmlResponse(xml.build());
