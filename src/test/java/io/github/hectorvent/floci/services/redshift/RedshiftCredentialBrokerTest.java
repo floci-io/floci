@@ -53,14 +53,44 @@ class RedshiftCredentialBrokerTest {
     }
 
     @Test
-    void issueOverwritesPreviousCredentialForSameUser() {
+    void issueKeepsEveryUnexpiredCredentialForSameUser() {
         TempCredential first = broker.issue("acc", "clus", "analyst", List.of(), 900);
         TempCredential second = broker.issue("acc", "clus", "analyst", List.of(), 900);
 
-        assertTrue(first.password() != null && second.password() != null);
-        Optional<TempCredential> live = broker.resolve("acc", "clus", "analyst");
-        assertTrue(live.isPresent());
-        assertEquals(second.password(), live.get().password());
+        // AWS keeps each issued password valid until its own expiry: a reissue must not
+        // invalidate a still-live credential.
+        assertEquals(RedshiftCredentialBroker.Match.MASTER_EQUIVALENT,
+                broker.classify("acc", "clus", "analyst", first.password()));
+        assertEquals(RedshiftCredentialBroker.Match.MASTER_EQUIVALENT,
+                broker.classify("acc", "clus", "analyst", second.password()));
+    }
+
+    @Test
+    void issuePrunesExpiredCredentialsForSameUser() {
+        broker.issue("acc", "clus", "analyst", List.of(), 0);
+        TempCredential live = broker.issue("acc", "clus", "analyst", List.of(), 900);
+
+        assertEquals(RedshiftCredentialBroker.Match.MASTER_EQUIVALENT,
+                broker.classify("acc", "clus", "analyst", live.password()));
+        assertEquals(1, broker.liveCredentialCountForTesting("acc", "clus", "analyst"));
+    }
+
+    @Test
+    void revokeClusterDropsEveryCredentialForThatCluster() {
+        TempCredential a = broker.issue("acc", "clus", "analyst", List.of(), 900);
+        broker.issue("acc", "clus", "etl", List.of(), 900);
+        TempCredential other = broker.issue("acc", "other", "analyst", List.of(), 900);
+
+        broker.revokeCluster("acc", "clus");
+
+        assertTrue(broker.resolve("acc", "clus", "analyst").isEmpty());
+        assertEquals(RedshiftCredentialBroker.Match.PASSTHROUGH,
+                broker.classify("acc", "clus", "analyst", a.password()));
+        assertEquals(RedshiftCredentialBroker.Match.PASSTHROUGH,
+                broker.classify("acc", "clus", "etl", "anything"));
+        // A same-named DbUser on a different cluster is untouched.
+        assertEquals(RedshiftCredentialBroker.Match.MASTER_EQUIVALENT,
+                broker.classify("acc", "other", "analyst", other.password()));
     }
 
     @Test

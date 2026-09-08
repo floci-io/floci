@@ -136,6 +136,9 @@ public class RedshiftService {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
+        // A previous cluster with this identifier may have been deleted without its temp
+        // credentials being cleared; drop them so the new cluster starts with none.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(identifier);
@@ -223,7 +226,10 @@ public class RedshiftService {
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
         clusters.flush();
-        
+        // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
+        // identifier does not accept them as master-equivalent.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
+
         cluster.setClusterStatus("deleting");
         return cluster;
     }

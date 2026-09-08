@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -25,6 +26,8 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class RedshiftQueryHandler {
+
+    private static final Logger LOG = Logger.getLogger(RedshiftQueryHandler.class);
 
     // GetClusterCredentials DurationSeconds bounds, inclusive (AWS: 900 to 3600).
     private static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
@@ -478,7 +481,7 @@ public class RedshiftQueryHandler {
     private int resolveDurationSeconds(MultivaluedMap<String, String> params) {
         String raw = params.getFirst("DurationSeconds");
         if (raw == null || raw.isBlank()) {
-            return config.services().redshift().defaultCredentialDurationSeconds();
+            return defaultDurationSeconds();
         }
         int duration;
         try {
@@ -492,6 +495,20 @@ public class RedshiftQueryHandler {
                             + " and " + MAX_CREDENTIAL_DURATION_SECONDS, 400);
         }
         return duration;
+    }
+
+    // The YAML default is operator-supplied, so hold it to the same AWS bounds as a request
+    // value: an out-of-range override falls back to the AWS minimum rather than minting a
+    // credential that is already expired or outlives the documented range.
+    private int defaultDurationSeconds() {
+        int configured = config.services().redshift().defaultCredentialDurationSeconds();
+        if (configured < MIN_CREDENTIAL_DURATION_SECONDS || configured > MAX_CREDENTIAL_DURATION_SECONDS) {
+            LOG.warnv("floci.services.redshift.default-credential-duration-seconds={0} is outside the "
+                    + "AWS range {1} to {2}; using {1}", configured,
+                    MIN_CREDENTIAL_DURATION_SECONDS, MAX_CREDENTIAL_DURATION_SECONDS);
+            return MIN_CREDENTIAL_DURATION_SECONDS;
+        }
+        return configured;
     }
 
     private String getClusterCredentialsXml(String operation, TempCredential credential) {

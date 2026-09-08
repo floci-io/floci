@@ -439,6 +439,21 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void getClusterCredentialsClampsAnOutOfRangeConfigDefault() {
+        when(config.services().redshift().defaultCredentialDurationSeconds()).thenReturn(5);
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
+
+        handler.handle("GetClusterCredentials", params);
+
+        java.time.Instant expiresAt = credentialBroker.resolve("acc", "c1", "analyst").orElseThrow().expiresAt();
+        assertTrue(expiresAt.isAfter(java.time.Instant.now().plusSeconds(800)),
+                "an out-of-range config default must fall back to the AWS minimum, not be used as-is");
+    }
+
+    @Test
     void getClusterCredentialsRejectsDurationBelowMinimum() {
         when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();

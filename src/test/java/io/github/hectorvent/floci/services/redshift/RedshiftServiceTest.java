@@ -353,6 +353,18 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void deleteClusterRevokesItsGetClusterCredentialsCredentials() {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier("test-c");
+        when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
+        credentialBroker.issue("111111111111", "test-c", "analyst", List.of(), 900);
+
+        service.deleteCluster("test-c");
+
+        assertTrue(credentialBroker.resolve("111111111111", "test-c", "analyst").isEmpty());
+    }
+
+    @Test
     void deleteClusterAbortsAndKeepsMetadataWhenTheProxyWontStop() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");
