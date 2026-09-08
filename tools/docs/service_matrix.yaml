@@ -68,6 +68,4 @@ deferred:
     by: "2026-09-15"
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
-facet_pages:
-  # An investigation write-up behind the CodeBuild local-agent work, not a service page.
-  - codebuild-local-agent-investigation-epic
+facet_pages: []
