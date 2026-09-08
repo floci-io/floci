@@ -253,7 +253,7 @@ public class SigninService {
         Instant expiration = issuedAt.plusSeconds(ACCESS_TOKEN_TTL_SECONDS);
         String principalArn = "arn:aws:iam::" + accountId + ":root";
         iamService.registerSessionForAccount(
-                accountId, accessKeyId, secretAccessKey, principalArn, expiration, null);
+                accountId, accessKeyId, secretAccessKey, sessionToken, principalArn, expiration, null);
 
         SessionCreds accessToken = new SessionCreds(accessKeyId, secretAccessKey, sessionToken);
         String idToken = includeIdToken ? idToken(principalArn, accountId, clientId, issuedAt) : null;

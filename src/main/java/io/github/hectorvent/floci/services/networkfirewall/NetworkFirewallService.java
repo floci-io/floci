@@ -126,23 +126,27 @@ public class NetworkFirewallService {
         firewall.put("DeleteProtection", request.path("DeleteProtection").asBoolean(true));
         firewall.put("AvailabilityZoneChangeProtection",
                 request.path("AvailabilityZoneChangeProtection").asBoolean(false));
+        rotateToken(firewall);
         firewalls.put(firewallArn, firewall);
         return firewallResponse(firewall, region);
     }
 
-    public ObjectNode describeFirewall(String firewallArn, String firewallName, String region, String accountId) {
+    public synchronized ObjectNode describeFirewall(String firewallArn, String firewallName, String region,
+                                                    String accountId) {
         requireIdentifier(firewallArn, firewallName);
         ObjectNode firewall = find(firewalls, firewallArn, firewallName, "FirewallArn", "FirewallName");
         if (firewall == null) {
             throw notFound("Firewall", firewallArn == null ? firewallName : firewallArn);
         }
-        return firewallResponse(firewall, region);
+        ObjectNode response = firewallResponse(firewall, region);
+        response.put("UpdateToken", ensureToken(firewall));
+        return response;
     }
 
     /**
      * Each UpdateFirewall* operation models exactly one mutable field (botocore
-     * 2020-11-12). Anything else in the raw request — including another operation's
-     * field, or unmodeled members like SubnetMappings — must not be persisted, matching
+     * 2020-11-12). Anything else in the raw request, including another operation's
+     * field, or unmodeled members like SubnetMappings, must not be persisted, matching
      * AWS ignoring unmodeled request members and scoping each op to its own field.
      */
     private static final Map<String, String> UPDATE_ACTION_FIELDS = Map.of(
@@ -161,10 +165,19 @@ public class NetworkFirewallService {
      */
     private static final Set<String> CLEARED_WHEN_OMITTED = Set.of("UpdateFirewallDescription");
 
-    public ObjectNode updateFirewall(String action, JsonNode request, String region, String accountId) {
+    /**
+     * Synchronized so that validating the caller's token against the firewall's current
+     * one and rotating to a new token happen as a single atomic step. Without a common
+     * lock, two overlapping calls can each read and match the same current token before
+     * either commits its rotation, letting both changes apply when the second one should
+     * have been rejected as stale. See {@link #associateSubnets} for the sibling case
+     * this reuses the same lock for.
+     */
+    public synchronized ObjectNode updateFirewall(String action, JsonNode request, String region, String accountId) {
         String arn = textOrNull(request, "FirewallArn");
         String name = textOrNull(request, "FirewallName");
         ObjectNode existing = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
+        requireCurrentToken(existing, request);
         String field = UPDATE_ACTION_FIELDS.get(action);
         JsonNode value = request.get(field);
         if (value != null) {
@@ -172,6 +185,7 @@ public class NetworkFirewallService {
         } else if (CLEARED_WHEN_OMITTED.contains(action)) {
             existing.remove(field);
         }
+        String newToken = rotateToken(existing);
         firewalls.put(existing.path("FirewallArn").asText(), existing);
 
         // Each UpdateFirewall* response is a flat {FirewallArn, FirewallName,
@@ -189,7 +203,7 @@ public class NetworkFirewallService {
         if (current != null) {
             response.set(field, current.deepCopy());
         }
-        response.put("UpdateToken", UUID.randomUUID().toString());
+        response.put("UpdateToken", newToken);
         return response;
     }
 
@@ -261,12 +275,64 @@ public class NetworkFirewallService {
     private ObjectNode firewallForChange(JsonNode request, String protectionField, String protectedResource) {
         ObjectNode firewall = require(firewalls, textOrNull(request, "FirewallArn"),
                 textOrNull(request, "FirewallName"), "Firewall", "FirewallArn", "FirewallName");
+        requireCurrentToken(firewall, request);
         if (firewall.path(protectionField).asBoolean(false)) {
             throw new AwsException("InvalidOperationException",
                     "Firewall has " + protectedResource + " change protection enabled: "
                             + firewall.path("FirewallArn").asText(), 400);
         }
         return firewall;
+    }
+
+    /**
+     * botocore 2020-11-12 marks UpdateToken optional on every UpdateFirewall, Associate and
+     * Disassociate request: omitting it makes an unconditional change, while supplying it
+     * asks Network Firewall to check it against the firewall's current token and fail with
+     * InvalidTokenException on a mismatch. See the UpdateFirewallDescription documentation
+     * for this exact contract.
+     */
+    private void requireCurrentToken(ObjectNode firewall, JsonNode request) {
+        String providedToken = textOrNull(request, "UpdateToken");
+        if (providedToken == null) {
+            return;
+        }
+        String currentToken = firewall.path("UpdateToken").asText(null);
+        if (!providedToken.equals(currentToken)) {
+            throw new AwsException("InvalidTokenException",
+                    "The token you provided is stale or isn't valid for the operation.", 400);
+        }
+    }
+
+    /**
+     * Generates a fresh UpdateToken and stores it directly on the firewall so the next
+     * mutating call can be checked against it. The token is never a member of the modeled
+     * Firewall shape, so {@link #firewallResponse} strips it before nesting that object
+     * under a response's {@code Firewall} field.
+     */
+    private String rotateToken(ObjectNode firewall) {
+        String token = UUID.randomUUID().toString();
+        firewall.put("UpdateToken", token);
+        return token;
+    }
+
+    /**
+     * A firewall persisted before UpdateToken support was added has no such field, so
+     * {@code UpdateToken}'s default read is {@code null} here, matching the default
+     * {@link #requireCurrentToken} compares against. Backfilling a real token on first
+     * describe, rather than exposing an empty string, keeps the describe-then-submit
+     * flow working for those firewalls the same way it does for ones created after
+     * this change. Like every other {@link #rotateToken} caller, the backfilled token
+     * is written through {@code firewalls.put} so a persistent or hybrid storage
+     * backend records it; otherwise the token handed to the caller could be lost on
+     * restart and a later conditional call carrying it would be rejected as stale.
+     */
+    private String ensureToken(ObjectNode firewall) {
+        String token = firewall.path("UpdateToken").asText(null);
+        if (token == null || token.isEmpty()) {
+            token = rotateToken(firewall);
+            firewalls.put(firewall.path("FirewallArn").asText(), firewall);
+        }
+        return token;
     }
 
     /**
@@ -299,12 +365,13 @@ public class NetworkFirewallService {
     private ObjectNode storeAndRespond(ObjectNode firewall, String field, ArrayNode mappings) {
         String firewallArn = firewall.path("FirewallArn").asText();
         firewall.set(field, mappings);
+        String newToken = rotateToken(firewall);
         firewalls.put(firewallArn, firewall);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("FirewallArn", firewallArn);
         response.put("FirewallName", firewall.path("FirewallName").asText());
         response.set(field, mappings.deepCopy());
-        response.put("UpdateToken", UUID.randomUUID().toString());
+        response.put("UpdateToken", newToken);
         return response;
     }
 
@@ -435,9 +502,16 @@ public class NetworkFirewallService {
         return objectMapper.createObjectNode();
     }
 
+    /**
+     * UpdateToken is stored directly on the firewall so {@link #requireCurrentToken} can
+     * read it back, but botocore's Firewall shape has no such member, so the nested
+     * {@code Firewall} view built here must have it stripped.
+     */
     private ObjectNode firewallResponse(ObjectNode firewall, String region) {
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Firewall", firewall.deepCopy());
+        ObjectNode firewallView = firewall.deepCopy();
+        firewallView.remove("UpdateToken");
+        response.set("Firewall", firewallView);
         ObjectNode status = response.putObject("FirewallStatus");
         status.put("ConfigurationSyncStateSummary", "IN_SYNC");
         status.put("Status", "READY");
@@ -469,9 +543,15 @@ public class NetworkFirewallService {
         attachment.put("SubnetId", subnetId);
     }
 
+    /**
+     * botocore 2020-11-12 models no {@code *AlreadyExist*} shape for CreateFirewall,
+     * CreateRuleGroup or CreateFirewallPolicy: their only modeled client-fault error for
+     * a name collision is InvalidRequestException, so that is what a typed SDK client can
+     * actually deserialize here.
+     */
     private void ensureUnique(StorageBackend<String, ObjectNode> store, String arn, String name, String kind) {
         if (store.get(arn).isPresent() || find(store, null, name, "ResourceArn", "ResourceName") != null) {
-            throw new AwsException("ResourceAlreadyExistsException", kind + " already exists: " + name, 400);
+            throw new AwsException("InvalidRequestException", kind + " already exists: " + name, 400);
         }
     }
 
@@ -621,18 +701,21 @@ public class NetworkFirewallService {
         }
     }
 
-    public ObjectNode associateFirewallPolicy(JsonNode request, String region, String accountId) {
+    /** @see #associateSubnets for why this is synchronized. */
+    public synchronized ObjectNode associateFirewallPolicy(JsonNode request, String region, String accountId) {
         String policyArn = requiredText(request, "FirewallPolicyArn");
         ObjectNode firewall =
                 firewallForChange(request, "FirewallPolicyChangeProtection", "firewall policy");
         require(firewallPolicies, policyArn, null, "FirewallPolicy", "ResourceArn", "ResourceName");
         String firewallArn = firewall.path("FirewallArn").asText();
         firewall.put("FirewallPolicyArn", policyArn);
+        String newToken = rotateToken(firewall);
         firewalls.put(firewallArn, firewall);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("FirewallArn", firewallArn);
         response.put("FirewallName", firewall.path("FirewallName").asText());
         response.put("FirewallPolicyArn", policyArn);
+        response.put("UpdateToken", newToken);
         return response;
     }
 }

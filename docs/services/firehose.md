@@ -57,6 +57,21 @@ The two Snappy variants share an extension and are told apart only by `Content-E
 
 Any other value, including differently-cased ones such as `SNAPPY` instead of `Snappy`, is rejected with `ValidationException`.
 
+## Data format conversion
+
+`DataFormatConversionConfiguration` on the extended S3 destination is accepted, validated, persisted, and echoed back by `DescribeDeliveryStream`. **The conversion itself, JSON to Parquet at delivery time, is not implemented yet**: a conversion-enabled stream delivers its records unconverted, under the usual key format, and creating or updating one logs a warning saying so.
+
+Validation matches AWS on both `CreateDeliveryStream` and `UpdateDestination`, down to the [modeled](https://docs.aws.amazon.com/firehose/latest/APIReference/API_DataFormatConversionConfiguration.html) bounds, enums and patterns, so a raw JSON client cannot store a configuration AWS would reject. Two rules are worth knowing because they constrain the destination rather than the conversion block: `CompressionFormat` must be `UNCOMPRESSED`, compression being chosen by the output serializer instead, and an explicitly specified `BufferingHints.SizeInMBs` must be at least 64. Omitting `BufferingHints` stores 128 MiB, AWS's larger default for converting streams, rather than the ordinary 5 MiB.
+
+An omitted `Enabled` counts as enabled; `Enabled: false` stores and merges the configuration without applying those two rules. `UpdateDestination` merges member-wise, nested `SchemaConfiguration` members included, then validates the merged result, so an update carrying only `{"Enabled": false}` keeps the stored schema and formats, and one naming only a new `TableName` keeps the stored role, database and region.
+
+### Known deviations from AWS
+
+- **An enabled `OrcSerDe` is rejected** with `InvalidArgumentException` at create/update time. Real AWS accepts it; Floci's planned conversion engine (DuckDB) cannot write ORC, and refusing early beats storing a configuration that could never deliver. A disabled one is stored and echoed with its ORC members intact.
+- **The Glue table is not resolved at create or update time.** Real AWS rejects a `SchemaConfiguration` naming a database or table that does not exist, with `InvalidArgumentException` wrapping a Glue `EntityNotFoundException`; Floci accepts it. Floci performs no role-assumption check either, where AWS validates the role last.
+- **Two kinds of validation are skipped**: the element constraints AWS puts on `OrcSerDe.BloomFilterColumns` and `HiveJsonSerDe.TimestampFormats` entries (the equivalent ones on `ColumnToJsonKeyMappings` are enforced), and AWS's semantic check of SerDe option values, which answers `InvalidArgumentException` ("Invalid deserializer option(s): ...") for a well-formed but unusable value.
+- A malformed but non-empty `SchemaConfiguration.RoleARN` is accepted. AWS answers `InvalidParameterValueException` ("Invalid role ARN.") before its modeled rules run; Floci validates no ARNs, so it applies only the length and pattern rules, which an empty value trips exactly as on AWS.
+
 ## S3 object keys
 
 Delivered objects are named `<evaluated prefix><streamName>-<versionId>-<yyyy-MM-dd-HH-mm-ss>-<uuid><file extension>`, matching [AWS's object name format](https://docs.aws.amazon.com/firehose/latest/dev/s3-object-name.html):

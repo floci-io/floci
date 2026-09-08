@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -51,14 +52,16 @@ public class ControlTowerService {
     private static final String OP_TYPE_CREATE = "CREATE";
     private static final String OP_TYPE_DELETE = "DELETE";
     private static final String OP_TYPE_RESET = "RESET";
-    private static final String OP_TYPE_BASELINE_ENABLED = "BASELINE_ENABLED";
+    private static final String OP_TYPE_BASELINE_ENABLED = "ENABLE_BASELINE";
     private static final String OP_TYPE_BASELINE_UPDATE = "UPDATE_ENABLED_BASELINE";
-    private static final String OP_TYPE_BASELINE_RESET = "BASELINE_RESET";
+    private static final String OP_TYPE_BASELINE_RESET = "RESET_ENABLED_BASELINE";
     private static final String IDENTITY_CENTER_BASELINE_NAME = "IdentityCenterBaseline";
     private static final String IDENTITY_CENTER_BASELINE_ID = "LN25R72TTG6IGPTQ";
     private static final String IDENTITY_CENTER_ENABLED_BASELINE_ID = "FLOCIIDCBASELINE1";
     private static final String IDENTITY_CENTER_BASELINE_VERSION = "1.0";
     private static final String CONTROL_TOWER_BASELINE_ID = "17BSJV3IGJ2QSGA2";
+    private static final String CONFIG_BASELINE_NAME = "ConfigBaseline";
+    private static final String CONFIG_BASELINE_ID = "FLOCICONFIGBASELINE";
 
     // Static baseline catalog. Only `name` is load-bearing (LZA matches case-insensitively on
     // name at register-organizational-unit/index.ts:109-111 and :502); ids are fixed for
@@ -66,6 +69,8 @@ public class ControlTowerService {
     private static final List<BaselineCatalogEntry> BASELINE_CATALOG = List.of(
             new BaselineCatalogEntry("AWSControlTowerBaseline", CONTROL_TOWER_BASELINE_ID,
                     "Sets up resources to govern an OU."),
+            new BaselineCatalogEntry(CONFIG_BASELINE_NAME, CONFIG_BASELINE_ID,
+                    "Sets up AWS Config resources for an organizational unit."),
             new BaselineCatalogEntry(IDENTITY_CENTER_BASELINE_NAME, IDENTITY_CENTER_BASELINE_ID,
                     "Sets up resources shared for IAM Identity Center access."),
             new BaselineCatalogEntry("AuditBaseline", "J8HX46AHS5MIKQPD",
@@ -76,6 +81,7 @@ public class ControlTowerService {
     private final StorageBackend<String, LandingZone> landingZoneStore;
     private final StorageBackend<String, EnabledBaseline> enabledBaselineStore;
     private final OrganizationsService organizationsService;
+    private final boolean seedLandingZone;
     // Operation ledgers keyed by "accountId::region": opId -> operationType. In-memory on purpose:
     // pollers within one pipeline run are the only consumers, and unknown ids still answer
     // SUCCEEDED (restart-safe for LZA). Scoped so one account cannot enumerate another's
@@ -83,7 +89,8 @@ public class ControlTowerService {
     private final Map<String, OperationLedger> operationLedgers = new ConcurrentHashMap<>();
 
     @Inject
-    public ControlTowerService(StorageFactory storageFactory, OrganizationsService organizationsService) {
+    public ControlTowerService(StorageFactory storageFactory, OrganizationsService organizationsService,
+                               EmulatorConfig config) {
         this(
                 storageFactory.create(
                         "controltower",
@@ -95,22 +102,32 @@ public class ControlTowerService {
                         "controltower-enabled-baselines.json",
                         new TypeReference<Map<String, EnabledBaseline>>() {
                         }),
-                organizationsService);
+                organizationsService,
+                config.services().controltower().seedLandingZone());
     }
 
     ControlTowerService(
             StorageBackend<String, LandingZone> landingZoneStore,
             StorageBackend<String, EnabledBaseline> enabledBaselineStore) {
-        this(landingZoneStore, enabledBaselineStore, null);
+        this(landingZoneStore, enabledBaselineStore, null, true);
     }
 
     ControlTowerService(
             StorageBackend<String, LandingZone> landingZoneStore,
             StorageBackend<String, EnabledBaseline> enabledBaselineStore,
             OrganizationsService organizationsService) {
+        this(landingZoneStore, enabledBaselineStore, organizationsService, true);
+    }
+
+    ControlTowerService(
+            StorageBackend<String, LandingZone> landingZoneStore,
+            StorageBackend<String, EnabledBaseline> enabledBaselineStore,
+            OrganizationsService organizationsService,
+            boolean seedLandingZone) {
         this.landingZoneStore = landingZoneStore;
         this.enabledBaselineStore = enabledBaselineStore;
         this.organizationsService = organizationsService;
+        this.seedLandingZone = seedLandingZone;
     }
 
     public synchronized LandingZone getOrSeedLandingZone(String accountId, String region) {
@@ -124,7 +141,10 @@ public class ControlTowerService {
     }
 
     public synchronized List<LandingZone> listLandingZones(String accountId, String region) {
-        return List.of(getOrSeedLandingZone(accountId, region));
+        if (seedLandingZone) {
+            return List.of(getOrSeedLandingZone(accountId, region));
+        }
+        return landingZoneStore.get(region).map(List::of).orElseGet(List::of);
     }
 
     /**
@@ -134,7 +154,10 @@ public class ControlTowerService {
      */
     private LandingZone requireSeededLandingZone(
             String accountId, String region, String landingZoneIdentifier) {
-        LandingZone landingZone = getOrSeedLandingZone(accountId, region);
+        LandingZone landingZone = seedLandingZone
+                ? getOrSeedLandingZone(accountId, region)
+                : landingZoneStore.get(region).orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Landing zone not found: " + landingZoneIdentifier, 404));
         if (!landingZone.getArn().equals(landingZoneIdentifier)) {
             throw new AwsException("ResourceNotFoundException",
                     "Landing zone not found: " + landingZoneIdentifier, 404);
@@ -231,8 +254,13 @@ public class ControlTowerService {
     }
 
     public String getOperationType(String accountId, String region, String operationIdentifier) {
+        validateOperationIdentifier(operationIdentifier);
         String recorded = recordedOperationType(accountId, region, operationIdentifier);
-        return recorded == null ? OP_TYPE_UPDATE : recorded;
+        if (recorded == null || !Set.of(OP_TYPE_CREATE, OP_TYPE_UPDATE, OP_TYPE_DELETE, OP_TYPE_RESET).contains(recorded)) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The landing zone operation does not exist or is no longer available.", 404);
+        }
+        return recorded;
     }
 
     public ListLandingZoneOperationsResult listLandingZoneOperations(
@@ -292,6 +320,7 @@ public class ControlTowerService {
     public synchronized ListEnabledBaselinesResult listEnabledBaselines(
             String accountId, String region, JsonNode request) {
         requireObject(request, "Request body");
+        migrateLegacyEnabledBaselines(region);
         String prefix = region + "::";
         List<EnabledBaseline> stored = enabledBaselineStore.scan(key -> key.startsWith(prefix));
         reconcileControlTowerGuardrails(accountId, stored);
@@ -347,6 +376,70 @@ public class ControlTowerService {
                         "The request references a resource that does not exist.", 404));
     }
 
+    private void requireBaselineExists(String region, String baselineIdentifier) {
+        boolean exists = BASELINE_CATALOG.stream().anyMatch(entry -> entry.arn(region).equals(baselineIdentifier));
+        if (!exists) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The request references a baseline that does not exist.", 404);
+        }
+    }
+
+    private void requireSupportedBaselineVersion(String region, String baselineIdentifier, String version) {
+        String configArn = baselineArn(region, CONFIG_BASELINE_ID);
+        String identityArn = baselineArn(region, IDENTITY_CENTER_BASELINE_ID);
+        String controlTowerArn = baselineArn(region, CONTROL_TOWER_BASELINE_ID);
+        boolean supported = (configArn.equals(baselineIdentifier) && "1.0".equals(version))
+                || (identityArn.equals(baselineIdentifier) && "1.0".equals(version))
+                || (controlTowerArn.equals(baselineIdentifier) && Set.of("3.0", "4.0", "5.0").contains(version))
+                || (!Set.of(configArn, identityArn, controlTowerArn).contains(baselineIdentifier)
+                        && version.matches("\\d+\\.\\d+"));
+        if (!supported) {
+            throw validation("The baseline version must be a valid version matching the \\d+\\.\\d+ pattern and supported by the baseline.");
+        }
+    }
+
+    private void requireOrganizationalUnitTarget(String accountId, String targetIdentifier) {
+        String ouId = organizationalUnitId(targetIdentifier)
+                .orElseThrow(() -> validation("targetIdentifier must identify an organizational unit."));
+        if (organizationsService != null) {
+            try {
+                organizationsService.describeOrganizationalUnit(accountId, ouId);
+            } catch (AwsException e) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The target organizational unit does not exist.", 404);
+            }
+        }
+    }
+
+    private static String enabledBaselineKey(String region, String targetIdentifier, String baselineIdentifier) {
+        return region + "::" + targetIdentifier + "::" + baselineIdentifier;
+    }
+
+    private static String legacyEnabledBaselineKey(String region, String targetIdentifier) {
+        return region + "::" + targetIdentifier;
+    }
+
+    private void migrateLegacyEnabledBaselines(String region) {
+        String prefix = region + "::";
+        List<EnabledBaseline> snapshot = enabledBaselineStore.scan(key -> key.startsWith(prefix));
+        for (EnabledBaseline baseline : snapshot) {
+            if (baseline.getTargetIdentifier() == null || baseline.getBaselineIdentifier() == null) {
+                continue;
+            }
+            String legacyKey = legacyEnabledBaselineKey(region, baseline.getTargetIdentifier());
+            EnabledBaseline legacy = enabledBaselineStore.get(legacyKey).orElse(null);
+            if (legacy == null) {
+                continue;
+            }
+            String compositeKey = enabledBaselineKey(
+                    region, legacy.getTargetIdentifier(), legacy.getBaselineIdentifier());
+            if (enabledBaselineStore.get(compositeKey).isEmpty()) {
+                enabledBaselineStore.put(compositeKey, legacy);
+            }
+            enabledBaselineStore.delete(legacyKey);
+        }
+    }
+
     private boolean isIdentityCenterBaseline(String arn) {
         return arn != null && arn.endsWith(":enabledbaseline/" + IDENTITY_CENTER_ENABLED_BASELINE_ID);
     }
@@ -364,12 +457,22 @@ public class ControlTowerService {
             throw validation("targetIdentifier must be a valid ARN.");
         }
         JsonNode parameters = request.get("parameters");
+        validateParameters(parameters);
+        requireBaselineExists(region, baselineIdentifier);
+        requireSupportedBaselineVersion(region, baselineIdentifier, baselineVersion);
+        requireOrganizationalUnitTarget(accountId, targetIdentifier);
+        migrateLegacyEnabledBaselines(region);
+
+        String key = enabledBaselineKey(region, targetIdentifier, baselineIdentifier);
+        if (enabledBaselineStore.get(key).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "The baseline is already enabled on the specified target.", 409);
+        }
 
         if (isControlTowerOuBaseline(baselineIdentifier)) {
             reconcileControlTowerGuardrails(accountId, targetIdentifier);
         }
 
-        String key = region + "::" + targetIdentifier;
         String arn = "arn:aws:controltower:" + region + ":" + accountId
                 + ":enabledbaseline/" + shortId();
         String opId = UUID.randomUUID().toString();
@@ -389,7 +492,7 @@ public class ControlTowerService {
         EnabledBaseline baseline = getEnabledBaseline(accountId, region, enabledBaselineIdentifier);
         String opId = UUID.randomUUID().toString();
         baseline.setLastOperationIdentifier(opId);
-        String key = region + "::" + baseline.getTargetIdentifier();
+        String key = enabledBaselineKey(region, baseline.getTargetIdentifier(), baseline.getBaselineIdentifier());
         enabledBaselineStore.put(key, baseline);
         recordOperation(accountId, region, opId, OP_TYPE_BASELINE_RESET);
         return opId;
@@ -406,6 +509,7 @@ public class ControlTowerService {
         requireBaselineVersion(baselineVersion);
 
         EnabledBaseline baseline = getEnabledBaseline(accountId, region, enabledBaselineIdentifier);
+        requireSupportedBaselineVersion(region, baseline.getBaselineIdentifier(), baselineVersion);
         JsonNode parameters = request.get("parameters");
         validateParameters(parameters);
         baseline.setBaselineVersion(baselineVersion);
@@ -415,15 +519,20 @@ public class ControlTowerService {
         baseline.setStatus(OP_SUCCEEDED);
         String opId = UUID.randomUUID().toString();
         baseline.setLastOperationIdentifier(opId);
-        String key = region + "::" + baseline.getTargetIdentifier();
+        String key = enabledBaselineKey(region, baseline.getTargetIdentifier(), baseline.getBaselineIdentifier());
         enabledBaselineStore.put(key, baseline);
         recordOperation(accountId, region, opId, OP_TYPE_BASELINE_UPDATE);
         return opId;
     }
 
     public String getBaselineOperationType(String accountId, String region, String operationIdentifier) {
+        validateOperationIdentifier(operationIdentifier);
         String recorded = recordedOperationType(accountId, region, operationIdentifier);
-        return recorded == null ? OP_TYPE_BASELINE_ENABLED : recorded;
+        if (recorded == null || !Set.of(OP_TYPE_BASELINE_ENABLED, OP_TYPE_BASELINE_UPDATE, OP_TYPE_BASELINE_RESET).contains(recorded)) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The baseline operation does not exist or is no longer available.", 404);
+        }
+        return recorded;
     }
 
     private void reconcileControlTowerGuardrails(String accountId, List<EnabledBaseline> baselines) {
@@ -466,12 +575,17 @@ public class ControlTowerService {
         if (alreadyStored) {
             return false;
         }
-        JsonNode manifest = getOrSeedLandingZone(accountId, region).getManifest();
-        return manifest.path("accessManagement").path("enabled").asBoolean(false);
+        JsonNode manifest = seedLandingZone
+                ? getOrSeedLandingZone(accountId, region).getManifest()
+                : landingZoneStore.get(region).map(LandingZone::getManifest).orElse(null);
+        return manifest != null && manifest.path("accessManagement").path("enabled").asBoolean(false);
     }
 
     private EnabledBaseline syntheticIdentityCenterBaseline(String accountId, String region) {
-        LandingZone lz = getOrSeedLandingZone(accountId, region);
+        LandingZone lz = seedLandingZone
+                ? getOrSeedLandingZone(accountId, region)
+                : landingZoneStore.get(region)
+                        .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Landing zone not found.", 404));
         return new EnabledBaseline(
                 "arn:aws:controltower:" + region + ":" + accountId
                         + ":enabledbaseline/" + IDENTITY_CENTER_ENABLED_BASELINE_ID,
@@ -584,6 +698,13 @@ public class ControlTowerService {
         return accountId + "::" + region;
     }
 
+    private static void validateOperationIdentifier(String operationIdentifier) {
+        if (operationIdentifier == null
+                || !operationIdentifier.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
+            throw validation("operationIdentifier must be a UUID.");
+        }
+    }
+
     /**
      * Insertion-ordered operation ledger for one account+region, holding at most
      * {@value #MAX_OPERATIONS_PER_SCOPE} entries and evicting the oldest first.
@@ -623,7 +744,11 @@ public class ControlTowerService {
             throw validation("nextToken must be a non-empty string.");
         }
         try {
-            return Integer.parseInt(value.textValue());
+            int offset = Integer.parseInt(value.textValue());
+            if (offset < 0) {
+                throw validation("nextToken is invalid.");
+            }
+            return offset;
         } catch (NumberFormatException e) {
             throw validation("nextToken is invalid.");
         }

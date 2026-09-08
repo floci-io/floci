@@ -77,7 +77,7 @@ class EcsServiceDaemonSchedulingTest {
         when(containerManager.startTask(any(), any(), any(), anyString()))
                 .thenThrow(new RuntimeException("no docker here"));
         EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory());
+                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null);
         service.initializeStorage();
         service.createCluster("daemon-fail", REGION);
         service.registerContainerInstance("daemon-fail", null, List.of(), REGION);
@@ -161,7 +161,8 @@ class EcsServiceDaemonSchedulingTest {
                 mock(EcsContainerManager.class),
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory());
+                new InMemoryStorageFactory(),
+                null);
         service.initializeStorage();
         return service;
     }

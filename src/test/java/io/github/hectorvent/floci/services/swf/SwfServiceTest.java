@@ -58,6 +58,8 @@ class SwfServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String DOMAIN = "unit-domain";
+    /** Upper bound for {@link #pollFor}; generous so a loaded CI runner cannot starve it. */
+    private static final Duration POLL_TIMEOUT = Duration.ofSeconds(10);
 
     private MutableClock clock;
     private SwfService service;
@@ -1199,9 +1201,15 @@ class SwfServiceTest {
      *
      * <p>Tolerates a transient empty poll so the concurrency tests can call this from
      * several threads: another thread may hold the task this caller wants at that instant.
+     *
+     * <p>Bounded by wall-clock time rather than an attempt count: with several pollers on
+     * one task list, a caller can repeatedly claim and release siblings' tasks, and those
+     * round trips take microseconds. A fixed attempt budget then burns out well before the
+     * wanted task becomes pollable under CI contention.
      */
     private SwfDecisionTask pollFor(String workflowId) {
-        for (int attempt = 0; attempt < 200; attempt++) {
+        long deadline = System.nanoTime() + POLL_TIMEOUT.toNanos();
+        while (System.nanoTime() < deadline) {
             Optional<SwfDecisionTask> claimed = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d");
             if (claimed.isPresent()) {
                 SwfDecisionTask task = claimed.get();
@@ -1210,10 +1218,11 @@ class SwfServiceTest {
                 }
                 // Release a sibling's task so its own poller can claim it.
                 service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(), null);
-                continue;
             }
+            // Back off after a steal too, so the sibling's own poller gets a window to
+            // claim the task just released instead of this thread grabbing it again.
             try {
-                Thread.sleep(5);
+                Thread.sleep(claimed.isPresent() ? 1 : 5);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;

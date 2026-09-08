@@ -11,9 +11,6 @@ import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
-import io.github.hectorvent.floci.services.pipes.PipesService;
-import io.github.hectorvent.floci.services.pipes.model.DesiredState;
-import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -25,6 +22,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -165,7 +163,20 @@ class LeafCfnProvisionerTest {
 
             verify(ssm).putParameter("/app/db", "secret", "String", null, true, REGION);
             assertEquals("/app/db", r.getPhysicalId());
-            assertEquals(Map.of("Name", "/app/db", "Type", "String", "Value", "secret"), r.getAttributes());
+            assertEquals(Map.of("Name", "/app/db", "Type", "String", "Value", "secret",
+                    "Arn", "arn:aws:ssm:us-east-1:000000000000:parameter/app/db"), r.getAttributes());
+        }
+
+        @Test
+        void arnOfANameWithoutALeadingSlashStillHasTheParameterPrefix() {
+            // AWS ARNs are always arn:...:parameter/<name>; a name without a leading slash gets the
+            // slash inserted, a name with one is not doubled.
+            StackResource r = resource("Param", "AWS::SSM::Parameter");
+            provisioner.provision(r, props("""
+                    {"Name": "db-host", "Value": "localhost"}
+                    """), ctx);
+
+            assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/db-host", r.getAttributes().get("Arn"));
         }
 
         @Test
@@ -229,18 +240,35 @@ class LeafCfnProvisionerTest {
         }
 
         @Test
-        void anExistingRepositoryIsAdoptedRatherThanFailing() {
+        void aCollidingRepositoryNameFailsTheCreate() {
             when(ecr.createRepository(anyString(), any(), any(), any(), any(), any(), any(), anyString()))
                     .thenThrow(new AwsException("RepositoryAlreadyExistsException", "exists", 400));
-            when(ecr.describeRepositories(List.of("app"), null, REGION))
-                    .thenReturn(List.of(repo("arn:existing", "uri:existing")));
 
+            // A first create has no prior physical id, so the existing repository is not this
+            // stack's: CloudFormation fails the create rather than adopting it.
+            StackResource r = resource("Repo", "AWS::ECR::Repository");
+            AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                    {"RepositoryName": "app"}
+                    """), ctx));
+
+            assertEquals("RepositoryAlreadyExistsException", failure.getErrorCode());
+            verify(ecr, never()).describeRepositories(any(), any(), anyString());
+        }
+
+        @Test
+        void theStacksOwnRepositoryIsReconciledOnUpdateRatherThanRecreated() {
+            when(ecr.putImageTagMutability("app", null, "MUTABLE", REGION))
+                    .thenReturn(repo("arn:existing", "uri:existing"));
+
+            // The prior physical id is the same name, which is what a CDK bootstrap re-run of the
+            // CDKToolkit stack looks like: reconcile in place, no create.
             StackResource r = resource("Repo", "AWS::ECR::Repository");
             provisioner.provision(r, props("""
                     {"RepositoryName": "app"}
-                    """), ctx);
+                    """), new ProvisionContext(engine, REGION, "000000000000", "my-stack", "app"));
 
             assertEquals("arn:existing", r.getAttributes().get("Arn"));
+            verify(ecr, never()).createRepository(anyString(), any(), any(), any(), any(), any(), any(), anyString());
         }
 
         @Test
@@ -264,49 +292,6 @@ class LeafCfnProvisionerTest {
         void deleteForcesRemovalSoANonEmptyRepositoryStillGoes() {
             provisioner.delete("AWS::ECR::Repository", "app", REGION);
             verify(ecr).deleteRepository("app", null, true, REGION);
-        }
-    }
-
-    @Nested
-    class Pipes {
-
-        private final PipesService pipes = mock(PipesService.class);
-        private final PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes);
-
-        @Test
-        void refIsThePipeNameAndGetAttExposesArn() {
-            Pipe pipe = new Pipe();
-            pipe.setArn("arn:aws:pipes:us-east-1:000000000000:pipe/p");
-            when(pipes.createPipe(eq("p"), eq("src"), eq("tgt"), eq("role"), any(),
-                    eq(DesiredState.RUNNING), any(), any(), any(), any(), any(), eq(REGION)))
-                    .thenReturn(pipe);
-
-            StackResource r = resource("Pipe", "AWS::Pipes::Pipe");
-            provisioner.provision(r, props("""
-                    {"Name": "p", "Source": "src", "Target": "tgt", "RoleArn": "role"}
-                    """), ctx);
-
-            assertEquals("p", r.getPhysicalId());
-            assertEquals("arn:aws:pipes:us-east-1:000000000000:pipe/p", r.getAttributes().get("Arn"));
-        }
-
-        @Test
-        void desiredStateStoppedIsHonouredAndAnythingElseRuns() {
-            Pipe pipe = new Pipe();
-            when(pipes.createPipe(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                    any(), any())).thenReturn(pipe);
-
-            provisioner.provision(resource("Pipe", "AWS::Pipes::Pipe"), props("""
-                    {"Name": "p", "DesiredState": "STOPPED"}
-                    """), ctx);
-            verify(pipes).createPipe(any(), any(), any(), any(), any(), eq(DesiredState.STOPPED),
-                    any(), any(), any(), any(), any(), any());
-        }
-
-        @Test
-        void deleteReachesTheService() {
-            provisioner.delete("AWS::Pipes::Pipe", "p", REGION);
-            verify(pipes).deletePipe("p", REGION);
         }
     }
 

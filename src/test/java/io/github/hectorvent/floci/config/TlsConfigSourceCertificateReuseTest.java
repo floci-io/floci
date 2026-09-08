@@ -58,8 +58,8 @@ class TlsConfigSourceCertificateReuseTest {
         new TlsConfigSource();
 
         Path tlsDir = tempDir.resolve("tls");
-        Path certFile = tlsDir.resolve("floci-selfsigned.crt");
-        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+        Path certFile = tlsDir.resolve("floci-server.crt");
+        Path metadataFile = tlsDir.resolve("floci-server.metadata.json");
 
         // Verify initial certificate and metadata exist
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");
@@ -108,8 +108,8 @@ class TlsConfigSourceCertificateReuseTest {
         new TlsConfigSource();
 
         Path tlsDir = tempDir.resolve("tls");
-        Path certFile = tlsDir.resolve("floci-selfsigned.crt");
-        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+        Path certFile = tlsDir.resolve("floci-server.crt");
+        Path metadataFile = tlsDir.resolve("floci-server.metadata.json");
 
         // Verify initial certificate and metadata exist
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");
@@ -151,8 +151,8 @@ class TlsConfigSourceCertificateReuseTest {
         new TlsConfigSource();
 
         Path tlsDir = tempDir.resolve("tls");
-        Path certFile = tlsDir.resolve("floci-selfsigned.crt");
-        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+        Path certFile = tlsDir.resolve("floci-server.crt");
+        Path metadataFile = tlsDir.resolve("floci-server.metadata.json");
 
         // Verify initial certificate and metadata exist
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");
@@ -196,7 +196,7 @@ class TlsConfigSourceCertificateReuseTest {
 
         // First boot: generate the certificate.
         new TlsConfigSource();
-        Path certFile = tempDir.resolve("tls").resolve("floci-selfsigned.crt");
+        Path certFile = tempDir.resolve("tls").resolve("floci-server.crt");
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");
         long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
         String initialCert = Files.readString(certFile);
@@ -278,8 +278,8 @@ class TlsConfigSourceCertificateReuseTest {
         new TlsConfigSource();
 
         Path tlsDir = tempDir.resolve("tls");
-        Path certFile = tlsDir.resolve("floci-selfsigned.crt");
-        Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
+        Path certFile = tlsDir.resolve("floci-server.crt");
+        Path metadataFile = tlsDir.resolve("floci-server.metadata.json");
 
         // Verify initial certificate and metadata exist
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");

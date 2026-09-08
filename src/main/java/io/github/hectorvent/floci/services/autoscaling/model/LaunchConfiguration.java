@@ -22,6 +22,11 @@ public class LaunchConfiguration {
     // Nullable on purpose: AWS treats an absent flag as "fall back to the
     // subnet's MapPublicIpOnLaunch" and an explicit false as an override.
     private Boolean associatePublicIpAddress;
+    // Set on create to the caller's value or AWS's documented default of true. Left without
+    // a field default so a record persisted before the field existed reads back as unset
+    // rather than as monitored.
+    private Boolean instanceMonitoringEnabled;
+    private List<LaunchConfigurationBlockDeviceMapping> blockDeviceMappings = new ArrayList<>();
     private Instant createdTime;
     private String region;
 
@@ -53,6 +58,12 @@ public class LaunchConfiguration {
 
     public Boolean getAssociatePublicIpAddress() { return associatePublicIpAddress; }
     public void setAssociatePublicIpAddress(Boolean v) { this.associatePublicIpAddress = v; }
+
+    public Boolean getInstanceMonitoringEnabled() { return instanceMonitoringEnabled; }
+    public void setInstanceMonitoringEnabled(Boolean v) { this.instanceMonitoringEnabled = v; }
+
+    public List<LaunchConfigurationBlockDeviceMapping> getBlockDeviceMappings() { return blockDeviceMappings; }
+    public void setBlockDeviceMappings(List<LaunchConfigurationBlockDeviceMapping> v) { this.blockDeviceMappings = v; }
 
     public Instant getCreatedTime() { return createdTime; }
     public void setCreatedTime(Instant v) { this.createdTime = v; }

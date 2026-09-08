@@ -79,6 +79,12 @@ public class LakeFormationController {
     }
 
     @POST
+    @Path("/UpdateResource")
+    public Response updateResource(@Context HttpHeaders headers, String body) throws Exception {
+        return handleResponse(service.updateResource(regionResolver.resolveRegion(headers), mapper.treeToValue(parse(body), UpdateResourceRequest.class)));
+    }
+
+    @POST
     @Path("/DeregisterResource")
     public Response deregisterResource(@Context HttpHeaders headers, String body) throws Exception {
         return handleResponse(service.deregisterResource(regionResolver.resolveRegion(headers), mapper.treeToValue(parse(body), DeregisterResourceRequest.class)));

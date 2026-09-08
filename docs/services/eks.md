@@ -46,7 +46,11 @@ aws eks update-kubeconfig --name my-cluster
 kubectl get nodes
 ```
 
-`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token it produces is validated by a **token-authentication webhook** that Floci wires into k3s: the k3s API server POSTs a Kubernetes `TokenReview` to Floci's `/_floci/eks/token-webhook` endpoint, and Floci maps the token to the `system:masters` group (bound to `cluster-admin`). No `aws-iam-authenticator` is required.
+`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 60-second presign expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before mapping the caller to the `system:masters` group (bound to `cluster-admin`). No `aws-iam-authenticator` is required.
+
+Create an IAM access key before using EKS authentication. The public local-development pairs `test`/`test` and `floci`/`floci` are deliberately rejected because the webhook grants cluster-admin access.
+
+Temporary IAM credentials must include their `AWS_SESSION_TOKEN` when signing the token.
 
 This webhook is enabled by default (`iam-auth-webhook: true`). Set it to `false` to start k3s without it (in which case `aws eks get-token` tokens are rejected with `401`).
 
@@ -241,7 +245,7 @@ When `sts:AssumeRoleWithWebIdentity` receives a token whose `iss` names an issue
 - `exp` / `nbf`, with 60s of clock-skew tolerance
 - the role's trust policy: `Principal.Federated` and the `Condition` block, comparing `oidc:sub` / `oidc:aud` with exact, case-sensitive equality
 
-The response then carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. Failures return `InvalidIdentityToken` (400) for a bad token or `AccessDenied` (403) when the trust policy does not permit the subject.
+The response then carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. Failures return `InvalidIdentityToken` (400) for a bad token, `ExpiredTokenException` (400) for an expired one, or `AccessDenied` (403) when the trust policy does not permit the subject.
 
 A token whose issuer Floci does not host is treated as opaque and accepted, since Floci cannot adjudicate a third-party provider. Validation is therefore automatic for Floci-issued tokens and requires no configuration flag.
 

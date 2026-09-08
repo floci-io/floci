@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cognito;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -11,11 +10,12 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -25,12 +25,10 @@ import java.util.Map;
  * mocks alone are insufficient for OIDC clients that resolve a user's profile
  * via this endpoint.
  *
- * <p>Floci is a local emulator, not a security boundary: the bearer token is
- * parsed but not signature-verified. The {@code iss} claim determines which
- * pool to look the user up in and {@code sub} identifies the user. Attributes
- * are returned with their raw Cognito names (including the {@code custom:*}
- * prefix) so downstream Jackson mappings such as
- * {@code @JsonProperty("custom:my_attribute")} resolve correctly.
+ * <p>Bearer access tokens are verified by the shared Cognito service verifier before
+ * {@code iss} and {@code sub} are used to resolve the user. Attributes are returned
+ * with their raw Cognito names (including the {@code custom:*} prefix) so downstream
+ * Jackson mappings such as {@code @JsonProperty("custom:my_attribute")} resolve correctly.
  *
  * <p>The response shape mirrors real AWS Cognito: snake_case keys for OIDC
  * standard claims and string-valued {@code email_verified} /
@@ -45,7 +43,6 @@ import java.util.Map;
 public class CognitoUserInfoController {
 
     private static final Logger LOG = Logger.getLogger(CognitoUserInfoController.class);
-    private static final TypeReference<Map<String, Object>> CLAIM_MAP_TYPE = new TypeReference<>() {};
 
     private final CognitoService cognitoService;
     private final ObjectMapper objectMapper;
@@ -58,35 +55,26 @@ public class CognitoUserInfoController {
 
     @GET
     @Path("/cognito-idp/oauth2/userInfo")
-    public Response userInfo(@HeaderParam("Authorization") String authorization) {
+    public Response userInfo(@HeaderParam("Authorization") String authorization,
+                             @Context ContainerRequestContext requestContext) {
         if (authorization == null || authorization.isBlank()
                 || !authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
             return bearerError(401, "invalid_token", "Bearer token required");
         }
         String token = authorization.substring(7).trim();
-        String[] parts = token.split("\\.");
-        if (parts.length < 2) {
-            return bearerError(401, "invalid_token", "Malformed JWT");
-        }
-
-        Map<String, Object> claims;
+        CognitoService.VerifiedAccessToken verified;
         try {
-            byte[] payload = Base64.getUrlDecoder().decode(parts[1]);
-            claims = objectMapper.readValue(payload, CLAIM_MAP_TYPE);
-        } catch (Exception e) {
-            LOG.debug("Failed to decode JWT payload", e);
-            return bearerError(401, "invalid_token", "Cannot decode JWT payload");
+            verified = cognitoService.verifyAccessToken(token);
+        } catch (AwsException e) {
+            LOG.debug("Access token verification failed", e);
+            return bearerError(401, "invalid_token", e.getMessage());
         }
 
-        String sub = asString(claims.get("sub"));
-        String iss = asString(claims.get("iss"));
-        if (sub == null || iss == null) {
-            return bearerError(401, "invalid_token", "Missing sub or iss claim");
-        }
-
-        String poolId = poolIdFromIssuer(iss);
-        if (poolId == null) {
-            return bearerError(401, "invalid_token", "Cannot derive user pool from iss: " + iss);
+        String sub = verified.subject();
+        String poolId = verified.poolId();
+        String domainPoolId = (String) requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY);
+        if (domainPoolId != null && !domainPoolId.equals(poolId)) {
+            return bearerError(401, "invalid_token", "Token was not issued by the user pool of this domain");
         }
 
         CognitoUser user;
@@ -128,25 +116,6 @@ public class CognitoUserInfoController {
             "preferred_username", "profile", "picture", "website", "gender",
             "birthdate", "zoneinfo", "locale", "updated_at", "address");
 
-    private static String poolIdFromIssuer(String iss) {
-        // iss looks like http://localhost:4566/eu-central-1_abc123 (or, in real AWS,
-        // https://cognito-idp.<region>.amazonaws.com/<pool-id>) — the pool id is the
-        // last path segment.
-        int slash = iss.lastIndexOf('/');
-        if (slash < 0 || slash == iss.length() - 1) {
-            return null;
-        }
-        String candidate = iss.substring(slash + 1);
-        return candidate.contains("_") ? candidate : null;
-    }
-
-    private static String asString(Object value) {
-        if (value == null) {
-            return null;
-        }
-        String s = value.toString().trim();
-        return s.isEmpty() ? null : s;
-    }
 
     private static void putIfPresent(ObjectNode body, String key, String value) {
         if (value != null && !value.isEmpty()) {

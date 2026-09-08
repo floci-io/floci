@@ -80,6 +80,18 @@ curl "http://localhost:4566/_aws/sqs/messages?QueueUrl=$QUEUE_URL"
 curl -X DELETE "http://localhost:4566/_aws/sqs/messages?QueueUrl=$QUEUE_URL"
 ```
 
+## Long Polling
+
+`ReceiveMessage` waits up to `WaitTimeSeconds` (0 to 20) for a message to arrive and returns as soon as one is available. Values outside that range are rejected with `InvalidParameterValue`. When the request omits `WaitTimeSeconds`, the queue's `ReceiveMessageWaitTimeSeconds` attribute applies (default `0`, short polling), matching AWS.
+
+```bash
+# Enable long polling for every consumer of the queue
+aws sqs set-queue-attributes \
+  --queue-url $QUEUE_URL \
+  --attributes ReceiveMessageWaitTimeSeconds=20 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
 ## Configuration
 
 | Variable | Default | Description |

@@ -110,14 +110,18 @@ class LambdaAccountScopedCodeTest {
     }
 
     @Test
-    void updateFunctionCodeDoesNotDeleteALegacyDirectoryStillReferencedByAPublishedVersion(
+    void aPublishedVersionsCodeSurvivesLatestMigratingOffTheLegacyPath(
             @TempDir Path baseDir) throws Exception {
-        // publishVersion snapshots codeLocalPath verbatim (it must, or a version-qualified
-        // invoke launches a container with no code - see #1987). If $LATEST was still on the
-        // legacy path at publish time, that version's snapshot is now the ONLY thing keeping
-        // the legacy directory alive once $LATEST itself migrates. The unused-check only scanned
-        // $LATEST records, so it missed this and reclaimed the directory out from under the
-        // published version's own future invokes.
+        // publishVersion used to snapshot codeLocalPath verbatim (it had to, or a
+        // version-qualified invoke launched a container with no code - see #1987). If $LATEST was
+        // still on the legacy path at publish time, that version's snapshot became the ONLY thing
+        // keeping the legacy directory alive once $LATEST itself migrated, and the unused-check
+        // reclaimed it out from under the version's own future invokes.
+        //
+        // A version now copies the code into a directory of its own (#2958), so it no longer
+        // depends on the legacy directory surviving. The guarantee this test protects is unchanged
+        // and now stronger: whatever happens to the directory $LATEST was using, the version keeps
+        // the code it was published from.
         CodeStore codeStore = new CodeStore(baseDir);
         LambdaService svc = serviceFor(ACCOUNT_A, codeStore);
         svc.createFunction(REGION, zipRequest("legacy-version-fn", "v1"));
@@ -129,13 +133,17 @@ class LambdaAccountScopedCodeTest {
         latest.setCodeLocalPath(legacyPath.toAbsolutePath().normalize().toString());
 
         LambdaFunction version = svc.publishVersion(REGION, "legacy-version-fn", null);
-        assertEquals(legacyPath.toAbsolutePath().normalize().toString(), version.getCodeLocalPath(),
-                "the published version must have snapshotted the legacy path");
+        Path versionPath = Path.of(version.getCodeLocalPath());
+        assertNotEquals(legacyPath.toAbsolutePath().normalize().toString(), version.getCodeLocalPath(),
+                "the published version must own its code rather than reference the legacy directory");
+        assertEquals("v1", Files.readString(versionPath.resolve("index.js")).trim());
 
         svc.updateFunctionCode(REGION, "legacy-version-fn", Map.of("ZipFile", zipBase64("index.js", "v2")));
 
-        assertTrue(Files.exists(legacyPath),
-                "a legacy directory a published version still references must survive this update");
+        assertTrue(Files.isDirectory(versionPath),
+                "the published version's own code must survive $LATEST migrating off the legacy path");
+        assertEquals("v1", Files.readString(versionPath.resolve("index.js")).trim(),
+                "the version must still hold the code it was published from");
     }
 
     @Test

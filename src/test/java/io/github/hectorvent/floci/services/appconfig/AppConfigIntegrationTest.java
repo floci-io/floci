@@ -182,8 +182,8 @@ class AppConfigIntegrationTest {
     }
 
     @Test @Order(12)
-    @DisplayName("Poll interval: requested 60s but emulator returns 15s (known deviation from AWS)")
-    void requiredMinimumPollIntervalIsStoredButNotEnforced() {
+    @DisplayName("Poll interval: requested minimum is returned to the client")
+    void requiredMinimumPollIntervalIsReturned() {
         intervalToken = given()
                 .contentType(ContentType.JSON)
                 .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\", \"RequiredMinimumPollIntervalInSeconds\": 60}")
@@ -199,7 +199,7 @@ class AppConfigIntegrationTest {
                 .then()
                 .statusCode(200)
                 .header("Next-Poll-Configuration-Token", notNullValue())
-                .header("Next-Poll-Interval-In-Seconds", equalTo("15"))
+                .header("Next-Poll-Interval-In-Seconds", equalTo("60"))
                 .extract().header("Next-Poll-Configuration-Token");
 
         given()
@@ -208,6 +208,72 @@ class AppConfigIntegrationTest {
                 .then()
                 .statusCode(200)
                 .header("Next-Poll-Configuration-Token", notNullValue());
+    }
+
+    @Test @Order(32)
+    void requiredMinimumPollIntervalMustBeWithinAwsLimits() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\", \"RequiredMinimumPollIntervalInSeconds\": 14}")
+                .when().post("/configurationsessions")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test @Order(33)
+    void requiredMinimumPollIntervalAcceptsAwsUpperBoundary() {
+        String token = startSessionWithInterval(86400);
+
+        given()
+                .queryParam("configuration_token", token)
+                .when().get("/configuration")
+                .then()
+                .statusCode(200)
+                .header("Next-Poll-Interval-In-Seconds", equalTo("86400"));
+    }
+
+    @Test @Order(34)
+    void requiredMinimumPollIntervalRejectsValuesAboveAwsMaximum() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\", \"RequiredMinimumPollIntervalInSeconds\": 86401}")
+                .when().post("/configurationsessions")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test @Order(35)
+    void requiredMinimumPollIntervalRejectsFractionalValues() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\", \"RequiredMinimumPollIntervalInSeconds\": 60.5}")
+                .when().post("/configurationsessions")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test @Order(36)
+    void requiredMinimumPollIntervalRejectsOversizedValues() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\", \"RequiredMinimumPollIntervalInSeconds\": 4294967296}")
+                .when().post("/configurationsessions")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    private String startSessionWithInterval(int interval) {
+        return given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\", \"RequiredMinimumPollIntervalInSeconds\": " + interval + "}")
+                .when().post("/configurationsessions")
+                .then()
+                .statusCode(201)
+                .extract().path("InitialConfigurationToken");
     }
 
     // ──────────────────────────── Hosted Configuration Version list ────────────────────────────

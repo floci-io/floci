@@ -143,9 +143,12 @@ public class CloudControlService {
      */
     private String resourceModel(String region, String typeName, String physicalId, JsonNode desiredState) {
         try {
-            for (ResourceDescription d : listResources(region, typeName)) {
-                if (physicalId.equals(d.identifier())) {
-                    return d.properties();
+            List<ResourceDescription> listed = resourcesForType(region, typeName);
+            if (listed != null) {
+                for (ResourceDescription d : listed) {
+                    if (physicalId.equals(d.identifier())) {
+                        return d.properties();
+                    }
                 }
             }
         } catch (Exception ignored) {
@@ -206,9 +209,12 @@ public class CloudControlService {
 
     /** Cloud Control {@code GetResource}: a single resource from the read side, by identifier. */
     public ResourceDescription getResource(String region, String typeName, String identifier) {
-        for (ResourceDescription d : listResources(region, typeName)) {
-            if (d.identifier().equals(identifier)) {
-                return d;
+        List<ResourceDescription> listed = resourcesForType(region, typeName);
+        if (listed != null) {
+            for (ResourceDescription d : listed) {
+                if (d.identifier().equals(identifier)) {
+                    return d;
+                }
             }
         }
         // CreateResource provisions the whole CFN type set while the read side lists six types, so
@@ -253,7 +259,26 @@ public class CloudControlService {
         }
     }
 
+    /**
+     * Cloud Control {@code ListResources}. A type this read side does not enumerate reports
+     * {@code UnsupportedActionException} rather than an empty list: an empty {@code
+     * ResourceDescriptions} is indistinguishable from "supported type, zero resources", which
+     * defeats a caller sweeping type names to discover inventory. Floci provisions many more types
+     * than {@link #resourcesForType} lists (see {@link #getResource} and {@link #createResource}),
+     * so this is a statement about read-side enumeration support, not about the type existing in
+     * AWS at all.
+     */
     public List<ResourceDescription> listResources(String region, String typeName) {
+        List<ResourceDescription> resources = resourcesForType(region, typeName);
+        if (resources == null) {
+            throw new AwsException("UnsupportedActionException",
+                    "ListResources is not supported for resource type " + typeName + ".", 400);
+        }
+        return resources;
+    }
+
+    /** The types {@link #listResources} and {@link #getResource} can enumerate, or {@code null}. */
+    private List<ResourceDescription> resourcesForType(String region, String typeName) {
         return switch (typeName) {
             case "AWS::S3::Bucket" -> s3Buckets();
             case "AWS::EC2::VPC" -> vpcs(region);
@@ -264,7 +289,7 @@ public class CloudControlService {
             case "AWS::EC2::Instance" -> instances(region);
             case "AWS::EC2::LaunchTemplate" -> launchTemplates(region);
             case "AWS::IAM::InstanceProfile" -> instanceProfiles();
-            default -> List.of();
+            default -> null;
         };
     }
 

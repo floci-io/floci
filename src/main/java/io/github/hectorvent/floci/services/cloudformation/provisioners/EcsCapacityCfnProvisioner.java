@@ -191,7 +191,7 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
 
     private Map<String, String> tags(JsonNode props, ProvisionContext ctx) {
         Map<String, String> out = new HashMap<>();
-        JsonNode tagsNode = props != null ? props.get("Tags") : null;
+        JsonNode tagsNode = props != null ? ctx.engine().resolveNode(props.get("Tags")) : null;
         if (tagsNode == null || !tagsNode.isArray()) {
             return out;
         }

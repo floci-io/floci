@@ -15,6 +15,8 @@ public class IotCertificate {
     private String privateKey;
     private String status;
     private Instant creationDate;
+    private Instant notBefore;
+    private Instant notAfter;
     private Map<String, String> tags = new TreeMap<>();
 
     public String getCertificateId() { return certificateId; }
@@ -31,6 +33,10 @@ public class IotCertificate {
     public void setStatus(String status) { this.status = status; }
     public Instant getCreationDate() { return creationDate; }
     public void setCreationDate(Instant creationDate) { this.creationDate = creationDate; }
+    public Instant getNotBefore() { return notBefore; }
+    public void setNotBefore(Instant notBefore) { this.notBefore = notBefore; }
+    public Instant getNotAfter() { return notAfter; }
+    public void setNotAfter(Instant notAfter) { this.notAfter = notAfter; }
     public Map<String, String> getTags() { return tags == null ? Map.of() : tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags == null ? new TreeMap<>() : new TreeMap<>(tags); }
 }

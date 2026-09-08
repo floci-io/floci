@@ -94,7 +94,10 @@ class CodeBuildIntegrationTest {
             .contentType(CONTENT_TYPE)
             .body("""
                 {
-                    "names": ["my-build-project", "nonexistent-project"]
+                    "names": [
+                        "arn:aws:codebuild:us-east-1:000000000000:project/my-build-project",
+                        "nonexistent-project"
+                    ]
                 }
                 """)
         .when()

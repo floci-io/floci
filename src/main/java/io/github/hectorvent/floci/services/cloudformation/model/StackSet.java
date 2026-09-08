@@ -21,6 +21,9 @@ public class StackSet {
     private Map<String, String> tags = new LinkedHashMap<>();
     /** SELF_MANAGED or SERVICE_MANAGED; Floci only models SELF_MANAGED behavior. */
     private String permissionModel = "SELF_MANAGED";
+    private boolean autoDeploymentEnabled;
+    private boolean retainStacksOnAccountRemoval;
+    private boolean managedExecutionActive;
 
     public String getStackSetId() { return stackSetId; }
     public void setStackSetId(String stackSetId) { this.stackSetId = stackSetId; }
@@ -40,4 +43,10 @@ public class StackSet {
     public void setTags(Map<String, String> tags) { this.tags = tags; }
     public String getPermissionModel() { return permissionModel; }
     public void setPermissionModel(String permissionModel) { this.permissionModel = permissionModel; }
+    public boolean isAutoDeploymentEnabled() { return autoDeploymentEnabled; }
+    public void setAutoDeploymentEnabled(boolean value) { this.autoDeploymentEnabled = value; }
+    public boolean isRetainStacksOnAccountRemoval() { return retainStacksOnAccountRemoval; }
+    public void setRetainStacksOnAccountRemoval(boolean value) { this.retainStacksOnAccountRemoval = value; }
+    public boolean isManagedExecutionActive() { return managedExecutionActive; }
+    public void setManagedExecutionActive(boolean value) { this.managedExecutionActive = value; }
 }

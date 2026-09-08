@@ -13,51 +13,19 @@ COPY src ./src
 
 RUN mvn clean package -Dnative -DskipTests -B
 
-# See: https://www.redhat.com/en/blog/build-ubi-micro-images
-FROM registry.access.redhat.com/ubi9:9.7 AS tools
+# Stage 2: Minimal runtime. Same base and user setup as Dockerfile.native-package.
+FROM registry.access.redhat.com/ubi9-micro:9.7
 
-ENV GOSU_VERSION=1.17
-ENV GOSU_AMD64_SHA256=bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3
-ENV GOSU_ARM64_SHA256=c3805a85d17f4454c23d7059bcb97e1ec1af272b90126e79ed002342de08389b
-
-RUN set -eux; \
-    mkdir -p /toolsroot; \
-    dnf install -y --installroot=/toolsroot --releasever=9 \
-        --setopt=install_weak_deps=0 --nodocs \
-        shadow-utils; \
-    dnf -y --installroot=/toolsroot clean all; \
-    rm -rf /toolsroot/var/cache/* /toolsroot/var/log/dnf* /toolsroot/var/log/yum* \
-           /toolsroot/var/lib/rpm /toolsroot/var/lib/dnf; \
-    arch="$(uname -m)"; \
-    case "$arch" in \
-        x86_64) gosuArch='amd64'; gosuSha256="$GOSU_AMD64_SHA256" ;; \
-        aarch64) gosuArch='arm64'; gosuSha256="$GOSU_ARM64_SHA256" ;; \
-        *) echo >&2 "unsupported arch: $arch"; exit 1 ;; \
-    esac; \
-    mkdir -p /toolsroot/usr/local/bin; \
-    curl -fsSL -o /toolsroot/usr/local/bin/gosu \
-        "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosuArch}"; \
-    echo "${gosuSha256}  /toolsroot/usr/local/bin/gosu" | sha256sum -c -; \
-    chmod +x /toolsroot/usr/local/bin/gosu
-
-# Stage 3: Minimal runtime
-FROM quay.io/quarkus/quarkus-micro-image:2.0
-
-USER root
 WORKDIR /app
-COPY --from=tools /toolsroot/ /
-
-RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci
-
-RUN mkdir -p /app/data \
+RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \
+    && mkdir -p /app/data \
     && chown -R 1001:root /app \
     && chmod -R g+rwX /app
 VOLUME /app/data
 
 EXPOSE 4566
 
-HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD bash -c 'echo -e "GET /_floci/health HTTP/1.0\r\nHost: localhost\r\n\r\n" > /dev/tcp/localhost/4566' || exit 1
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthcheck.sh"]
 
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
@@ -65,7 +33,7 @@ ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
 COPY --chmod=755 --from=build /app/target/*-runner /app/application
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
+COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/app/application"]

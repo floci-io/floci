@@ -995,7 +995,7 @@ public class ApiGatewayController {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
             CustomDomain domain = service.createDomainName(region, request);
-            return Response.status(201).entity(toDomainNode(domain).toString()).type(MediaType.APPLICATION_JSON).build();
+            return Response.status(201).entity(toDomainNode(region, domain).toString()).type(MediaType.APPLICATION_JSON).build();
         } catch (IOException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
@@ -1008,7 +1008,7 @@ public class ApiGatewayController {
         List<CustomDomain> domains = service.getDomainNames(region);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        domains.forEach(d -> items.add(toDomainNode(d)));
+        domains.forEach(d -> items.add(toDomainNode(region, d)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -1016,7 +1016,7 @@ public class ApiGatewayController {
     @Path("/domainnames/{domainName}")
     public Response getDomainName(@Context HttpHeaders headers, @PathParam("domainName") String domainName) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toDomainNode(service.getDomainName(region, domainName)).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toDomainNode(region, service.getDomainName(region, domainName)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @PATCH
@@ -1025,7 +1025,7 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         CustomDomain domain = service.updateDomainName(region, domainName, patchOperations);
-        return Response.ok(toDomainNode(domain).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toDomainNode(region, domain).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -2218,11 +2218,13 @@ public class ApiGatewayController {
                         "Unable to find ApiMapping with ID " + apiMappingId, 404));
     }
 
-    private ObjectNode toDomainNode(CustomDomain d) {
+    private ObjectNode toDomainNode(String region, CustomDomain d) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("domainName", d.getDomainName());
+        node.put("domainNameArn", "arn:aws:apigateway:" + region + "::/domainnames/" + d.getDomainName());
         node.put("domainNameStatus", d.getDomainNameStatus());
         node.put("endpointConfigurationType", d.getEndpointConfigurationType());
+        node.putObject("endpointConfiguration").putArray("types").add(d.getEndpointConfigurationType());
         if (d.getCertificateName() != null) node.put("certificateName", d.getCertificateName());
         if (d.getCertificateArn() != null) node.put("certificateArn", d.getCertificateArn());
         node.put("regionalDomainName", d.getRegionalDomainName());
@@ -2241,6 +2243,10 @@ public class ApiGatewayController {
         }
         if (d.getSecurityPolicy() != null) {
             node.put("securityPolicy", d.getSecurityPolicy());
+        }
+        if (d.getTags() != null && !d.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            d.getTags().forEach(tags::put);
         }
         return node;
     }

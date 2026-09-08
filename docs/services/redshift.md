@@ -4,11 +4,13 @@
 **Management Endpoint:** `POST http://localhost:4566/` with `Action=` param
 **Data Endpoint:** Floci's auth proxy on the `Endpoint` and `Port` returned by `DescribeClusters` (PostgreSQL wire protocol)
 
-Floci emulates Amazon Redshift by managing a real [PostgreSQL](https://www.postgresql.org/) Docker container per cluster behind a Redshift-shaped control plane. Each cluster sits behind a lightweight auth proxy on the Floci host, so the endpoint is reachable from outside Docker and the master password is validated at the proxy — a `ModifyCluster` password change takes effect for new connections immediately. Redshift speaks the PostgreSQL wire protocol, so the cluster endpoint returned by `DescribeClusters` works with any standard PostgreSQL driver (`psql`, JDBC, `psycopg`, …).
+Floci emulates Amazon Redshift by managing a real [PostgreSQL](https://www.postgresql.org/) Docker container per cluster behind a Redshift-shaped control plane. Each cluster sits behind a lightweight auth proxy on the Floci host, so the endpoint is reachable from outside Docker and the master password is validated at the proxy, a `ModifyCluster` password change takes effect for new connections immediately. Redshift speaks the PostgreSQL wire protocol, so the cluster endpoint returned by `DescribeClusters` works with any standard PostgreSQL driver (`psql`, JDBC, `psycopg`, …).
 
-> **Always read the host and port from `DescribeClusters`** rather than assuming a fixed port. PostgreSQL listens on `5432` *inside* the container; the port you connect to is dynamically assigned on the host and returned as `Clusters[0].Endpoint.Port`. Redshift's conventional port is `5439`, but the emulator does not bind it — use whatever `DescribeClusters` reports.
+> **Always read the host and port from `DescribeClusters`** rather than assuming a fixed port. PostgreSQL listens on `5432` *inside* the container; the port you connect to is dynamically assigned on the host and returned as `Clusters[0].Endpoint.Port`. Redshift's conventional port is `5439`, but the emulator does not bind it: use whatever `DescribeClusters` reports.
 
 The container has **no persistent volume**: if the physical container survives a Floci restart it is adopted and its data is kept, but if the container itself is gone (host reboot, `docker rm`, a pruned dev box) the cluster comes back empty. Use `CreateClusterSnapshot` / `RestoreFromClusterSnapshot` to preserve data explicitly.
+
+For running SQL without a PostgreSQL wire connection (the way Lambda and Step Functions do), see the [Redshift Data API](redshift-data.md).
 
 ## Supported Actions
 
@@ -106,7 +108,7 @@ aws redshift delete-cluster \
 ```python
 import psycopg
 
-# Read host and port from DescribeClusters — the host port is dynamic.
+# Read host and port from DescribeClusters: the host port is dynamic.
 host, port = "localhost", 32768  # e.g. Clusters[0].Endpoint.Address / .Port
 with psycopg.connect(f"host={host} port={port} dbname=dev user=admin password=Secret123") as conn:
     conn.execute("CREATE TABLE people (name text)")
@@ -135,10 +137,86 @@ cluster = redshift.create_cluster(
 print(cluster["Cluster"]["Endpoint"])
 ```
 
+## SQL Interceptor
+
+Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire protocol (Simple Query `'Q'` protocol) and rewrites common Redshift-specific table DDL so it runs on the plain PostgreSQL backend.
+
+### DDL compatibility
+
+- Redshift-only table DDL keywords are stripped before the statement is forwarded: `DISTSTYLE ALL|EVEN|KEY|AUTO`, `DISTKEY (<col>)` and column-level `DISTKEY`, `[COMPOUND|INTERLEAVED] SORTKEY (<cols>)` and column-level `SORTKEY`, and `ENCODE <codec>` for the real Redshift column encodings (`raw`, `az64`, `bytedict`, `delta`, `delta32k`, `lzo`, `mostly8`, `mostly16`, `mostly32`, `runlength`, `text255`, `text32k`, `zstd`) or `auto`.
+- The rewrite only runs when the statement's first keyword is `CREATE TABLE` or `ALTER TABLE`. A `SELECT`, `INSERT`, function body, or string literal that merely contains one of these keywords is forwarded byte-for-byte. Single-quoted and dollar-quoted string literals are masked before the rewrite, so a keyword inside a quoted value (including in a later statement of a multi-statement query) is preserved.
+- Columns legitimately named `distkey`, `sortkey`, or `encode` survive.
+
+### COPY from S3
+
+`COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple
+Query protocol is emulated: Floci reads the object (or every object under the prefix, in key
+order) through its own S3 service and streams the rows into the backing PostgreSQL container with
+`COPY ... FROM STDIN`.
+
+- Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
+  `HEADER`, `NULL AS`, and an explicit column list.
+- The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
+  a comma default delimiter.
+- `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
+- `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
+- S3 access is authorized as an unsigned request: with `FLOCI_SERVICES_S3_ENFORCE_AUTH` off it is
+  unrestricted; with it on, bucket policy and public access settings apply.
+- Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
+  `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
+  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, credentials clauses, and so on) is not
+  recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.
+- A multi-statement query whose COPY is followed by another statement is not intercepted; send the
+  COPY on its own.
+- Extended Query protocol COPY (a JDBC `PreparedStatement`, or pgjdbc's default
+  `preferQueryMode=extended`) is not intercepted. Use `preferQueryMode=simple`.
+
+### Limitations
+
+- Emulation runs on the **Simple Query protocol** (`'Q'`) only. Extended Query protocol statements (`Parse`/`Bind`/`Execute`) pass through untouched, including anything a JDBC `PreparedStatement` sends, and, with the pgjdbc default `preferQueryMode=extended`, plain `Statement` calls too. Connect with `preferQueryMode=simple` to exercise the interceptor from JDBC.
+- The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
+- A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
+- Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
+
+### UNLOAD to S3
+
+`UNLOAD ('<select-statement>') TO 's3://<bucket>/<prefix>' [options]` sent over the
+Simple Query protocol runs the select on the backing PostgreSQL container and writes
+the result to S3 as one or more objects under `<prefix>`.
+
+- Framing defaults to pipe-delimited text; `FORMAT CSV` (or `CSV`) switches to CSV
+  with a `,` default. `DELIMITER`, `HEADER`, `NULL AS`, and `ADDQUOTES` are honoured
+  (`ADDQUOTES` and `HEADER` force CSV framing on PostgreSQL 15).
+- `PARALLEL ON` (default) names objects `<prefix>0000_part_00`,
+  `<prefix>0001_part_00`, and so on; `PARALLEL OFF` names them `<prefix>000`,
+  `<prefix>001`, and so on. The emulator has a single backend node, so more than one
+  object appears only when the result exceeds the per-file size. When `HEADER` is
+  set, the header row is repeated at the top of every object.
+- `MAXFILESIZE [AS] <n> [MB|GB]` sets the per-file size; a bare number is bytes.
+  Each file is buffered in memory, so the default is 6 MiB (real Redshift defaults
+  to 6.2 GB) and a whole UNLOAD result is capped at 256 MiB; a larger result fails
+  with a SQL error (54000). A `MAXFILESIZE` above that 256 MiB cap is not
+  intercepted at all: the statement is forwarded and PostgreSQL reports its own error.
+- A zero-row result still writes one object (empty, or the header row alone when
+  `HEADER` is set).
+- `GZIP` compresses each object and appends `.gz` to its key.
+- `MANIFEST` writes `<prefix>manifest` listing every object with its
+  `content_length`.
+- Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select
+  does not run. A failed UNLOAD then removes any objects it had already written. With
+  `ALLOWOVERWRITE` a failed UNLOAD leaves its objects in place (they may have replaced prior data,
+  so they are not deleted); a `MANIFEST` request that fails this way can leave data objects without
+  a manifest, and rerunning the same statement overwrites them.
+- S3 access is authorized as an unsigned request, like COPY from S3.
+- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `IAM_ROLE` / `CREDENTIALS`,
+  `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
+  statement is forwarded and PostgreSQL reports its own error.
+- Extended Query protocol UNLOAD (a JDBC `PreparedStatement`) is not intercepted.
+
 ## Out of Scope
 
-- Real Redshift SQL semantics — the data plane is stock PostgreSQL, so Redshift-only SQL (distribution/sort keys, `COPY`/`UNLOAD` from S3, `SUPER`/`SPECTRUM`) is not emulated.
-- Multi-node clusters — `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
+- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER/SPECTRUM are not emulated.
+- Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.

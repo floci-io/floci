@@ -9,6 +9,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.OutputStream;
+import java.util.function.Consumer;
+
 /**
  * Thin orchestration layer for Bedrock Runtime: delegates Converse/InvokeModel to the
  * backend selected by {@code floci.services.bedrock-runtime.backend}.
@@ -35,6 +38,10 @@ public class BedrockRuntimeService {
 
     public byte[] buildInvokeModelResponse(String modelId, byte[] body) {
         return backend().invokeModel(modelId, body);
+    }
+
+    public Consumer<OutputStream> buildConverseStreamResponse(String modelId, ObjectNode bedrockRequest) {
+        return backend().converseStream(modelId, bedrockRequest);
     }
 
     private BedrockBackend backend() {

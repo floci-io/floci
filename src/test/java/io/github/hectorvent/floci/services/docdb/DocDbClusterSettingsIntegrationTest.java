@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.docdb;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -16,7 +18,7 @@ import static org.hamcrest.Matchers.containsString;
 
 /**
  * The settings a DocumentDB cluster is created with come back from DescribeDBClusters, as on a
- * live account — through the Query protocol, with a real KMS key from the KMS store and the
+ * live account: through the Query protocol, with a real KMS key from the KMS store and the
  * default subnet group, parameter group and security group.
  */
 @QuarkusTest
@@ -35,6 +37,9 @@ class DocDbClusterSettingsIntegrationTest {
     @Inject
     KmsService kmsService;
 
+    @Inject
+    Ec2Service ec2Service;
+
     private static io.restassured.specification.RequestSpecification rds(String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
@@ -48,6 +53,38 @@ class DocDbClusterSettingsIntegrationTest {
     void cleanUp() {
         rds("DeleteDBInstance").formParam("DBInstanceIdentifier", ID + "-1").when().post("/");
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true").when().post("/");
+    }
+
+    /**
+     * A security group that exists is the case a live stack always sends, and the one a probe
+     * with a made-up id never reaches, because an unknown id is refused before its record is
+     * consulted. 2.0.1 answered it with an internal error.
+     */
+    @Test
+    void anExistingSecurityGroupIsAcceptedOnCreateAndModify() {
+        String vpcId = ec2Service.createVpc("us-east-1", "10.9.0.0/16", false).getVpcId();
+        SecurityGroup first = ec2Service.createSecurityGroup("us-east-1", "docdb-first", "d", vpcId);
+        SecurityGroup second = ec2Service.createSecurityGroup("us-east-1", "docdb-second", "d", vpcId);
+
+        rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", ID)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "u")
+                .formParam("MasterUserPassword", "secret99password")
+                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", first.getGroupId())
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<VpcSecurityGroupId>" + first.getGroupId() + "</VpcSecurityGroupId>"));
+
+        rds("ModifyDBCluster")
+                .formParam("DBClusterIdentifier", ID)
+                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", first.getGroupId())
+                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.2", second.getGroupId())
+                .when().post("/").then().statusCode(200);
+
+        rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<VpcSecurityGroupId>" + first.getGroupId() + "</VpcSecurityGroupId>"))
+                .body(containsString("<VpcSecurityGroupId>" + second.getGroupId() + "</VpcSecurityGroupId>"));
     }
 
     @Test

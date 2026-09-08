@@ -6,14 +6,21 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
+import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -118,7 +125,7 @@ class RamServiceTest {
         service.createResourceShare(
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertTrue(service.getResourceShareInvitations(ACCEPTER).isEmpty());
+        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).isEmpty());
     }
 
     @Test
@@ -186,7 +193,7 @@ class RamServiceTest {
     /**
      * The model enumerates resourceOwner as SELF or OTHER-ACCOUNTS on GetResourceShares,
      * ListPrincipals and ListResources. Anything else used to fall through the "not SELF" branch
-     * and silently return other accounts' shares — the opposite of what a caller who typo'd
+     * and silently return other accounts' shares, the opposite of what a caller who typo'd
      * "self" expected.
      */
     @Test
@@ -218,7 +225,7 @@ class RamServiceTest {
         assertUnknownResource(() -> service.untagResource(arn, List.of("k"), OWNER));
         assertUnknownResource(() -> service.deleteResourceShare(arn, OWNER));
 
-        // Still readable with DELETED status — mutation rejection must not hide it from reads.
+        // Still readable with DELETED status: mutation rejection must not hide it from reads.
         assertEquals("DELETED", service.getResourceShares(OWNER, "SELF").get(0).getStatus());
     }
 
@@ -291,6 +298,241 @@ class RamServiceTest {
         assertEquals(created.getCreationTime(), tagged.getCreationTime());
     }
 
+    @Test
+    void accountPrincipalWithoutOrganizationSharingCreatesPendingInvitation() {
+        ResourceShare share = service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        List<ResourceShareInvitation> invitations =
+                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of());
+        assertEquals(1, invitations.size());
+        ResourceShareInvitation invitation = invitations.get(0);
+        assertEquals(share.getResourceShareArn(), invitation.resourceShareArn());
+        assertEquals(OWNER, invitation.senderAccountId());
+        assertEquals(ACCEPTER, invitation.receiverAccountId());
+        assertEquals("PENDING", invitation.status());
+
+        // Receiver-only, per the API reference ("invitations that you have received"): the
+        // sender does not see its own outstanding invitations through this call.
+        assertTrue(service.getResourceShareInvitations(OWNER, List.of(), List.of()).isEmpty());
+        // But the share itself is visible regardless: invitations are bookkeeping, not a gate.
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+    }
+
+    @Test
+    void organizationPrincipalNeverCreatesInvitationEvenWithoutOrganizationSharingEnabled() {
+        service.createResourceShare(
+                "ou-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void accountPrincipalUnderEnabledOrganizationSharingCreatesNoInvitation() {
+        service.enableSharingWithAwsOrganization();
+
+        service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void associatingNewAccountPrincipalCreatesInvitationButReassociatingExistingOneDoesNot() {
+        ResourceShare share = service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+
+        // Re-associating the same principal must not spawn a second invitation.
+        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+
+        // A genuinely new principal gets its own.
+        String other = "333333333333";
+        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(other), OWNER);
+        assertEquals(1, service.getResourceShareInvitations(other, List.of(), List.of()).size());
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+    }
+
+    @Test
+    void acceptResourceShareInvitationTransitionsToAcceptedAndIsThenTerminal() {
+        service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+                .get(0).resourceShareInvitationArn();
+
+        ResourceShareInvitation accepted = service.acceptResourceShareInvitation(invitationArn, ACCEPTER);
+        assertEquals("ACCEPTED", accepted.status());
+        assertEquals("ACCEPTED",
+                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).get(0).status());
+
+        AwsException repeat = assertThrows(AwsException.class,
+                () -> service.acceptResourceShareInvitation(invitationArn, ACCEPTER));
+        assertEquals("ResourceShareInvitationAlreadyAcceptedException", repeat.getErrorCode());
+    }
+
+    @Test
+    void rejectResourceShareInvitationTransitionsToRejectedAndIsThenTerminal() {
+        service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+                .get(0).resourceShareInvitationArn();
+
+        ResourceShareInvitation rejected = service.rejectResourceShareInvitation(invitationArn, ACCEPTER);
+        assertEquals("REJECTED", rejected.status());
+
+        AwsException repeat = assertThrows(AwsException.class,
+                () -> service.rejectResourceShareInvitation(invitationArn, ACCEPTER));
+        assertEquals("ResourceShareInvitationAlreadyRejectedException", repeat.getErrorCode());
+    }
+
+    @Test
+    void reassociatingAfterRejectionSendsANewInvitation() {
+        ResourceShare share = service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String firstArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+                .get(0).resourceShareInvitationArn();
+        service.rejectResourceShareInvitation(firstArn, ACCEPTER);
+
+        // Disassociate and re-associate, same as a Terraform apply that removes then re-adds
+        // the principal: real AWS sends a fresh invitation rather than leaving the account
+        // permanently locked out by an old rejection.
+        service.disassociateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
+        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
+
+        List<ResourceShareInvitation> invitations =
+                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of());
+        assertEquals(2, invitations.size());
+        assertTrue(invitations.stream().anyMatch(i -> "PENDING".equals(i.status())));
+    }
+
+    @Test
+    void onlyTheReceiverCanAcceptOrRejectAnInvitation() {
+        service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+                .get(0).resourceShareInvitationArn();
+
+        AwsException bySender = assertThrows(AwsException.class,
+                () -> service.acceptResourceShareInvitation(invitationArn, OWNER));
+        assertEquals("OperationNotPermittedException", bySender.getErrorCode());
+
+        AwsException byStranger = assertThrows(AwsException.class,
+                () -> service.rejectResourceShareInvitation(invitationArn, "444444444444"));
+        assertEquals("OperationNotPermittedException", byStranger.getErrorCode());
+    }
+
+    @Test
+    void unknownInvitationArnFailsWithNotFoundException() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.acceptResourceShareInvitation(
+                        "arn:aws:ram:us-east-1:222222222222:resource-share-invitation/does-not-exist", ACCEPTER));
+        assertEquals("ResourceShareInvitationArnNotFoundException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void malformedInvitationArnFailsWithMalformedArnException() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.acceptResourceShareInvitation("not-an-arn", ACCEPTER));
+        assertEquals("MalformedArnException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class, () ->
+                service.getResourceShareInvitations(ACCEPTER, List.of("not-an-arn"), List.of()));
+        assertEquals("MalformedArnException", filterError.getErrorCode());
+    }
+
+    @Test
+    void getResourceShareInvitationsFiltersByResourceShareArnAndInvitationArn() {
+        ResourceShare share = service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        service.createResourceShare(
+                "other-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).stream()
+                .filter(i -> i.resourceShareArn().equals(share.getResourceShareArn()))
+                .findFirst().orElseThrow().resourceShareInvitationArn();
+
+        assertEquals(1, service.getResourceShareInvitations(
+                ACCEPTER, List.of(share.getResourceShareArn()), List.of()).size());
+        assertEquals(1, service.getResourceShareInvitations(
+                ACCEPTER, List.of(), List.of(invitationArn)).size());
+        assertTrue(service.getResourceShareInvitations(
+                ACCEPTER, List.of("arn:aws:ram:us-east-1:111111111111:resource-share/nope"), List.of()).isEmpty());
+    }
+
+    @Test
+    void concurrentAcceptCallsOnTheSameInvitationOnlySucceedOnce() throws Exception {
+        service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+                .get(0).resourceShareInvitationArn();
+
+        int threadCount = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        try {
+            CountDownLatch ready = new CountDownLatch(threadCount);
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (int i = 0; i < threadCount; i++) {
+                results.add(executor.submit(() -> {
+                    ready.countDown();
+                    assertTrue(start.await(5, TimeUnit.SECONDS));
+                    try {
+                        service.acceptResourceShareInvitation(invitationArn, ACCEPTER);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("ResourceShareInvitationAlreadyAcceptedException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            assertTrue(ready.await(5, TimeUnit.SECONDS), "every thread reached the start gate");
+            start.countDown();
+
+            int succeeded = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(5, TimeUnit.SECONDS)) {
+                    succeeded++;
+                }
+            }
+            assertEquals(1, succeeded, "exactly one concurrent Accept call should win the race");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentAssociateCallsForTheSamePrincipalCreateOnlyOneInvitation() throws Exception {
+        ResourceShare share = service.createResourceShare(
+                "direct-share", List.of(), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        int threadCount = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        try {
+            CountDownLatch ready = new CountDownLatch(threadCount);
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<Void>> results = new ArrayList<>();
+            for (int i = 0; i < threadCount; i++) {
+                results.add(executor.submit(() -> {
+                    ready.countDown();
+                    assertTrue(start.await(5, TimeUnit.SECONDS));
+                    service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
+                    return null;
+                }));
+            }
+            assertTrue(ready.await(5, TimeUnit.SECONDS), "every thread reached the start gate");
+            start.countDown();
+            for (Future<Void> result : results) {
+                result.get(5, TimeUnit.SECONDS);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+    }
+
     private static void assertInvalidParameter(Executable read) {
         AwsException error = assertThrows(AwsException.class, read);
         assertEquals("InvalidParameterException", error.getErrorCode());
@@ -301,7 +543,7 @@ class RamServiceTest {
         AwsException error = assertThrows(AwsException.class, mutation);
         assertEquals("UnknownResourceException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
-        // Same message an unknown ARN gets — a non-owner must not learn the share exists.
+        // Same message an unknown ARN gets: a non-owner must not learn the share exists.
         assertTrue(error.getMessage().endsWith(" does not exist."));
     }
 

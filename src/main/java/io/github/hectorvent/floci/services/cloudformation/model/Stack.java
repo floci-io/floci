@@ -11,6 +11,8 @@ import java.util.*;
 public class Stack {
     private String stackId;
     private String stackName;
+    /** AWS account that owns this stack; absent only on legacy records. */
+    private String accountId;
     private String region;
     private String status = "CREATE_IN_PROGRESS";
     private String statusReason;
@@ -38,6 +40,8 @@ public class Stack {
     public void setStackId(String stackId) { this.stackId = stackId; }
     public String getStackName() { return stackName; }
     public void setStackName(String stackName) { this.stackName = stackName; }
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
     public String getStatus() { return status; }

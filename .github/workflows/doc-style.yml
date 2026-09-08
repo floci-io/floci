@@ -1,0 +1,65 @@
+name: Documentation Style
+
+on:
+  pull_request:
+    # "edited" also fires when the PR is retargeted to a different base
+    # branch, which changes what counts as a newly added file.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  no-em-dashes:
+    name: New files omit em-dashes
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check new files for em-dashes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # AGENTS.md: "No em-dashes anywhere, in any content. Use colons,
+          # commas, or periods."
+          #
+          # Scoped to files this PR adds, not lines changed in existing
+          # ones: plenty of existing content already has em-dashes, and
+          # flagging every PR that happens to touch one of those files
+          # would make this check noise rather than signal. New files
+          # start clean.
+
+          # Written as an escape, not the literal glyph: this workflow file
+          # is itself a new file the first time it's added, and the check
+          # below would otherwise flag itself for containing the character
+          # it's searching for.
+          EM_DASH=$'\u2014'
+          FAILED=0
+
+          # -z / -d '' throughout: plain --name-only C-quotes paths with
+          # non-ASCII or special characters (e.g. "caf\303\251.md"), which
+          # then fail to match the real file on disk and get silently
+          # skipped. NUL-delimited output/reads sidestep that.
+          while IFS= read -r -d '' file; do
+            [ -z "$file" ] && continue
+
+            MATCHES=$(grep -InH "$EM_DASH" -- "$file" || true)
+            [ -z "$MATCHES" ] && continue
+
+            FAILED=1
+            while IFS=: read -r path lineno content; do
+              echo "::error file=$path,line=$lineno::Em-dash found in new file (AGENTS.md: no em-dashes anywhere, in any content)"
+              echo "  $path:$lineno: $content"
+            done <<< "$MATCHES"
+          done < <(git diff -z --diff-filter=A --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "Use colons, commas, or periods instead of em-dashes (U+2014). See AGENTS.md, Documentation Style."
+          fi
+
+          exit $FAILED

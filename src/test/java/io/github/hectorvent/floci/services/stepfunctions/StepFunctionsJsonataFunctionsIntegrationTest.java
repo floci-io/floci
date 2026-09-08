@@ -247,7 +247,8 @@ class StepFunctionsJsonataFunctionsIntegrationTest {
         Response resp = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", resp.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$sum(['a'])' specified for the field 'Output/v' threw an error "
+        assertEquals("An error occurred while executing the state 'Sum' (entered at the event id #2). "
+                + "The JSONata expression '$sum(['a'])' specified for the field 'Output/v' threw an error "
                 + "during evaluation. T0412: Argument [\"a\"] must be an array of \"numbers\"",
                 resp.jsonPath().getString("cause"));
     }
@@ -277,7 +278,8 @@ class StepFunctionsJsonataFunctionsIntegrationTest {
         Response resp = waitForExecutionFailure(startExecution(smArn, "{}"));
 
         assertEquals("States.QueryEvaluationError", resp.jsonPath().getString("error"));
-        assertEquals("The JSONata expression '$abs(\"x\")' specified for the field 'Output/v' threw an error "
+        assertEquals("An error occurred while executing the state 'Abs' (entered at the event id #2). "
+                + "The JSONata expression '$abs(\"x\")' specified for the field 'Output/v' threw an error "
                 + "during evaluation. T0410: Argument 1 of function \"abs\" does not match function signature",
                 resp.jsonPath().getString("cause"));
     }

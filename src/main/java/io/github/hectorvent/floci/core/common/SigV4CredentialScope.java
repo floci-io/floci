@@ -26,4 +26,11 @@ public final class SigV4CredentialScope {
         }
         return Optional.empty();
     }
+
+    public static Optional<String> serviceNameFromCredential(String credential) {
+        if (credential == null) {
+            return Optional.empty();
+        }
+        return serviceName("Credential=" + credential);
+    }
 }

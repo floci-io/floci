@@ -164,6 +164,320 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void createTableWithCustomKmsKeyRetainsItOnDescribe() {
+        String customKeyArn = "arn:aws:kms:us-east-1:000000000000:key/custom-key-id";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "CustomKmsKeyTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "SSESpecification": {"Enabled": true, "SSEType": "KMS", "KMSMasterKeyId": "%s"}
+                }
+                """.formatted(customKeyArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription.Status", equalTo("ENABLED"))
+            .body("TableDescription.SSEDescription.SSEType", equalTo("KMS"))
+            .body("TableDescription.SSEDescription.KMSMasterKeyArn", equalTo(customKeyArn));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "CustomKmsKeyTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription.Status", equalTo("ENABLED"))
+            .body("Table.SSEDescription.SSEType", equalTo("KMS"))
+            .body("Table.SSEDescription.KMSMasterKeyArn", equalTo(customKeyArn));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "CustomKmsKeyTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateTableCanEnableRotateAndDisableSse() {
+        String firstKeyArn = "arn:aws:kms:us-east-1:000000000000:key/first-key-id";
+        String rotatedKeyArn = "arn:aws:kms:us-east-1:000000000000:key/rotated-key-id";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "UpdateSseTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription", nullValue());
+
+        // Enable SSE with a customer-supplied KMS key via UpdateTable.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "UpdateSseTable",
+                    "SSESpecification": {"Enabled": true, "SSEType": "KMS", "KMSMasterKeyId": "%s"}
+                }
+                """.formatted(firstKeyArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription.Status", equalTo("ENABLED"))
+            .body("TableDescription.SSEDescription.SSEType", equalTo("KMS"))
+            .body("TableDescription.SSEDescription.KMSMasterKeyArn", equalTo(firstKeyArn));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "UpdateSseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription.Status", equalTo("ENABLED"))
+            .body("Table.SSEDescription.SSEType", equalTo("KMS"))
+            .body("Table.SSEDescription.KMSMasterKeyArn", equalTo(firstKeyArn));
+
+        // Rotate to a different customer-supplied KMS key via UpdateTable.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "UpdateSseTable",
+                    "SSESpecification": {"Enabled": true, "SSEType": "KMS", "KMSMasterKeyId": "%s"}
+                }
+                """.formatted(rotatedKeyArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription.KMSMasterKeyArn", equalTo(rotatedKeyArn));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "UpdateSseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription.KMSMasterKeyArn", equalTo(rotatedKeyArn));
+
+        // Disable SSE via UpdateTable.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "UpdateSseTable",
+                    "SSESpecification": {"Enabled": false}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription", nullValue());
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "UpdateSseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription", nullValue());
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "UpdateSseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void createTableWithAes256SseOmitsKmsMasterKeyArn() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "Aes256SseTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "SSESpecification": {"Enabled": true, "SSEType": "AES256"}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription.Status", equalTo("ENABLED"))
+            .body("TableDescription.SSEDescription.SSEType", equalTo("AES256"))
+            .body("TableDescription.SSEDescription.KMSMasterKeyArn", nullValue());
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "Aes256SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription.Status", equalTo("ENABLED"))
+            .body("Table.SSEDescription.SSEType", equalTo("AES256"))
+            .body("Table.SSEDescription.KMSMasterKeyArn", nullValue());
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "Aes256SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void createTableWithInvalidSseTypeFailsValidation() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "InvalidSseTypeTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "SSESpecification": {"Enabled": true, "SSEType": "BOGUS"}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        // SSEType is validated before CreateTable runs, so the table must not exist at all --
+        // a real DynamoDB rejects the whole request rather than leaving a table behind.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "InvalidSseTypeTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void updateTableWithInvalidSseTypeFailsValidation() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "UpdateInvalidSseTypeTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "UpdateInvalidSseTypeTable",
+                    "SSESpecification": {"Enabled": true, "SSEType": "BOGUS"}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        // SSEType is validated before UpdateTable applies anything, so the table must still
+        // show no SSEDescription at all -- the failed request must not have partially applied.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "UpdateInvalidSseTypeTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription", nullValue());
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "UpdateInvalidSseTypeTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void createTableWithGsiAndLsi() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -438,6 +752,35 @@ class DynamoDbIntegrationTest {
             .body("Items[0].name", nullValue())
             .body("Items[0].age", nullValue())
             .body("Items[0].total", nullValue());
+    }
+
+    // Checked against real DynamoDB (us-east-1, 2026-09-07). A reversed BETWEEN in a
+    // ConditionExpression is a 400 ValidationException, not a ConditionalCheckFailedException,
+    // and AWS wraps the ConditionExpression form in its validation-error envelope.
+    @Test
+    @Order(10)
+    void putItemWithReversedBetweenBoundsReturnsValidationException() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "Item": {"pk": {"S": "between-1"}, "sk": {"S": "a"}},
+                    "ConditionExpression": "#n BETWEEN :hi AND :lo",
+                    "ExpressionAttributeNames": {"#n": "n"},
+                    "ExpressionAttributeValues": {":hi": {"N": "10"}, ":lo": {"N": "1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: "
+                    + "The BETWEEN operator requires upper bound to be greater than or equal to lower "
+                    + "bound; lower bound operand: AttributeValue: {N:10}, upper bound operand: "
+                    + "AttributeValue: {N:1}"));
     }
 
     @Test
@@ -3467,6 +3810,57 @@ given()
     }
 
     @Test
+    void transactWriteFailureIsAtomicThroughAwsProtocol() {
+        String firstTable = "TxAtomicPublicOne";
+        String secondTable = "TxAtomicPublicTwo";
+        String createTable = """
+                {
+                  "TableName":"%s",
+                  "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                  "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],
+                  "BillingMode":"PAY_PER_REQUEST"
+                }
+                """;
+
+        for (String table : new String[]{firstTable, secondTable}) {
+            given().header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+                    .contentType(DYNAMODB_CONTENT_TYPE)
+                    .body(createTable.formatted(table))
+                    .when().post("/")
+                    .then().statusCode(200);
+        }
+
+        String transaction = """
+                {
+                  "TransactItems":[
+                    {"Put":{"TableName":"%s","Item":{"pk":{"S":"new"}}}},
+                    {"ConditionCheck":{"TableName":"%s","Key":{"pk":{"S":"bad"}},
+                      "ConditionExpression":"attribute_exists(pk)"}}
+                  ]
+                }
+                """.formatted(firstTable, secondTable);
+
+        given().header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body(transaction)
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("TransactionCanceledException"));
+
+        for (String table : new String[]{firstTable, secondTable}) {
+            given().header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+                    .contentType(DYNAMODB_CONTENT_TYPE)
+                    .body("{\"TableName\":\"%s\",\"Key\":{\"pk\":{\"S\":\"new\"}}}".formatted(table))
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("Item", nullValue());
+        }
+
+        deleteTable(firstTable);
+        deleteTable(secondTable);
+    }
+
+    @Test
     void nullTypedKeyAttributeIsRejected() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -3538,6 +3932,335 @@ given()
             .statusCode(200);
 
         deleteTable("NullKeyTable");
+    }
+
+    // Reproduces #2893: unused ExpressionAttributeNames/Values must be rejected on
+    // PutItem, DeleteItem, Scan and Query, matching AWS ValidationException behavior.
+    @Test
+    void unusedExpressionAttributesAreRejected() {
+        String tableName = "UnusedExprAttrTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // PutItem: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // PutItem: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // DeleteItem: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_exists(pk)",
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // DeleteItem: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_exists(pk)",
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Scan: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "#d = :d",
+                    "ExpressionAttributeNames": {"#d": "data", "#st": "status"},
+                    "ExpressionAttributeValues": {":d": {"S": "v"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // Scan: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "#d = :d",
+                    "ExpressionAttributeNames": {"#d": "data"},
+                    "ExpressionAttributeValues": {":d": {"S": "v"}, ":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Query: unused ExpressionAttributeValues entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {":pk": {"S": "a"}, ":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Query: unused ExpressionAttributeNames entry
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeNames": {"#st": "status"},
+                    "ExpressionAttributeValues": {":pk": {"S": "a"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#st}"));
+
+        // Query: legacy KeyConditions combined with FilterExpression, unused EAV entry.
+        // keyConditionExpr is null here, so the check must not be gated on it.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditions": {
+                        "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}
+                    },
+                    "FilterExpression": "#d = :d",
+                    "ExpressionAttributeNames": {"#d": "data"},
+                    "ExpressionAttributeValues": {":d": {"S": "v"}, ":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Query: legacy KeyConditions with no expression parameter at all, stray EAV.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditions": {
+                        "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}
+                    },
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+                    + "unused in expressions: keys: {:unused}"));
+
+        // Only the unused entries are reported: #used is referenced, #a and #b are not.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ConditionExpression": "attribute_not_exists(#used)",
+                    "ExpressionAttributeNames": {"#used": "pk", "#a": "x", "#b": "y"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+                    + "unused in expressions: keys: {#a, #b}"));
+
+        // No expression parameter at all: AWS reports the alias map "can only be specified
+        // when using expressions", distinct from the "unused in expressions" wording above.
+        // PutItem and DeleteItem only accept ConditionExpression, so it is the named param.
+
+        // PutItem: ExpressionAttributeNames without ConditionExpression
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeNames can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
+        // PutItem: ExpressionAttributeValues without ConditionExpression (pre-existing guard)
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}},
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeValues can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
+        // DeleteItem: ExpressionAttributeNames without ConditionExpression
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ExpressionAttributeNames": {"#st": "status"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeNames can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
+        // DeleteItem: ExpressionAttributeValues without ConditionExpression; with both maps
+        // present the values message wins, matching the pre-existing PutItem guard order.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}},
+                    "ExpressionAttributeNames": {"#st": "status"},
+                    "ExpressionAttributeValues": {":unused": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("ExpressionAttributeValues can only be specified "
+                    + "when using expressions: ConditionExpression is null"));
+
+        // Control: fully-referenced expression attributes are still accepted.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "data": {"S": "v"}},
+                    "ConditionExpression": "attribute_not_exists(#p)",
+                    "ExpressionAttributeNames": {"#p": "pk"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        deleteTable(tableName);
     }
 
     private void deleteTable(String tableName) {

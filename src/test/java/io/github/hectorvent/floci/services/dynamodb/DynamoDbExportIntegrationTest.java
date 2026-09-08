@@ -69,7 +69,7 @@ class DynamoDbExportIntegrationTest {
     }
 
     @Test
-    void exportTableToPointInTime_returnsInProgressOrCompleted() {
+    void exportTableToPointInTime_returnsInProgress() {
         String exportArn = given()
             .header("X-Amz-Target", "DynamoDB_20120810.ExportTableToPointInTime")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -85,7 +85,7 @@ class DynamoDbExportIntegrationTest {
             .then()
             .statusCode(200)
             .body("ExportDescription.ExportArn", notNullValue())
-            .body("ExportDescription.ExportStatus", oneOf("IN_PROGRESS", "COMPLETED"))
+            .body("ExportDescription.ExportStatus", equalTo("IN_PROGRESS"))
             .body("ExportDescription.TableArn", equalTo(TABLE_ARN))
             .body("ExportDescription.S3Bucket", equalTo(BUCKET_NAME))
             .body("ExportDescription.ExportFormat", equalTo("DYNAMODB_JSON"))

@@ -73,6 +73,8 @@ class IamEnforcementFilterTest {
         when(services.iam()).thenReturn(iamConfig);
         when(iamConfig.enforcementEnabled()).thenReturn(true);
         when(config.defaultRegion()).thenReturn("us-east-1");
+        when(arnBuilder.buildResources(any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(arnBuilder.build(any(), any(), any(), any())).thenReturn("*");
         // Default: scopes are already canonical. Alias handling is asserted explicitly below.
         when(catalog.canonicalCredentialScope(anyString())).thenAnswer(inv -> inv.getArgument(0));
     }
@@ -109,8 +111,8 @@ class IamEnforcementFilterTest {
                           {"Effect":"Allow","Action":"lambda:InvokeFunction",
                            "Resource":"arn:aws:lambda:us-east-1:222233334444:function:fn"}
                         ]}""")));
-        when(arnBuilder.build("lambda", containerRequest, "us-east-1", "222233334444"))
-                .thenReturn("arn:aws:lambda:us-east-1:222233334444:function:fn");
+        when(arnBuilder.buildResources("lambda", containerRequest, "us-east-1", "222233334444"))
+                .thenReturn(List.of("arn:aws:lambda:us-east-1:222233334444:function:fn"));
         when(evaluator.evaluate(
                 any(),
                 isNull(),
@@ -125,7 +127,111 @@ class IamEnforcementFilterTest {
 
         filter.filter(containerRequest);
 
-        verify(arnBuilder).build("lambda", containerRequest, "us-east-1", "222233334444");
+        verify(arnBuilder).buildResources("lambda", containerRequest, "us-east-1", "222233334444");
+    }
+
+    @Test
+    void filterBuildsResourceArnForDynamoDbTable() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260902/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(accountResolver.resolve(auth)).thenReturn("000000000000");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:GetItem");
+        when(iamService.resolveCallerContext("ASIASESSION"))
+                .thenReturn(CallerContext.of(List.of("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"dynamodb:GetItem",
+                           "Resource":"arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"}
+                        ]}""")));
+        when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
+                .thenReturn(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"));
+        when(evaluator.evaluate(
+                any(),
+                isNull(),
+                eq("dynamodb:GetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"),
+                isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+        when(conditionContextResolver.resolve("dynamodb", "dynamodb:GetItem", containerRequest))
+                .thenReturn(null);
+
+        IamEnforcementFilter filter = newFilter();
+
+        filter.filter(containerRequest);
+
+        verify(arnBuilder).buildResources("dynamodb", containerRequest, "us-east-1", "000000000000");
+        verify(containerRequest, never()).abortWith(any());
+    }
+
+    @Test
+    void filterEvaluatesAllResourcesForMultiTableDynamoDbRequestAndAllowsWhenAllAllowed() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260902/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(accountResolver.resolve(auth)).thenReturn("000000000000");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:BatchGetItem");
+        when(iamService.resolveCallerContext("ASIASESSION"))
+                .thenReturn(CallerContext.of(List.of("{}")));
+        when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
+                .thenReturn(List.of(
+                        "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
+                        "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
+                ));
+        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"), isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+        when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
+                .thenReturn(null);
+
+        IamEnforcementFilter filter = newFilter();
+        filter.filter(containerRequest);
+
+        verify(evaluator).evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), isNull());
+        verify(evaluator).evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"), isNull());
+        verify(containerRequest, never()).abortWith(any());
+    }
+
+    @Test
+    void filterAbortsWhenAnyResourceInMultiTableRequestIsDenied() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260902/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(accountResolver.resolve(auth)).thenReturn("000000000000");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:BatchGetItem");
+        when(iamService.resolveCallerContext("ASIASESSION"))
+                .thenReturn(CallerContext.of(List.of("{}")));
+        when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
+                .thenReturn(List.of(
+                        "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
+                        "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
+                ));
+        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"), isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.DENY);
+        when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
+                .thenReturn(null);
+
+        IamEnforcementFilter filter = newFilter();
+        filter.filter(containerRequest);
+
+        verify(containerRequest).abortWith(any());
     }
 
     @Test
@@ -150,7 +256,7 @@ class IamEnforcementFilterTest {
     @Test
     void filterPassesS3ListBucketConditionContext() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        Map<String, String> conditions = Map.of("s3:prefix", "my_namespace/table/");
+        Map<String, List<String>> conditions = Map.of("s3:prefix", List.of("my_namespace/table/"));
 
         String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260706/us-east-1/s3/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
@@ -165,8 +271,8 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Allow","Action":"s3:ListBucket","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.build("s3", containerRequest, "us-east-1", "222233334444"))
-                .thenReturn("arn:aws:s3:::bucket");
+        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+                .thenReturn(List.of("arn:aws:s3:::bucket"));
         when(conditionContextResolver.resolve("s3", "s3:ListBucket", containerRequest))
                 .thenReturn(conditions);
         when(evaluator.evaluate(any(), isNull(), eq("s3:ListBucket"), eq("arn:aws:s3:::bucket"), eq(conditions)))
@@ -201,8 +307,8 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.build(eq("s3"), eq(containerRequest), anyString(), anyString()))
-                .thenReturn("arn:aws:s3:::bucket/key");
+        when(arnBuilder.buildResources(eq("s3"), eq(containerRequest), anyString(), anyString()))
+                .thenReturn(List.of("arn:aws:s3:::bucket/key"));
         when(evaluator.evaluate(any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
@@ -210,7 +316,7 @@ class IamEnforcementFilterTest {
 
         // Everything keyed by scope must see the canonical name, not the alias.
         verify(actionRegistry).resolve("s3", containerRequest);
-        verify(arnBuilder).build(eq("s3"), eq(containerRequest), anyString(), anyString());
+        verify(arnBuilder).buildResources(eq("s3"), eq(containerRequest), anyString(), anyString());
         verify(conditionContextResolver).resolve("s3", "s3:GetObject", containerRequest);
         // The policy above grants only s3:PutObject, so a GetObject signed as s3express is denied.
         verify(containerRequest).abortWith(any(Response.class));
@@ -297,8 +403,8 @@ class IamEnforcementFilterTest {
         when(actionRegistry.resolve("organizations", containerRequest))
                 .thenReturn("organizations:DescribeOrganization");
         when(iamService.resolveCallerContext(account)).thenReturn(null);
-        when(arnBuilder.build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
-                .thenReturn("*");
+        when(arnBuilder.buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
+                .thenReturn(List.of("*"));
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
                 .thenReturn(null);
 
@@ -312,10 +418,10 @@ class IamEnforcementFilterTest {
 
         verify(containerRequest, never()).abortWith(any());
         // Prove the request went THROUGH evaluation rather than taking the unknown-key bypass:
-        // arnBuilder.build sits after the caller-resolution branch, so it only fires for a request
+        // arnBuilder.buildResources sits after the caller-resolution branch, so it only fires for a request
         // that was actually evaluated. Without this, the never()-abort assertion would also pass on
         // a bypass, making it no stronger than the pre-fix behavior.
-        verify(arnBuilder).build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
+        verify(arnBuilder).buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
     }
 
     // The realistic baseline guardrail from .temp/org-functional-test.sh: DenyLeaveOrg plus a
@@ -498,8 +604,8 @@ class IamEnforcementFilterTest {
                 .thenReturn(CallerContext.of(List.of(ALLOW_IF_IAM_USER_PRINCIPAL)));
         when(iamService.resolveCallerArn(akid))
                 .thenReturn(Optional.of("arn:aws:iam::" + account + ":user/bob"));
-        when(arnBuilder.build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
-                .thenReturn("*");
+        when(arnBuilder.buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
+                .thenReturn(List.of("*"));
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
                 .thenReturn(null);
 
@@ -511,7 +617,7 @@ class IamEnforcementFilterTest {
 
         // aws:PrincipalArn matches arn:aws:iam::*:user/* → the conditional Allow grants access.
         verify(containerRequest, never()).abortWith(any());
-        verify(arnBuilder).build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
+        verify(arnBuilder).buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
     }
 
     @Test

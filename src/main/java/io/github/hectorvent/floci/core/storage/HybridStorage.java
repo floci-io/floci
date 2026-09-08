@@ -91,7 +91,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void load() {
+    public synchronized void load() {
         if (!Files.exists(filePath)) {
             LOG.debugv("No persistent file found at {0}, starting with empty store", filePath);
             return;
@@ -102,7 +102,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
             store.putAll(data);
             LOG.infov("Loaded {0} entries from {1}", store.size(), filePath);
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to load data from {0}", filePath);
+            StorageQuarantine.quarantine(filePath, e, LOG);
         }
     }
 

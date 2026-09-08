@@ -220,6 +220,136 @@ class StepFunctionsExecutionHistoryIntegrationTest {
         }
     }
 
+    /**
+     * The events of the states inside a Parallel branch and a Map iteration reach the caller through
+     * GetExecutionHistory under the details field the SDK names for each event type. Shapes read
+     * off real Step Functions in us-east-1 for issue #2868.
+     */
+    @Test
+    void getExecutionHistory_publishesParallelBranchAndMapIterationEvents() throws Exception {
+        String definition = """
+                {
+                  "StartAt": "P",
+                  "States": {
+                    "P": {
+                      "Type": "Parallel",
+                      "Branches": [
+                        {"StartAt": "A1", "States": {"A1": {"Type": "Pass", "End": true}}}
+                      ],
+                      "Next": "M"
+                    },
+                    "M": {
+                      "Type": "Map",
+                      "ItemsPath": "$[0].items",
+                      "MaxConcurrency": 1,
+                      "ItemProcessor": {
+                        "ProcessorConfig": {"Mode": "INLINE"},
+                        "StartAt": "I1",
+                        "States": {"I1": {"Type": "Pass", "End": true}}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """;
+
+        String stateMachineArn = createStateMachine("execution-history-branches-test", definition);
+        String executionArn = startExecution(stateMachineArn, "{\"items\": [1, 2]}");
+        waitForExecution(executionArn);
+
+        var events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
+        var types = new ArrayList<String>();
+        events.forEach(event -> types.add(event.path("type").asText()));
+        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
+                "PassStateEntered", "PassStateExited", "ParallelStateSucceeded", "ParallelStateExited",
+                "MapStateEntered", "MapStateStarted",
+                "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
+                "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
+                "MapStateSucceeded", "MapStateExited", "ExecutionSucceeded"), types);
+        var expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 5L, 7L, 8L, 9L, 10L, 11L, 12L,
+                9L, 14L, 15L, 16L, 17L, 17L, 19L);
+        for (var i = 0; i < events.size(); i++) {
+            assertEquals(i + 1L, events.get(i).path("id").asLong());
+            assertEquals(expectedPreviousEventIds.get(i), events.get(i).path("previousEventId").asLong(),
+                    "previousEventId of event " + (i + 1) + " in " + events);
+        }
+        assertFalse(events.get(2).has("parallelStateStartedEventDetails"));
+        assertEquals(2, events.get(8).path("mapStateStartedEventDetails").path("length").asInt());
+        assertEquals("M", events.get(9).path("mapIterationStartedEventDetails").path("name").asText());
+        assertEquals(0, events.get(9).path("mapIterationStartedEventDetails").path("index").asInt());
+        assertEquals("M", events.get(16).path("mapIterationSucceededEventDetails").path("name").asText());
+        assertEquals(1, events.get(16).path("mapIterationSucceededEventDetails").path("index").asInt());
+        assertEquals("[1,2]", events.get(18).path("stateExitedEventDetails").path("output").asText());
+    }
+
+    /** The shape reported in issue #2868, verified against us-east-1. */
+    @Test
+    void getExecutionHistory_namesTheBranchStateAFailureBelongsTo() throws Exception {
+        String definition = """
+                {
+                  "StartAt": "P",
+                  "States": {
+                    "P": {
+                      "Type": "Parallel",
+                      "Branches": [
+                        {"StartAt": "Fast", "States": {"Fast": {"Type": "Pass", "Parameters": {"m.$": "$.nope"}, "End": true}}}
+                      ],
+                      "End": true
+                    }
+                  }
+                }
+                """;
+
+        String stateMachineArn = createStateMachine("execution-history-branch-failure-test", definition);
+        String executionArn = startExecution(stateMachineArn, "{\"x\": \"a\"}");
+        var cause = "An error occurred while executing the state 'Fast' (entered at the event id #4). "
+                + "The JSONPath '$.nope' specified for the field 'm.$' could not be found in the input '{\"x\":\"a\"}'";
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(100)).untilAsserted(() -> {
+            var described = describeExecution(executionArn);
+            assertEquals("FAILED", described.jsonPath().getString("status"), described.body().asString());
+            assertEquals("States.Runtime", described.jsonPath().getString("error"));
+            assertEquals(cause, described.jsonPath().getString("cause"));
+        });
+
+        var events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
+        var types = new ArrayList<String>();
+        events.forEach(event -> types.add(event.path("type").asText()));
+        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
+                "PassStateEntered", "ExecutionFailed"), types);
+        assertEquals("Fast", events.get(3).path("stateEnteredEventDetails").path("name").asText());
+        assertEquals(cause, events.get(4).path("executionFailedEventDetails").path("cause").asText());
+        assertEquals(4L, events.get(4).path("previousEventId").asLong());
+    }
+
+    private Response getExecutionHistory(String executionArn) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "executionArn": "%s",
+                            "includeExecutionData": true
+                        }
+                        """, executionArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response;
+    }
+
+    private Response describeExecution(String executionArn) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        { "executionArn": "%s" }
+                        """, executionArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response;
+    }
+
     private static String createQueue(String queueName) {
         var response = given()
                 .header("X-Amz-Target", "AmazonSQS.CreateQueue")
@@ -272,6 +402,22 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                             "stateMachineArn": "%s"
                         }
                         """, stateMachineArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response.jsonPath().getString("executionArn");
+    }
+
+    private String startExecution(String stateMachineArn, String input) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "stateMachineArn": "%s",
+                            "input": %s
+                        }
+                        """, stateMachineArn, quote(input)))
                 .when()
                 .post("/");
         response.then().statusCode(200);

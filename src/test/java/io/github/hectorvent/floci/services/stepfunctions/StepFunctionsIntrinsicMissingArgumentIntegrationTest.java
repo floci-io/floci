@@ -39,7 +39,8 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
-        assertEquals("The function 'States.Format('{}', $.nope)' had the following error: "
+        assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
+                + "The function 'States.Format('{}', $.nope)' had the following error: "
                 + "The JsonPath argument for the field '$.nope' could not be found in the input "
                 + "'{\"other\":1}'",
                 describe.jsonPath().getString("cause"));
@@ -58,7 +59,8 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
         var describe = run("nested-intrinsic", definition, "{\"other\":1}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
-        assertEquals("The function 'States.Format('{}', States.Format('{}', $.nope))' had the "
+        assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
+                + "The function 'States.Format('{}', States.Format('{}', $.nope))' had the "
                 + "following error: The JsonPath argument for the field '$.nope' could not be "
                 + "found in the input '{\"other\":1}'",
                 describe.jsonPath().getString("cause"));
@@ -79,7 +81,8 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
         var describe = run("intrinsic-index-out-of-range", definition, "{\"items\":[1,2]}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
-        assertEquals("The function 'States.Format('{}', $.items[5])' had the following error: "
+        assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
+                + "The function 'States.Format('{}', $.items[5])' had the following error: "
                 + "The JsonPath argument for the field '$.items[5]' could not be found in the "
                 + "input '{\"items\":[1,2]}'",
                 describe.jsonPath().getString("cause"));
@@ -101,7 +104,8 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
-        assertEquals("The function 'States.Format('{}', $.nope)' had the following error: "
+        assertEquals("An error occurred while executing the state 'M' (entered at the event id #2). "
+                + "The function 'States.Format('{}', $.nope)' had the following error: "
                 + "The JsonPath argument for the field '$.nope' could not be found in the input "
                 + "'{\"items\":[1,2]}'",
                 describe.jsonPath().getString("cause"));

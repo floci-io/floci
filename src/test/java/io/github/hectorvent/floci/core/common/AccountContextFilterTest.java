@@ -160,6 +160,26 @@ class AccountContextFilterTest {
         assertEquals("eu-west-1", requestContext.getRegion());
     }
 
+    @Test
+    void pinnedAccountWinsOverTheAuthorizationHeader() {
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=000000000001/20260617/us-west-2/s3/aws4_request, SignedHeaders=host, Signature=abc",
+            null
+        );
+        when(ctx.getProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY)).thenReturn("111122223333");
+        filter.filter(ctx);
+        assertEquals("111122223333", requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
+    @Test
+    void pinnedAccountAppliesToAnUnsignedRequest() {
+        ContainerRequestContext ctx = mockContext("Basic Y2xpZW50OnNlY3JldA==", null);
+        when(ctx.getProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY)).thenReturn("111122223333");
+        filter.filter(ctx);
+        assertEquals("111122223333", requestContext.getAccountId());
+    }
+
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         when(ctx.getHeaderString("Authorization")).thenReturn(authHeader);

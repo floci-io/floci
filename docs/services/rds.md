@@ -32,16 +32,18 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBParameterGroup` | Delete a parameter group |
 | `ModifyDBParameterGroup` | Update parameter group settings |
 | `DescribeDBParameters` | List parameters in a group |
-| `CreateDBClusterParameterGroup` | - |
-| `DescribeDBClusterParameterGroups` | - |
-| `DeleteDBClusterParameterGroup` | - |
-| `ModifyDBClusterParameterGroup` | - |
-| `DescribeDBClusterParameters` | - |
+| `CreateDBClusterParameterGroup` | Create an Aurora-compatible cluster parameter group |
+| `DescribeDBClusterParameterGroups` | List cluster parameter groups |
+| `DeleteDBClusterParameterGroup` | Delete a cluster parameter group |
+| `ModifyDBClusterParameterGroup` | Update cluster parameter group settings |
+| `DescribeDBClusterParameters` | List parameters in a cluster group |
 | `CreateOptionGroup` | Create an option group |
 | `DescribeOptionGroups` | List option groups, including the implicit `default:` groups |
 | `ModifyOptionGroup` | Add, update, or remove options in an option group |
 | `DeleteOptionGroup` | Delete an option group |
-| `DescribeDBSnapshots` | Return an empty snapshot list (snapshots are not modeled) |
+| `CreateDBSnapshot` | Create a snapshot of a DB instance |
+| `RestoreDBInstanceFromDBSnapshot` | Create a new DB instance from a snapshot |
+| `DescribeDBSnapshots` | List DB instance snapshots |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
@@ -106,6 +108,21 @@ services:
       FLOCI_SERVICES_DOCKER_NETWORK: my-project_default
       FLOCI_SERVICES_RDS_PROXY_BASE_PORT: "7001"
 ```
+
+### Without a reachable Docker daemon
+
+A DB instance or cluster record is metadata. Its identifier, ARN, endpoint address and tags come
+from Floci's configuration, not from Docker. When no daemon is reachable, because Floci runs inside
+Docker with no socket mounted or the daemon on the host is stopped, `CreateDBInstance` and
+`CreateDBCluster` still succeed and the resource reaches `available`. `DescribeDBInstances`,
+`ModifyDBInstance`, the tagging APIs and `DeleteDBInstance` all work on that record, and Floci logs
+a warning naming the missing daemon.
+
+Nothing listens behind the endpoint in that state. The backing container is retried by every
+operation that needs the live database, so it starts as soon as a daemon becomes reachable. Until
+then, RDS Data API calls fail with a modelled `InternalServerErrorException` that names the missing
+daemon. A daemon that is reachable but cannot start the container still fails `CreateDBInstance`
+outright, since that is a real error rather than a degraded mode.
 
 ### Mock mode (CI / tests)
 
@@ -305,6 +322,10 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
 The RDS auth proxy validates the master username and password at the proxy layer. All other database users are passed through directly to the backend engine — create them with standard SQL (`CREATE USER`) and connect as normal.
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
+
+On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
+
+Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
 
 ## TLS / SSL
 

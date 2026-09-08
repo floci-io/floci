@@ -477,12 +477,13 @@ public class JsonataEvaluator {
         } catch (QueryEvaluationFailure failure) {
             throw new FailStateException(failure.error,
                     "The JSONata expression '" + expr + "' specified for the field '" + field
-                            + "' threw an error during evaluation" + failure.sentenceSeparator + failure.cause);
+                            + "' threw an error during evaluation" + failure.sentenceSeparator + failure.cause,
+                    field);
         }
         if (value.isMissingNode()) {
             throw new FailStateException("States.QueryEvaluationError",
                     "The JSONata expression '" + expr + "' specified for the field '" + field
-                            + "' returned nothing (undefined).");
+                            + "' returned nothing (undefined).", field);
         }
         return value;
     }

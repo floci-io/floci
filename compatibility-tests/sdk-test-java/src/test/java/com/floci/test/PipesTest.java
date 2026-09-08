@@ -28,6 +28,10 @@ class PipesTest {
         return "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":" + queueName;
     }
 
+    private static String kinesisArn(String streamName) {
+        return "arn:aws:kinesis:" + REGION + ":" + ACCOUNT_ID + ":stream/" + streamName;
+    }
+
     @BeforeAll
     static void setup() {
         pipes = TestFixtures.pipesClient();
@@ -343,5 +347,62 @@ class PipesTest {
             try { sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(nfSrcUrl).build()); } catch (Exception ignored) {}
             try { sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(nfTgtUrl).build()); } catch (Exception ignored) {}
         }
+    }
+
+    @Test
+    @Order(14)
+    void parallelizationFactorRoundTripsOnKinesisSource() {
+        String pfPipeName = TestFixtures.uniqueName("pipe-pf");
+        String pfStream = TestFixtures.uniqueName("pipe-pf-stream");
+
+        try {
+            pipes.createPipe(CreatePipeRequest.builder()
+                    .name(pfPipeName)
+                    .source(kinesisArn(pfStream))
+                    .target(sqsArn(tgtQueue))
+                    .roleArn(ROLE_ARN)
+                    .desiredState(RequestedPipeState.STOPPED)
+                    .sourceParameters(PipeSourceParameters.builder()
+                            .kinesisStreamParameters(PipeSourceKinesisStreamParameters.builder()
+                                    .startingPosition(KinesisStreamStartPosition.TRIM_HORIZON)
+                                    .parallelizationFactor(4)
+                                    .build())
+                            .build())
+                    .build());
+
+            DescribePipeResponse response = pipes.describePipe(DescribePipeRequest.builder()
+                    .name(pfPipeName).build());
+
+            assertThat(response.sourceParameters().kinesisStreamParameters().parallelizationFactor())
+                    .isEqualTo(4);
+        } finally {
+            try { pipes.deletePipe(DeletePipeRequest.builder().name(pfPipeName).build()); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(15)
+    void parallelizationFactorOutOfRangeIsRejected() {
+        String pfPipeName = TestFixtures.uniqueName("pipe-pf-invalid");
+        String pfStream = TestFixtures.uniqueName("pipe-pf-invalid-stream");
+
+        assertThatThrownBy(() -> pipes.createPipe(CreatePipeRequest.builder()
+                .name(pfPipeName)
+                .source(kinesisArn(pfStream))
+                .target(sqsArn(tgtQueue))
+                .roleArn(ROLE_ARN)
+                .desiredState(RequestedPipeState.STOPPED)
+                .sourceParameters(PipeSourceParameters.builder()
+                        .kinesisStreamParameters(PipeSourceKinesisStreamParameters.builder()
+                                .startingPosition(KinesisStreamStartPosition.TRIM_HORIZON)
+                                .parallelizationFactor(11)
+                                .build())
+                        .build())
+                .build()))
+                .isInstanceOf(ValidationException.class);
+
+        assertThatThrownBy(() -> pipes.describePipe(DescribePipeRequest.builder()
+                .name(pfPipeName).build()))
+                .isInstanceOf(NotFoundException.class);
     }
 }

@@ -39,6 +39,103 @@ func TestIoT(t *testing.T) {
 		assert.NotEmpty(t, aws.ToString(response.EndpointAddress))
 	})
 
+	t.Run("DomainConfigurationLifecycle", func(t *testing.T) {
+		name := "go-iot-domain"
+		certificateArn := "arn:aws:acm:us-east-1:000000000000:certificate/11111111-1111-1111-1111-111111111111"
+		// A leftover from an earlier run must be disabled before it can be deleted.
+		_, _ = svc.UpdateDomainConfiguration(ctx, &iot.UpdateDomainConfigurationInput{
+			DomainConfigurationName:   aws.String(name),
+			DomainConfigurationStatus: iottypes.DomainConfigurationStatusDisabled,
+		})
+		_, _ = svc.DeleteDomainConfiguration(ctx, &iot.DeleteDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+
+		_, err := svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		var notFound *iottypes.ResourceNotFoundException
+		require.ErrorAs(t, err, &notFound)
+
+		managed, err := svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String("iot:Data-ATS")})
+		require.NoError(t, err)
+		assert.Equal(t, iottypes.DomainTypeAwsManaged, managed.DomainType)
+		assert.Equal(t, iottypes.DomainConfigurationStatusEnabled, managed.DomainConfigurationStatus)
+		assert.NotEmpty(t, aws.ToString(managed.DomainName))
+
+		created, err := svc.CreateDomainConfiguration(ctx, &iot.CreateDomainConfigurationInput{
+			DomainConfigurationName: aws.String(name),
+			DomainName:              aws.String("iot.go.example.com"),
+			ServerCertificateArns:   []string{certificateArn},
+			ServiceType:             iottypes.ServiceTypeData,
+			Tags:                    []iottypes.Tag{{Key: aws.String("env"), Value: aws.String("go")}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, name, aws.ToString(created.DomainConfigurationName))
+		assert.True(t, strings.HasPrefix(aws.ToString(created.DomainConfigurationArn),
+			"arn:aws:iot:us-east-1:000000000000:domainconfiguration/"+name+"/"))
+
+		_, err = svc.CreateDomainConfiguration(ctx, &iot.CreateDomainConfigurationInput{
+			DomainConfigurationName: aws.String(name),
+			DomainName:              aws.String("iot.go.example.com"),
+			ServerCertificateArns:   []string{certificateArn},
+		})
+		var alreadyExists *iottypes.ResourceAlreadyExistsException
+		require.ErrorAs(t, err, &alreadyExists)
+
+		described, err := svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		require.NoError(t, err)
+		assert.Equal(t, aws.ToString(created.DomainConfigurationArn), aws.ToString(described.DomainConfigurationArn))
+		assert.Equal(t, "iot.go.example.com", aws.ToString(described.DomainName))
+		assert.Equal(t, iottypes.DomainConfigurationStatusEnabled, described.DomainConfigurationStatus)
+		assert.Equal(t, iottypes.ServiceTypeData, described.ServiceType)
+		assert.Equal(t, iottypes.DomainTypeCustomerManaged, described.DomainType)
+		require.Len(t, described.ServerCertificates, 1)
+		assert.Equal(t, certificateArn, aws.ToString(described.ServerCertificates[0].ServerCertificateArn))
+		assert.Equal(t, iottypes.ServerCertificateStatusValid, described.ServerCertificates[0].ServerCertificateStatus)
+		assert.NotNil(t, described.LastStatusChangeDate)
+
+		listed, err := svc.ListDomainConfigurations(ctx, &iot.ListDomainConfigurationsInput{ServiceType: iottypes.ServiceTypeData})
+		require.NoError(t, err)
+		var names []string
+		for _, summary := range listed.DomainConfigurations {
+			names = append(names, aws.ToString(summary.DomainConfigurationName))
+		}
+		assert.Contains(t, names, name)
+
+		// Enabling an already ENABLED configuration is accepted and changes nothing.
+		enabled, err := svc.UpdateDomainConfiguration(ctx, &iot.UpdateDomainConfigurationInput{
+			DomainConfigurationName:   aws.String(name),
+			DomainConfigurationStatus: iottypes.DomainConfigurationStatusEnabled,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, aws.ToString(created.DomainConfigurationArn), aws.ToString(enabled.DomainConfigurationArn))
+		described, err = svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		require.NoError(t, err)
+		assert.Equal(t, iottypes.DomainConfigurationStatusEnabled, described.DomainConfigurationStatus)
+
+		tags, err := svc.ListTagsForResource(ctx, &iot.ListTagsForResourceInput{ResourceArn: created.DomainConfigurationArn})
+		require.NoError(t, err)
+		require.Len(t, tags.Tags, 1)
+		assert.Equal(t, "env", aws.ToString(tags.Tags[0].Key))
+
+		_, err = svc.DeleteDomainConfiguration(ctx, &iot.DeleteDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		var invalid *iottypes.InvalidRequestException
+		require.ErrorAs(t, err, &invalid)
+
+		updated, err := svc.UpdateDomainConfiguration(ctx, &iot.UpdateDomainConfigurationInput{
+			DomainConfigurationName:   aws.String(name),
+			DomainConfigurationStatus: iottypes.DomainConfigurationStatusDisabled,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, aws.ToString(created.DomainConfigurationArn), aws.ToString(updated.DomainConfigurationArn))
+
+		described, err = svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		require.NoError(t, err)
+		assert.Equal(t, iottypes.DomainConfigurationStatusDisabled, described.DomainConfigurationStatus)
+
+		_, err = svc.DeleteDomainConfiguration(ctx, &iot.DeleteDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		require.NoError(t, err)
+		_, err = svc.DescribeDomainConfiguration(ctx, &iot.DescribeDomainConfigurationInput{DomainConfigurationName: aws.String(name)})
+		require.ErrorAs(t, err, &notFound)
+	})
+
 	t.Run("ThingRegistryCrud", func(t *testing.T) {
 		thingName := "go-iot-thing"
 		otherThingName := "go-iot-other-thing"

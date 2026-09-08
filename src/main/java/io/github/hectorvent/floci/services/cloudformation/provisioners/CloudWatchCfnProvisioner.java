@@ -32,10 +32,8 @@ public class CloudWatchCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "AlarmName");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), ALARM_NAME_MAX_LENGTH, false);
-        }
+        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "AlarmName"),
+                r.getLogicalId(), ALARM_NAME_MAX_LENGTH, false);
 
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName(name);

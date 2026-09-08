@@ -41,6 +41,7 @@ final class CognitoAuthFlowHandler {
 
     private static final Logger LOG = Logger.getLogger(CognitoAuthFlowHandler.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String CUSTOM_MESSAGE_CODE_PARAMETER = "{####}";
 
     private final CognitoService service;
     private final LambdaService lambdaService;
@@ -852,6 +853,28 @@ final class CognitoAuthFlowHandler {
                 Boolean.TRUE.equals(resp.get("autoConfirmUser")),
                 Boolean.TRUE.equals(resp.get("autoVerifyEmail")),
                 Boolean.TRUE.equals(resp.get("autoVerifyPhone")));
+    }
+
+    /**
+     * Fires the CustomMessage trigger, if configured, so the function can override the
+     * subject/body Cognito would otherwise deliver. Non-blocking: an unconfigured or
+     * failing trigger falls back to the pool's default templated message, mirroring how
+     * {@link #firePostAuthentication} and {@link #firePostConfirmation} tolerate errors.
+     */
+    Map<String, Object> fireCustomMessage(UserPool pool, UserPoolClient client, CognitoUser user,
+                                           String triggerSource) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("codeParameter", CUSTOM_MESSAGE_CODE_PARAMETER);
+        req.put("usernameParameter", user.getUsername());
+        req.put("clientMetadata", Map.of());
+        TriggerResult result = invokeTrigger(pool, client, user, "CustomMessage", triggerSource, req);
+        if (!result.configured()) return null;
+        if (result.errored()) {
+            LOG.warnv("CustomMessage trigger failed for pool {0} (source {1}): {2}",
+                    pool.getId(), triggerSource, result.errorMessage());
+            return null;
+        }
+        return result.response();
     }
 
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,

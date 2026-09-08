@@ -895,11 +895,11 @@ public class CodePipelineService {
         state.setExternalExecutionId(build.getId());
         while (!Boolean.TRUE.equals(build.getBuildComplete())) {
             if (execution.isStopRequested()) {
-                codeBuildService.stopBuild(execution.getRegion(), build.getId());
+                codeBuildService.stopBuild(execution.getRegion(), execution.getAccountId(), build.getId());
                 break;
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
-            build = codeBuildService.getBuild(execution.getRegion(), build.getId());
+            build = codeBuildService.getBuild(execution.getRegion(), execution.getAccountId(), build.getId());
         }
         if (!"SUCCEEDED".equals(build.getBuildStatus())) {
             throw new AwsException("ActionExecutionFailed",

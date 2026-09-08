@@ -1453,7 +1453,7 @@ public class EventBridgeService implements ResourceProvider {
             throw new AwsException("IllegalStatusException",
                     "Replay is not in a cancellable state: " + replay.getState(), 400);
         }
-        boolean signalled = replayDispatcher.requestCancel(replayName);
+        boolean signalled = replayDispatcher.requestCancel(replay.getReplayArn());
         if (!signalled) {
             // already completed between check and cancel
             replay = replayStore.get(key).orElse(replay);

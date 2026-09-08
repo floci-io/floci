@@ -10,7 +10,7 @@ public class ConfigurationSession {
     private String applicationId;
     private String environmentId;
     private String configurationProfileId;
-    private int requiredMinimumPollIntervalInSeconds;
+    private int requiredMinimumPollIntervalInSeconds = 15;
     private String currentToken;
     private String lastConfigurationVersion;
 

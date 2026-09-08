@@ -4,9 +4,9 @@
 # Exit 0 on success, non-zero on first failure summary.
 #
 # These tests run the entrypoint as an unprivileged user with
-# LOCALSTACK_PARITY=false, so the root-only gosu block and the parity
+# LOCALSTACK_PARITY=false, so the root-only chroot block and the parity
 # script (installed at an absolute path inside the image) stay out of
-# the way. The root/gosu path is covered by the Docker image tests.
+# the way. The root/chroot path is covered by the Docker image tests.
 
 set -eu
 
@@ -26,7 +26,7 @@ assert_eq() {
 }
 
 if [ "$(id -u)" = '0' ]; then
-    echo "These tests must run as an unprivileged user (the root path re-execs via gosu)." >&2
+    echo "These tests must run as an unprivileged user (the root path re-execs via chroot)." >&2
     exit 1
 fi
 

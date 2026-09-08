@@ -42,7 +42,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void registerResource(String region, String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation) {
+    public synchronized void registerResource(String region, String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation) {
         ResourceInfo info = new ResourceInfo();
         info.setResourceArn(resourceArn);
         info.setRoleArn(roleArn);
@@ -52,7 +52,44 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void deregisterResource(String region, String resourceArn) {
+    public synchronized void updateResource(String region, String resourceArn, String roleArn, String expectedResourceOwnerAccount,
+                               Boolean hybridAccessEnabled, Boolean withFederation) {
+        String resourceKey = region + ":" + resourceArn;
+        ResourceInfo existing = resourcesStorage.get(resourceKey)
+                .orElseThrow(() -> new io.github.hectorvent.floci.core.common.AwsException(
+                        "EntityNotFoundException", "Resource not found", 400));
+        // Work on a defensive copy so concurrent readers (DescribeResource, ListResources)
+        // never observe a partially-mutated ResourceInfo: they see either the old complete
+        // state or the new complete state, never a mix of field values.
+        ResourceInfo updated = copyOf(existing);
+        updated.setRoleArn(roleArn);
+        if (expectedResourceOwnerAccount != null) {
+            updated.setExpectedResourceOwnerAccount(expectedResourceOwnerAccount);
+        }
+        if (hybridAccessEnabled != null) {
+            updated.setHybridAccessEnabled(hybridAccessEnabled);
+        }
+        if (withFederation != null) {
+            updated.setWithFederation(withFederation);
+        }
+        resourcesStorage.put(resourceKey, updated);
+    }
+
+    private static ResourceInfo copyOf(ResourceInfo source) {
+        ResourceInfo copy = new ResourceInfo();
+        copy.setExpectedResourceOwnerAccount(source.getExpectedResourceOwnerAccount());
+        copy.setHybridAccessEnabled(source.getHybridAccessEnabled());
+        copy.setLastModified(source.getLastModified());
+        copy.setResourceArn(source.getResourceArn());
+        copy.setRoleArn(source.getRoleArn());
+        copy.setVerificationStatus(source.getVerificationStatus());
+        copy.setWithFederation(source.getWithFederation());
+        copy.setWithPrivilegedAccess(source.getWithPrivilegedAccess());
+        return copy;
+    }
+
+    @Override
+    public synchronized void deregisterResource(String region, String resourceArn) {
         resourcesStorage.delete(region + ":" + resourceArn);
     }
 

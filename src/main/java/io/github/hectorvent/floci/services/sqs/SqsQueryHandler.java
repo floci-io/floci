@@ -262,7 +262,7 @@ public class SqsQueryHandler {
         String queueUrl = getParam(params, "QueueUrl");
         int maxMessages = getIntParam(params, "MaxNumberOfMessages", 1);
         int visibilityTimeout = getIntParam(params, "VisibilityTimeout", -1);
-        int waitTimeSeconds = getIntParam(params, "WaitTimeSeconds", 0);
+        Integer waitTimeSeconds = getOptionalIntParam(params, "WaitTimeSeconds");
 
         java.util.Set<String> requestedAttrs = new java.util.LinkedHashSet<>();
         requestedAttrs.addAll(collectIndexed(params, "AttributeName."));
@@ -562,6 +562,19 @@ public class SqsQueryHandler {
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
         return params.getFirst(name);
+    }
+
+    private Integer getOptionalIntParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + value + " for parameter " + name + " is invalid. Reason: Must be an integer.", 400);
+        }
     }
 
     private int getIntParam(MultivaluedMap<String, String> params, String name, int defaultValue) {

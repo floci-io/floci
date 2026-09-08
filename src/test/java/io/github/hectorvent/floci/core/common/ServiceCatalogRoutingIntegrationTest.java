@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.services.securityadmin.SecurityAdminController;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -72,6 +73,13 @@ class ServiceCatalogRoutingIntegrationTest {
         assertEquals("fis", descriptor.storageKey());
         assertEquals(ServiceProtocol.REST_JSON, descriptor.defaultProtocol());
         assertTrue(descriptor.supportsProtocol(ServiceProtocol.REST_JSON));
+    }
+
+    @Test
+    void sharedSecurityAdminRouteResolvesOnlyBySigningScope() {
+        assertTrue(catalog.byResourceClass(SecurityAdminController.class).isEmpty());
+        assertEquals("macie2", catalog.byCredentialScope("macie2").orElseThrow().externalKey());
+        assertEquals("guardduty", catalog.byCredentialScope("guardduty").orElseThrow().externalKey());
     }
 
     @Test

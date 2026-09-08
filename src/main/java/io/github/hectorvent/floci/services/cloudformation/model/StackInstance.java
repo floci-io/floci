@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.cloudformation.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class StackInstance {
@@ -18,6 +21,16 @@ public class StackInstance {
     /** Last operation status (SUCCEEDED, FAILED, ...) reported under StackInstanceStatus.DetailedStatus. */
     private String detailedStatus = "SUCCEEDED";
     private String statusReason;
+    private String organizationalUnitId;
+    /**
+     * Service-managed DeploymentTargets that currently cover this instance.
+     *
+     * <p>A single account/Region stack instance can be covered by more than one requested OU,
+     * for example when both a parent OU and one of its descendants are StackSet targets. AWS
+     * still exposes one {@code OrganizationalUnitId} on the public StackInstance shape, so this
+     * list is emulator-internal persistence used to preserve all target associations.</p>
+     */
+    private List<String> deploymentTargetIds = new ArrayList<>();
 
     public String getStackSetId() { return stackSetId; }
     public void setStackSetId(String stackSetId) { this.stackSetId = stackSetId; }
@@ -37,4 +50,10 @@ public class StackInstance {
     public void setDetailedStatus(String detailedStatus) { this.detailedStatus = detailedStatus; }
     public String getStatusReason() { return statusReason; }
     public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
+    public String getOrganizationalUnitId() { return organizationalUnitId; }
+    public void setOrganizationalUnitId(String organizationalUnitId) { this.organizationalUnitId = organizationalUnitId; }
+    public List<String> getDeploymentTargetIds() { return deploymentTargetIds; }
+    public void setDeploymentTargetIds(List<String> deploymentTargetIds) {
+        this.deploymentTargetIds = deploymentTargetIds == null ? new ArrayList<>() : new ArrayList<>(deploymentTargetIds);
+    }
 }

@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class CloudTrailService {
@@ -45,6 +46,15 @@ public class CloudTrailService {
     private final ConcurrentHashMap<TrailKey, ConcurrentLinkedQueue<ObjectNode>> pendingRecordsByTrail =
             new ConcurrentHashMap<>();
 
+    /**
+     * Backs {@link #withTrailLock}: serializes read-modify-write mutations to the same trail. A
+     * plain {@code get} then {@code put} on the store is not atomic across the pair, so two
+     * overlapping mutations of the same trail, even from different actions, e.g. AddTags racing
+     * StartLogging, can interleave such that the second {@code put} replaces the whole entry the
+     * first read, silently discarding whatever the first call changed.
+     */
+    private final ConcurrentHashMap<String, Object> trailLocks = new ConcurrentHashMap<>();
+
     @Inject
     public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
                              IamService iamService, ObjectMapper mapper) {
@@ -61,9 +71,30 @@ public class CloudTrailService {
                              String snsTopicArn, boolean includeGlobalServiceEvents,
                              boolean isMultiRegionTrail, boolean enableLogFileValidation,
                              boolean isOrganizationTrail) {
+        return createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
+                includeGlobalServiceEvents, isMultiRegionTrail, enableLogFileValidation,
+                isOrganizationTrail, Map.of());
+    }
+
+    /**
+     * Creates a trail, optionally tagged from the outset. CreateTrail carries a {@code TagsList}
+     * on the wire, and the Terraform AWS provider always sends the resource's tags there rather
+     * than through a follow-up AddTags, then reads them back with ListTags on every refresh, so
+     * tags dropped here would surface as a perpetual diff on {@code aws_cloudtrail}.
+     */
+    public Trail createTrail(String region, String name, String s3BucketName, String s3KeyPrefix,
+                             String snsTopicArn, boolean includeGlobalServiceEvents,
+                             boolean isMultiRegionTrail, boolean enableLogFileValidation,
+                             boolean isOrganizationTrail, Map<String, String> tags) {
         validateTrailName(name);
         if (s3BucketName == null || s3BucketName.isEmpty()) {
             throw new AwsException("S3BucketDoesNotExistException", "S3 bucket name is required.", 400);
+        }
+        Map<String, String> initialTags = tags == null ? Map.of() : tags;
+        if (initialTags.size() > MAX_TAGS_PER_RESOURCE) {
+            throw new AwsException("TagsLimitExceededException",
+                    "Tag limit exceeded for trail " + name
+                            + ". Maximum allowed: " + MAX_TAGS_PER_RESOURCE + ".", 400);
         }
         String key = regionKey(region, name);
         if (store.get(key).isPresent()) {
@@ -76,13 +107,14 @@ public class CloudTrailService {
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
                 enableLogFileValidation, false, false, isOrganizationTrail);
-        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null));
+        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null, initialTags));
         return trail;
     }
 
     public void deleteTrail(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        store.delete(regionKey(trail.homeRegion(), trail.name()));
+        String key = regionKey(trail.homeRegion(), trail.name());
+        withTrailLock(key, () -> store.delete(key));
         pendingRecordsByTrail.keySet().removeIf(k -> k.trailName().equals(trail.name()));
     }
 
@@ -90,23 +122,28 @@ public class CloudTrailService {
                              String s3BucketName, String s3KeyPrefix, String snsTopicArn,
                              Boolean includeGlobalServiceEvents, Boolean isMultiRegionTrail,
                              Boolean enableLogFileValidation, Boolean isOrganizationTrail) {
-        Trail existing = findTrailOrThrow(region, trailNameOrArn);
-        Trail updated = new Trail(
-                existing.name(),
-                existing.trailArn(),
-                s3BucketName != null ? s3BucketName : existing.s3BucketName(),
-                s3KeyPrefix != null ? s3KeyPrefix : existing.s3KeyPrefix(),
-                snsTopicArn != null ? snsTopicArn : existing.snsTopicArn(),
-                includeGlobalServiceEvents != null ? includeGlobalServiceEvents : existing.includeGlobalServiceEvents(),
-                isMultiRegionTrail != null ? isMultiRegionTrail : existing.isMultiRegionTrail(),
-                existing.homeRegion(),
-                enableLogFileValidation != null ? enableLogFileValidation : existing.logFileValidationEnabled(),
-                existing.hasCustomEventSelectors(),
-                existing.hasInsightSelectors(),
-                isOrganizationTrail != null ? isOrganizationTrail : existing.isOrganizationTrail());
-        String key = regionKey(existing.homeRegion(), existing.name());
-        store.get(key).ifPresent(entry -> store.put(key, entry.withTrail(updated)));
-        return updated;
+        Trail resolved = findTrailOrThrow(region, trailNameOrArn);
+        String key = regionKey(resolved.homeRegion(), resolved.name());
+        return withTrailLock(key, () -> {
+            CloudTrailEntry entry = store.get(key).orElseThrow(() -> new AwsException(
+                    "TrailNotFoundException", "Unknown trail: " + trailNameOrArn, 400));
+            Trail existing = entry.trail();
+            Trail updated = new Trail(
+                    existing.name(),
+                    existing.trailArn(),
+                    s3BucketName != null ? s3BucketName : existing.s3BucketName(),
+                    s3KeyPrefix != null ? s3KeyPrefix : existing.s3KeyPrefix(),
+                    snsTopicArn != null ? snsTopicArn : existing.snsTopicArn(),
+                    includeGlobalServiceEvents != null ? includeGlobalServiceEvents : existing.includeGlobalServiceEvents(),
+                    isMultiRegionTrail != null ? isMultiRegionTrail : existing.isMultiRegionTrail(),
+                    existing.homeRegion(),
+                    enableLogFileValidation != null ? enableLogFileValidation : existing.logFileValidationEnabled(),
+                    existing.hasCustomEventSelectors(),
+                    existing.hasInsightSelectors(),
+                    isOrganizationTrail != null ? isOrganizationTrail : existing.isOrganizationTrail());
+            store.put(key, entry.withTrail(updated));
+            return updated;
+        });
     }
 
     public List<Trail> describeTrails(String region, List<String> trailNameOrArnList) {
@@ -135,7 +172,7 @@ public class CloudTrailService {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         List<EventSelector> normalized = selectors == null ? List.of() : List.copyOf(selectors);
         String key = regionKey(trail.homeRegion(), trail.name());
-        store.get(key).ifPresent(entry -> store.put(key, entry.withSelectors(normalized, true)));
+        withTrailLock(key, () -> store.get(key).ifPresent(entry -> store.put(key, entry.withSelectors(normalized, true))));
         return normalized;
     }
 
@@ -149,13 +186,13 @@ public class CloudTrailService {
     public void startLogging(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(trail.homeRegion(), trail.name());
-        store.get(key).ifPresent(entry -> store.put(key, entry.startLogging(System.currentTimeMillis())));
+        withTrailLock(key, () -> store.get(key).ifPresent(entry -> store.put(key, entry.startLogging(System.currentTimeMillis()))));
     }
 
     public void stopLogging(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(trail.homeRegion(), trail.name());
-        store.get(key).ifPresent(entry -> store.put(key, entry.stopLogging(System.currentTimeMillis())));
+        withTrailLock(key, () -> store.get(key).ifPresent(entry -> store.put(key, entry.stopLogging(System.currentTimeMillis()))));
     }
 
     public TrailStatus getTrailStatus(String region, String trailNameOrArn) {
@@ -163,6 +200,102 @@ public class CloudTrailService {
         return store.get(regionKey(trail.homeRegion(), trail.name()))
                 .map(e -> new TrailStatus(e.logging(), e.startLoggingTime(), e.stopLoggingTime()))
                 .orElse(new TrailStatus(false, null, null));
+    }
+
+    // --- Tagging ---
+    //
+    // AddTags/RemoveTags/ListTags identify the trail solely by ARN (ResourceId /
+    // ResourceIdList), unlike every other CloudTrail action here which also accepts a
+    // bare trail name — so these don't take a `region` parameter.
+
+    private static final int MAX_TAGS_PER_RESOURCE = 50;
+
+    public void addTags(String resourceId, Map<String, String> tagsToAdd) {
+        String key = findKeyByArnOrThrow(resourceId);
+        withTrailLock(key, () -> {
+            CloudTrailEntry entry = store.get(key).orElseThrow(() -> new AwsException(
+                    "ResourceNotFoundException", "Resource not found: " + resourceId, 400));
+            Map<String, String> merged = entry.mutableTags();
+            merged.putAll(tagsToAdd);
+            if (merged.size() > MAX_TAGS_PER_RESOURCE) {
+                throw new AwsException("TagsLimitExceededException",
+                        "Tag limit exceeded for resource " + resourceId
+                                + ". Maximum allowed: " + MAX_TAGS_PER_RESOURCE + ".", 400);
+            }
+            store.put(key, entry.withTags(merged));
+        });
+    }
+
+    public void removeTags(String resourceId, List<String> tagKeys) {
+        String key = findKeyByArnOrThrow(resourceId);
+        withTrailLock(key, () -> {
+            CloudTrailEntry entry = store.get(key).orElseThrow(() -> new AwsException(
+                    "ResourceNotFoundException", "Resource not found: " + resourceId, 400));
+            Map<String, String> remaining = entry.mutableTags();
+            tagKeys.forEach(remaining::remove);
+            store.put(key, entry.withTags(remaining));
+        });
+    }
+
+    public Map<String, String> listTags(String resourceId) {
+        return findEntryByArnOrThrow(resourceId).tags();
+    }
+
+    private CloudTrailEntry findEntryByArnOrThrow(String resourceId) {
+        String key = findKeyByArnOrThrow(resourceId);
+        return store.get(key).orElseThrow(() -> new AwsException(
+                "ResourceNotFoundException", "Resource not found: " + resourceId, 400));
+    }
+
+    /** Validates {@code resourceId} as a trail ARN and resolves it to a storage key, without
+     *  reading the entry itself. Callers that go on to mutate the entry must re-read it inside
+     *  {@link #withTrailLock} rather than reuse a value read here. */
+    private String findKeyByArnOrThrow(String resourceId) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceId);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("CloudTrailARNInvalidException",
+                    resourceId + " is not a valid ARN.", 400);
+        }
+        if (!"cloudtrail".equals(arn.service()) || !arn.resource().startsWith("trail/")) {
+            throw new AwsException("CloudTrailARNInvalidException",
+                    resourceId + " is not a valid trail ARN.", 400);
+        }
+        for (String k : store.keys()) {
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            if (entry != null && resourceId.equals(entry.trail().trailArn())) {
+                return k;
+            }
+        }
+        throw new AwsException("ResourceNotFoundException",
+                "Resource not found: " + resourceId, 400);
+    }
+
+    /**
+     * Runs {@code action} with exclusive access to trail {@code key}, so overlapping mutations of
+     * the same trail (even from different actions) can't interleave and clobber one another.
+     * Piggybacks on {@link ConcurrentHashMap#compute}'s documented per-key atomicity as the
+     * mutex, rather than a plain lock-object map: returning null from the remapping function
+     * drops the bookkeeping entry the instant the call finishes, so {@code trailLocks} never
+     * accumulates one entry per trail ever mutated, unlike a map of retained lock objects would.
+     */
+    private <T> T withTrailLock(String key, Supplier<T> action) {
+        Object[] box = new Object[1];
+        trailLocks.compute(key, (k, v) -> {
+            box[0] = action.get();
+            return null;
+        });
+        @SuppressWarnings("unchecked")
+        T result = (T) box[0];
+        return result;
+    }
+
+    private void withTrailLock(String key, Runnable action) {
+        withTrailLock(key, () -> {
+            action.run();
+            return null;
+        });
     }
 
     // --- Data plane: called by S3 (and other services) when an op happens ---

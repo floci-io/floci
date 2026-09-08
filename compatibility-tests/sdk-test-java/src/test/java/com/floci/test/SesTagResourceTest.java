@@ -58,6 +58,8 @@ class SesTagResourceTest {
     private static String cvetArn;
     private static String poolName;
     private static String poolArn;
+    private static String tenantName;
+    private static String tenantArn;
 
     @BeforeAll
     static void setup() {
@@ -76,6 +78,7 @@ class SesTagResourceTest {
         cvetArn = "arn:aws:ses:us-east-1:000000000000:custom-verification-email-template/" + cvetName;
         poolName = "sdk-tag-pool-" + suffix;
         poolArn = "arn:aws:ses:us-east-1:000000000000:dedicated-ip-pool/" + poolName;
+        tenantName = "sdk-tag-tenant-" + suffix;
 
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(configSetName)
@@ -122,6 +125,11 @@ class SesTagResourceTest {
                         .poolName(poolName).build());
             } catch (Exception e) {
                 System.out.println("Cleanup: failed to delete pool " + poolName + ": " + e.getMessage());
+            }
+            try {
+                sesV2.deleteTenant(r -> r.tenantName(tenantName));
+            } catch (Exception e) {
+                System.out.println("Cleanup: failed to delete tenant " + tenantName + ": " + e.getMessage());
             }
             sesV2.close();
         }
@@ -402,5 +410,40 @@ class SesTagResourceTest {
                 .resourceArn(poolArn).build());
         assertThat(afterUntag.tags()).hasSize(1);
         assertThat(afterUntag.tags().get(0).key()).isEqualTo("owner");
+    }
+
+    @Test
+    @Order(60)
+    void tenant_createWithTags_tagAndUntag_lifecycle() {
+        // The tenant ARN carries two path segments (tenant/<name>/<tenantId>); AWS resolves it by
+        // the TenantId alone, so the real ARN from CreateTenant is used throughout.
+        tenantArn = sesV2.createTenant(r -> r.tenantName(tenantName)
+                .tags(Tag.builder().key("env").value("dev").build())).tenantArn();
+
+        ListTagsForResourceResponse listed = sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
+                .resourceArn(tenantArn).build());
+        assertThat(listed.tags()).hasSize(1);
+        assertThat(listed.tags().get(0).key()).isEqualTo("env");
+
+        sesV2.tagResource(TagResourceRequest.builder()
+                .resourceArn(tenantArn)
+                .tags(Tag.builder().key("owner").value("alice").build())
+                .build());
+
+        sesV2.untagResource(UntagResourceRequest.builder()
+                .resourceArn(tenantArn)
+                .tagKeys("env")
+                .build());
+
+        ListTagsForResourceResponse afterUntag = sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
+                .resourceArn(tenantArn).build());
+        assertThat(afterUntag.tags()).hasSize(1);
+        assertThat(afterUntag.tags().get(0).key()).isEqualTo("owner");
+
+        assertThatThrownBy(() -> sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
+                        .resourceArn(tenantArn.substring(0, tenantArn.lastIndexOf('/'))
+                                + "/tn-000000000000000000000000000000").build()))
+                .hasMessageContaining("No Tenant present with name: " + tenantName
+                        + "with tenantId: tn-000000000000000000000000000000");
     }
 }

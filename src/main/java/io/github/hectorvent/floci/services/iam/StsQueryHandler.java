@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
@@ -48,6 +49,8 @@ public class StsQueryHandler {
     private final WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator;
     private final WebIdentityTokenVerifier tokenVerifier;
     private final OidcIssuerKeyLookup oidcIssuerKeys;
+    private final SAMLProviderService samlProviderService;
+    private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
 
     @Context
     HttpHeaders headers;
@@ -57,7 +60,9 @@ public class StsQueryHandler {
                            EmulatorConfig config, AssumeRolePolicyEvaluator trustPolicyEvaluator,
                            WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
                            WebIdentityTokenVerifier tokenVerifier,
-                           OidcIssuerKeyLookup oidcIssuerKeys) {
+                           OidcIssuerKeyLookup oidcIssuerKeys,
+                           SAMLProviderService samlProviderService,
+                           SAMLTrustPolicyEvaluator samlTrustEvaluator) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
@@ -66,6 +71,8 @@ public class StsQueryHandler {
         this.webIdentityTrustEvaluator = webIdentityTrustEvaluator;
         this.tokenVerifier = tokenVerifier;
         this.oidcIssuerKeys = oidcIssuerKeys;
+        this.samlProviderService = samlProviderService;
+        this.samlTrustEvaluator = samlTrustEvaluator;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -116,7 +123,8 @@ public class StsQueryHandler {
         // IAM token validation can find the temporary secret key, and account routing can map
         // these temporary credentials to the assumed role's account.
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy, callerAccountId);
+        iamService.registerSession(
+                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -178,7 +186,8 @@ public class StsQueryHandler {
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
         // No role ARN — route these credentials back to the caller's account.
-        iamService.registerSession(accessKeyId, secretKey, null, expiration, null, regionResolver.getAccountId());
+        iamService.registerSession(
+                accessKeyId, secretKey, sessionToken, null, expiration, null, regionResolver.getAccountId());
         return Response.ok(AwsQueryResponse.envelope("GetSessionToken", AwsNamespaces.STS, result)).build();
     }
 
@@ -197,9 +206,6 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        // Only tokens naming an issuer Floci itself hosts (an EKS cluster's IRSA OIDC provider) are
-        // verifiable, so only those are enforced. An opaque or third-party token keeps the historical
-        // permissive behaviour rather than failing a workflow Floci cannot adjudicate.
         WebIdentityOutcome outcome = verifyWebIdentityToken(webIdentityToken, roleName, accountId, roleArn);
         if (outcome.denial() != null) {
             return outcome.denial();
@@ -220,7 +226,8 @@ public class StsQueryHandler {
         String subject = verified != null ? verified.subject() : "web-identity-subject";
 
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy, callerAccountId);
+        iamService.registerSession(
+                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -239,16 +246,11 @@ public class StsQueryHandler {
     /** The claims of a token Floci issued and verified, used to fill the response accurately. */
     private record VerifiedWebIdentity(String issuer, String subject, String audience) {}
 
-    /**
-     * The result of inspecting a web identity token: at most one field is non-null. Both null means
-     * the issuer is unknown to Floci, so the token is treated as opaque and accepted.
-     */
     private record WebIdentityOutcome(VerifiedWebIdentity verified, Response denial) {
 
         static WebIdentityOutcome unverifiable() {
             return new WebIdentityOutcome(null, null);
         }
-
         static WebIdentityOutcome allow(VerifiedWebIdentity verified) {
             return new WebIdentityOutcome(verified, null);
         }
@@ -258,25 +260,33 @@ public class StsQueryHandler {
         }
     }
 
-    /**
-     * Inspects {@code token} and decides whether it may assume {@code roleArn}. Returns an outcome
-     * carrying the verified claims, a denial response, or neither when the token's issuer is not one
-     * Floci hosts (preserving the historical permissive behaviour for third-party providers).
-     */
+    /** Inspects {@code token} and decides whether it may assume {@code roleArn}. */
     private WebIdentityOutcome verifyWebIdentityToken(String token, String roleName, String roleAccountId,
                                                       String roleArn) {
         Optional<String> issuer = tokenVerifier.peekIssuer(token);
         if (issuer.isEmpty()) {
-            return WebIdentityOutcome.unverifiable();
+            return config.services().iam().enforcementEnabled()
+                    ? WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                    "The web identity token does not identify a trusted issuer.", AwsNamespaces.STS, 400))
+                    : WebIdentityOutcome.unverifiable();
         }
         Optional<RSAPublicKey> key = oidcIssuerKeys.findVerificationKey(issuer.get());
         if (key.isEmpty()) {
-            return WebIdentityOutcome.unverifiable();
+            return config.services().iam().enforcementEnabled()
+                    ? WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                    "The web identity token issuer is not trusted.", AwsNamespaces.STS, 400))
+                    : WebIdentityOutcome.unverifiable();
         }
 
         WebIdentityToken claims;
         try {
             claims = tokenVerifier.verify(token, key.get(), issuer.get(), STS_AUDIENCE);
+        } catch (WebIdentityTokenVerifier.ExpiredTokenException e) {
+            LOG.debugv("Rejecting web identity token for role {0}: {1}", roleArn, e.getMessage());
+            return WebIdentityOutcome.deny(AwsQueryResponse.error("ExpiredTokenException",
+                    "The web identity token that was passed is expired or is not valid. Get a new "
+                            + "identity token from the identity provider and then retry the request.",
+                    AwsNamespaces.STS, 400));
         } catch (WebIdentityTokenVerifier.InvalidTokenException e) {
             LOG.debugv("Rejecting web identity token for role {0}: {1}", roleArn, e.getMessage());
             return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
@@ -328,35 +338,59 @@ public class StsQueryHandler {
             return validation;
         }
         String roleArn = getParam(params, "RoleArn");
-        String sessionName = "saml-session";
+        String principalArn = getParam(params, "PrincipalArn");
         int durationSeconds = getIntParam(params, "DurationSeconds", 3600);
 
+        var provider = samlProviderService.find(principalArn).orElseThrow(() ->
+                new AwsException("InvalidIdentityToken", "The SAML provider is not trusted.", 400));
+        SAMLAssertionVerifier.Verified verified;
+        try {
+            verified = SAMLAssertionVerifier.verify(getParam(params, "SAMLAssertion"), provider, Instant.now());
+        } catch (SAMLAssertionVerifier.InvalidAssertionException e) {
+            throw new AwsException("InvalidIdentityToken", "The SAML assertion is invalid.", 400);
+        }
+        boolean rolePair = verified.roles().stream().anyMatch(pair ->
+                roleArn.equals(pair.roleArn()) && principalArn.equals(pair.principalArn()));
+        if (!rolePair) {
+            throw new AwsException("InvalidIdentityToken",
+                    "The SAML assertion does not contain the requested role and principal.", 400);
+        }
+
+        String callerAccountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
+        IamRole role = iamService.findRole(accountId, roleName).orElseThrow(() ->
+                new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403));
+        if (!samlTrustEvaluator.allows(role.getAssumeRolePolicyDocument(), principalArn, Map.of(
+                "aud", List.of(STS_AUDIENCE),
+                "iss", List.of(verified.issuer()),
+                "sub", List.of(verified.subject()),
+                "namequalifier", List.of(verified.nameQualifier())))) {
+            throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
+        }
+
+        String sessionName = verified.subject().replaceAll("[^A-Za-z0-9+=,.@_-]", "_");
+        if (sessionName.length() > 64) {
+            sessionName = sessionName.substring(0, 64);
+        }
+        Instant requestedExpiration = Instant.now().plusSeconds(durationSeconds);
+        Instant roleExpiration = Instant.now().plusSeconds(role.getMaxSessionDuration());
+        Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
+        if (roleExpiration.isBefore(expiration)) {
+            expiration = roleExpiration;
+        }
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
-
-        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String callerAccountId = regionResolver.getAccountId();
-        String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, null, callerAccountId);
-
+        iamService.registerSession(accessKeyId, secretKey, sessionToken, roleArn, expiration, null, callerAccountId);
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
-                .start("AssumedRoleUser")
-                  .elem("Arn", assumedRoleArn)
-                  .elem("AssumedRoleId", assumedRoleId)
-                .end("AssumedRoleUser")
-                .elem("PackedPolicySize", "0")
-                .elem("Issuer", "https://saml.example.com")
-                .elem("Audience", "urn:amazon:webservices")
-                .elem("NameQualifier", "saml-qualifier")
-                .elem("SubjectType", "persistent")
-                .elem("Subject", "saml-subject")
-                .build();
+                .start("AssumedRoleUser").elem("Arn", assumedRoleArn).elem("AssumedRoleId", assumedRoleId).end("AssumedRoleUser")
+                .elem("PackedPolicySize", "0").elem("Issuer", verified.issuer()).elem("Audience", "urn:amazon:webservices")
+                .elem("NameQualifier", verified.nameQualifier()).elem("SubjectType", verified.subjectType()).elem("Subject", verified.subject()).build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRoleWithSAML", AwsNamespaces.STS, result)).build();
     }
 
@@ -379,7 +413,8 @@ public class StsQueryHandler {
         String sessionPolicy = getParam(params, "Policy");
         // Register federation token so enforcement can scope its policies via session policy.
         // The federated-user ARN already carries the caller's account, so reuse it as the origin.
-        iamService.registerSession(accessKeyId, secretKey, federatedUserArn, expiration, sessionPolicy, accountId);
+        iamService.registerSession(
+                accessKeyId, secretKey, sessionToken, federatedUserArn, expiration, sessionPolicy, accountId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))

@@ -71,7 +71,7 @@ public class S3Object {
         this.storageClass = "STANDARD";
         this.checksum = new S3Checksum();
         this.checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
-        this.checksum.setChecksumType("FULL_OBJECT");
+        this.checksum.setChecksumType(ChecksumType.FULL_OBJECT);
         this.parts = new ArrayList<>();
         this.tags = new HashMap<>();
     }

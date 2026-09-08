@@ -25,6 +25,7 @@ class Ec2FlowLogIntegrationTest {
 
     private static String vpcId;
     private static String flowLogId;
+    private static String cloudWatchFlowLogId;
 
     // =========================================================================
     // Fixture: a VPC to attach the flow log to
@@ -119,6 +120,54 @@ class Ec2FlowLogIntegrationTest {
 
     @Test
     @Order(13)
+    void createFlowLogsWithACloudWatchDestinationKeepsTheDeliverLogsPermissionArn() {
+        // Terraform reads aws_flow_log.iam_role_arn back from DescribeFlowLogs. A dropped ARN
+        // reads as empty and every later plan proposes replacing the flow log.
+        cloudWatchFlowLogId = given()
+            .formParam("Action", "CreateFlowLogs")
+            .formParam("ResourceType", "VPC")
+            .formParam("ResourceId.1", vpcId)
+            .formParam("TrafficType", "ALL")
+            .formParam("LogDestinationType", "cloud-watch-logs")
+            .formParam("LogDestination", "arn:aws:logs:us-east-1:000000000000:log-group:/aws/vpc/flow-logs")
+            .formParam("DeliverLogsPermissionArn", "arn:aws:iam::000000000000:role/flow-logs-role")
+            .formParam("MaxAggregationInterval", "600")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("CreateFlowLogsResponse.flowLogIdSet.item[0]", startsWith("fl-"))
+            .extract().path("CreateFlowLogsResponse.flowLogIdSet.item[0]");
+
+        given()
+            .formParam("Action", "DescribeFlowLogs")
+            .formParam("FlowLogId.1", cloudWatchFlowLogId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].flowLogId", equalTo(cloudWatchFlowLogId))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logDestinationType", equalTo("cloud-watch-logs"))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].deliverLogsPermissionArn",
+                    equalTo("arn:aws:iam::000000000000:role/flow-logs-role"));
+
+        given()
+            .formParam("Action", "DeleteFlowLogs")
+            .formParam("FlowLogId.1", cloudWatchFlowLogId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml");
+    }
+
+    @Test
+    @Order(14)
     void deleteFlowLogs() {
         given()
             .formParam("Action", "DeleteFlowLogs")

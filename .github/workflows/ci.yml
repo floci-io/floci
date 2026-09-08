@@ -39,9 +39,9 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-java@v6.0.0
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           java-version: '25'
           distribution: 'temurin'
@@ -51,7 +51,7 @@ jobs:
       # Restore on every shard; save from shard 1 only. With a combined cache step
       # all four shards would race the same save key: one wins, three spend
       # post-job time reserving-then-failing plus redundant multi-hundred-MB uploads.
-      - uses: actions/cache/restore@v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
@@ -98,7 +98,7 @@ jobs:
       # restore-keys prefix for the bulk, and re-downloads its delta on each re-run
       # rather than caching it. pom.xml changed 21 times in 30 days, so that is a
       # small minority of PRs paying a small delta.
-      - uses: actions/cache/save@v6.1.0
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: always() && matrix.shard == 1 && github.event_name == 'push'
         with:
           path: ~/.m2/repository
@@ -106,7 +106,7 @@ jobs:
 
       - name: Upload shard manifest and results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shard-${{ matrix.shard }}
           path: |
@@ -132,7 +132,7 @@ jobs:
           echo "shard matrix concluded: ${{ needs.test.result }}"
           exit 1
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: shard-*
           path: shards

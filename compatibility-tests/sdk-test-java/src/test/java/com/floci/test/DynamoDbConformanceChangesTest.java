@@ -817,11 +817,12 @@ class DynamoDbConformanceChangesTest {
 
     @Test @Order(101)
     void reservedWordWithAliasPasses() {
-        // Using #status alias should work fine
+        // Using the #st alias should work fine. The alias must be referenced by the
+        // expression: AWS rejects ExpressionAttributeNames entries left unused.
         assertThatCode(() -> ddb.putItem(r -> r
                 .tableName(TABLE)
                 .item(Map.of("pk", av("rw-alias"), "sk", av("s"), "status", av("ok")))
-                .conditionExpression("attribute_not_exists(pk)")
+                .conditionExpression("attribute_not_exists(#st)")
                 .expressionAttributeNames(Map.of("#st", "status"))))
                 .doesNotThrowAnyException();
     }

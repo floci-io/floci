@@ -63,6 +63,7 @@ public class TransferHandler {
     // ── Server handlers ───────────────────────────────────────────────────────
 
     private Response createServer(JsonNode req, String region) {
+        String domain = textOrNull(req, "Domain");
         List<String> protocols = jsonStringList(req.path("Protocols"));
         String endpointType = textOrNull(req, "EndpointType");
         Map<String, Object> endpointDetails = jsonObjectMap(req.path("EndpointDetails"));
@@ -72,7 +73,7 @@ public class TransferHandler {
         String securityPolicyName = textOrNull(req, "SecurityPolicyName");
         Map<String, String> tags = parseTags(req.path("Tags"));
 
-        Server server = service.createServer(region, protocols, endpointType, endpointDetails,
+        Server server = service.createServer(region, domain, protocols, endpointType, endpointDetails,
                 identityProviderType, identityProviderDetails, loggingRole, securityPolicyName, tags);
 
         ObjectNode resp = objectMapper.createObjectNode();
@@ -277,6 +278,7 @@ public class TransferHandler {
         node.put("ServerId", s.getServerId());
         node.put("Arn", s.getArn());
         node.put("State", s.getState());
+        node.put("Domain", s.getDomain());
         node.put("EndpointType", s.getEndpointType());
         node.put("IdentityProviderType", s.getIdentityProviderType());
         node.put("SecurityPolicyName", s.getSecurityPolicyName());
@@ -304,6 +306,7 @@ public class TransferHandler {
     private ObjectNode buildServerListEntry(Server s) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Arn", s.getArn());
+        node.put("Domain", s.getDomain());
         node.put("EndpointType", s.getEndpointType());
         node.put("IdentityProviderType", s.getIdentityProviderType());
         node.put("ServerId", s.getServerId());

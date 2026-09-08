@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.ram;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
+import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -21,6 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * AWS Resource Access Manager (RAM) business logic.
@@ -28,15 +31,24 @@ import java.util.UUID;
  * <p>Covers {@code EnableSharingWithAwsOrganization} plus the resource-share reads LZA's
  * TGW share flow performs: the owning account registers a share (from the
  * {@code AWS::RAM::ResourceShare} CFN provisioner), and accepting accounts page
- * GetResourceShareInvitations (always empty here — organization sharing auto-accepts, matching
- * real AWS), find the share via GetResourceShares(OTHER-ACCOUNTS), and read the shared ARNs via
- * ListResources.
+ * GetResourceShareInvitations, find the share via GetResourceShares(OTHER-ACCOUNTS), and read
+ * the shared ARNs via ListResources.
  *
  * <p>Principals are stored but not enforced for visibility: floci's org is the only org, and
  * launched containers call in with placeholder credentials that resolve to the default account,
- * so OTHER-ACCOUNTS simply means "every share the caller does not own". Mutations are the
- * opposite: they are owner-only, and a non-owner gets the same UnknownResourceException a
- * never-created ARN gets.
+ * so OTHER-ACCOUNTS simply means "every share the caller does not own", and ListResources /
+ * GetResourceShares never wait on an invitation being accepted. Mutations are the opposite: they
+ * are owner-only, and a non-owner gets the same UnknownResourceException a never-created ARN
+ * gets.
+ *
+ * <p>Invitations exist purely as the accept/reject bookkeeping {@code aws_ram_resource_share_accepter}
+ * needs, not as a visibility gate: an organization/OU principal (real AWS's own auto-accept case)
+ * never gets one, and neither does an account principal while organization sharing is enabled
+ * (matching {@code EnableSharingWithAwsOrganization}'s effect on member accounts). A bare AWS
+ * account-id principal added while organization sharing is off gets a PENDING invitation the
+ * receiving account can accept or reject, but, unlike real AWS, the share and its resources are
+ * visible under OTHER-ACCOUNTS regardless of that invitation's status, for the same reason
+ * visibility isn't otherwise gated by principal.
  */
 @ApplicationScoped
 public class RamService {
@@ -45,10 +57,13 @@ public class RamService {
     /** The modeled ResourceShareStatus enum. */
     private static final List<String> SHARE_STATUSES =
             List.of("PENDING", "ACTIVE", "FAILED", "DELETING", "DELETED");
+    /** An AWS account id, as opposed to an organization/OU principal ARN. */
+    private static final Pattern ACCOUNT_ID_PRINCIPAL = Pattern.compile("\\d{12}");
 
     private final StorageFactory storageFactory;
     private StorageBackend<String, ResourceShare> shares;
     private StorageBackend<String, Boolean> settings;
+    private StorageBackend<String, ResourceShareInvitation> invitations;
 
     @Inject
     public RamService(StorageFactory storageFactory) {
@@ -61,6 +76,8 @@ public class RamService {
                 new TypeReference<Map<String, ResourceShare>>() {});
         settings = storageFactory.create("ram", "ram-settings.json",
                 new TypeReference<Map<String, Boolean>>() {});
+        invitations = storageFactory.create("ram", "ram-resource-share-invitations.json",
+                new TypeReference<Map<String, ResourceShareInvitation>>() {});
     }
 
     public boolean enableSharingWithAwsOrganization() {
@@ -79,7 +96,9 @@ public class RamService {
                 + ":resource-share/" + UUID.randomUUID();
         ResourceShare share = new ResourceShare(
                 arn, name, owningAccountId, principals, resourceArns, allowExternalPrincipals);
-        return putForOwner(share);
+        ResourceShare stored = putForOwner(share);
+        inviteAccountPrincipals(stored, principals);
+        return stored;
     }
 
     /** The unfiltered read: every share visible to the caller under {@code resourceOwner}. */
@@ -118,9 +137,155 @@ public class RamService {
         return result;
     }
 
-    /** Organization sharing never creates invitations — resources become visible directly. */
-    public List<Object> getResourceShareInvitations(String callerAccountId) {
-        return List.of();
+    /**
+     * @param resourceShareArns restrict to invitations for these shares, or empty for any
+     * @param resourceShareInvitationArns restrict to these invitation ARNs, or empty for any
+     */
+    public List<ResourceShareInvitation> getResourceShareInvitations(String callerAccountId,
+                                                                      List<String> resourceShareArns,
+                                                                      List<String> resourceShareInvitationArns) {
+        requireValidArns(resourceShareArns);
+        requireValidArns(resourceShareInvitationArns);
+        List<ResourceShareInvitation> result = new ArrayList<>();
+        for (ResourceShareInvitation invitation : allInvitations()) {
+            // "Retrieves details about invitations that you have received": receiver only,
+            // not the sender (verified against the API reference; unlike GetResourceShares,
+            // there is no SELF/OTHER-ACCOUNTS style toggle here).
+            if (!callerAccountId.equals(invitation.receiverAccountId())) {
+                continue;
+            }
+            if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(invitation.resourceShareArn())) {
+                continue;
+            }
+            if (!resourceShareInvitationArns.isEmpty()
+                    && !resourceShareInvitationArns.contains(invitation.resourceShareInvitationArn())) {
+                continue;
+            }
+            result.add(invitation);
+        }
+        return result;
+    }
+
+    /** Both GetResourceShareInvitations and Accept/RejectResourceShareInvitation model this. */
+    private static void requireValidArns(List<String> arns) {
+        for (String arn : arns) {
+            if (!isValidArn(arn)) {
+                throw new AwsException("MalformedArnException",
+                        "The specified Amazon Resource Name (ARN) has a format that isn't valid: " + arn, 400);
+            }
+        }
+    }
+
+    private static boolean isValidArn(String arn) {
+        try {
+            AwsArnUtils.parse(arn);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    public ResourceShareInvitation acceptResourceShareInvitation(String resourceShareInvitationArn,
+                                                                  String callerAccountId) {
+        return resolveInvitation(resourceShareInvitationArn, callerAccountId, "ACCEPTED");
+    }
+
+    public ResourceShareInvitation rejectResourceShareInvitation(String resourceShareInvitationArn,
+                                                                  String callerAccountId) {
+        return resolveInvitation(resourceShareInvitationArn, callerAccountId, "REJECTED");
+    }
+
+    private ResourceShareInvitation resolveInvitation(String resourceShareInvitationArn,
+                                                       String callerAccountId, String newStatus) {
+        if (!isValidArn(resourceShareInvitationArn)) {
+            throw new AwsException("MalformedArnException",
+                    "The specified Amazon Resource Name (ARN) has a format that isn't valid: "
+                            + resourceShareInvitationArn, 400);
+        }
+        // Serializes the status check against the write: two concurrent Accept calls on the
+        // same invitation must not both observe PENDING and both succeed.
+        synchronized (this) {
+            ResourceShareInvitation invitation = allInvitations().stream()
+                    .filter(i -> i.resourceShareInvitationArn().equals(resourceShareInvitationArn))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("ResourceShareInvitationArnNotFoundException",
+                            "ResourceShareInvitation " + resourceShareInvitationArn + " does not exist.", 400));
+            // Only the invited account can act on its own invitation: the sender polls it via
+            // GetResourceShareInvitations but does not get to accept or reject on the receiver's
+            // behalf.
+            if (!callerAccountId.equals(invitation.receiverAccountId())) {
+                throw new AwsException("OperationNotPermittedException",
+                        "You do not have permission to accept or reject this invitation.", 400);
+            }
+            if ("ACCEPTED".equals(invitation.status())) {
+                throw new AwsException("ResourceShareInvitationAlreadyAcceptedException",
+                        "ResourceShareInvitation " + resourceShareInvitationArn + " has already been accepted.", 400);
+            }
+            if ("REJECTED".equals(invitation.status())) {
+                throw new AwsException("ResourceShareInvitationAlreadyRejectedException",
+                        "ResourceShareInvitation " + resourceShareInvitationArn + " has already been rejected.", 400);
+            }
+            ResourceShareInvitation updated = invitation.withStatus(newStatus);
+            putInvitation(updated);
+            return updated;
+        }
+    }
+
+    /**
+     * An organization/OU principal (not a bare account id) never gets one: real AWS only
+     * invites account principals, and auto-accepts those too once organization sharing is
+     * enabled (matching {@link #enableSharingWithAwsOrganization()}). A principal already
+     * PENDING or ACCEPTED on this share is skipped so re-associating it is a no-op; one that
+     * was REJECTED gets invited again, same as real AWS re-sharing after a rejection.
+     */
+    private void inviteAccountPrincipals(ResourceShare share, List<String> principals) {
+        if (isSharingWithOrganizationEnabled()) {
+            return;
+        }
+        // Serializes the live-invitation check against the insert: two concurrent
+        // AssociateResourceShare calls for the same principal must not both observe "no
+        // live invitation" and both create one.
+        synchronized (this) {
+            for (String principal : principals) {
+                if (!ACCOUNT_ID_PRINCIPAL.matcher(principal).matches()) {
+                    continue;
+                }
+                boolean live = allInvitations().stream()
+                        .anyMatch(i -> i.resourceShareArn().equals(share.getResourceShareArn())
+                                && i.receiverAccountId().equals(principal)
+                                && !"REJECTED".equals(i.status()));
+                if (live) {
+                    continue;
+                }
+                String region = extractRegion(share.getResourceShareArn());
+                String arn = "arn:aws:ram:" + region + ":" + share.getOwningAccountId()
+                        + ":resource-share-invitation/" + UUID.randomUUID();
+                putInvitation(new ResourceShareInvitation(arn, share.getResourceShareArn(), share.getName(),
+                        share.getOwningAccountId(), principal, Instant.now(), "PENDING"));
+            }
+        }
+    }
+
+    /** {@code arn:aws:ram:<region>:<account>:resource-share/<id>} → {@code <region>}. */
+    private static String extractRegion(String resourceShareArn) {
+        String[] parts = resourceShareArn.split(":", 6);
+        return parts.length < 4 ? "" : parts[3];
+    }
+
+    private void putInvitation(ResourceShareInvitation invitation) {
+        if (invitations instanceof AccountAwareStorageBackend<ResourceShareInvitation> accountAware) {
+            accountAware.putForAccount(invitation.receiverAccountId(),
+                    invitation.resourceShareInvitationArn(), invitation);
+            return;
+        }
+        invitations.put(invitation.resourceShareInvitationArn(), invitation);
+    }
+
+    private List<ResourceShareInvitation> allInvitations() {
+        if (invitations instanceof AccountAwareStorageBackend<ResourceShareInvitation> accountAware) {
+            return accountAware.scanAllAccounts();
+        }
+        return invitations.scan(key -> true);
     }
 
     public List<SharedResource> listResources(String callerAccountId, String resourceOwner,
@@ -166,11 +331,21 @@ public class RamService {
 
     public ResourceShare associateResourceShare(String resourceShareArn, List<String> resourceArns,
                                                 List<String> principals, String callerAccountId) {
-        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
-        ResourceShare updated = share.withPrincipalsAndResources(
-                mergeDistinct(share.getPrincipals(), principals),
-                mergeDistinct(share.getResourceArns(), resourceArns));
-        return putForOwner(updated);
+        // The read, the merged write, and the resulting invitation creation must all happen as
+        // one operation: two concurrent associates for different principals on the same share
+        // must not each read the pre-update share and overwrite each other's addition, which
+        // would also leave an invitation on record for a principal the stored share lost.
+        synchronized (this) {
+            ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
+            ResourceShare updated = share.withPrincipalsAndResources(
+                    mergeDistinct(share.getPrincipals(), principals),
+                    mergeDistinct(share.getResourceArns(), resourceArns));
+            ResourceShare stored = putForOwner(updated);
+            // Only newly-added principals: re-associating one already on the share (or one that
+            // already has a live invitation) must not spawn a second invitation.
+            inviteAccountPrincipals(stored, withoutAll(principals, share.getPrincipals()));
+            return stored;
+        }
     }
 
     public ResourceShare disassociateResourceShare(String resourceShareArn, List<String> resourceArns,
@@ -227,7 +402,7 @@ public class RamService {
     /**
      * Resolves a share the caller may mutate. A share owned by another account gets the same
      * UnknownResourceException as one that was never created: AWS resolves a share ARN within
-     * the caller's own account, so a non-owner must not learn that the ARN exists — let alone
+     * the caller's own account, so a non-owner must not learn that the ARN exists, let alone
      * be able to rename, retag, or delete it.
      */
     private ResourceShare requireOwnedShare(String resourceShareArn, String callerAccountId) {
@@ -284,7 +459,7 @@ public class RamService {
     /**
      * The model enumerates {@code resourceOwner} as {@code SELF} or {@code OTHER-ACCOUNTS} on every
      * read operation that takes it. The visibility fork below is a two-way branch, so an unmodelled
-     * value silently means OTHER-ACCOUNTS — a caller who sent {@code "self"} would be handed every
+     * value silently means OTHER-ACCOUNTS: a caller who sent {@code "self"} would be handed every
      * share they do NOT own. AWS answers InvalidParameterException, which all three operations list.
      *
      * <p>It is also a required member, so a null one is rejected rather than defaulted: guessing

@@ -412,7 +412,10 @@ class EksServiceTest {
         clusterStore.putForAccount("000000000000", "persisted-cluster", persisted);
 
         EksClusterManager clusterManager = mock(EksClusterManager.class);
-        doThrow(new RuntimeException("no docker")).when(clusterManager).restoreCluster(persisted);
+        // The daemon is reachable, so this is a genuine restore failure: the daemonless
+        // degradation path (which marks the cluster metadata-only ACTIVE) must not kick in.
+        when(clusterManager.isDockerReachable()).thenReturn(true);
+        doThrow(new RuntimeException("bad container state")).when(clusterManager).restoreCluster(persisted);
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
@@ -422,6 +425,33 @@ class EksServiceTest {
 
             // Better an honest FAILED than an ACTIVE cluster no kubectl can reach.
             assertEquals(ClusterStatus.FAILED,
+                    restarted.describeCluster("persisted-cluster").getStatus());
+        } finally {
+            restarted.shutdown();
+        }
+    }
+
+    @Test
+    void initRestoresAClusterAsMetadataOnlyWhenNoDockerDaemonIsReachable() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        var clusterStore = new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        Cluster persisted = new Cluster();
+        persisted.setName("persisted-cluster");
+        persisted.setStatus(ClusterStatus.ACTIVE);
+        clusterStore.putForAccount("000000000000", "persisted-cluster", persisted);
+
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.isDockerReachable()).thenReturn(false);
+        doThrow(new RuntimeException("no docker")).when(clusterManager).restoreCluster(persisted);
+        EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()));
+        try {
+            restarted.init();
+
+            // Same degradation as create: losing the daemon is not the cluster's fault.
+            assertEquals(ClusterStatus.ACTIVE,
                     restarted.describeCluster("persisted-cluster").getStatus());
         } finally {
             restarted.shutdown();
@@ -949,5 +979,92 @@ class EksServiceTest {
         AwsException delete = assertThrows(AwsException.class,
                 () -> eksService.deleteFargateProfile("my-eks-cluster", "missing-profile"));
         assertEquals(404, delete.getHttpStatus());
+    }
+
+    private EksService newService(EksClusterManager clusterManager, boolean mock) {
+        StorageFactory storageFactory = new StorageFactory(null, null) {
+            @Override
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return AccountAwareStorageBackend.inMemory("000000000000");
+            }
+        };
+        return new EksService(storageFactory, testConfig(mock),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(storageFactory, new ObjectMapper()));
+    }
+
+    @Test
+    void createClusterStaysCreatingWhileTheK3sContainerBoots() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(true);
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("real-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+
+        assertEquals(ClusterStatus.CREATING, service.createCluster(request).getStatus());
+    }
+
+    @Test
+    void createClusterReachesActiveMetadataWhenNoDockerDaemonIsReachable() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(false);
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("probe-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setTags(Map.of("tofu-estate", "probe1"));
+
+        Cluster cluster = service.createCluster(request);
+
+        assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
+        assertEquals("https://localhost:6500", cluster.getEndpoint());
+        assertEquals("probe1", cluster.getTags().get("tofu-estate"));
+        // No k3s API server exists. The empty CA is what says so.
+        assertEquals("", cluster.getCertificateAuthority().getData());
+        assertNull(cluster.getContainerId());
+    }
+
+    @Test
+    void clusterMetadataCrudWorksWhenNoDockerDaemonIsReachable() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(false);
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("probe-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        request.setTags(Map.of("tofu-estate", "probe1"));
+        String arn = service.createCluster(request).getArn();
+
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("probe-eks").getStatus());
+        assertEquals(List.of("probe-eks"), service.listClusters());
+        assertEquals("probe1", service.listTagsForResource(arn).get("tofu-estate"));
+
+        service.tagResource(arn, Map.of("Name", "probe-eks"));
+        assertEquals("probe-eks", service.listTagsForResource(arn).get("Name"));
+
+        assertEquals(NodegroupStatus.ACTIVE,
+                service.createNodeGroup("probe-eks", nodeGroupRequest("ng-1")).getStatus());
+
+        service.deleteCluster("probe-eks");
+        assertThrows(AwsException.class, () -> service.describeCluster("probe-eks"));
+    }
+
+    @Test
+    void createClusterStillFailsOnAGenuineProvisioningErrorWithAReachableDaemon() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any()))
+                .thenThrow(new RuntimeException("no such image: rancher/k3s"));
+        EksService service = newService(clusterManager, false);
+
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("broken-eks");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+
+        assertEquals(ClusterStatus.FAILED, service.createCluster(request).getStatus());
     }
 }

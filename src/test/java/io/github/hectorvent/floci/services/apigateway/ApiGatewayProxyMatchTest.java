@@ -36,7 +36,7 @@ class ApiGatewayProxyMatchTest {
         ctrl = new ApiGatewayExecuteController(apiGatewayService, apiGatewayV2Service, lambdaService,
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(), vtlEngine, serviceRouter, webSocketConnectionManager, elbV2Service, null,
-                new ApiGatewayExecuteRouteContext(), null, null);
+                new ApiGatewayExecuteRouteContext(), null, null, null);
     }
 
     private ApiGatewayResource resource(String id, String parentId, String pathPart, String path) {

@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -87,15 +88,26 @@ class AslExecutorIntrinsicMissingArgumentTest {
     }
 
     /**
-     * A reference path in the format template position is left as written rather than resolved, so
-     * it never reaches the argument check. Real AWS and Step Functions Local resolve it and fail
-     * here. That is a separate gap from issue #2870 and is tracked by issue #2927.
+     * A reference path in the format template position is resolved the same as every other
+     * argument, matching real AWS and Step Functions Local. Fixes issue #2927.
      */
     @Test
-    void aReferencePathAsTheFormatTemplateIsStillTakenLiterally() throws Exception {
-        var resolved = resolve("{\"v.$\":\"States.Format($.nope, 1)\"}", "{\"other\":1}");
+    void aReferencePathAsTheFormatTemplateIsResolvedAndFailsWhenItMatchesNothing() throws Exception {
+        var failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> resolve("{\"v.$\":\"States.Format($.nope, 1)\"}", "{\"other\":1}"));
 
-        assertEquals("\"$.nope\"", resolved.path("v").toString());
+        assertEquals("States.Runtime", failure.error);
+        assertEquals("The function 'States.Format($.nope, 1)' had the following error: "
+                + "The JsonPath argument for the field '$.nope' could not be found in the input "
+                + "'{\"other\":1}'", failure.cause);
+    }
+
+    /** A reference path in the template position that does resolve is used as the template. */
+    @Test
+    void aReferencePathAsTheFormatTemplateThatResolvesIsUsedAsTheTemplate() throws Exception {
+        var resolved = resolve("{\"v.$\":\"States.Format($.tpl, 1)\"}", "{\"tpl\":\"n={}\"}");
+
+        assertEquals("\"n=1\"", resolved.path("v").toString());
     }
 
     /** The whole expression is named, not the inner function that took the failing argument. */
@@ -151,6 +163,14 @@ class AslExecutorIntrinsicMissingArgumentTest {
         assertEquals("The function 'States.Format('{}', $.items[5])' had the following error: "
                 + "The JsonPath argument for the field '$.items[5]' could not be found in the "
                 + "input '{\"items\":[1,2]}'", failure.cause);
+    }
+
+    /** The plain form of the same path is not a miss. AWS resolves it to null and the execution succeeds. */
+    @Test
+    void plainReferencePastTheEndOfAnArrayResolvesToNull() throws Exception {
+        var resolved = resolve("{\"v.$\":\"$.items[5]\"}", "{\"items\":[1,2]}");
+
+        assertTrue(resolved.path("v").isNull());
     }
 
     /** Reading a field off the absent element fails alike. */

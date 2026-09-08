@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -18,6 +20,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -34,6 +37,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     private final LambdaFunctionStore functionStore;
     private final EsmStore esmStore;
     private final ObjectMapper objectMapper;
+    private final PipesFilterMatcher filterMatcher;
     private final long pollIntervalMs;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
@@ -49,7 +53,8 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                                             LambdaFunctionStore functionStore,
                                             EsmStore esmStore,
                                             ObjectMapper objectMapper,
-                                            EmulatorConfig config) {
+                                            EmulatorConfig config,
+                                            PipesFilterMatcher filterMatcher) {
         this.vertx = vertx;
         this.streamService = streamService;
         this.executorService = executorService;
@@ -57,6 +62,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         this.esmStore = esmStore;
         this.objectMapper = objectMapper;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
+        this.filterMatcher = filterMatcher;
     }
 
     public void startPersistedPollers() {
@@ -159,10 +165,31 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                     return;
                 }
 
-                LOG.infov("DynamoDB Streams ESM {0}: received {1} record(s), invoking {2}",
-                        esm.getUuid(), records.size(), esm.getFunctionName());
+                // Advance to the newest FETCHED record whenever the batch is disposed of, invoked or
+                // fully filtered out, so filtered-out records are consumed, not re-read forever. Leave
+                // the checkpoint unmoved only when an attempted invoke fails (the window retries).
+                String newestFetchedSeq = records.get(records.size() - 1).getSequenceNumber();
 
-                String eventJson = buildDynamoDbEvent(records, esm);
+                List<DynamoDbStreamRecord> matched = records;
+                JsonNode filterParams = EsmFilterCriteriaUtils.matcherSourceParameters(objectMapper, esm.getFilterCriteria());
+                if (filterParams != null) {
+                    List<JsonNode> filterNodes = new ArrayList<>(records.size());
+                    for (DynamoDbStreamRecord rec : records) {
+                        filterNodes.add(buildDynamoDbRecordNode(rec, esm));
+                    }
+                    matched = EsmFilterCriteriaUtils.selectMatched(
+                            records, filterNodes, filterMatcher.applyFilterCriteria(filterNodes, filterParams));
+                }
+
+                if (matched.isEmpty()) {
+                    advanceCheckpoint(esm, shardId, newestFetchedSeq);
+                    return;
+                }
+
+                LOG.infov("DynamoDB Streams ESM {0}: delivering {1} of {2} record(s) to {3}",
+                        esm.getUuid(), matched.size(), records.size(), esm.getFunctionName());
+
+                String eventJson = buildDynamoDbEvent(matched, esm);
                 InvokeResult invokeResult;
                 try {
                     invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse);
@@ -176,9 +203,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                 }
 
                 if (invokeResult.getFunctionError() == null) {
-                    String newestSeq = records.get(records.size() - 1).getSequenceNumber();
-                    esm.getShardSequenceNumbers().put(shardId, newestSeq);
-                    esmStore.saveForAccount(esm.getAccountId(), esm);
+                    advanceCheckpoint(esm, shardId, newestFetchedSeq);
                 } else {
                     LOG.warnv("DynamoDB Streams ESM {0}: Lambda returned error [{1}], records will be retried",
                             esm.getUuid(), invokeResult.getFunctionError());
@@ -196,32 +221,48 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             ObjectNode root = objectMapper.createObjectNode();
             ArrayNode array = root.putArray("Records");
             for (DynamoDbStreamRecord rec : records) {
-                ObjectNode item = array.addObject();
-                item.put("eventID", rec.getEventId());
-                item.put("eventVersion", rec.getEventVersion());
-                item.put("awsRegion", rec.getAwsRegion());
-                item.put("eventName", rec.getEventName());
-                item.put("eventSourceARN", esm.getEventSourceArn());
-                item.put("eventSource", rec.getEventSource());
-
-                ObjectNode dynamodb = item.putObject("dynamodb");
-                dynamodb.put("StreamViewType", rec.getStreamViewType());
-                dynamodb.put("SequenceNumber", rec.getSequenceNumber());
-                dynamodb.put("SizeBytes", 100);
-                dynamodb.put("ApproximateCreationDateTime", (double) rec.getApproximateCreationDateTime());
-                if (rec.getKeys() != null) {
-                    dynamodb.set("Keys", rec.getKeys());
-                }
-                if (rec.getNewImage() != null) {
-                    dynamodb.set("NewImage", rec.getNewImage());
-                }
-                if (rec.getOldImage() != null) {
-                    dynamodb.set("OldImage", rec.getOldImage());
-                }
+                array.add(buildDynamoDbRecordNode(rec, esm));
             }
             return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize DynamoDB Streams event", e);
         }
+    }
+
+    /**
+     * Builds the single-record node: top-level {@code eventName}/metadata plus the {@code dynamodb} map
+     * with AttributeValue-wrapped images. This is both the delivery record shape and the exact structure a
+     * DynamoDB filter pattern matches against, so it serves the matcher unchanged. (Numeric operators
+     * naturally never match here because AttributeValue numbers are JSON strings, AWS parity for free.)
+     */
+    private ObjectNode buildDynamoDbRecordNode(DynamoDbStreamRecord rec, EventSourceMapping esm) {
+        ObjectNode item = objectMapper.createObjectNode();
+        item.put("eventID", rec.getEventId());
+        item.put("eventVersion", rec.getEventVersion());
+        item.put("awsRegion", rec.getAwsRegion());
+        item.put("eventName", rec.getEventName());
+        item.put("eventSourceARN", esm.getEventSourceArn());
+        item.put("eventSource", rec.getEventSource());
+
+        ObjectNode dynamodb = item.putObject("dynamodb");
+        dynamodb.put("StreamViewType", rec.getStreamViewType());
+        dynamodb.put("SequenceNumber", rec.getSequenceNumber());
+        dynamodb.put("SizeBytes", 100);
+        dynamodb.put("ApproximateCreationDateTime", (double) rec.getApproximateCreationDateTime());
+        if (rec.getKeys() != null) {
+            dynamodb.set("Keys", rec.getKeys());
+        }
+        if (rec.getNewImage() != null) {
+            dynamodb.set("NewImage", rec.getNewImage());
+        }
+        if (rec.getOldImage() != null) {
+            dynamodb.set("OldImage", rec.getOldImage());
+        }
+        return item;
+    }
+
+    private void advanceCheckpoint(EventSourceMapping esm, String shardId, String newestSeq) {
+        esm.getShardSequenceNumbers().put(shardId, newestSeq);
+        esmStore.saveForAccount(esm.getAccountId(), esm);
     }
 }

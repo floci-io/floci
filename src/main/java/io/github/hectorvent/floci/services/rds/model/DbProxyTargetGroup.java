@@ -4,7 +4,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The (single, always named {@code "default"}) target group of an {@code AWS::RDS::DBProxy}. Holds
@@ -26,6 +28,7 @@ public class DbProxyTargetGroup {
     private String initQuery;
     private List<String> sessionPinningFilters = new ArrayList<>();
     private List<DbProxyTarget> targets = new ArrayList<>();
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public DbProxyTargetGroup() {}
 
@@ -73,5 +76,10 @@ public class DbProxyTargetGroup {
     public List<DbProxyTarget> getTargets() { return targets; }
     public void setTargets(List<DbProxyTarget> targets) {
         this.targets = targets != null ? new ArrayList<>(targets) : new ArrayList<>();
+    }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>();
     }
 }

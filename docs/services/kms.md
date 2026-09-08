@@ -46,7 +46,64 @@
 | `EnableKey` | Enable a key |
 | `DisableKey` | Disable a key |
 | `RotateKeyOnDemand` | Rotate key material on demand (symmetric keys only) |
+| `GetParametersForImport` | Get the wrapping key and import token for an `EXTERNAL` key |
+| `ImportKeyMaterial` | Import key material into an `EXTERNAL` key |
+| `DeleteImportedKeyMaterial` | Delete imported key material, returning the key to `PendingImport` |
 <!-- floci:actions:end -->
+
+## Asymmetric Encryption
+
+`Encrypt`, `Decrypt`, and `ReEncrypt` apply real RSAES-OAEP for RSA keys (`RSA_2048`, `RSA_3072`, `RSA_4096`) when `EncryptionAlgorithm` is `RSAES_OAEP_SHA_1` or `RSAES_OAEP_SHA_256`. The ciphertext is raw RSA output of the modulus length, for example exactly 256 bytes for `RSA_2048`. A ciphertext produced locally with the public key from `GetPublicKey` decrypts the same way it does on real AWS, which makes the usual envelope pattern work. Only the encrypting side needs the public key. As on real AWS, asymmetric `Decrypt` requires `KeyId`, an `EncryptionContext` is rejected for asymmetric keys, and plaintext larger than the OAEP capacity of the key fails validation.
+
+Symmetric keys keep the emulator's internal ciphertext format, which is not compatible with ciphertexts from real AWS KMS.
+
+## Imported Key Material
+
+`CreateKey` accepts `Origin=EXTERNAL`, which creates a key with no key material in state
+`PendingImport`. `GetParametersForImport` returns a real RSA public key and an import token;
+material wrapped with that public key by a standard client is unwrapped by `ImportKeyMaterial`,
+which puts the key in state `Enabled`. Wrapping material against the wrong key, or with a
+different algorithm than the one requested, fails with `InvalidCiphertextException` the same way
+it does on AWS.
+
+Supported `WrappingAlgorithm` values are `RSAES_OAEP_SHA_256` and `RSAES_OAEP_SHA_1`, over
+`WrappingKeySpec` `RSA_2048`, `RSA_3072` or `RSA_4096`. `RSAES_PKCS1_V1_5` is rejected, matching
+AWS, which stopped supporting it on October 10, 2023. The `RSA_AES_KEY_WRAP_*` variants exist for
+material longer than an RSA modulus can hold and are also rejected: no importable key spec here
+carries more than 64 bytes.
+
+An import token is scoped to one key and spent by the import that uses it, and a second
+`GetParametersForImport` call invalidates the token the previous one returned. Tokens expire 24
+hours after they are issued.
+
+`ExpirationModel=KEY_MATERIAL_EXPIRES` (the default) requires `ValidTo`, which must be in the
+future and no more than 365 days out. Once `ValidTo` passes, the material is dropped and the key
+returns to `PendingImport`, as does `DeleteImportedKeyMaterial`. Expiry is evaluated when the key
+is next read rather than on a timer, which is not observable through the API. Deleting the
+material of a key that is already in `PendingDeletion` leaves that state in place.
+
+A key in `PendingImport` rejects cryptographic operations, `EnableKey` and `DisableKey` with
+`KMSInvalidStateException`. `CancelKeyDeletion` on a key whose material was never imported, or was
+deleted or expired while it was pending deletion, returns it to `PendingImport` rather than to a
+usable state it could not serve. `DeleteImportedKeyMaterial` on a key that holds no material
+succeeds, as it does on AWS. `ImportKeyMaterial` and `DeleteImportedKeyMaterial` return a
+`KeyMaterialId`, derived from the key id and the material as AWS derives it. Re-importing
+requires the same material the key was first given; different material is rejected with
+`IncorrectKeyMaterialException`.
+
+Automatic key rotation is rejected for keys with imported material, matching AWS: KMS does not
+own the material and cannot rotate it.
+
+**Deviations:**
+
+- `Origin=EXTERNAL` is supported only for `SYMMETRIC_DEFAULT` and the `HMAC_*` key specs, whose
+  material is a raw byte string. Real AWS KMS also imports asymmetric material as a DER-encoded
+  key pair; here an asymmetric spec with `Origin=EXTERNAL` is rejected at `CreateKey` with
+  `UnsupportedOperationException` rather than creating a key that could never sign or decrypt.
+- Holding several imported key materials on one symmetric key, which real KMS uses for on-demand
+  rotation of imported material, is not emulated. `ImportType=NEW_KEY_MATERIAL` on a key that
+  already has key material is rejected with `UnsupportedOperationException`, and
+  `ListKeyRotations` is not implemented.
 
 ## Grant Support Scope
 

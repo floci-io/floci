@@ -252,4 +252,89 @@ class PipesIntegrationTest {
         .then()
             .statusCode(400);
     }
+
+    @Test
+    @Order(14)
+    void createPipeReturnsParallelizationFactorInResponse() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Source": "arn:aws:kinesis:us-east-1:000000000000:stream/pf-stream",
+                    "Target": "arn:aws:sqs:us-east-1:000000000000:pf-target",
+                    "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+                    "DesiredState": "STOPPED",
+                    "SourceParameters": {
+                        "KinesisStreamParameters": {
+                            "StartingPosition": "TRIM_HORIZON",
+                            "ParallelizationFactor": 4
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/v1/pipes/pf-pipe")
+        .then()
+            .statusCode(200)
+            .body("SourceParameters.KinesisStreamParameters.ParallelizationFactor", equalTo(4));
+
+        given()
+            .contentType("application/json")
+        .when()
+            .get("/v1/pipes/pf-pipe")
+        .then()
+            .statusCode(200)
+            .body("SourceParameters.KinesisStreamParameters.ParallelizationFactor", equalTo(4));
+
+        given()
+            .contentType("application/json")
+        .when()
+            .delete("/v1/pipes/pf-pipe")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(15)
+    void createPipeParallelizationFactorOutOfRangeReturns400() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Source": "arn:aws:kinesis:us-east-1:000000000000:stream/pf-stream",
+                    "Target": "arn:aws:sqs:us-east-1:000000000000:pf-target",
+                    "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+                    "DesiredState": "STOPPED",
+                    "SourceParameters": {
+                        "KinesisStreamParameters": {"ParallelizationFactor": 11}
+                    }
+                }
+                """)
+        .when()
+            .post("/v1/pipes/pf-invalid-pipe")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(16)
+    void createPipeParallelizationFactorOnSqsSourceReturns400() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Source": "arn:aws:sqs:us-east-1:000000000000:pf-source",
+                    "Target": "arn:aws:sqs:us-east-1:000000000000:pf-target",
+                    "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+                    "DesiredState": "STOPPED",
+                    "SourceParameters": {
+                        "KinesisStreamParameters": {"ParallelizationFactor": 4}
+                    }
+                }
+                """)
+        .when()
+            .post("/v1/pipes/pf-wrong-source-pipe")
+        .then()
+            .statusCode(400);
+    }
 }

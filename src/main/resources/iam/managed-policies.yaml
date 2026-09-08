@@ -5,8 +5,8 @@
 # keeps that check faithful in both directions: policies AWS publishes attach cleanly, and
 # typos are still rejected.
 #
-# Policy documents are not modelled. Floci does not evaluate IAM by default and every entry
-# resolves to the same permissive document, so only name, path and description are needed.
+# Policy documents are stored in iam/managed-policy-documents.json, keyed by policy name.
+# The documents are generated from the public AWS managed policy dataset cited below.
 #
 # Names and paths derive from the public AWS managed policy list, via
 # https://github.com/iann0036/iam-dataset (MIT). To refresh against a real account:

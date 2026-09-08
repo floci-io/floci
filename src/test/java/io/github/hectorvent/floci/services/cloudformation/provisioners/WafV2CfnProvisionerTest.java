@@ -64,14 +64,14 @@ class WafV2CfnProvisionerTest {
         WebAcl updated = acl("portal", "acl-123", "REGIONAL", "lock-2");
         updated.setArn("arn:updated");
         when(wafV2.listWebAcls("REGIONAL")).thenReturn(List.of(existing));
-        when(wafV2.getWebAcl("REGIONAL", "acl-123")).thenReturn(updated);
+        when(wafV2.getWebAcl("REGIONAL", "acl-123", "portal")).thenReturn(updated);
         StackResource resource = resource();
         resource.setPhysicalId("portal|acl-123|REGIONAL");
         ObjectNode props = mapper.createObjectNode().put("Name", "portal").put("Scope", "REGIONAL");
 
         provisioner.provision(resource, props, context());
 
-        verify(wafV2).updateWebAcl(any(), eq("REGIONAL"), eq("acl-123"), eq("lock-1"));
+        verify(wafV2).updateWebAcl(any(), eq("REGIONAL"), eq("acl-123"), eq("portal"), eq("lock-1"));
         assertEquals("portal|acl-123|REGIONAL", resource.getPhysicalId());
     }
 
@@ -84,7 +84,7 @@ class WafV2CfnProvisionerTest {
         when(wafV2.createWebAcl(any(), eq("REGIONAL"), eq("portal-renamed"), eq("us-east-1")))
                 .thenReturn(created);
         org.mockito.Mockito.doThrow(new RuntimeException("WAFAssociatedItemException"))
-                .when(wafV2).deleteWebAcl("REGIONAL", "acl-old", "lock-1");
+                .when(wafV2).deleteWebAcl("REGIONAL", "acl-old", "portal", "lock-1");
         StackResource resource = resource();
         resource.setPhysicalId("portal|acl-old|REGIONAL");
         ObjectNode props = mapper.createObjectNode().put("Name", "portal-renamed").put("Scope", "REGIONAL");

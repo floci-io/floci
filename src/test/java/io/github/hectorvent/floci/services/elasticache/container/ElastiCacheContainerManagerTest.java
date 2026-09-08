@@ -17,8 +17,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -91,5 +93,36 @@ class ElastiCacheContainerManagerTest {
                     "io.floci.account", "000000000000",
                     "io.floci.region", "us-east-1"));
         }
+    }
+
+    @Test
+    void tryStartRethrowsWhenDaemonBecomesUnreachableAfterContainerWasCreated() {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(6379,
+                        new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 6379))));
+        when(lifecycleManager.getDockerClient()).thenThrow(new IllegalStateException("no daemon"));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        when(logStreamer.attach(any(), any(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("log attach failed after daemon went away"));
+
+        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(mock(ContainerSpec.class));
+
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElastiCacheServiceConfig elasticache = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.elasticache()).thenReturn(elasticache);
+        when(elasticache.dockerNetwork()).thenReturn(Optional.empty());
+
+        ElastiCacheContainerManager manager = new ElastiCacheContainerManager(containerBuilder, lifecycleManager,
+                logStreamer, mock(ContainerDetector.class), config, mock(RegionResolver.class));
+
+        assertThrows(IllegalStateException.class, () -> manager.tryStart("my-group", "valkey/valkey:7.2"));
+
+        verify(lifecycleManager).stopAndRemove(eq("container-id"), any());
     }
 }

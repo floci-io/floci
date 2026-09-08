@@ -65,7 +65,7 @@ public class ContainerBuilder {
         return new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver);
     }
 
-    private String resolveImage(String image) {
+    public String resolveImage(String image) {
         return resolveImage(image, configuredImageRegistryBase(config));
     }
 

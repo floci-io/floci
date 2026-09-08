@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
@@ -120,7 +121,12 @@ public class EcrService implements ResourceProvider {
                                        Map<String, String> tags,
                                        String region) {
         validateRepoName(repositoryName);
-        registryManager.ensureStarted();
+        // Repository records are pure metadata: the ARN and the URI are derived from the
+        // configured account, region and registry port, none of which need Docker. Start
+        // the backing registry opportunistically so the URI reflects an already-adopted
+        // container's published port, but never fail CreateRepository when no Docker
+        // daemon is reachable, the registry is retried on the next image operation.
+        registryManager.tryEnsureStarted();
         String account = effectiveAccount(registryId);
         String key = key(region, account, repositoryName);
         if (repoStore.get(key).isPresent()) {
@@ -189,21 +195,16 @@ public class EcrService implements ResourceProvider {
         String key = key(region, account, repositoryName);
         Repository repo = repoStore.get(key).orElseThrow(() -> notFound(repositoryName, account));
 
-        // Check whether the registry has any tagged images for this repo. If
-        // ensureStarted() can't talk to docker (no daemon), assume the repo is
-        // empty — this allows control-plane unit tests to delete without docker.
         List<String> tags = listTagsBestEffort(account, region, repositoryName);
-        if (!tags.isEmpty() && !force) {
+        if (!force && !tags.isEmpty()) {
             throw new AwsException("RepositoryNotEmptyException",
                     "The repository with name '" + repositoryName
                             + "' in registry with id '" + account + "' cannot be deleted because it still contains images",
                     400);
         }
 
-        if (force && !tags.isEmpty()) {
-            // Phase 5 will issue real DELETE /v2/<name>/manifests/<digest> calls.
-            LOG.infov("Force-deleting ECR repository {0} containing {1} tag(s) (manifest deletion deferred)",
-                    repositoryName, tags.size());
+        if (force) {
+            deleteRepositoryStorage(account, region, repositoryName);
         }
 
         repoStore.delete(key);
@@ -211,6 +212,9 @@ public class EcrService implements ResourceProvider {
         String metaPrefix = key + "::";
         for (ImageMetadata meta : imageMetaStore.scan(k -> k.startsWith(metaPrefix))) {
             imageMetaStore.delete(metaPrefix + meta.getDigest());
+        }
+        if (!hasRepositories()) {
+            registryManager.pruneStorage();
         }
         LOG.infov("Deleted ECR repository {0}/{1}/{2}", region, account, repositoryName);
         return repo;
@@ -221,7 +225,7 @@ public class EcrService implements ResourceProvider {
     // ============================================================
 
     public AuthorizationData getAuthorizationToken() {
-        registryManager.ensureStarted();
+        requireRegistry();
         String token = Base64.getEncoder()
                 .encodeToString("AWS:floci".getBytes(StandardCharsets.UTF_8));
         Instant expires = Instant.now().plusSeconds(12 * 60 * 60);
@@ -235,7 +239,7 @@ public class EcrService implements ResourceProvider {
 
     public List<ImageIdentifier> listImages(String repositoryName, String registryId, String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         try {
             RegistryHttpClient http = registryManager.httpClient();
@@ -257,7 +261,7 @@ public class EcrService implements ResourceProvider {
                                                 String registryId,
                                                 String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
@@ -332,7 +336,7 @@ public class EcrService implements ResourceProvider {
                                               String registryId,
                                               String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
@@ -372,7 +376,7 @@ public class EcrService implements ResourceProvider {
                                                     String registryId,
                                                     String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
-        registryManager.ensureStarted();
+        requireRegistry();
         String internal = registryManager.internalRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
@@ -534,6 +538,20 @@ public class EcrService implements ResourceProvider {
     }
 
 
+    /**
+     * Gate for the ECR data plane, which cannot be emulated without the backing
+     * registry container. Surfaces ECR's modelled {@code ServerException} instead of
+     * letting the Docker client's {@code SocketException} escape as an InternalFailure.
+     */
+    private void requireRegistry() {
+        if (!registryManager.tryEnsureStarted()) {
+            throw new AwsException("ServerException",
+                    "The ECR backing registry is unavailable because no Docker daemon is reachable "
+                            + "from Floci. Repository metadata operations are supported; image push, "
+                            + "pull and image queries require Docker.", 500);
+        }
+    }
+
     private List<String> listTagsBestEffort(String account, String region, String repoName) {
         try {
             return registryManager.httpClient()
@@ -542,6 +560,28 @@ public class EcrService implements ResourceProvider {
             LOG.debugv("Could not list tags for {0} (registry not available): {1}", repoName, e.getMessage());
             return List.of();
         }
+    }
+
+    private void deleteRepositoryStorage(String account, String region, String repositoryName) {
+        try {
+            registryManager.deleteRepositoryStorage(account, region, repositoryName);
+        } catch (Exception e) {
+            throw registryFailure(repositoryName, e);
+        }
+    }
+
+    private boolean hasRepositories() {
+        if (repoStore instanceof AccountAwareStorageBackend<?> accountAware) {
+            return !accountAware.scanAllAccounts().isEmpty();
+        }
+        return !repoStore.scan(k -> true).isEmpty();
+    }
+
+    private AwsException registryFailure(String repositoryName, Exception cause) {
+        LOG.warnv("Could not delete ECR repository {0} from the backing registry: {1}",
+                repositoryName, cause.getMessage());
+        return new AwsException("ServerException",
+                "Could not delete images from repository '" + repositoryName + "'", 500);
     }
 
     private static String key(String region, String account, String repoName) {

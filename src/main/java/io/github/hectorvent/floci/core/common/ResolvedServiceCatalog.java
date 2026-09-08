@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.fis.FisController;
 import io.github.hectorvent.floci.services.mwaa.MwaaController;
 import io.github.hectorvent.floci.services.iot.IotController;
+import io.github.hectorvent.floci.services.iot.IotDomainConfigurationController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlController;
@@ -31,7 +32,14 @@ import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
+import io.github.hectorvent.floci.services.macie2.MacieController;
+import io.github.hectorvent.floci.services.account.AccountController;
+import io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController;
+import io.github.hectorvent.floci.services.inspector2.Inspector2Controller;
+import io.github.hectorvent.floci.services.detective.DetectiveController;
 import io.github.hectorvent.floci.services.aps.ApsController;
+import io.github.hectorvent.floci.services.controlcatalog.ControlCatalogController;
+import io.github.hectorvent.floci.services.controltower.ControlTowerControlController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
 import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
@@ -161,7 +169,12 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.REDSHIFT, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("redshift"), Set.of(), Set.of()),
-                
+                descriptor("redshift-data", "redshift-data",
+                        config.services().redshift().enabled() && config.services().redshiftData().enabled(), true,
+                        "redshift-data", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("RedshiftData."), Set.of("redshift-data"), Set.of(), Set.of()),
+
                 descriptor("events", "eventbridge", config.services().eventbridge().enabled(), true,
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -406,6 +419,27 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("SWBExternalService."), Set.of("sso"), Set.of(), Set.of()),
+                descriptor("macie2", "macie2", config.services().macie2().enabled(), true,
+                        "macie2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("macie2"), Set.of(), Set.of(MacieController.class)),
+                descriptor("account", "account", config.services().account().enabled(), true,
+                        "account", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("account"), Set.of(), Set.of(AccountController.class)),
+                descriptor("access-analyzer", "accessanalyzer", config.services().accessanalyzer().enabled(), true,
+                        "accessanalyzer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("access-analyzer"), Set.of(), Set.of(AccessAnalyzerController.class)),
+                descriptor("identitystore", "identitystore", config.services().identitystore().enabled(), true,
+                        "identitystore", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON), Set.of("AWSIdentityStore."), Set.of("identitystore"), Set.of(), Set.of()),
+                descriptor("budgets", "budgets", config.services().budgets().enabled(), true,
+                        "budgets", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON), Set.of("AWSBudgetServiceGateway."), Set.of("budgets"), Set.of(), Set.of()),
+                descriptor("detective", "detective", config.services().detective().enabled(), true,
+                        "detective", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("detective"), Set.of(), Set.of(DetectiveController.class)),
+                descriptor("inspector2", "inspector2", config.services().inspector2().enabled(), true,
+                        "inspector2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("inspector2"), Set.of(), Set.of(Inspector2Controller.class)),
                 descriptor("autoscaling", "autoscaling", config.services().autoscaling().enabled(), true,
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -521,7 +555,7 @@ public class ResolvedServiceCatalog {
                         // DescribeJobExecution, StartNextPendingJobExecution, UpdateJobExecution)
                         // signs under its own name while IotController serves its /things/*/jobs routes
                         Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
-                        Set.of(IotController.class)),
+                        Set.of(IotController.class, IotDomainConfigurationController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -554,6 +588,11 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("connect"), Set.of(),
                         Set.of(io.github.hectorvent.floci.services.connect.ConnectController.class)),
+                descriptor("cognito-identity", "cognitoidentity",
+                        config.services().cognitoidentity().enabled(), true,
+                        "cognitoidentity", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSCognitoIdentityService."), Set.of("cognito-identity"), Set.of(), Set.of()),
                 descriptor("network-firewall", "networkfirewall", config.services().networkfirewall().enabled(), true,
                         "networkfirewall", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -562,11 +601,14 @@ public class ResolvedServiceCatalog {
                         "servicecatalog", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AWS242ServiceCatalogService."), Set.of("servicecatalog"), Set.of(), Set.of()),
+                descriptor("controlcatalog", "controlcatalog", config.services().controlcatalog().enabled(), true,
+                        "controlcatalog", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("controlcatalog"), Set.of(), Set.of(ControlCatalogController.class)),
                 descriptor("controltower", "controltower", config.services().controltower().enabled(), true,
                         "controltower", storageMode(config.storage().services().controltower().mode(), config.storage().mode()),
                         config.storage().services().controltower().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("controltower"), Set.of(), Set.of(ControlTowerController.class)),
+                        Set.of(), Set.of("controltower"), Set.of(), Set.of(ControlTowerController.class, ControlTowerControlController.class)),
                 descriptor("aps", "aps", config.services().aps().enabled(), true,
                         "aps", storageMode(config.storage().services().aps().mode(), config.storage().mode()),
                         config.storage().services().aps().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

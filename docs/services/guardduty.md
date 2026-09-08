@@ -22,6 +22,8 @@ region and use the configured Floci storage mode.
 | `EnableOrganizationAdminAccount` | `POST /admin/enable` | Designate the delegated administrator account |
 | `DisableOrganizationAdminAccount` | `POST /admin/disable` | Remove the delegated administrator account |
 | `ListOrganizationAdminAccounts` | `GET /admin` | List the delegated administrator account |
+| `CreateMembers` | `POST /detector/{detectorId}/member` | Create GuardDuty member accounts for a detector |
+| `ListMembers` | `GET /detector/{detectorId}/member` | List detector members with pagination and association filtering |
 | `TagResource` | `POST /tags/{resourceArn}` | Add tags to a detector |
 | `UntagResource` | `DELETE /tags/{resourceArn}` | Remove tags from a detector |
 | `ListTagsForResource` | `GET /tags/{resourceArn}` | List detector tags |
@@ -78,6 +80,6 @@ aws guardduty delete-detector --detector-id "$DETECTOR_ID"
   `aws_guardduty_organization_admin_account` resources in a single-account workflow.
 - No findings are generated: detection, malware scans, and the findings APIs
   (`ListFindings`, `GetFindings`, filters, and publishing destinations) are not implemented.
-- Member, invitation, IP-set, threat-intel, and coverage APIs are not implemented.
+- Member creation and listing are implemented. Invitation, IP-set, threat-intel, and coverage APIs are not implemented.
 - The deprecated `dataSources` request/response structures are not modeled; the Terraform
   provider treats their absence as "not configured".

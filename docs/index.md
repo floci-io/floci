@@ -12,76 +12,7 @@ Floci is a fast, free, and open-source local AWS service emulator built for deve
 
 ## Supported Services
 
-Floci emulates 85 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
-
-| Service | Protocol |
-|---|---|
-| SSM Parameter Store | JSON 1.1 |
-| SQS | Query / JSON |
-| SNS | Query / JSON |
-| SES | Query |
-| SES v2 | REST JSON |
-| S3 | REST XML |
-| DynamoDB + Streams | JSON 1.1 |
-| Lambda | REST JSON |
-| API Gateway v1 & v2 | REST JSON |
-| AppSync | REST JSON |
-| Cognito | JSON 1.1 |
-| KMS | JSON 1.1 |
-| Kinesis | JSON 1.1 |
-| Secrets Manager | JSON 1.1 |
-| CloudFormation | Query |
-| Step Functions | JSON 1.1 |
-| IAM | Query |
-| STS | Query |
-| Organizations | JSON 1.1 |
-| ElastiCache (Redis / Valkey) | Query + RESP proxy |
-| RDS (PostgreSQL / MySQL) | Query + wire proxy |
-| RDS Data API | REST JSON |
-| Neptune (graph DB / Gremlin) | Query + WebSocket proxy |
-| DocumentDB (MongoDB-compatible) | Query + MongoDB wire |
-| MSK (Kafka / Redpanda) | REST JSON + Kafka |
-| Amazon MQ (RabbitMQ) | REST JSON + AMQP |
-| Athena | JSON 1.1 |
-| Glue Data Catalog + Schema Registry | JSON 1.1 |
-| Data Firehose | JSON 1.1 |
-| Managed Service for Apache Flink | JSON 1.1 |
-| ECS | JSON 1.1 |
-| EC2 | EC2 Query |
-| Lightsail | JSON 1.1 |
-| ACM | JSON 1.1 |
-| ECR | JSON 1.1 + OCI Distribution |
-| Resource Groups Tagging API | JSON 1.1 |
-| OpenSearch | REST JSON |
-| EventBridge | JSON 1.1 |
-| EventBridge Pipes | REST JSON |
-| EventBridge Scheduler | REST JSON |
-| CloudWatch Logs & Metrics | JSON 1.1 / Query |
-| CloudWatch RUM | REST JSON |
-| AppConfig + AppConfigData | REST JSON |
-| Bedrock Runtime | REST JSON |
-| EKS | REST JSON |
-| ELB v2 | Query |
-| Auto Scaling | Query |
-| Elastic Beanstalk | Query |
-| CodeBuild | JSON 1.1 |
-| CodeDeploy | JSON 1.1 |
-| CodePipeline | JSON 1.1 |
-| AWS Backup | REST JSON |
-| AWS FIS | REST JSON |
-| CloudFront | REST XML |
-| Route53 | REST XML |
-| Cloud Map | JSON 1.1 |
-| AWS Config | JSON 1.1 |
-| Textract | JSON 1.1 |
-| Transcribe | JSON 1.1 |
-| Pricing | JSON 1.1 |
-| Cost Explorer | JSON 1.1 |
-| Cost and Usage Reports | JSON 1.1 |
-| BCM Data Exports | JSON 1.1 |
-| Transfer Family | JSON 1.1 |
-| AWS RAM | REST JSON |
-| Service Quotas | JSON 1.1 |
+See the [Services Overview](services/index.md) for the full list of emulated services, per-service operation counts, endpoints, and protocol details.
 
 ## Why Floci?
 
@@ -117,7 +48,7 @@ docker compose up -d
 aws --endpoint-url http://localhost:4566 s3 mb s3://my-bucket
 ```
 
-All 85 AWS services are immediately available at `http://localhost:4566`.
+Every emulated service is immediately available at `http://localhost:4566`.
 
 [Get started →](getting-started/quick-start.md){ .md-button .md-button--primary }
 [View services →](services/index.md){ .md-button }

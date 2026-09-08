@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +54,26 @@ class HybridStorageTest {
         store2.load();
         assertEquals("value1", store2.get("key1").orElseThrow());
         store2.shutdown();
+    }
+
+    @Test
+    void loadQuarantinesUnreadableFile() throws Exception {
+        Path filePath = tempDir.resolve("corrupt-hybrid-store.json");
+        String unreadableContents = "{ not valid json";
+        Path quarantinePath = filePath.resolveSibling("corrupt-hybrid-store.json.corrupt");
+        Files.writeString(filePath, unreadableContents);
+        Files.writeString(quarantinePath, "previous unreadable contents");
+        var loadedStorage = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
+
+        try {
+            loadedStorage.load();
+
+            assertFalse(Files.exists(filePath));
+            assertTrue(Files.exists(quarantinePath));
+            assertEquals(unreadableContents, Files.readString(quarantinePath));
+        } finally {
+            loadedStorage.shutdown();
+        }
     }
 
     @Test
