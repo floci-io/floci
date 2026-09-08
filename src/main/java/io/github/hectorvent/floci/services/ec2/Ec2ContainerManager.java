@@ -781,6 +781,7 @@ public class Ec2ContainerManager {
                         exposeReachablePublicAddress(instance);
                     }
                     metadataServer.registerContainer(containerIp, instanceId, instance);
+                    refreshImdsSourceRegistration(instance, containerId, containerIp);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -880,7 +881,67 @@ public class Ec2ContainerManager {
             exposeReachablePublicAddress(instance);
         }
         metadataServer.registerContainer(containerIp, instance.getInstanceId(), instance);
+        refreshImdsSourceRegistration(instance, containerId, containerIp);
         return true;
+    }
+
+    /**
+     * Keeps the IMDS registration of a VPC-attached instance's bridge address current.
+     *
+     * <p>An instance on a VPC network has two addresses, and only one of them is the one IMDS
+     * sees. {@code Ec2MetadataServer} resolves an instance from the source address of the
+     * request, and the container's default route is the bridge, so its metadata requests arrive
+     * from the bridge address. The address Floci reports, and the one
+     * {@link #getContainerBridgeIp} prefers, is the VPC address, so registering only that one
+     * leaves IMDS with no entry for the address the requests actually come from.
+     *
+     * <p>{@code launch} gets this right. {@link #start} and {@link #restoreMetadataRegistration}
+     * did not, and both are exactly where it goes wrong: Docker hands out a fresh bridge address
+     * when a stopped container starts again, and an emulator restart rebuilds the registration
+     * map empty. Either way the instance came back with its bridge address unregistered and
+     * {@code imdsSourceIp} still naming the address of a previous run, which then also survived
+     * as a stale entry pointing at this instance.
+     *
+     * @param reportedIp the address the instance reports, already registered by the caller; when
+     *                   the bridge address is the same one, there is no second address to track
+     */
+    private void refreshImdsSourceRegistration(Instance instance, String containerId, String reportedIp) {
+        String bridgeIp = bridgeNetworkIp(containerId);
+        // Nothing to track separately when the reported address is the bridge address: that is a
+        // plain bridge-only instance, and the caller has already registered it.
+        String current = bridgeIp != null && !bridgeIp.isBlank() && !bridgeIp.equals(reportedIp) ? bridgeIp : null;
+        String previous = instance.getImdsSourceIp();
+
+        if (previous != null && !previous.isBlank() && !previous.equals(current)) {
+            metadataServer.unregisterContainer(previous, instance);
+            instance.setImdsSourceIp(null);
+        }
+        if (current != null) {
+            instance.setImdsSourceIp(current);
+            metadataServer.registerContainer(current, instance.getInstanceId(), instance);
+        }
+    }
+
+    /**
+     * The container's address on Docker's default bridge, which is where its default route, and
+     * so the source address of its IMDS requests, lives. Distinct from
+     * {@link #getContainerBridgeIp}, which despite the name prefers the VPC network's address.
+     *
+     * @return the address, or null when the container is not on the default bridge at all
+     */
+    private String bridgeNetworkIp(String containerId) {
+        try {
+            var inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
+                return null;
+            }
+            ContainerNetwork bridge = inspect.getNetworkSettings().getNetworks().get("bridge");
+            return bridge == null || bridge.getIpAddress() == null || bridge.getIpAddress().isBlank()
+                    ? null : bridge.getIpAddress();
+        } catch (Exception e) {
+            LOG.warnv("Could not inspect container {0} for its bridge IP: {1}", containerId, e.getMessage());
+            return null;
+        }
     }
 
     /**
