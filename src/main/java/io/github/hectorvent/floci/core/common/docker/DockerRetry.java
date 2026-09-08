@@ -9,7 +9,7 @@ import java.io.InterruptedIOException;
  * Retry policy for docker daemon calls. Every docker command travels over the single shared
  * socket; when many builds drive the daemon at once (e.g. an LZA Bootstrap stage fanning out
  * ~15 CodeBuild actions) it intermittently drops a connection mid-call with a transient I/O
- * error — {@code Broken pipe} or {@code Connection reset} — that docker-java surfaces wrapped
+ * error, {@code Broken pipe} or {@code Connection reset}, that docker-java surfaces wrapped
  * in a {@link RuntimeException}. These clear on a retry; a genuine daemon rejection (a 4xx, a
  * name conflict) does not and must surface immediately. Callers wrap idempotent docker calls
  * (create container, copy archive in) so a transient blip does not fail the whole build.
@@ -58,16 +58,16 @@ public final class DockerRetry {
 
     /**
      * True when {@code t} (or any cause in its chain) is a transient docker I/O failure worth
-     * retrying — an {@link IOException} such as {@code Broken pipe} / {@code Connection reset},
+     * retrying, an {@link IOException} such as {@code Broken pipe} / {@code Connection reset},
      * possibly wrapped by docker-java in a {@link RuntimeException}.
      */
     public static boolean isTransientIo(Throwable t) {
         // InterruptedIOException covers both a genuine thread interruption (masking it would
-        // delay shutdown) and httpclient5's ConnectionRequestTimeoutException — the pool has no
+        // delay shutdown) and httpclient5's ConnectionRequestTimeoutException, the pool has no
         // free connection lease after waiting the full request timeout, meaning the pool is
         // exhausted rather than a socket blip. Retrying either just re-enters another wait and
         // adds pressure to an already-starved pool, so both must be excluded from the general
-        // "any IOException is transient" rule below — checked over the WHOLE chain first, since
+        // "any IOException is transient" rule below, checked over the WHOLE chain first, since
         // an outer wrapper IOException would otherwise short-circuit the walk before it ever
         // reaches an inner InterruptedIOException cause. java.net.SocketTimeoutException is ALSO
         // an InterruptedIOException subtype but means something different (the daemon just took

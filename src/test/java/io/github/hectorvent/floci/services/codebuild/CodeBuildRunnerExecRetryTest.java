@@ -21,8 +21,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * The transport-level retry ({@code RetryingDockerHttpClient}) excludes every {@code /exec} path
- * because exec-START must never be replayed. That leaves exec BOOKKEEPING — exec-create (replay
- * leaves at most an orphaned, never-started exec instance) and exec-inspect (a read) — exposed to
+ * because exec-START must never be replayed. That leaves exec BOOKKEEPING, exec-create (replay
+ * leaves at most an orphaned, never-started exec instance) and exec-inspect (a read), exposed to
  * the same transient broken-pipe blips as every other short docker call. A blip on the
  * exit-code inspect after a fully successful build silently failed LZA Bootstrap builds: every
  * phase SUCCEEDED, the terminal status FAILED, and nothing was logged. These call sites retry

@@ -29,7 +29,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * The transport-level retry ({@code RetryingDockerHttpClient}) must refuse to replay a one-shot
- * {@code InputStream} body — the streamed tar bytes are gone after the first attempt. Every
+ * {@code InputStream} body, the streamed tar bytes are gone after the first attempt. Every
  * tar-copy into a container therefore needs its retry at the call site, rebuilding the whole
  * operation (tar bytes or pipe, streamer thread, request) per attempt. This module is that call
  * site, shared by every service that copies content into containers; tar extract over the same
@@ -95,7 +95,7 @@ class RetryingTarCopierTest {
 
     // copyFile streams tarWriter through a pipe on its own thread; if the writer fails before
     // producing any bytes (e.g. the source file vanished), closing the pipe with nothing written
-    // looks like a clean, empty tar to a reader that isn't checking for that — the daemon accepts
+    // looks like a clean, empty tar to a reader that isn't checking for that, the daemon accepts
     // it and exec() returns normally, so the caller would otherwise see a false success instead
     // of the real failure.
     @Test

@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * A CodeBuild build runs in a {@code docker exec} stream, not as container PID 1, so the
  * PID-1 log tap ({@link ContainerLogStreamer#attach}) captures nothing and the build's
  * CloudWatch log stream comes back empty. The phase session parses every exec line, so it
- * is the correct place to forward build output to CloudWatch Logs — mirroring how Lambda
+ * is the correct place to forward build output to CloudWatch Logs, mirroring how Lambda
  * forwards its exec output. Without this, failed builds are undiagnosable post-hoc.
  */
 class CodeBuildLogForwardingTest {

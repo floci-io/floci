@@ -153,7 +153,7 @@ class CodeBuildRunnerEnvAssemblyTest {
     }
 
     // Clients like the CDK toolkit pass a shared https.Agent into their SDK
-    // httpOptions and Node rejects http: URLs on an https.Agent — the injected
+    // httpOptions and Node rejects http: URLs on an https.Agent, the injected
     // endpoint must be https when the spoofed endpoints are served with TLS.
     @Test
     void endpointUrlSwitchesToHttpsWhenSpoofingAndTlsBothEnabled() {

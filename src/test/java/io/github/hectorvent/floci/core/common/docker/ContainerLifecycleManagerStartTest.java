@@ -32,14 +32,14 @@ import static org.mockito.Mockito.when;
  * ({@link RetryingDockerHttpClient}), not at this call site.
  *
  * <p>The load-bearing piece the transport cannot provide: when the daemon honoured a start whose
- * response was lost to a broken pipe, the transport's replay meets HTTP 304 — a perfectly
+ * response was lost to a broken pipe, the transport's replay meets HTTP 304, a perfectly
  * successful response at transport level, which docker-java converts to
  * {@link NotModifiedException} <em>above</em> the transport. The call site must treat it as
  * success, or a recovered blip becomes a hard launch failure.
  *
  * <p>Equally load-bearing in the other direction: this manager sees the docker API through a
  * client whose transport has already spent the full retry budget, so it must not loop again
- * itself — an outer loop would compound backoff on an already-exhausted inner one (~90s+ worst
+ * itself, an outer loop would compound backoff on an already-exhausted inner one (~90s+ worst
  * case for a single call) and multiply daemon pressure exactly when the socket is saturated.
  */
 @ExtendWith(MockitoExtension.class)
@@ -91,7 +91,7 @@ class ContainerLifecycleManagerStartTest {
 
         ContainerLifecycleManager.ContainerInfo info = assertDoesNotThrow(
                 () -> manager(docker).startCreated("container-abc", spec),
-                "a 304 means the container is running — that is success, not failure");
+                "a 304 means the container is running, that is success, not failure");
 
         assertEquals("container-abc", info.containerId());
         assertEquals(1, execCalls.get());
