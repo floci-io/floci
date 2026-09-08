@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.mockito.Mockito.mock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -58,6 +60,8 @@ class CloudWatchLogsHandlerTest {
                 new CloudWatchLogsCrossAccountService(
                         new InMemoryStorage<>(), new InMemoryStorage<>(),
                         new RegionResolver(REGION, ACCOUNT), MAPPER),
+                new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), service,
+                        mock(CloudWatchMetricsService.class)),
                 MAPPER);
 
         service.createLogGroup(GROUP, null, null, REGION);
