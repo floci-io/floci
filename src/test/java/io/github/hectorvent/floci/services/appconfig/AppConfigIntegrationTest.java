@@ -23,6 +23,7 @@ class AppConfigIntegrationTest {
     private static String strategyId;
     private static String configToken;
     private static String nextConfigToken;
+    private static String unchangedConfigToken;
     private static String intervalToken;
     private static String emptyAppId;
     private static String emptyEnvId;
@@ -126,6 +127,7 @@ class AppConfigIntegrationTest {
                 .header("Content-Type", startsWith("application/json"))
                 .header("Version-Label", equalTo("1"))
                 .header("Next-Poll-Configuration-Token", notNullValue())
+                .header("Next-Poll-Configuration-Token", not(equalTo(configToken)))
                 .header("Next-Poll-Interval-In-Seconds", equalTo("15"))
                 .body("foo", equalTo("bar"))
                 .extract().header("Next-Poll-Configuration-Token");
@@ -154,6 +156,22 @@ class AppConfigIntegrationTest {
     }
 
     @Test @Order(11)
+    void repeatedPollWithSameVersionReturnsEmptyPayload() {
+        unchangedConfigToken = given()
+                .queryParam("configuration_token", nextConfigToken)
+                .when().get("/configuration")
+                .then()
+                .statusCode(200)
+                .header("Content-Type", equalTo("application/octet-stream"))
+                .header("Version-Label", equalTo(""))
+                .header("Next-Poll-Configuration-Token", notNullValue())
+                .header("Next-Poll-Configuration-Token", not(equalTo(nextConfigToken)))
+                .header("Next-Poll-Interval-In-Seconds", equalTo("15"))
+                .body(equalTo(""))
+                .extract().header("Next-Poll-Configuration-Token");
+    }
+
+    @Test @Order(12)
     void updatedDeploymentIsVisibleOnNextPollToken() {
         given()
                 .header("Content-Type", "application/json")
@@ -173,15 +191,62 @@ class AppConfigIntegrationTest {
                 .body("State", equalTo("COMPLETE"));
 
         given()
-                .queryParam("configuration_token", nextConfigToken)
+                .queryParam("configuration_token", unchangedConfigToken)
+                .when().get("/configuration")
+                .then()
+                .statusCode(200)
+                .header("Content-Type", startsWith("application/json"))
+                .header("Version-Label", equalTo("2"))
+                .header("Next-Poll-Configuration-Token", notNullValue())
+                .header("Next-Poll-Configuration-Token", not(equalTo(unchangedConfigToken)))
+                .body("foo", equalTo("baz"));
+    }
+
+    @Test @Order(13)
+    void concurrentSessionsTrackLastVersionIndependently() {
+        String firstToken = given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\"}")
+                .when().post("/configurationsessions")
+                .then()
+                .statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        String secondToken = given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\": \"" + appId + "\", \"EnvironmentIdentifier\": \"" + envId + "\", \"ConfigurationProfileIdentifier\": \"" + profileId + "\"}")
+                .when().post("/configurationsessions")
+                .then()
+                .statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        String firstNextToken = given()
+                .queryParam("configuration_token", firstToken)
+                .when().get("/configuration")
+                .then()
+                .statusCode(200)
+                .header("Version-Label", equalTo("2"))
+                .body("foo", equalTo("baz"))
+                .extract().header("Next-Poll-Configuration-Token");
+
+        given()
+                .queryParam("configuration_token", secondToken)
                 .when().get("/configuration")
                 .then()
                 .statusCode(200)
                 .header("Version-Label", equalTo("2"))
                 .body("foo", equalTo("baz"));
+
+        given()
+                .queryParam("configuration_token", firstNextToken)
+                .when().get("/configuration")
+                .then()
+                .statusCode(200)
+                .header("Version-Label", equalTo(""))
+                .body(equalTo(""));
     }
 
-    @Test @Order(12)
+    @Test @Order(14)
     @DisplayName("Poll interval: requested minimum is returned to the client")
     void requiredMinimumPollIntervalIsReturned() {
         intervalToken = given()
@@ -210,7 +275,7 @@ class AppConfigIntegrationTest {
                 .header("Next-Poll-Configuration-Token", notNullValue());
     }
 
-    @Test @Order(32)
+    @Test @Order(34)
     void requiredMinimumPollIntervalMustBeWithinAwsLimits() {
         given()
                 .contentType(ContentType.JSON)
@@ -221,7 +286,7 @@ class AppConfigIntegrationTest {
                 .body("__type", equalTo("BadRequestException"));
     }
 
-    @Test @Order(33)
+    @Test @Order(35)
     void requiredMinimumPollIntervalAcceptsAwsUpperBoundary() {
         String token = startSessionWithInterval(86400);
 
@@ -233,7 +298,7 @@ class AppConfigIntegrationTest {
                 .header("Next-Poll-Interval-In-Seconds", equalTo("86400"));
     }
 
-    @Test @Order(34)
+    @Test @Order(36)
     void requiredMinimumPollIntervalRejectsValuesAboveAwsMaximum() {
         given()
                 .contentType(ContentType.JSON)
@@ -244,7 +309,7 @@ class AppConfigIntegrationTest {
                 .body("__type", equalTo("BadRequestException"));
     }
 
-    @Test @Order(35)
+    @Test @Order(37)
     void requiredMinimumPollIntervalRejectsFractionalValues() {
         given()
                 .contentType(ContentType.JSON)
@@ -255,7 +320,7 @@ class AppConfigIntegrationTest {
                 .body("__type", equalTo("BadRequestException"));
     }
 
-    @Test @Order(36)
+    @Test @Order(38)
     void requiredMinimumPollIntervalRejectsOversizedValues() {
         given()
                 .contentType(ContentType.JSON)
@@ -278,7 +343,7 @@ class AppConfigIntegrationTest {
 
     // ──────────────────────────── Hosted Configuration Version list ────────────────────────────
 
-    @Test @Order(13)
+    @Test @Order(15)
     void listHostedConfigurationVersionsReturnsBothVersions() {
         given()
                 .when().get("/applications/" + appId + "/configurationprofiles/" + profileId + "/hostedconfigurationversions")
@@ -295,7 +360,7 @@ class AppConfigIntegrationTest {
 
     // ──────────────────────────── Builtin deployment strategies ────────────────────────────
 
-    @Test @Order(14)
+    @Test @Order(16)
     void builtinStrategyAllAtOnceCanBeUsedWithoutCreating() {
         given()
                 .contentType(ContentType.JSON)
@@ -309,7 +374,7 @@ class AppConfigIntegrationTest {
 
     // ──────────────────────────── Application tagging ────────────────────────────
 
-    @Test @Order(15)
+    @Test @Order(17)
     void listTagsOnNewApplicationIsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -319,7 +384,7 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
-    @Test @Order(16)
+    @Test @Order(18)
     void tagApplication() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -330,7 +395,7 @@ class AppConfigIntegrationTest {
                 .statusCode(204);
     }
 
-    @Test @Order(17)
+    @Test @Order(19)
     void listTagsAfterTagging() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -341,7 +406,7 @@ class AppConfigIntegrationTest {
                 .body("Tags.team", equalTo("platform"));
     }
 
-    @Test @Order(18)
+    @Test @Order(20)
     void untagApplication() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -350,7 +415,7 @@ class AppConfigIntegrationTest {
                 .statusCode(204);
     }
 
-    @Test @Order(19)
+    @Test @Order(21)
     void listTagsAfterUntagging() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -363,7 +428,7 @@ class AppConfigIntegrationTest {
 
     // ──────────────────────────── Tags on non-application resources (no-op) ────────────────────────────
 
-    @Test @Order(20)
+    @Test @Order(22)
     void listTagsForEnvironmentArnReturnsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId + "/environment/" + envId;
         given()
@@ -373,7 +438,7 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
-    @Test @Order(21)
+    @Test @Order(23)
     void listTagsForDeploymentArnReturnsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId + "/environment/" + envId + "/deployment/1";
         given()
@@ -390,7 +455,7 @@ class AppConfigIntegrationTest {
     // Regression coverage for that ARN-shape acceptance; no tag storage exists for these types
     // yet (same no-op precedent as environment/deployment above), so only 200-not-400 is asserted.
 
-    @Test @Order(22)
+    @Test @Order(24)
     void listTagsForDeploymentStrategyArnIsAcceptedNotRejected() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + strategyId;
         given()
@@ -400,7 +465,7 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
-    @Test @Order(23)
+    @Test @Order(25)
     void tagDeploymentStrategyArnIsAcceptedNotRejected() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + strategyId;
         given()
@@ -411,7 +476,7 @@ class AppConfigIntegrationTest {
                 .statusCode(204);
     }
 
-    @Test @Order(24)
+    @Test @Order(26)
     void listTagsForExtensionAndExtensionAssociationArnsIsAcceptedNotRejected() {
         String extensionArn = "arn:aws:appconfig:us-east-1:000000000000:extension/some-extension-id";
         String associationArn = "arn:aws:appconfig:us-east-1:000000000000:extensionassociation/some-association-id";
@@ -427,7 +492,7 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
-    @Test @Order(25)
+    @Test @Order(27)
     void emptyConfigurationReturnsEmptyPayload() {
         emptyAppId = given()
                 .contentType(ContentType.JSON)
@@ -479,7 +544,7 @@ class AppConfigIntegrationTest {
     // path-style catch-all (GET/DELETE /{bucket}[/{key}]) and returned a misleading NoSuchBucket
     // 404 instead of a real AppConfig response.
 
-    @Test @Order(26)
+    @Test @Order(28)
     void deleteConfigurationProfileRemovesIt() {
         String throwawayProfileId = given()
                 .contentType(ContentType.JSON)
@@ -500,7 +565,7 @@ class AppConfigIntegrationTest {
                 .statusCode(404);
     }
 
-    @Test @Order(27)
+    @Test @Order(29)
     void deleteHostedConfigurationVersionRemovesIt() {
         String versionNumberHeader = given()
                 .header("Content-Type", "application/json")
@@ -524,7 +589,7 @@ class AppConfigIntegrationTest {
                 .statusCode(404);
     }
 
-    @Test @Order(28)
+    @Test @Order(30)
     void listDeploymentStrategiesIncludesBuiltinsAndCustom() {
         given()
                 .when().get("/deploymentstrategies")
@@ -534,7 +599,7 @@ class AppConfigIntegrationTest {
                         "AppConfig.Canary10Percent20Minutes", strategyId));
     }
 
-    @Test @Order(29)
+    @Test @Order(31)
     void deleteDeploymentStrategyRemovesIt() {
         String throwawayStrategyId = given()
                 .contentType(ContentType.JSON)
@@ -566,7 +631,7 @@ class AppConfigIntegrationTest {
                 .statusCode(204);
     }
 
-    @Test @Order(30)
+    @Test @Order(32)
     void deleteConfigurationProfileUnderWrongApplicationIsRejectedNotDeleted() {
         // emptyProfileId belongs to emptyAppId (created in @Order(25)), not appId - a caller
         // guessing/reusing a profileId under the wrong application must not be able to delete it.
@@ -581,7 +646,7 @@ class AppConfigIntegrationTest {
                 .statusCode(200);
     }
 
-    @Test @Order(31)
+    @Test @Order(33)
     void deleteDeploymentStrategyOnPredefinedStrategyIsRejected() {
         given()
                 .when().delete("/deployementstrategies/AppConfig.AllAtOnce")
