@@ -774,6 +774,109 @@ class DynamoDbJsonHandlerTest {
                 + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
     }
 
+    // The empty-list, null, and index-position cases below were checked against real DynamoDB.
+    @Test
+    void createTableRejectsEmptyGsiNonKeyAttributesWithItsPosition() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "EmptyGsiNonKey",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "gsi1",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "ALL"}
+                        },
+                        {
+                            "IndexName": "gsi2",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": []}
+                        }
+                    ]
+                }
+                """));
+        assertEquals("1 validation error detected: Value '[]' at "
+                + "'globalSecondaryIndexes.2.member.projection.nonKeyAttributes' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsEmptyLsiNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "EmptyLsiNonKey",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "lsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "lsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "lsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": []}
+                    }]
+                }
+                """));
+        assertEquals("1 validation error detected: Value '[]' at "
+                + "'localSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void updateTableRejectsEmptyGsiNonKeyAttributesBeforeProjectionTypeCheck() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": []}
+                    }}]
+                }
+                """));
+        assertEquals("1 validation error detected: Value '[]' at "
+                + "'globalSecondaryIndexUpdates.1.member.create.projection.nonKeyAttributes' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void createTableTreatsNullNonKeyAttributesAsNotSpecified() throws Exception {
+        Response response = handler.handle("CreateTable", json("""
+                {
+                    "TableName": "NullNonKey",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": null}
+                    }]
+                }
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        var gsi = service.describeTable("NullNonKey", "eu-west-1").findGsi("gsi1").orElseThrow();
+        assertEquals("KEYS_ONLY", gsi.getProjectionType());
+    }
+
     @Test
     void createTableRejectsStreamViewTypeWithStreamEnabledFalse() {
         var ex = expectValidationException("CreateTable", json("""

@@ -128,7 +128,9 @@ public class DynamoDbJsonHandler {
         List<GlobalSecondaryIndex> gsis = new ArrayList<>();
         JsonNode gsiArray = request.path("GlobalSecondaryIndexes");
         if (!gsiArray.isMissingNode() && gsiArray.isArray()) {
+            var gsiPosition = 0;
             for (JsonNode gsiNode : gsiArray) {
+                gsiPosition++;
                 String indexName = gsiNode.path("IndexName").asText();
                 List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
                 gsiNode.path("KeySchema").forEach(ks ->
@@ -143,6 +145,7 @@ public class DynamoDbJsonHandler {
                         nonKeyAttributes.add(nonKeyAttr.asText());
                     }
                 }
+                rejectEmptyNonKeyAttributes(nonKeyAttrArray, "globalSecondaryIndexes." + gsiPosition + ".member");
                 validateProjectionSpec(projectionType, nonKeyAttributes);
                 GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                 JsonNode gsiPt = gsiNode.path("ProvisionedThroughput");
@@ -166,7 +169,9 @@ public class DynamoDbJsonHandler {
         List<LocalSecondaryIndex> lsis = new ArrayList<>();
         JsonNode lsiArray = request.path("LocalSecondaryIndexes");
         if (!lsiArray.isMissingNode() && lsiArray.isArray()) {
+            var lsiPosition = 0;
             for (JsonNode lsiNode : lsiArray) {
+                lsiPosition++;
                 String indexName = lsiNode.path("IndexName").asText();
                 List<KeySchemaElement> lsiKeySchema = new ArrayList<>();
                 lsiNode.path("KeySchema").forEach(ks ->
@@ -179,6 +184,7 @@ public class DynamoDbJsonHandler {
                 if (!lsiNonKeyAttrArray.isMissingNode() && lsiNonKeyAttrArray.isArray()) {
                     lsiNonKeyAttrArray.forEach(a -> lsiNonKeyAttributes.add(a.asText()));
                 }
+                rejectEmptyNonKeyAttributes(lsiNonKeyAttrArray, "localSecondaryIndexes." + lsiPosition + ".member");
                 validateProjectionSpec(projectionType, lsiNonKeyAttributes);
                 lsis.add(new LocalSecondaryIndex(indexName, lsiKeySchema, null, projectionType, lsiNonKeyAttributes));
             }
@@ -284,6 +290,17 @@ public class DynamoDbJsonHandler {
                     "1 validation error detected: Value '" + sseType
                     + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [AES256, KMS]", 400);
+        }
+    }
+
+    // AWS reports an empty list as a length constraint on the 1-based member path, before the
+    // projection type check. A null NonKeyAttributes counts as not specified.
+    private static void rejectEmptyNonKeyAttributes(JsonNode nonKeyAttrArray, String memberPath) {
+        if (nonKeyAttrArray.isArray() && nonKeyAttrArray.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '[]' at '" + memberPath
+                    + ".projection.nonKeyAttributes' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1", 400);
         }
     }
 
@@ -1340,7 +1357,9 @@ public class DynamoDbJsonHandler {
         List<JsonNode> gsiUpdatesToApply = new ArrayList<>();
         JsonNode gsiUpdates = request.path("GlobalSecondaryIndexUpdates");
         if (!gsiUpdates.isMissingNode() && gsiUpdates.isArray()) {
+            var updatePosition = 0;
             for (JsonNode update : gsiUpdates) {
+                updatePosition++;
                 JsonNode createNode = update.path("Create");
                 if (!createNode.isMissingNode()) {
                     String indexName = createNode.path("IndexName").asText();
@@ -1357,6 +1376,8 @@ public class DynamoDbJsonHandler {
                             nonKeyAttributes.add(nonKeyAttr.asText());
                         }
                     }
+                    rejectEmptyNonKeyAttributes(nonKeyAttrArray,
+                            "globalSecondaryIndexUpdates." + updatePosition + ".member.create");
                     validateProjectionSpec(projectionType, nonKeyAttributes);
                     GlobalSecondaryIndex newGsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                     JsonNode newGsiPt = createNode.path("ProvisionedThroughput");
