@@ -28,6 +28,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class Ec2KeyMaterialTest {
 
+    /** Throwaway keys, kept fixed so their fingerprints can be pinned to known good values. */
+    private static final String RSA_PUBLIC_KEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCp7mGC9"
+            + "NkQI+loxf1G9bM6HnCs9iR1nnzZA/f/o7hx/Wv1oDhx03k6H83I+Q49eE1XO56WBPxnr8/2G6UmS9D0R"
+            + "FKe9L+HJrfiZF7oLQ09JwEK91VLNSkD0Bq2zhnfWJe/ULkaPQ7FgHEghRi8aI5PsATH6VCaJDKWxl+2b"
+            + "zM7MWlbKRAo8uuu2evnGrgnu+RmuXJQCRYz6lG+JESVzm6MnHXYxme+UD+7c/tTYwzoswfXh8VN8QVzX"
+            + "mjfHi2Ve3PJ+YuF2X2gKpRMNMf7cLWMCTOhZI2AgXX+NLDlCG0dEUm/DXdSKRTDhm3mIJmF67eGYuff+"
+            + "zHusBZ9cSBkW9i9";
+
+    private static final String ED25519_PUBLIC_KEY =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
+
     @Test
     void generatedPrivateKeyParsesAsA2048BitRsaKey() throws Exception {
         Ec2KeyMaterial.Generated generated = Ec2KeyMaterial.generateRsa();
@@ -129,6 +140,78 @@ class Ec2KeyMaterialTest {
                 .getKeyPair(parsed).getPublic();
 
         assertEquals(generated.openSshPublicKey(), Ec2KeyMaterial.openSshPublicKey(publicKey));
+    }
+
+    @Test
+    void importedRsaFingerprintMatchesTheSchemeAwsDocuments() {
+        // Pinned against a value derived outside this code, from a throwaway key:
+        //   openssl rsa -in rsa.pem -pubout -outform DER | openssl md5 -c
+        // which is the command AWS gives for verifying an imported RSA key pair. A test that
+        // compared the service against fingerprintOf, or that only checked the digest shape,
+        // would pass under either scheme and so could not tell them apart.
+        String expected = "4d:1a:39:2e:6a:18:60:9a:c5:2a:cb:cc:6c:de:22:b5";
+
+        assertEquals(expected, Ec2KeyMaterial.fingerprintOf(RSA_PUBLIC_KEY));
+        assertEquals(expected, Ec2KeyMaterial.fingerprintOf(RSA_PUBLIC_KEY + " someone@example.com"));
+
+        // The other candidate scheme for the same key: MD5 over the SSH wire blob, which is
+        // what "ssh-keygen -l -E md5" reports. AWS does not use it for imported RSA keys, and
+        // it is a different value, which is what makes the assertion above load bearing.
+        assertNotEquals("e7:d6:55:60:68:18:8f:b7:4f:2a:72:20:0b:2f:f2:d9",
+                Ec2KeyMaterial.fingerprintOf(RSA_PUBLIC_KEY));
+    }
+
+    @Test
+    void importedEd25519FingerprintIsTheBase64Sha256AwsReports() {
+        // EC2 fingerprints ed25519 keys with SHA-256, not MD5, whichever way the key arrived.
+        // Derived independently with "ssh-keygen -l -f ed25519.pub", which prints
+        //   SHA256:UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk
+        // AWS reports the same digest without the prefix and with base64 padding kept.
+        String fingerprint = Ec2KeyMaterial.fingerprintOf(ED25519_PUBLIC_KEY);
+
+        assertEquals("UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=", fingerprint);
+        assertEquals(fingerprint,
+                Ec2KeyMaterial.fingerprintOf(ED25519_PUBLIC_KEY + " someone@example.com"));
+    }
+
+    @Test
+    void ed25519MaterialThatIsNotA32ByteKeyYieldsNoFingerprint() {
+        assertEquals(null, Ec2KeyMaterial.fingerprintOf(
+                "ssh-ed25519 " + Base64.getEncoder().encodeToString(blobOf("ssh-ed25519", new byte[31]))));
+    }
+
+    @Test
+    void aFieldLongerThanTheBlobIsRejectedRatherThanAllocated() {
+        // ImportKeyPair passes the caller's material to this parser, so the declared field
+        // length is attacker controlled. A blob that announces a two-gigabyte field is a few
+        // bytes on the wire; allocating first turns that into an OutOfMemoryError, which is an
+        // Error and so escapes the catch inside fingerprintOf and takes the request thread
+        // with it. The length has to be rejected before the array exists.
+        ByteBuffer overstated = ByteBuffer.allocate(15);
+        byte[] type = "ssh-rsa".getBytes(StandardCharsets.UTF_8);
+        overstated.putInt(type.length).put(type).putInt(Integer.MAX_VALUE);
+
+        assertEquals(null, Ec2KeyMaterial.fingerprintOf(
+                "ssh-rsa " + Base64.getEncoder().encodeToString(overstated.array())));
+    }
+
+    @Test
+    void negativeAndTruncatedFieldLengthsYieldNoFingerprint() {
+        ByteBuffer negative = ByteBuffer.allocate(4).putInt(-1);
+        assertEquals(null, Ec2KeyMaterial.fingerprintOf(
+                "ssh-rsa " + Base64.getEncoder().encodeToString(negative.array())));
+
+        // Fewer than four bytes left: not even a length prefix.
+        assertEquals(null, Ec2KeyMaterial.fingerprintOf(
+                "ssh-rsa " + Base64.getEncoder().encodeToString(new byte[]{0, 0, 1})));
+    }
+
+    private static byte[] blobOf(String type, byte[] key) {
+        byte[] typeBytes = type.getBytes(StandardCharsets.UTF_8);
+        return ByteBuffer.allocate(8 + typeBytes.length + key.length)
+                .putInt(typeBytes.length).put(typeBytes)
+                .putInt(key.length).put(key)
+                .array();
     }
 
     private static byte[] read(ByteBuffer blob) {

@@ -32,6 +32,9 @@ public final class Ec2KeyMaterial {
     /** AWS generates 2048-bit RSA keys for KeyType=rsa, which is the default. */
     private static final int RSA_KEY_SIZE = 2048;
 
+    /** An ed25519 public key is a fixed 32-byte value, so any other length is not one. */
+    private static final int ED25519_KEY_LENGTH = 32;
+
     private Ec2KeyMaterial() {}
 
     /**
@@ -70,14 +73,31 @@ public final class Ec2KeyMaterial {
     }
 
     /**
-     * Fingerprint for an imported public key: the MD5 digest of its DER encoding, which is
-     * what AWS reports for ImportKeyPair.
+     * Fingerprint for an imported public key, in the scheme AWS uses for that key type.
      *
-     * <p>Only ssh-rsa is decoded back to a DER SubjectPublicKeyInfo. For any other key type
-     * (ssh-ed25519 and friends) the digest is taken over the wire-format blob instead: still
-     * stable and distinct per key, which is what callers actually depend on, but not
-     * byte-identical to what AWS would report. Returns null for material that does not parse,
-     * so the caller can decide rather than getting a fingerprint of garbage.
+     * <p>ImportKeyPair does not fingerprint every key the same way, and it does not agree
+     * with CreateKeyPair either:
+     *
+     * <ul>
+     *   <li><b>ssh-rsa</b>: "the MD5 public key fingerprint", taken over the DER
+     *       SubjectPublicKeyInfo rather than over the SSH wire blob. AWS documents the check
+     *       as {@code openssl rsa -in key -pubout -outform DER | openssl md5 -c}, and
+     *       {@link java.security.Key#getEncoded()} produces exactly that DER, so the blob is
+     *       decoded back to a public key first. Colon-separated hex, as AWS reports it.</li>
+     *   <li><b>ssh-ed25519</b>: the base64-encoded SHA-256 digest of the wire blob, "which is
+     *       the default for OpenSSH". This is the {@code ssh-keygen -l} value without its
+     *       {@code SHA256:} prefix, and padded: AWS keeps the trailing {@code =} that
+     *       ssh-keygen drops.</li>
+     * </ul>
+     *
+     * <p>Any other key type keeps the MD5 of the wire blob: stable and distinct per key,
+     * which is what callers depend on, but not a value AWS would report. AWS accepts only
+     * RSA and ed25519 material for import, so nothing else has a documented answer to match.
+     *
+     * <p>Returns null for material that does not parse, so the caller can decide rather than
+     * getting a fingerprint of garbage.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/verify-keys.html">Verify the fingerprint of your key pair</a>
      */
     public static String fingerprintOf(String openSshPublicKey) {
         byte[] blob = decodeOpenSshBlob(openSshPublicKey);
@@ -88,6 +108,13 @@ public final class Ec2KeyMaterial {
             byte[] der = blob;
             SshReader reader = new SshReader(blob);
             String type = new String(reader.readBytes(), StandardCharsets.UTF_8);
+            if ("ssh-ed25519".equals(type)) {
+                if (reader.readBytes().length != ED25519_KEY_LENGTH) {
+                    return null;
+                }
+                return Base64.getEncoder().encodeToString(
+                        MessageDigest.getInstance("SHA-256").digest(blob));
+            }
             if ("ssh-rsa".equals(type)) {
                 BigInteger exponent = new BigInteger(reader.readBytes());
                 BigInteger modulus = new BigInteger(reader.readBytes());
@@ -135,6 +162,13 @@ public final class Ec2KeyMaterial {
 
     /** Reads the length-prefixed fields of an OpenSSH public key blob. */
     private static final class SshReader {
+
+        /**
+         * Absolute ceiling on a single field, well clear of anything a real key carries: the
+         * largest is the modulus of a 16384-bit RSA key, 2049 bytes with its sign byte.
+         */
+        private static final int MAX_FIELD_LENGTH = 64 * 1024;
+
         private final ByteBuffer buffer;
 
         SshReader(byte[] blob) {
@@ -142,7 +176,21 @@ public final class Ec2KeyMaterial {
         }
 
         byte[] readBytes() {
-            byte[] field = new byte[buffer.getInt()];
+            if (buffer.remaining() < Integer.BYTES) {
+                throw new IllegalArgumentException("truncated OpenSSH key blob");
+            }
+            int length = buffer.getInt();
+            // ImportKeyPair hands the caller's PublicKeyMaterial straight to this parser, so
+            // the declared length is attacker-controlled and has to be checked before it is
+            // allocated. Reading it first meant an eleven-byte blob could declare a
+            // two-gigabyte field and the array was built before anything noticed the bytes
+            // were not there; the resulting OutOfMemoryError is an Error, so the catch around
+            // fingerprintOf did not contain it either. Bounding by what is left in the buffer
+            // ties the allocation to the size of the request that carried it.
+            if (length < 0 || length > MAX_FIELD_LENGTH || length > buffer.remaining()) {
+                throw new IllegalArgumentException("invalid OpenSSH key field length: " + length);
+            }
+            byte[] field = new byte[length];
             buffer.get(field);
             return field;
         }
