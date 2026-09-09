@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -25,9 +27,16 @@ import static org.hamcrest.xml.HasXPath.hasXPath;
 @QuarkusTest
 class CloudFrontDistributionConfigMembersTest {
 
-    private static final String API = "/2020-05-31/distribution/";
+    private static final String DISTRIBUTIONS = "/2020-05-31/distribution";
+    private static final String API = DISTRIBUTIONS + "/";
     private static final String LOGGING_ENABLED =
             "//*[local-name()='Logging']/*[local-name()='Enabled']";
+    private static final String LOGGING_INCLUDE_COOKIES =
+            "//*[local-name()='Logging']/*[local-name()='IncludeCookies']";
+    private static final String LOGGING_BUCKET =
+            "//*[local-name()='Logging']/*[local-name()='Bucket']";
+    private static final String LOGGING_PREFIX =
+            "//*[local-name()='Logging']/*[local-name()='Prefix']";
 
     @Inject
     CloudFrontService cloudFrontService;
@@ -68,8 +77,7 @@ class CloudFrontDistributionConfigMembersTest {
         .then()
             .statusCode(200)
             .body(hasXPath(LOGGING_ENABLED, equalTo("false")))
-            .body(hasXPath("//*[local-name()='Logging']/*[local-name()='Bucket']",
-                    equalTo("")));
+            .body(hasXPath(LOGGING_BUCKET, equalTo("")));
     }
 
     @Test
@@ -124,11 +132,118 @@ class CloudFrontDistributionConfigMembersTest {
         .then()
             .statusCode(200)
             .body(hasXPath(LOGGING_ENABLED, equalTo("true")))
-            .body(hasXPath("//*[local-name()='Logging']/*[local-name()='IncludeCookies']",
-                    equalTo("true")))
-            .body(hasXPath("//*[local-name()='Logging']/*[local-name()='Bucket']",
-                    equalTo("logs.s3.amazonaws.com")))
-            .body(hasXPath("//*[local-name()='Logging']/*[local-name()='Prefix']",
-                    equalTo("cf/")));
+            .body(hasXPath(LOGGING_INCLUDE_COOKIES, equalTo("true")))
+            .body(hasXPath(LOGGING_BUCKET, equalTo("logs.s3.amazonaws.com")))
+            .body(hasXPath(LOGGING_PREFIX, equalTo("cf/")));
+    }
+
+    /**
+     * A DistributionConfig request body, which is what an SDK or the Terraform provider
+     * actually sends. {@code loggingBlock} goes in verbatim so a caller that omits Logging
+     * and a caller that supplies it share one shape.
+     */
+    private static String distributionConfigBody(String originId, String loggingBlock) {
+        return """
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>%s</CallerReference>
+                  <Enabled>true</Enabled>
+                  <Comment>members-test-request-path</Comment>
+                  %s
+                  <Origins><Quantity>1</Quantity><Items><Origin>
+                    <Id>%s</Id><DomainName>example.com</DomainName>
+                    <CustomOriginConfig><HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+                      <OriginProtocolPolicy>http-only</OriginProtocolPolicy></CustomOriginConfig>
+                  </Origin></Items></Origins>
+                  <DefaultCacheBehavior>
+                    <TargetOriginId>%s</TargetOriginId>
+                    <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  </DefaultCacheBehavior>
+                </DistributionConfig>
+                """.formatted(originId, loggingBlock, originId, originId);
+    }
+
+    /** POSTs a config body and returns the id of the distribution it created. */
+    private static String postDistribution(String body) {
+        String response = given()
+                .contentType(ContentType.XML)
+                .body(body)
+        .when()
+            .post(DISTRIBUTIONS)
+        .then()
+            .statusCode(201)
+            .extract().asString();
+        // Distribution.Id is the first Id in the response; the origin ids come later.
+        return XmlParser.extractFirst(response, "Id", null);
+    }
+
+    @Test
+    void createDistributionParsesAnExplicitLoggingBlock() {
+        // Goes through the request path rather than the service, so the parser is what is
+        // under test: emitting Logging on reads while the parser drops it on writes still
+        // drifts, because the provider sends a configuration and reads defaults back.
+        String id = postDistribution(distributionConfigBody("origin-logging-request", """
+                <Logging>
+                  <Enabled>true</Enabled>
+                  <IncludeCookies>true</IncludeCookies>
+                  <Bucket>request-logs.s3.amazonaws.com</Bucket>
+                  <Prefix>request/</Prefix>
+                </Logging>"""));
+
+        given()
+        .when()
+            .get(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(LOGGING_ENABLED, equalTo("true")))
+            .body(hasXPath(LOGGING_INCLUDE_COOKIES, equalTo("true")))
+            .body(hasXPath(LOGGING_BUCKET, equalTo("request-logs.s3.amazonaws.com")))
+            .body(hasXPath(LOGGING_PREFIX, equalTo("request/")));
+    }
+
+    @Test
+    void createDistributionWithoutALoggingBlockKeepsTheDisabledDefaults() {
+        String id = postDistribution(distributionConfigBody("origin-logging-request-absent", ""));
+
+        given()
+        .when()
+            .get(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(LOGGING_ENABLED, equalTo("false")))
+            .body(hasXPath(LOGGING_INCLUDE_COOKIES, equalTo("false")))
+            .body(hasXPath(LOGGING_BUCKET, equalTo("")))
+            .body(hasXPath(LOGGING_PREFIX, equalTo("")));
+    }
+
+    @Test
+    void updateDistributionParsesAnExplicitLoggingBlock() {
+        // Turning logging on for an existing distribution is an UpdateDistribution, which
+        // parses the body through the same path and must not drop the block either.
+        String id = postDistribution(distributionConfigBody("origin-logging-update", ""));
+        String etag = given()
+        .when()
+            .get(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .extract().header("ETag");
+
+        given()
+            .contentType(ContentType.XML)
+            .header("If-Match", etag)
+            .body(distributionConfigBody("origin-logging-update", """
+                <Logging>
+                  <Enabled>true</Enabled>
+                  <IncludeCookies>false</IncludeCookies>
+                  <Bucket>update-logs.s3.amazonaws.com</Bucket>
+                  <Prefix>update/</Prefix>
+                </Logging>"""))
+        .when()
+            .put(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(LOGGING_ENABLED, equalTo("true")))
+            .body(hasXPath(LOGGING_INCLUDE_COOKIES, equalTo("false")))
+            .body(hasXPath(LOGGING_BUCKET, equalTo("update-logs.s3.amazonaws.com")))
+            .body(hasXPath(LOGGING_PREFIX, equalTo("update/")));
     }
 }

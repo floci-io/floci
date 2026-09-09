@@ -2508,6 +2508,7 @@ public class CloudFrontController {
         cfg.setViewerCertificate(parseViewerCertificate(body));
         cfg.setCustomErrorResponses(parseCustomErrorResponses(body));
         cfg.setGeoRestriction(parseGeoRestriction(body));
+        cfg.setLogging(parseLogging(body));
 
         return cfg;
     }
@@ -2639,6 +2640,20 @@ public class CloudFrontController {
             LOG.debugv("Ignoring malformed CustomErrorResponses during parse: {0}", e.getMessage());
         }
         return result;
+    }
+
+    /**
+     * Parses the optional {@code Logging} block into {@code Enabled}, {@code IncludeCookies},
+     * {@code Bucket} and {@code Prefix} (values kept as strings). A request that omits the block
+     * yields an empty map rather than {@code null}, which {@link #xmlLogging} renders as the
+     * disabled defaults CloudFront reports for a distribution that never asked for access logs.
+     */
+    private Map<String, Object> parseLogging(String body) {
+        List<Map<String, String>> groups = XmlParser.extractGroups(body, "Logging");
+        if (groups.isEmpty()) {
+            return Map.of();
+        }
+        return new LinkedHashMap<>(groups.getFirst());
     }
 
     private Map<String, Object> parseGeoRestriction(String body) {
