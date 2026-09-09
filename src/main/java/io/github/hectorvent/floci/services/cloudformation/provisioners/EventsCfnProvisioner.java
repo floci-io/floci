@@ -210,7 +210,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      */
     private void provisionEventBus(StackResource r, JsonNode props, ProvisionContext ctx) {
         validateEventBusProperties(props);
-        String existingBusName = r.getPhysicalId();
+        String existingBusName = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
         String busName = ctx.resolveOptional(props, "Name");
         validateEventBusName(busName);
         if (existingBusName != null && !existingBusName.equals(busName)) {

@@ -169,6 +169,20 @@ class EventsCfnProvisionerTest {
         assertTrue(thrown.getMessage().contains("StatementId"));
     }
 
+    // ── the event bus reads its prior identity from the provision context ─────
+
+    @Test
+    void anEventBusUpdateComparesAgainstThePriorIdFromTheContext() {
+        // provision assigns the new id as it runs, so the prior name has to come from the context.
+        // Reading it off the resource made a rename look like a create and silently switched buses.
+        StackResource r = resource("AWS::Events::EventBus", "Bus");
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                r, mapper.createObjectNode().put("Name", "renamed"), ctx("orders-bus")));
+
+        assertTrue(thrown.getMessage().contains("requires resource replacement"));
+    }
+
     private void doThrowOnRemovePermission(AwsException e) {
         org.mockito.Mockito.doThrow(e).when(events)
                 .removePermission(anyString(), anyString(), org.mockito.ArgumentMatchers.anyBoolean(), anyString());
