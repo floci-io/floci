@@ -29,6 +29,8 @@ class S3MultipartIntegrationTest {
     private static final String PART_2 = "Part2Data-World";
     private static final String COMPOSITE_SHA256 = compositeSha256(PART_1, PART_2);
     private static String uploadId;
+    private static String part1ETag;
+    private static String part2ETag;
 
     @Test
     @Order(1)
@@ -62,27 +64,29 @@ class S3MultipartIntegrationTest {
     @Test
     @Order(3)
     void uploadPart1() {
-        given()
+        part1ETag = given()
             .body(PART_1)
         .when()
             .put("/" + BUCKET + "/" + KEY + "?uploadId=" + uploadId + "&partNumber=1")
         .then()
             .statusCode(200)
             .header("ETag", notNullValue())
-            .header("x-amz-checksum-sha256", equalTo(S3Checksum.sha256Base64(PART_1.getBytes(StandardCharsets.UTF_8))));
+            .header("x-amz-checksum-sha256", equalTo(S3Checksum.sha256Base64(PART_1.getBytes(StandardCharsets.UTF_8))))
+            .extract().header("ETag");
     }
 
     @Test
     @Order(4)
     void uploadPart2() {
-        given()
+        part2ETag = given()
             .body(PART_2)
         .when()
             .put("/" + BUCKET + "/" + KEY + "?uploadId=" + uploadId + "&partNumber=2")
         .then()
             .statusCode(200)
             .header("ETag", notNullValue())
-            .header("x-amz-checksum-sha256", equalTo(S3Checksum.sha256Base64(PART_2.getBytes(StandardCharsets.UTF_8))));
+            .header("x-amz-checksum-sha256", equalTo(S3Checksum.sha256Base64(PART_2.getBytes(StandardCharsets.UTF_8))))
+            .extract().header("ETag");
     }
 
     @Test
@@ -119,9 +123,9 @@ class S3MultipartIntegrationTest {
     void completeMultipartUpload() {
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
-                    <Part><PartNumber>2</PartNumber><ETag>etag2</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
-                </CompleteMultipartUpload>""".formatted(sha256Base64(PART_1), sha256Base64(PART_2));
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                    <Part><PartNumber>2</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                </CompleteMultipartUpload>""".formatted(part1ETag, sha256Base64(PART_1), part2ETag, sha256Base64(PART_2));
 
         given()
             .contentType("application/xml")
@@ -211,7 +215,8 @@ class S3MultipartIntegrationTest {
         .when()
             .put("/" + BUCKET + "/abort-test.bin?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         // Abort
         given()
@@ -249,17 +254,18 @@ class S3MultipartIntegrationTest {
                 .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
         // UploadPartCopy full source
-        given()
+        String copyPart1ETag = given()
             .header("x-amz-copy-source", "/" + BUCKET + "/source-for-copy.bin")
         .when()
             .put("/" + BUCKET + "/copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=1")
         .then()
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
-            .body(containsString("<ETag>"));
+            .body(containsString("<ETag>"))
+            .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // UploadPartCopy with range (bytes 2-5 → "CDEF")
-        given()
+        String copyPart2ETag = given()
             .header("x-amz-copy-source", "/" + BUCKET + "/source-for-copy.bin")
             .header("x-amz-copy-source-range", "bytes=2-5")
         .when()
@@ -267,11 +273,12 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
-            .body(containsString("<ETag>"));
+            .body(containsString("<ETag>"))
+            .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Percent-encoded bucket/key separator: the AWS SDK for .NET encodes the whole
         // copy source, so the header carries no literal slash.
-        given()
+        String copyPart3ETag = given()
             .header("x-amz-copy-source", BUCKET + "%2Fsource-for-copy.bin")
             .header("x-amz-copy-source-range", "bytes=2-5")
         .when()
@@ -279,15 +286,16 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
-            .body(containsString("<ETag>"));
+            .body(containsString("<ETag>"))
+            .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Complete the upload
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
-                    <Part><PartNumber>2</PartNumber><ETag>etag2</ETag></Part>
-                    <Part><PartNumber>3</PartNumber><ETag>etag3</ETag></Part>
-                </CompleteMultipartUpload>""";
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                    <Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part>
+                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(copyPart1ETag, copyPart2ETag, copyPart3ETag);
         given()
             .contentType("application/xml")
             .body(completeXml)
@@ -533,17 +541,18 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String taggedPartETag = given()
             .body("TaggedPartData")
         .when()
             .put("/" + BUCKET + "/" + taggedKey + "?uploadId=" + taggingUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
-                </CompleteMultipartUpload>""";
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(taggedPartETag);
         given()
             .contentType("application/xml")
             .body(completeXml)
@@ -592,17 +601,18 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String checksumPartETag = given()
             .body("Part1Data-Hello")
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
-                </CompleteMultipartUpload>""";
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(checksumPartETag);
 
         given()
             .contentType("application/xml")
@@ -641,17 +651,18 @@ class S3MultipartIntegrationTest {
             .header("x-amz-checksum-type", equalTo("FULL_OBJECT"))
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String checksumPartETag = given()
             .body(data)
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
-                </CompleteMultipartUpload>""";
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(checksumPartETag);
 
         given()
             .contentType("application/xml")
@@ -677,18 +688,20 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String fullObjectShaPartETag = given()
             .body("Part1Data-Hello")
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         given()
             .contentType("application/xml")
             .header("x-amz-checksum-type", "FULL_OBJECT")
             .header("x-amz-checksum-sha256", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-            .body(singlePartCompleteXml("<ChecksumSHA256>" + sha256Base64("Part1Data-Hello") + "</ChecksumSHA256>"))
+            .body(singlePartCompleteXml(fullObjectShaPartETag,
+                    "<ChecksumSHA256>" + sha256Base64("Part1Data-Hello") + "</ChecksumSHA256>"))
         .when()
             .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
         .then()
@@ -720,17 +733,18 @@ class S3MultipartIntegrationTest {
             .header("x-amz-checksum-type", equalTo("FULL_OBJECT"))
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String checksumTypePartETag = given()
             .body(data)
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
-                </CompleteMultipartUpload>""";
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(checksumTypePartETag);
 
         given()
             .contentType("application/xml")
@@ -816,18 +830,20 @@ class S3MultipartIntegrationTest {
             .header("x-amz-checksum-type", equalTo("COMPOSITE"))
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String modeMismatchPartETag = given()
             .body(data)
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         given()
             .contentType("application/xml")
             .header("x-amz-checksum-type", "FULL_OBJECT")
             .header("x-amz-checksum-crc32", S3Checksum.crc32Base64(data.getBytes(StandardCharsets.UTF_8)))
-            .body(singlePartCompleteXml("<ChecksumCRC32>" + S3Checksum.crc32Base64(data.getBytes(StandardCharsets.UTF_8)) + "</ChecksumCRC32>"))
+            .body(singlePartCompleteXml(modeMismatchPartETag,
+                    "<ChecksumCRC32>" + S3Checksum.crc32Base64(data.getBytes(StandardCharsets.UTF_8)) + "</ChecksumCRC32>"))
         .when()
             .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
         .then()
@@ -850,18 +866,20 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String mismatchPartETag = given()
             .body("Part1Data-Hello")
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         given()
             .contentType("application/xml")
             .header("x-amz-checksum-type", "COMPOSITE")
             .header("x-amz-checksum-sha256", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=-1")
-            .body(singlePartCompleteXml("<ChecksumSHA256>" + sha256Base64("Part1Data-Hello") + "</ChecksumSHA256>"))
+            .body(singlePartCompleteXml(mismatchPartETag,
+                    "<ChecksumSHA256>" + sha256Base64("Part1Data-Hello") + "</ChecksumSHA256>"))
         .when()
             .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
         .then()
@@ -886,26 +904,28 @@ class S3MultipartIntegrationTest {
 
         String part1Sha256 = S3Checksum.sha256Base64(PART_1.getBytes(StandardCharsets.UTF_8));
         String part2Sha256 = S3Checksum.sha256Base64(PART_2.getBytes(StandardCharsets.UTF_8));
-        given()
+        String compositePart1ETag = given()
             .header("x-amz-checksum-sha256", part1Sha256)
             .body(PART_1)
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
-        given()
+            .statusCode(200)
+            .extract().header("ETag");
+        String compositePart2ETag = given()
             .header("x-amz-checksum-sha256", part2Sha256)
             .body(PART_2)
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=2")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         String completeXml = """
                 <CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-                    <Part><ChecksumSHA256>%s</ChecksumSHA256><ETag>etag1</ETag><PartNumber>1</PartNumber></Part>
-                    <Part><ChecksumSHA256>%s</ChecksumSHA256><ETag>etag2</ETag><PartNumber>2</PartNumber></Part>
-                </CompleteMultipartUpload>""".formatted(part1Sha256, part2Sha256);
+                    <Part><ChecksumSHA256>%s</ChecksumSHA256><ETag>%s</ETag><PartNumber>1</PartNumber></Part>
+                    <Part><ChecksumSHA256>%s</ChecksumSHA256><ETag>%s</ETag><PartNumber>2</PartNumber></Part>
+                </CompleteMultipartUpload>""".formatted(part1Sha256, compositePart1ETag, part2Sha256, compositePart2ETag);
 
         given()
             .contentType("application/xml")
@@ -941,18 +961,19 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String badChecksumPartETag = given()
             .body("Part1Data-Hello")
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag>
                         <ChecksumSHA256>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</ChecksumSHA256></Part>
-                </CompleteMultipartUpload>""";
+                </CompleteMultipartUpload>""".formatted(badChecksumPartETag);
 
         given()
             .contentType("application/xml")
@@ -979,21 +1000,21 @@ class S3MultipartIntegrationTest {
             .header("x-amz-checksum-type", equalTo("FULL_OBJECT"))
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given().body(PART_1).when()
+        String crc64Part1ETag = given().body(PART_1).when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
-            .then().statusCode(200);
-        given().body(PART_2).when()
+            .then().statusCode(200).extract().header("ETag");
+        String crc64Part2ETag = given().body(PART_2).when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=2")
-            .then().statusCode(200);
+            .then().statusCode(200).extract().header("ETag");
 
         String fullObjectCrc64 = S3Checksum.crc64NvmeBase64((PART_1 + PART_2).getBytes(StandardCharsets.UTF_8));
         given()
             .contentType("application/xml")
             .body("""
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
-                    <Part><PartNumber>2</PartNumber><ETag>etag2</ETag></Part>
-                </CompleteMultipartUpload>""")
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                    <Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(crc64Part1ETag, crc64Part2ETag))
         .when()
             .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
         .then()
@@ -1087,7 +1108,8 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .header("ETag", notNullValue())
             .header("x-amz-checksum-crc64nvme", nullValue())
-            .header("x-amz-checksum-sha256", nullValue());
+            .header("x-amz-checksum-sha256", nullValue())
+            .extract().header("ETag");
 
         given().when().delete("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId).then().statusCode(204);
     }
@@ -1104,16 +1126,17 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String missingChecksumPartETag = given()
             .body(PART_1)
         .when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         given()
             .contentType("application/xml")
-            .body(singlePartCompleteXml(""))
+            .body(singlePartCompleteXml(missingChecksumPartETag, ""))
         .when()
             .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
         .then()
@@ -1124,7 +1147,8 @@ class S3MultipartIntegrationTest {
 
         given()
             .contentType("application/xml")
-            .body(singlePartCompleteXml("<ChecksumCRC32>" + S3Checksum.crc32Base64(PART_1.getBytes(StandardCharsets.UTF_8)) + "</ChecksumCRC32>"))
+            .body(singlePartCompleteXml(missingChecksumPartETag,
+                    "<ChecksumCRC32>" + S3Checksum.crc32Base64(PART_1.getBytes(StandardCharsets.UTF_8)) + "</ChecksumCRC32>"))
         .when()
             .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
         .then()
@@ -1157,6 +1181,71 @@ class S3MultipartIntegrationTest {
     }
 
     @Test
+    @Order(35)
+    void completeMultipartUploadValidatesEtagsAndPartOrder() {
+        String key = "completion-validation.bin";
+        String newUploadId = given().when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then().statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        String firstETag = given().body("first").when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
+        .then().statusCode(200).extract().header("ETag");
+        String thirdETag = given().body("third").when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=3")
+        .then().statusCode(200).extract().header("ETag");
+
+        completeMultipart(newUploadId, key, """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>\"wrong\"</ETag></Part>
+                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(thirdETag))
+            .statusCode(400)
+            .body(containsString("<Code>InvalidPart</Code>"));
+        completeMultipart(newUploadId, key, """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber></Part>
+                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(thirdETag))
+            .statusCode(400)
+            .body(containsString("<Code>InvalidPart</Code>"));
+        completeMultipart(newUploadId, key, """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(firstETag, firstETag))
+            .statusCode(400)
+            .body(containsString("<Code>InvalidPartOrder</Code>"));
+        completeMultipart(newUploadId, key, """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag></Part>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(thirdETag, firstETag))
+            .statusCode(400)
+            .body(containsString("<Code>InvalidPartOrder</Code>"));
+        completeMultipart(newUploadId, key, """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                    <Part><PartNumber>5</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(firstETag, thirdETag))
+            .statusCode(400)
+            .body(containsString("<Code>InvalidPart</Code>"));
+        completeMultipart(newUploadId, key, """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(firstETag, thirdETag))
+            .statusCode(200);
+    }
+
+    private static io.restassured.response.ValidatableResponse completeMultipart(String uploadId, String key,
+                                                                                   String body) {
+        return given().contentType("application/xml").body(body)
+                .when().post("/" + BUCKET + "/" + key + "?uploadId=" + uploadId).then();
+    }
+
+    @Test
     @Order(40)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/copy-of-multipart.bin").then().statusCode(204);
@@ -1171,14 +1260,15 @@ class S3MultipartIntegrationTest {
         given().when().delete("/" + BUCKET + "/sse-c-source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/checksum-match-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/checksum-type-multipart.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/completion-validation.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 
-    private static String singlePartCompleteXml(String checksumElement) {
+    private static String singlePartCompleteXml(String eTag, String checksumElement) {
         return """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag>%s</Part>
-                </CompleteMultipartUpload>""".formatted(checksumElement);
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag>%s</Part>
+                </CompleteMultipartUpload>""".formatted(eTag, checksumElement);
     }
 
     private static String sha256Base64(String data) {

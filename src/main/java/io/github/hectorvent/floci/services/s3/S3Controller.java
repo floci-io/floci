@@ -1374,7 +1374,8 @@ public class S3Controller {
                 String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
                 S3Checksum expectedChecksum = extractChecksumFromHeaders(httpHeaders);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
-                        completedPartChecksums(completedParts), checksumType, expectedChecksum);
+                        completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
+                        expectedChecksum);
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
@@ -1541,7 +1542,7 @@ public class S3Controller {
         return Response.ok(xml.build()).build();
     }
 
-    private record CompletedPart(int partNumber, S3Checksum checksum) {}
+    private record CompletedPart(int partNumber, String eTag, S3Checksum checksum) {}
 
     private List<CompletedPart> parseCompleteMultipartBody(String xml) {
         List<Map<String, String>> parts = XmlParser.extractGroups(xml, "Part");
@@ -1556,11 +1557,12 @@ public class S3Controller {
             } catch (NumberFormatException e) {
                 throw malformedCompleteMultipartXml();
             }
+            String eTag = part.getOrDefault("ETag", "").trim();
             S3Checksum checksum = new S3Checksum();
             for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
                 checksum.setValueFor(algorithm, part.get("Checksum" + algorithm.name()));
             }
-            completedParts.add(new CompletedPart(partNumber, checksum.hasAnyValue() ? checksum : null));
+            completedParts.add(new CompletedPart(partNumber, eTag, checksum.hasAnyValue() ? checksum : null));
         }
         return completedParts;
     }
@@ -1577,6 +1579,14 @@ public class S3Controller {
             }
         }
         return checksums;
+    }
+
+    private Map<Integer, String> completedPartETags(List<CompletedPart> parts) {
+        Map<Integer, String> eTags = new HashMap<>();
+        for (CompletedPart part : parts) {
+            eTags.put(part.partNumber(), part.eTag());
+        }
+        return eTags;
     }
 
     // --- Versioning Operations ---

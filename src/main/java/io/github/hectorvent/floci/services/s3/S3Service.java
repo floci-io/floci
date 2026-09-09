@@ -2461,11 +2461,19 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
                                             String checksumType, S3Checksum expectedChecksum) {
-        return completeMultipartUpload(bucket, key, uploadId, partNumbers, Map.of(), checksumType, expectedChecksum);
+        return completeMultipartUpload(bucket, key, uploadId, partNumbers, Map.of(), Map.of(), checksumType,
+                expectedChecksum);
     }
 
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
                                             Map<Integer, S3Checksum> partChecksums,
+                                            String checksumType, S3Checksum expectedChecksum) {
+        return completeMultipartUpload(bucket, key, uploadId, partNumbers, Map.of(), partChecksums, checksumType,
+                expectedChecksum);
+    }
+
+    public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
+                                            Map<Integer, String> partETags, Map<Integer, S3Checksum> partChecksums,
                                             String checksumType, S3Checksum expectedChecksum) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)) {
@@ -2476,12 +2484,22 @@ public class S3Service implements Resettable, ResourceProvider {
         ChecksumAlgorithm algorithm = upload.getChecksumAlgorithm() != null ? upload.getChecksumAlgorithm() : ChecksumAlgorithm.CRC64NVME;
         ChecksumType storedChecksumType = upload.getChecksumType() != null ? upload.getChecksumType() : ChecksumType.FULL_OBJECT;
 
-        // Verify all requested parts exist and carry the checksums the upload requires
+        int previousPartNumber = 0;
         for (int num : partNumbers) {
+            if (num <= previousPartNumber) {
+                throw new AwsException("InvalidPartOrder",
+                        "The list of parts was not in ascending order.", 400);
+            }
+            previousPartNumber = num;
             Part part = upload.getParts().get(num);
             if (part == null) {
                 throw new AwsException("InvalidPart",
                         "One or more of the specified parts could not be found. Part " + num + " is missing.", 400);
+            }
+            if (!partETags.isEmpty() && !part.getETag().equals(partETags.get(num))) {
+                throw new AwsException("InvalidPart",
+                        "One or more of the specified parts could not be found. Part " + num
+                                + " has an invalid ETag.", 400);
             }
             validatePartChecksum(upload.getChecksumAlgorithm(), storedChecksumType, num, part, partChecksums.get(num));
         }
