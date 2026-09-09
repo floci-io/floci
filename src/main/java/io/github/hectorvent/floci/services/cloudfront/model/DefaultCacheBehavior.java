@@ -20,9 +20,11 @@ public class DefaultCacheBehavior {
     private List<Map<String, String>> functionAssociations;
     private List<Map<String, Object>> lambdaFunctionAssociations;
     private boolean compress;
-    private long defaultTTL;
-    private long minTTL;
-    private long maxTTL;
+    private boolean smoothStreaming;
+    private Long defaultTTL;
+    private Long minTTL;
+    private Long maxTTL;
+    private Map<String, Object> forwardedValues;
     // Private-content key group IDs whose public keys may sign requests.
     // Explicit enablement controls signature enforcement.
     private Boolean trustedKeyGroupsEnabled;
@@ -66,14 +68,20 @@ public class DefaultCacheBehavior {
     public boolean isCompress() { return compress; }
     public void setCompress(boolean compress) { this.compress = compress; }
 
-    public long getDefaultTTL() { return defaultTTL; }
-    public void setDefaultTTL(long defaultTTL) { this.defaultTTL = defaultTTL; }
+    public boolean isSmoothStreaming() { return smoothStreaming; }
+    public void setSmoothStreaming(boolean smoothStreaming) { this.smoothStreaming = smoothStreaming; }
 
-    public long getMinTTL() { return minTTL; }
-    public void setMinTTL(long minTTL) { this.minTTL = minTTL; }
+    public Map<String, Object> getForwardedValues() { return forwardedValues; }
+    public void setForwardedValues(Map<String, Object> forwardedValues) { this.forwardedValues = forwardedValues; }
 
-    public long getMaxTTL() { return maxTTL; }
-    public void setMaxTTL(long maxTTL) { this.maxTTL = maxTTL; }
+    public Long getDefaultTTL() { return defaultTTL; }
+    public void setDefaultTTL(Long defaultTTL) { this.defaultTTL = defaultTTL; }
+
+    public Long getMinTTL() { return minTTL; }
+    public void setMinTTL(Long minTTL) { this.minTTL = minTTL; }
+
+    public Long getMaxTTL() { return maxTTL; }
+    public void setMaxTTL(Long maxTTL) { this.maxTTL = maxTTL; }
 
     public boolean isTrustedKeyGroupsEnabled() {
         return trustedKeyGroupsEnabled != null

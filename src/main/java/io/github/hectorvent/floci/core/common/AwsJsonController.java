@@ -120,7 +120,8 @@ public class AwsJsonController {
                 case "states" -> sfnJsonHandler.handle(action, request, region);
                 case "swf" -> swfJsonHandler.handle(action, request, region);
                 case "monitoring" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
-                case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
+                case "cloudcontrol" -> cloudControlJsonHandler.handle(
+                                        action, request, region, regionResolver.getAccountId());
                 case "network-firewall" -> networkFirewallJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 default -> null;

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
+import io.github.hectorvent.floci.services.cloudwatch.metricstreams.CloudWatchMetricStreamsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -27,7 +28,8 @@ class CloudWatchMetricsQueryHandlerTest {
     private final CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
     // The alarm cases below never reach a dashboard operation; the handler simply routes both.
     private final CloudWatchMetricsQueryHandler handler = new CloudWatchMetricsQueryHandler(
-            metricsService, mock(CloudWatchDashboardsService.class));
+            metricsService, mock(CloudWatchDashboardsService.class),
+            mock(CloudWatchMetricStreamsService.class));
 
     @Test
     void putMetricAlarmDefaultsActionsEnabledToTrueWhenOmitted() {

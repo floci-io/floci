@@ -16,7 +16,7 @@ below for what's simplified.
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `EnableSharingWithAwsOrganization` | Enables resource sharing within the organization; returns `{"returnValue": true}`. Idempotent, no disable counterpart, matching real AWS (`POST /enablesharingwithawsorganization`) |
+| `EnableSharingWithAwsOrganization` | Enables resource sharing within the organization; returns `{"returnValue": true}`. Also enables `ram.amazonaws.com` trusted access in Organizations and creates the `AWSServiceRoleForResourceAccessManager` IAM service-linked role when absent. Idempotent, no disable counterpart, matching real AWS (`POST /enablesharingwithawsorganization`) |
 | `CreateResourceShare` | Creates a resource share with the given name, principals, and resource ARNs (`POST /createresourceshare`) |
 | `GetResourceShares` | Lists resource shares visible to the caller, `SELF` owned or `OTHER-ACCOUNTS` shared in (`POST /getresourceshares`) |
 | `DeleteResourceShare` | Marks a share `DELETED`, a soft delete matching real AWS's async-then-terminal status (`DELETE /deleteresourceshare`) |

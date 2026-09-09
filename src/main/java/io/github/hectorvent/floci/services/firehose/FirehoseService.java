@@ -5,7 +5,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
@@ -61,7 +62,7 @@ public class FirehoseService implements ResourceProvider {
     // busy source stream from monopolising the single flusher thread.
     private static final int SOURCE_POLL_LIMIT = 500;
 
-    private final StorageBackend<String, DeliveryStreamDescription> streamStore;
+    private final AccountAwareStorageBackend<DeliveryStreamDescription> streamStore;
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
     private final Map<String, Instant> bufferSince = new ConcurrentHashMap<>();
     private final S3Service s3Service;
@@ -82,7 +83,7 @@ public class FirehoseService implements ResourceProvider {
     // This store holds only COMMITTED positions: a shard is advanced here once the
     // records read up to that point have actually landed in S3. See
     // pendingSourceIterators for why the two halves cannot be one map.
-    private final StorageBackend<String, Map<String, String>> sourceIteratorStore;
+    private final AccountAwareStorageBackend<Map<String, String>> sourceIteratorStore;
     // The advanced-but-not-yet-durable half of the checkpoint, deliberately in memory.
     //
     // Polled records do not go straight to S3; they go into buffers above and reach S3
@@ -104,6 +105,82 @@ public class FirehoseService implements ResourceProvider {
     private final int flushRecordCount;
     private final boolean flusherEnabled;
     private final ScheduledExecutorService flushExecutor;
+
+    private String currentRegion() {
+        String region = regionResolver.getRegion();
+        return region == null || region.isBlank() ? regionResolver.getDefaultRegion() : region;
+    }
+
+    private String scopedKey(String streamName) {
+        return scopedKey(regionResolver.getAccountId(), currentRegion(), streamName);
+    }
+
+    private static String scopedKey(String accountId, String region, String streamName) {
+        return accountId + "/" + region + "/" + streamName;
+    }
+
+
+    private static String accountFromScopedKey(String key) {
+        return key.substring(0, key.indexOf('/'));
+    }
+
+    private static String logicalKeyFromScopedKey(String key) {
+        return key.substring(key.indexOf('/') + 1);
+    }
+
+    private static String regionFromScopedKey(String key) {
+        String logicalKey = logicalKeyFromScopedKey(key);
+        return logicalKey.substring(0, logicalKey.indexOf('/'));
+    }
+
+    private static String streamNameFromScopedKey(String key) {
+        String logicalKey = logicalKeyFromScopedKey(key);
+        return logicalKey.substring(logicalKey.indexOf('/') + 1);
+    }
+
+    private static boolean belongsTo(String accountId, String region, DeliveryStreamDescription stream) {
+        if (!accountId.equals(stream.getAccountId())) {
+            return false;
+        }
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(stream.getDeliveryStreamARN());
+            return accountId.equals(arn.accountId()) && region.equals(arn.region());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private Optional<DeliveryStreamDescription> streamGet(String key) {
+        String accountId = accountFromScopedKey(key);
+        String region = regionFromScopedKey(key);
+        String streamName = streamNameFromScopedKey(key);
+        return streamStore.getForAccountMigratingLegacyKeys(accountId, logicalKeyFromScopedKey(key),
+                List.of(streamName), stream -> belongsTo(accountId, region, stream), false);
+    }
+
+    private void streamPut(String key, DeliveryStreamDescription stream) {
+        streamStore.putForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key), stream);
+    }
+
+    private void streamDelete(String key) {
+        streamStore.deleteForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key));
+    }
+
+    private Optional<Map<String, String>> iteratorGet(String key) {
+        // Do not migrate the old account/name checkpoint key: its opaque iterator token has no
+        // region, so with same-named streams in multiple regions there is no safe way to tell
+        // which stream it belongs to. Leaving it untouched makes the regional stream start from
+        // its configured delivery timestamp instead of risking a cross-region checkpoint.
+        return sourceIteratorStore.getForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key));
+    }
+
+    private void iteratorPut(String key, Map<String, String> value) {
+        sourceIteratorStore.putForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key), value);
+    }
+
+    private void iteratorDelete(String key) {
+        sourceIteratorStore.deleteForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key));
+    }
 
     @Inject
     public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
@@ -143,7 +220,7 @@ public class FirehoseService implements ResourceProvider {
     // checkpoint out with everything else.
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
         flushExecutor.shutdownNow();
-        buffers.keySet().forEach(this::flush);
+        buffers.keySet().forEach(this::flushByKey);
     }
 
     void tickSafely() {
@@ -162,7 +239,7 @@ public class FirehoseService implements ResourceProvider {
             }
             String streamName = entry.getKey();
             try {
-                DeliveryStreamDescription stream = describeDeliveryStream(streamName);
+                DeliveryStreamDescription stream = describeDeliveryStreamByKey(streamName);
                 Instant since = bufferSince.putIfAbsent(streamName, now);
                 if (since == null) {
                     since = now;
@@ -201,26 +278,34 @@ public class FirehoseService implements ResourceProvider {
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
                                        String deliveryStreamType, KinesisStreamSource source) {
-        return createDeliveryStream(regionResolver.getDefaultRegion(), name, s3Config, tags, deliveryStreamType,
-                source);
+        return createDeliveryStream(regionResolver.getDefaultRegion(), regionResolver.getAccountId(), name, s3Config,
+                tags, deliveryStreamType, source);
     }
 
     public String createDeliveryStream(String region, String name, S3Destination s3Config,
                                        List<DeliveryStreamDescription.Tag> tags, String deliveryStreamType,
                                        KinesisStreamSource source) {
+        return createDeliveryStream(region, regionResolver.getAccountId(), name, s3Config, tags,
+                deliveryStreamType, source);
+    }
+
+    public String createDeliveryStream(String region, String accountId, String name, S3Destination s3Config,
+                                       List<DeliveryStreamDescription.Tag> tags, String deliveryStreamType,
+                                       KinesisStreamSource source) {
+        String streamKey = scopedKey(accountId, region, name);
         if (name == null || name.isEmpty() || name.length() > 64 || !name.matches("[a-zA-Z0-9_.-]+")) {
             throw new AwsException("InvalidArgumentException",
                     "Delivery stream name must be between 1 and 64 characters and contain only letters, numbers, underscores, hyphens, or periods.", 400);
         }
 
-        if (streamStore.get(name).isPresent()) {
+        if (streamGet(streamKey).isPresent()) {
             throw new AwsException("ResourceInUseException",
                     "Delivery stream " + name + " already exists.", 409);
         }
 
         validateBufferingHints(s3Config);
         DataFormatConversionValidator.validateEffective(s3Config);
-        String arn = AwsArnUtils.Arn.of("firehose", region, regionResolver.getAccountId(),
+        String arn = AwsArnUtils.Arn.of("firehose", region, accountId,
                 "deliverystream/" + name).toString();
         // CreateDeliveryStream's KinesisStreamSourceConfiguration carries only the ARN and
         // role -- DeliveryStartTimestamp exists only on the Description shape, which AWS
@@ -232,20 +317,30 @@ public class FirehoseService implements ResourceProvider {
             source.setDeliveryStartTimestamp(Instant.now());
         }
         DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config, source);
-        description.setAccountId(regionResolver.getAccountId());
+        description.setAccountId(accountId);
         description.setTags(tags);
         if (deliveryStreamType != null && !deliveryStreamType.isBlank()) {
             description.setDeliveryStreamType(deliveryStreamType);
         }
-        streamStore.put(name, description);
-        buffers.put(name, Collections.synchronizedList(new ArrayList<>()));
+        streamPut(streamKey, description);
+        buffers.put(streamKey, Collections.synchronizedList(new ArrayList<>()));
         LOG.infov("Created Firehose delivery stream: {0}", name);
         warnIfConversionEnabled(name, s3Config);
         return arn;
     }
 
     public void updateDestination(String name, String currentVersionId, String destinationId, S3Destination update) {
-        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        updateDestination(scopedKey(name), name, currentVersionId, destinationId, update);
+    }
+
+    public void updateDestination(String accountId, String region, String name, String currentVersionId,
+                                  String destinationId, S3Destination update) {
+        updateDestination(scopedKey(accountId, region, name), name, currentVersionId, destinationId, update);
+    }
+
+    private void updateDestination(String streamKey, String name, String currentVersionId, String destinationId, S3Destination update) {
+        DeliveryStreamDescription stream = streamGet(streamKey)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Delivery stream not found: " + name, 400));
         if (!stream.getVersionId().equals(currentVersionId)) {
             throw new AwsException("ConcurrentModificationException",
                     "Cannot update firehose: " + name + " since the current version id: " + stream.getVersionId()
@@ -279,7 +374,7 @@ public class FirehoseService implements ResourceProvider {
         }
         stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
         stream.setLastUpdateTimestamp(java.time.Instant.now());
-        streamStore.put(name, stream);
+        streamPut(streamKey, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
         warnIfConversionEnabled(name, stream.s3Destination());
     }
@@ -324,7 +419,7 @@ public class FirehoseService implements ResourceProvider {
                         effectiveKeyType,
                         effectiveKeyType.equals("CUSTOMER_MANAGED_CMK") ? keyArn : null,
                         "ENABLED"));
-        streamStore.put(name, stream);
+        streamPut(scopedKey(name), stream);
     }
 
     public void stopDeliveryStreamEncryption(String name) {
@@ -339,7 +434,7 @@ public class FirehoseService implements ResourceProvider {
         stream.setDeliveryStreamEncryptionConfiguration(
                 new DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration(
                         keyType, keyArn, "DISABLED"));
-        streamStore.put(name, stream);
+        streamPut(scopedKey(name), stream);
     }
 
     // A corrupt persisted version can only reach here when the caller echoed it
@@ -470,7 +565,7 @@ public class FirehoseService implements ResourceProvider {
         List<DeliveryStreamDescription.Tag> newTags = new ArrayList<>();
         tagMap.forEach((k, v) -> newTags.add(new DeliveryStreamDescription.Tag(k, v)));
         stream.setTags(newTags);
-        streamStore.put(name, stream);
+        streamPut(scopedKey(name), stream);
         LOG.infov("Tagged Firehose delivery stream {0}: {1}", name, tagsToTag);
     }
 
@@ -483,7 +578,7 @@ public class FirehoseService implements ResourceProvider {
             }
         }
         stream.setTags(newTags);
-        streamStore.put(name, stream);
+        streamPut(scopedKey(name), stream);
         LOG.infov("Untagged Firehose delivery stream {0}: {1}", name, tagKeys);
     }
 
@@ -508,9 +603,25 @@ public class FirehoseService implements ResourceProvider {
     }
 
     public DeliveryStreamDescription describeDeliveryStream(String name) {
-        DeliveryStreamDescription stream = streamStore.get(name)
+        return describeDeliveryStream(scopedKey(name), name);
+    }
+
+    public DeliveryStreamDescription describeDeliveryStream(String accountId, String region, String name) {
+        return describeDeliveryStream(scopedKey(accountId, region, name), name);
+    }
+
+    private DeliveryStreamDescription describeDeliveryStream(String streamKey, String name) {
+        return describeDeliveryStreamByKey(streamKey, name);
+    }
+
+    private DeliveryStreamDescription describeDeliveryStreamByKey(String streamKey) {
+        return describeDeliveryStreamByKey(streamKey, streamKey.substring(streamKey.lastIndexOf('/') + 1));
+    }
+
+    private DeliveryStreamDescription describeDeliveryStreamByKey(String streamKey, String streamName) {
+        DeliveryStreamDescription stream = streamGet(streamKey)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Delivery stream not found: " + name, 400));
+                        "Delivery stream not found: " + streamName, 400));
         // Normalizes streams persisted before required output members existed.
         if (stream.s3Destination() != null) {
             stream.s3Destination().applyDefaults();
@@ -519,20 +630,26 @@ public class FirehoseService implements ResourceProvider {
     }
 
     public void deleteDeliveryStream(String name) {
-        describeDeliveryStream(name);
-        streamStore.delete(name);
+        deleteDeliveryStream(regionResolver.getAccountId(), currentRegion(), name);
+    }
+
+    public void deleteDeliveryStream(String accountId, String region, String name) {
+        String streamKey = scopedKey(accountId, region, name);
+        describeDeliveryStream(streamKey, name);
+        streamDelete(streamKey);
         // Pending records are discarded, not flushed: verified against real AWS
         // (2026-07-13, eu-west-1) — 3 records buffered under a 300s/5MB hint never
         // reached the bucket after DeleteDeliveryStream completed.
-        buffers.remove(name);
-        bufferSince.remove(name);
-        pendingSourceIterators.remove(name);
-        sourceIteratorStore.delete(name);
+        buffers.remove(streamKey);
+        bufferSince.remove(streamKey);
+        pendingSourceIterators.remove(streamKey);
+        iteratorDelete(streamKey);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
     }
 
     public List<String> listDeliveryStreams() {
-        return streamStore.scan(k -> true).stream()
+        String regionPrefix = currentRegion() + "/";
+        return streamStore.scan(k -> k.startsWith(regionPrefix)).stream()
                 .map(DeliveryStreamDescription::getDeliveryStreamName).toList();
     }
 
@@ -554,14 +671,18 @@ public class FirehoseService implements ResourceProvider {
      * records does not backfill them.
      */
     void pollKinesisSources() {
-        for (DeliveryStreamDescription stream : streamStore.scan(k -> true)) {
+        for (AccountAwareStorageBackend.AccountEntry<DeliveryStreamDescription> entry
+                : streamStore.scanAllAccountEntries(k -> true)) {
+            DeliveryStreamDescription stream = entry.value();
             KinesisStreamSource source = stream.getSource() == null
                     ? null : stream.getSource().getKinesisStreamSourceDescription();
             if (source == null || source.getKinesisStreamArn() == null) {
                 continue;
             }
             try {
-                pollKinesisSource(stream.getDeliveryStreamName(), source);
+                AwsArnUtils.Arn ownerArn = AwsArnUtils.parse(stream.getDeliveryStreamARN());
+                pollKinesisSource(scopedKey(ownerArn.accountId(), ownerArn.region(), stream.getDeliveryStreamName()),
+                        ownerArn.accountId(), stream.getDeliveryStreamName(), source);
             } catch (Exception e) {
                 // A source stream that was deleted (or was never created) is the caller's
                 // business, not a reason to stop polling every other delivery stream.
@@ -571,29 +692,33 @@ public class FirehoseService implements ResourceProvider {
         }
     }
 
-    private void pollKinesisSource(String deliveryStreamName, KinesisStreamSource source) {
+    private void pollKinesisSource(String streamKey, String accountId, String deliveryStreamName,
+                                   KinesisStreamSource source) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(source.getKinesisStreamArn());
         String sourceName = arn.resource().startsWith("stream/")
                 ? arn.resource().substring("stream/".length())
                 : arn.resource();
         String region = arn.region() == null || arn.region().isBlank()
                 ? regionResolver.getDefaultRegion() : arn.region();
-        KinesisStream sourceStream = kinesisService.describeStream(sourceName, region);
+        String sourceAccountId = arn.accountId() == null || arn.accountId().isBlank()
+                ? accountId : arn.accountId();
+        KinesisStream sourceStream = kinesisService.describeStreamForAccount(sourceAccountId, sourceName, region);
         for (KinesisShard shard : sourceStream.getShards()) {
             // Where to read from: the pending position if a flush still owes these
             // records to S3, otherwise the committed one. Reading pending is what stops
             // a second poll re-reading what the first already buffered; committing only
             // on flush is what stops the durable checkpoint outrunning delivery.
-            String iterator = sourceIteratorsInUse(deliveryStreamName).get(shard.getShardId());
+            String iterator = sourceIteratorsInUse(streamKey).get(shard.getShardId());
             if (iterator == null) {
                 Instant start = source.getDeliveryStartTimestamp();
                 iterator = start == null
-                        ? kinesisService.getShardIterator(sourceName, shard.getShardId(),
+                        ? kinesisService.getShardIteratorForAccount(sourceAccountId, sourceName, shard.getShardId(),
                                 "TRIM_HORIZON", null, region)
-                        : kinesisService.getShardIterator(sourceName, shard.getShardId(),
+                        : kinesisService.getShardIteratorForAccount(sourceAccountId, sourceName, shard.getShardId(),
                                 "AT_TIMESTAMP", null, start.toEpochMilli(), region);
             }
-            Map<String, Object> page = kinesisService.getRecords(iterator, SOURCE_POLL_LIMIT, region);
+            Map<String, Object> page = kinesisService.getRecordsForAccount(sourceAccountId, iterator,
+                    SOURCE_POLL_LIMIT, region);
             @SuppressWarnings("unchecked")
             List<KinesisRecord> records = (List<KinesisRecord>) page.get("Records");
             String next = (String) page.get("NextShardIterator");
@@ -602,66 +727,74 @@ public class FirehoseService implements ResourceProvider {
             if (records == null || records.isEmpty()) {
                 // Nothing was buffered, so this advance owes S3 nothing and is safe to
                 // park as pending on its own.
-                advanceSourceIterator(deliveryStreamName, shardId, advanced);
+                advanceSourceIterator(streamKey, shardId, advanced);
                 continue;
             }
             // Through putRecordBatch so source records buffer, and trigger a flush, on
             // exactly the same terms as records handed to PutRecord directly. The
             // advance runs under the buffer lock together with the records it covers, so
             // no flush can ever see one without the other.
-            putRecordBatch(deliveryStreamName, records.stream()
+            putRecordBatch(streamKey, deliveryStreamName, records.stream()
                             .map(record -> new Record(record.getData()))
                             .toList(),
-                    () -> advanceSourceIterator(deliveryStreamName, shardId, advanced));
+                    () -> advanceSourceIterator(streamKey, shardId, advanced));
         }
     }
 
     /** The position the poller reads from: pending if a flush still owes it, else committed. */
-    private Map<String, String> sourceIteratorsInUse(String deliveryStreamName) {
-        Map<String, String> pending = pendingSourceIterators.get(deliveryStreamName);
-        return pending != null ? pending : sourceIteratorStore.get(deliveryStreamName).orElseGet(Map::of);
+    private Map<String, String> sourceIteratorsInUse(String streamKey) {
+        Map<String, String> pending = pendingSourceIterators.get(streamKey);
+        return pending != null ? pending : iteratorGet(streamKey).orElseGet(Map::of);
     }
 
     // Rebased on whatever is current rather than on a map carried across the shard loop,
     // so that a flush which discarded pending (because its S3 write failed) rolls the
     // other shards back to committed instead of having this poll re-assert them.
-    private void advanceSourceIterator(String deliveryStreamName, String shardId, String iterator) {
-        Map<String, String> advanced = new LinkedHashMap<>(sourceIteratorsInUse(deliveryStreamName));
+    private void advanceSourceIterator(String streamKey, String shardId, String iterator) {
+        Map<String, String> advanced = new LinkedHashMap<>(sourceIteratorsInUse(streamKey));
         advanced.put(shardId, iterator);
-        pendingSourceIterators.put(deliveryStreamName, Collections.unmodifiableMap(advanced));
+        pendingSourceIterators.put(streamKey, Collections.unmodifiableMap(advanced));
     }
 
     // Merged rather than written whole: two flushes can complete out of order, and a
     // whole-map write would then drop a shard's newer committed position. Merging can
     // still move one shard backwards, which costs a duplicate and never a skip.
-    private void commitSourceIterators(String deliveryStreamName, Map<String, String> checkpoint) {
+    private void commitSourceIterators(String streamKey, Map<String, String> checkpoint) {
         if (checkpoint == null || checkpoint.isEmpty()) {
             return;
         }
         // Copied out and written back whole: the store may hand back its own instance,
         // and a persistent backend only learns of a change through put().
         Map<String, String> committed =
-                new LinkedHashMap<>(sourceIteratorStore.get(deliveryStreamName).orElseGet(Map::of));
+                new LinkedHashMap<>(iteratorGet(streamKey).orElseGet(Map::of));
         committed.putAll(checkpoint);
-        sourceIteratorStore.put(deliveryStreamName, committed);
+        iteratorPut(streamKey, committed);
     }
 
     public void putRecord(String streamName, Record record) {
-        putRecordBatch(streamName, List.of(record));
+        putRecordBatch(scopedKey(streamName), streamName, List.of(record), null);
+    }
+
+    public void putRecord(String accountId, String region, String streamName, Record record) {
+        putRecordBatch(scopedKey(accountId, region, streamName), streamName, List.of(record), null);
     }
 
     public void putRecordBatch(String streamName, List<Record> records) {
-        putRecordBatch(streamName, records, null);
+        putRecordBatch(scopedKey(streamName), streamName, records, null);
+    }
+
+    public void putRecordBatch(String accountId, String region, String streamName, List<Record> records) {
+        putRecordBatch(scopedKey(accountId, region, streamName), streamName, records, null);
     }
 
     /**
      * @param checkpointAdvance run under the buffer lock once the records are buffered,
      *                          or null for records that are not read from a source stream.
      */
-    private void putRecordBatch(String streamName, List<Record> records, Runnable checkpointAdvance) {
-        DeliveryStreamDescription stream = describeDeliveryStream(streamName);
+    private void putRecordBatch(String streamKey, String streamName, List<Record> records, Runnable checkpointAdvance) {
+        DeliveryStreamDescription stream = describeDeliveryStreamByKey(streamKey);
         List<byte[]> buffer = buffers.computeIfAbsent(
-                streamName, k -> Collections.synchronizedList(new ArrayList<>()));
+                streamKey, k -> Collections.synchronizedList(new ArrayList<>()));
         long bufferedBytes = 0;
         int bufferedCount;
         // Records, their buffering-start timestamp and any source checkpoint advance move
@@ -673,7 +806,7 @@ public class FirehoseService implements ResourceProvider {
             if (checkpointAdvance != null) {
                 checkpointAdvance.run();
             }
-            bufferSince.putIfAbsent(streamName, clock.instant());
+            bufferSince.putIfAbsent(streamKey, clock.instant());
             bufferedCount = buffer.size();
             for (byte[] data : buffer) {
                 bufferedBytes += data.length;
@@ -681,7 +814,7 @@ public class FirehoseService implements ResourceProvider {
         }
         if ((flushRecordCount > 0 && bufferedCount >= flushRecordCount)
                 || bufferedBytes >= bufferingSizeLimitBytes(stream)) {
-            flush(streamName, stream);
+            flush(streamKey, stream);
         }
     }
 
@@ -694,7 +827,15 @@ public class FirehoseService implements ResourceProvider {
     }
 
     public void flush(String streamName) {
-        streamStore.get(streamName).ifPresent(stream -> flush(streamName, stream));
+        flushByKey(scopedKey(streamName));
+    }
+
+    public void flush(String accountId, String region, String streamName) {
+        flushByKey(scopedKey(accountId, region, streamName));
+    }
+
+    private void flushByKey(String streamKey) {
+        streamGet(streamKey).ifPresent(stream -> flush(streamKey, stream));
     }
 
     private void flush(String streamName, DeliveryStreamDescription stream) {
@@ -779,7 +920,7 @@ public class FirehoseService implements ResourceProvider {
     @Override
     public List<ExplorerResource> getResources() {
         List<ExplorerResource> resources = new ArrayList<>();
-        for (DeliveryStreamDescription stream : streamStore.scan(k -> true)) {
+        for (DeliveryStreamDescription stream : streamStore.scanAllAccounts()) {
             String arn = stream.getDeliveryStreamARN();
             if (arn == null) {
                 continue;

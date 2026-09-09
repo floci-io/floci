@@ -191,6 +191,15 @@ aws logs put-retention-policy \
 | `DescribeAlarms` | List alarms |
 | `DeleteAlarms` | Delete alarms |
 | `SetAlarmState` | Manually set alarm state |
+| `PutMetricStream` | Create or update a metric stream definition |
+| `GetMetricStream` | Read a metric stream definition |
+| `ListMetricStreams` | List metric streams |
+| `DeleteMetricStream` | Delete a metric stream |
+| `StartMetricStreams` | Move metric streams to `running` |
+| `StopMetricStreams` | Move metric streams to `stopped` |
+
+Metric streams are stored as definitions with their `running` or `stopped` state. Floci never
+delivers metrics to the Firehose delivery stream a metric stream names.
 
 ### Examples
 

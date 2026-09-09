@@ -1228,14 +1228,14 @@ public class DynamoDbService implements ResourceProvider {
                     }
                     JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
                     DynamoDbItemSize.validateSize(normalizedItem);
-                    itemKey = buildItemKey(table, normalizedItem);
+                    itemKey = buildItemKey(table, normalizedItem, KeySurface.BATCH_WRITE);
                     validateIndexKeyTypes(table, normalizedItem, false);
                 } else if (writeRequest.has("DeleteRequest")) {
                     JsonNode key = writeRequest.get("DeleteRequest").get("Key");
                     if (key == null) {
                         throw new AwsException("ValidationException", "Key is required for DeleteRequest", 400);
                     }
-                    itemKey = buildItemKey(table, key, true);
+                    itemKey = buildItemKey(table, key, KeySurface.BATCH_WRITE);
                 } else {
                     continue;
                 }
@@ -2630,22 +2630,15 @@ public class DynamoDbService implements ResourceProvider {
 
                 if (last) {
                     if (nextTok instanceof String finalAttr) {
-                        if (child == null) {
-                            ObjectNode newMap = objectMapper.createObjectNode();
-                            newMap.set(finalAttr, value);
-
-                            ObjectNode wrapper = objectMapper.createObjectNode();
-                            wrapper.set("M", newMap);
-
-                            obj.set(attrName, wrapper);
-                        } else if (!child.has("M")) {
+                        // AWS requires every intermediate of a document path to already
+                        // exist as the right type; only the final element may be new.
+                        if (child == null || !child.has("M")) {
                             throw new AwsException(
                                     "ValidationException",
                                     "The document path provided in the update expression is invalid for update",
                                     400);
-                        } else {
-                            ((ObjectNode) child.get("M")).set(finalAttr, value);
                         }
+                        ((ObjectNode) child.get("M")).set(finalAttr, value);
                     } else if (nextTok instanceof Long finalIdx) {
                         if (child == null || !child.has("L")) {
                             throw new AwsException(
@@ -2661,21 +2654,13 @@ public class DynamoDbService implements ResourceProvider {
                 }
 
                 if (nextTok instanceof String) {
-                    if (child == null) {
-                        ObjectNode newMap = objectMapper.createObjectNode();
-                        ObjectNode wrapper = objectMapper.createObjectNode();
-                        wrapper.set("M", newMap);
-                        obj.set(attrName, wrapper);
-
-                        container = newMap;
-                    } else if (!child.has("M")) {
+                    if (child == null || !child.has("M")) {
                         throw new AwsException(
                                 "ValidationException",
                                 "The document path provided in the update expression is invalid for update",
                                 400);
-                    } else {
-                        container = child.get("M");
                     }
+                    container = child.get("M");
 
                 } else if (nextTok instanceof Long) {
                     if (child == null || !child.has("L")) {
@@ -3054,39 +3039,47 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
+    // AWS words a key rejection by the surface the key arrived on. A PutItem item body
+    // names the mismatched types, a Key argument and a BatchWriteItem entry report a
+    // schema mismatch instead. An empty key value is worded the same on every surface.
+    enum KeySurface { ITEM_BODY, KEY_ARGUMENT, BATCH_WRITE }
+
     String buildItemKey(TableDefinition table, JsonNode item) {
-        return buildItemKey(table, item, false);
+        return buildItemKey(table, item, KeySurface.ITEM_BODY);
     }
 
     String buildItemKey(TableDefinition table, JsonNode item, boolean isKeyArg) {
+        return buildItemKey(table, item, isKeyArg ? KeySurface.KEY_ARGUMENT : KeySurface.ITEM_BODY);
+    }
+
+    String buildItemKey(TableDefinition table, JsonNode item, KeySurface surface) {
         String pkName = table.getPartitionKeyName();
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr == null) {
-            if (isKeyArg) {
-                throw new AwsException("ValidationException",
-                        "The provided key element does not match the schema", 400);
-            }
-            throw new AwsException("ValidationException",
-                    "One of the required keys was not given a value", 400);
+            throw missingKeyException(surface);
         }
-        validateKeyAttributeValue(table, pkAttr, pkName, isKeyArg);
+        validateKeyAttributeValue(table, pkAttr, pkName, surface);
 
         String pk = extractScalarValue(pkAttr);
         String skName = table.getSortKeyName();
         if (skName != null) {
             JsonNode skAttr = item.get(skName);
             if (skAttr == null) {
-                if (isKeyArg) {
-                    throw new AwsException("ValidationException",
-                            "The provided key element does not match the schema", 400);
-                }
-                throw new AwsException("ValidationException",
-                        "One of the required keys was not given a value", 400);
+                throw missingKeyException(surface);
             }
-            validateKeyAttributeValue(table, skAttr, skName, isKeyArg);
+            validateKeyAttributeValue(table, skAttr, skName, surface);
             return pk + "#" + extractScalarValue(skAttr);
         }
         return pk;
+    }
+
+    private AwsException missingKeyException(KeySurface surface) {
+        if (surface == KeySurface.ITEM_BODY) {
+            return new AwsException("ValidationException",
+                    "One of the required keys was not given a value", 400);
+        }
+        return new AwsException("ValidationException",
+                "The provided key element does not match the schema", 400);
     }
 
     // A wire-format AttributeValue must be a JSON object with exactly one type member.
@@ -3108,27 +3101,33 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
-    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
+    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName,
+                                            KeySurface surface) {
         if (attr == null) {
             return;
         }
         validateAttributeValueShape(attr);
         String expectedType = keyAttributeType(table, keyName);
         if (expectedType != null && !attr.has(expectedType)) {
-            // AWS words the type mismatch differently for a Key argument
-            // (Get/Delete/Update) than for a PutItem item body.
-            if (isKeyArg) {
+            if (surface == KeySurface.ITEM_BODY) {
                 throw new AwsException("ValidationException",
-                        "The provided key element does not match the schema", 400);
+                        "One or more parameter values were invalid: Type mismatch for key " + keyName
+                        + " expected: " + expectedType + " actual: " + attr.fieldNames().next(), 400);
             }
             throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Type mismatch for key " + keyName
-                    + " expected: " + expectedType + " actual: " + attr.fieldNames().next(), 400);
+                    "The provided key element does not match the schema", 400);
         }
         if (attr.has("S") && attr.get("S").asText().isEmpty()) {
             throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: "
-                    + "The AttributeValue for a key attribute cannot contain an empty string value. Key: " + keyName, 400);
+                    "One or more parameter values are not valid. "
+                    + "The AttributeValue for a key attribute cannot contain an empty string value. Key: "
+                    + keyName, 400);
+        }
+        if (attr.has("B") && attr.get("B").asText().isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values are not valid. "
+                    + "The AttributeValue for a key attribute cannot contain an empty binary value. Key: "
+                    + keyName, 400);
         }
     }
 

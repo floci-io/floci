@@ -134,6 +134,29 @@ class SsmDirectCommandExecutorTest {
     }
 
     @Test
+    void containerBackedRequiresRunningEc2Container() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        Instance running = new Instance();
+        running.setInstanceId("i-running");
+        running.setDockerContainerId("container-1");
+        Instance stopped = new Instance();
+        stopped.setInstanceId("i-stopped");
+        stopped.setDockerContainerId("container-2");
+        when(ec2Service.findInstanceById("i-running")).thenReturn(running);
+        when(ec2Service.findInstanceById("i-stopped")).thenReturn(stopped);
+        when(ec2Service.findInstanceById("mi-agent-only")).thenReturn(null);
+        when(ec2Service.isInstanceContainerRunning("i-running")).thenReturn(true);
+        when(ec2Service.isInstanceContainerRunning("i-stopped")).thenReturn(false);
+
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+
+        assertTrue(executor.isContainerBacked("i-running"));
+        assertFalse(executor.isContainerBacked("i-stopped"));
+        assertFalse(executor.isContainerBacked("mi-agent-only"));
+    }
+
+    @Test
     void returnsEmptyForUnsupportedDocument() {
         DockerClient dockerClient = mock(DockerClient.class);
         Ec2Service ec2Service = mock(Ec2Service.class);

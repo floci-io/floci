@@ -315,6 +315,30 @@ public class ApiGatewayService {
         return resourceStore.scan(k -> k.startsWith(prefix));
     }
 
+    /**
+     * The id of the resource at "/", or empty if there is no API to read it from.
+     * <p>
+     * ListRestApis renders a snapshot of the APIs and resolves this per API afterwards, so an
+     * API deleted in between is already gone by the time its root is looked up. That must cost
+     * the caller the one member rather than failing the whole listing, which is why a missing
+     * API is empty here instead of a not-found. Every other failure still propagates.
+     */
+    public Optional<String> findRootResourceId(String region, String apiId) {
+        List<ApiGatewayResource> resources;
+        try {
+            resources = getResources(region, apiId);
+        } catch (AwsException e) {
+            if ("NotFoundException".equals(e.getErrorCode())) {
+                return Optional.empty();
+            }
+            throw e;
+        }
+        return resources.stream()
+                .filter(r -> "/".equals(r.getPath()))
+                .map(ApiGatewayResource::getId)
+                .findFirst();
+    }
+
     public ApiGatewayResource getResource(String region, String apiId, String resourceId) {
         return resourceStore.get(resourceKey(region, apiId, resourceId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid resource id specified", 404));
@@ -339,7 +363,15 @@ public class ApiGatewayService {
     }
 
     public void deleteResource(String region, String apiId, String resourceId) {
-        getResource(region, apiId, resourceId);
+        ApiGatewayResource resource = getResource(region, apiId, resourceId);
+        // The root resource is created with the API and cannot be removed on its own; it
+        // goes away only when the API does. Allowing it to be deleted would leave the API
+        // with no resource at "/", and so with no rootResourceId to report or to parent a
+        // new resource on, a state that has no way back short of recreating the API.
+        if ("/".equals(resource.getPath())) {
+            throw new AwsException("BadRequestException",
+                    "Invalid resource identifier specified: the root resource cannot be deleted", 400);
+        }
         resourceStore.delete(resourceKey(region, apiId, resourceId));
     }
 

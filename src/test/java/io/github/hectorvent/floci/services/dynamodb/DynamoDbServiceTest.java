@@ -3017,9 +3017,118 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void batchWriteItemReportsAKeySchemaMismatchTheWayAwsDoes() {
+        createUsersTable("us-east-1");
+        var wrongType = mapper.createObjectNode();
+        wrongType.set("userId", attributeValue("N", "5"));
+
+        var error = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(putRequest(wrongType))), "us-east-1"));
+        assertEquals("The provided key element does not match the schema", error.getMessage());
+    }
+
+    @Test
+    void batchWriteItemReportsAMissingKeyAsASchemaMismatch() {
+        createUsersTable("us-east-1");
+        var noKey = mapper.createObjectNode();
+        noKey.set("name", attributeValue("S", "x"));
+
+        var putError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(putRequest(noKey))), "us-east-1"));
+        assertEquals("The provided key element does not match the schema", putError.getMessage());
+
+        var deleteError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(deleteRequest(noKey))), "us-east-1"));
+        assertEquals("The provided key element does not match the schema", deleteError.getMessage());
+    }
+
+    @Test
+    void putItemStillNamesTheMismatchedKeyTypes() {
+        createUsersTable("us-east-1");
+        var wrongType = mapper.createObjectNode();
+        wrongType.set("userId", attributeValue("N", "5"));
+
+        var error = assertThrows(AwsException.class,
+                () -> service.putItem("Users", wrongType, "us-east-1"));
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId "
+                + "expected: S actual: N", error.getMessage());
+    }
+
+    @Test
+    void everySurfaceUsesTheSameEmptyStringKeyWording() {
+        createUsersTable("us-east-1");
+        ObjectNode emptyKey = mapper.createObjectNode();
+        emptyKey.set("userId", attributeValue("S", ""));
+        String expected = "One or more parameter values are not valid. The AttributeValue for a key "
+                + "attribute cannot contain an empty string value. Key: userId";
+
+        AwsException batchError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(putRequest(emptyKey))), "us-east-1"));
+        assertEquals(expected, batchError.getMessage());
+
+        AwsException putError = assertThrows(AwsException.class,
+                () -> service.putItem("Users", emptyKey, "us-east-1"));
+        assertEquals(expected, putError.getMessage());
+
+        AwsException getError = assertThrows(AwsException.class,
+                () -> service.getItem("Users", emptyKey, "us-east-1"));
+        assertEquals(expected, getError.getMessage());
+    }
+
+    @Test
+    void rejectsAnEmptyBinaryKeyValue() {
+        service.createTable("Binaries",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(new AttributeDefinition("pk", "B")),
+                5L, 5L, "us-east-1");
+        ObjectNode emptyBinary = mapper.createObjectNode();
+        emptyBinary.set("pk", attributeValue("B", ""));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putItem("Binaries", emptyBinary, "us-east-1"));
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key "
+                + "attribute cannot contain an empty binary value. Key: pk", error.getMessage());
+    }
+
+    private JsonNode putRequest(ObjectNode item) {
+        ObjectNode request = mapper.createObjectNode();
+        request.set("PutRequest", mapper.createObjectNode().set("Item", item));
+        return request;
+    }
+
+    private JsonNode deleteRequest(ObjectNode key) {
+        ObjectNode request = mapper.createObjectNode();
+        request.set("DeleteRequest", mapper.createObjectNode().set("Key", key));
+        return request;
+    }
+
+    @Test
+    void updateItemRejectsSetThroughMissingIntermediateMapPath() {
+        createOrdersTable("us-east-1");
+        service.putItem("Orders", item("customerId", "c9", "orderId", "o9"), "us-east-1");
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#missing", "missing");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "x"));
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("customerId", attributeValue("S", "c9"));
+        key.set("orderId", attributeValue("S", "o9"));
+
+        var ex = assertThrows(AwsException.class, () -> service.updateItem("Orders", key, null,
+                "SET #missing.subkey = :val", exprNames, exprValues, "NONE", null, "us-east-1", "NONE"));
+        assertEquals("The document path provided in the update expression is invalid for update", ex.getMessage());
+    }
+
+    @Test
     void updateItemWithNestedDottedPathSetAndRemove() {
         createOrdersTable("us-east-1");
-        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), "us-east-1");
+        // AWS requires every intermediate of a document path to already exist,
+        // so the details map is seeded before SET #details.subkey runs.
+        ObjectNode initialItem = item("customerId", "c1", "orderId", "o1");
+        initialItem.set("details", mapAttributeValue(mapper.createObjectNode()));
+        service.putItem("Orders", initialItem, "us-east-1");
 
         ObjectNode exprNames = mapper.createObjectNode();
         exprNames.put("#details", "details");

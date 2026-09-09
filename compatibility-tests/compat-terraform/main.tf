@@ -287,7 +287,14 @@ resource "aws_elasticache_replication_group" "compat" {
   engine               = "redis"
   node_type            = "cache.t3.micro"
   num_cache_clusters   = 1
-  port                 = 6379
+  # Deliberately not 6379: that is the bottom of floci's ElastiCache proxy range and the
+  # port it would hand out anyway, so pinning it asserts nothing. A non-default port is
+  # what actually exercises CreateReplicationGroup's Port input, and a mismatch shows up
+  # as permanent drift because Terraform treats the port as replacement-forcing.
+  #
+  # It must also stay above the block the cluster-mode fixture allocates: the bats files
+  # run concurrently and that fixture takes one port per node from the base of the range.
+  port                 = 6395
 }
 
 # -- Firehose Delivery Stream --------------------------------------------------

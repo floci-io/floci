@@ -125,6 +125,7 @@ public class ElastiCacheQueryHandler {
                             intParam(params, "NumCacheClusters"),
                             boolParam(params, "AutomaticFailoverEnabled"),
                             boolParam(params, "MultiAZEnabled"),
+                            intParam(params, "Port"),
                             replicationGroupSettings(params),
                             parseTags(params)));
             String result = replicationGroupXml(group);

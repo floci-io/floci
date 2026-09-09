@@ -1934,6 +1934,7 @@ public class CloudFrontController {
                     .elem("HTTPSPort", coc.getOrDefault("HTTPSPort", "443").toString())
                     .elem("OriginProtocolPolicy",
                             coc.getOrDefault("OriginProtocolPolicy", "https-only").toString())
+                    .raw(xmlOriginSslProtocols(coc.get("OriginSslProtocols")))
                     .end("CustomOriginConfig");
         }
 
@@ -1966,13 +1967,19 @@ public class CloudFrontController {
                 .elem("CachePolicyId", dcb.getCachePolicyId())
                 .elem("OriginRequestPolicyId", dcb.getOriginRequestPolicyId())
                 .elem("ResponseHeadersPolicyId", dcb.getResponseHeadersPolicyId())
-                .elem("Compress", dcb.isCompress());
+                .elem("FieldLevelEncryptionId",
+                        dcb.getFieldLevelEncryptionId() != null ? dcb.getFieldLevelEncryptionId() : "")
+                .elem("Compress", dcb.isCompress())
+                .elem("SmoothStreaming", dcb.isSmoothStreaming());
+
+        xml.raw(xmlCacheBehaviorTtls(dcb.getMinTTL(), dcb.getDefaultTTL(), dcb.getMaxTTL()));
 
         xml.raw(xmlTrustedSigners());
         xml.raw(xmlTrustedKeyGroups(
                 dcb.isTrustedKeyGroupsEnabled(), dcb.getTrustedKeyGroups()));
 
         xml.raw(xmlAllowedMethods(dcb.getAllowedMethods(), dcb.getCachedMethods()));
+        xml.raw(xmlCacheBehaviorForwardedValues(dcb.getCachePolicyId(), dcb.getForwardedValues()));
 
         xml.raw(xmlFunctionAssociations(dcb.getFunctionAssociations()));
         xml.raw(xmlLambdaFunctionAssociations(dcb.getLambdaFunctionAssociations()));
@@ -1991,13 +1998,19 @@ public class CloudFrontController {
                 .elem("CachePolicyId", cb.getCachePolicyId())
                 .elem("OriginRequestPolicyId", cb.getOriginRequestPolicyId())
                 .elem("ResponseHeadersPolicyId", cb.getResponseHeadersPolicyId())
-                .elem("Compress", cb.isCompress());
+                .elem("FieldLevelEncryptionId",
+                        cb.getFieldLevelEncryptionId() != null ? cb.getFieldLevelEncryptionId() : "")
+                .elem("Compress", cb.isCompress())
+                .elem("SmoothStreaming", cb.isSmoothStreaming());
+
+        xml.raw(xmlCacheBehaviorTtls(cb.getMinTTL(), cb.getDefaultTTL(), cb.getMaxTTL()));
 
         xml.raw(xmlTrustedSigners());
         xml.raw(xmlTrustedKeyGroups(
                 cb.isTrustedKeyGroupsEnabled(), cb.getTrustedKeyGroups()));
 
         xml.raw(xmlAllowedMethods(cb.getAllowedMethods(), cb.getCachedMethods()));
+        xml.raw(xmlCacheBehaviorForwardedValues(cb.getCachePolicyId(), cb.getForwardedValues()));
 
         xml.raw(xmlFunctionAssociations(cb.getFunctionAssociations()));
         xml.raw(xmlLambdaFunctionAssociations(cb.getLambdaFunctionAssociations()));
@@ -2070,6 +2083,85 @@ public class CloudFrontController {
                 .elem("Quantity", 0)
                 .end("TrustedSigners")
                 .build();
+    }
+
+    // A custom origin must carry OriginSslProtocols. Floci did not echo it, and the Terraform AWS
+    // provider flattens CustomOriginConfig.OriginSslProtocols.Items with no nil guard, so an omitted
+    // element segfaults it on distribution read-back. Round-trip the submitted protocols, defaulting
+    // to the form AWS returns when the client sends none.
+    private String xmlOriginSslProtocols(Object protocols) {
+        List<String> list = stringList(protocols);
+        if (list.isEmpty()) {
+            list = List.of("TLSv1.2");
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start("OriginSslProtocols")
+                .elem("Quantity", list.size())
+                .start("Items");
+        for (String protocol : list) {
+            xml.elem("SslProtocol", protocol);
+        }
+        return xml.end("Items").end("OriginSslProtocols").build();
+    }
+
+    // DefaultTTL and MaxTTL are optional, and 0 is a meaningful value (the usual "do not cache" with
+    // forwarded_values), so presence has to be tracked separately from the value. Treating 0 as unset
+    // drops an explicit default_ttl = 0 from the read-back and the provider then sees a permanent diff.
+    private String xmlCacheBehaviorTtls(Long minTtl, Long defaultTtl, Long maxTtl) {
+        XmlBuilder xml = new XmlBuilder().elem("MinTTL", minTtl != null ? minTtl : 0L);
+        if (defaultTtl != null) {
+            xml.elem("DefaultTTL", defaultTtl);
+        }
+        if (maxTtl != null) {
+            xml.elem("MaxTTL", maxTtl);
+        }
+        return xml.build();
+    }
+
+    // When a cache behavior uses the legacy (non-cache-policy) form, AWS echoes a full ForwardedValues
+    // object. Floci dropped it, so the provider's read either lost the config or, on newer provider
+    // versions, dereferenced the missing object. Emit the submitted values in the shape AWS returns.
+    private String xmlCacheBehaviorForwardedValues(String cachePolicyId, Map<String, Object> forwardedValues) {
+        if (cachePolicyId != null && !cachePolicyId.isEmpty()) {
+            return "";
+        }
+        boolean queryString = forwardedValues != null
+                && Boolean.TRUE.equals(forwardedValues.get("QueryString"));
+        Object forward = forwardedValues != null ? forwardedValues.get("CookiesForward") : null;
+        XmlBuilder xml = new XmlBuilder()
+                .start("ForwardedValues")
+                .elem("QueryString", queryString)
+                .start("Cookies")
+                .elem("Forward", forward != null ? forward.toString() : "none");
+        xml.raw(xmlForwardedNames("WhitelistedNames", "Name",
+                forwardedValuesList(forwardedValues, "CookieNames")));
+        xml.end("Cookies");
+        xml.raw(xmlForwardedNames("Headers", "Name",
+                forwardedValuesList(forwardedValues, "Headers")));
+        xml.raw(xmlForwardedNames("QueryStringCacheKeys", "Name",
+                forwardedValuesList(forwardedValues, "QueryStringCacheKeys")));
+        return xml.end("ForwardedValues").build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> forwardedValuesList(Map<String, Object> forwardedValues, String key) {
+        Object value = forwardedValues != null ? forwardedValues.get(key) : null;
+        return value instanceof List<?> list ? (List<String>) list : List.of();
+    }
+
+    // Whitelisted cookie names, forwarded headers and query-string cache keys are Quantity/Items pairs.
+    // Echoing a bare Quantity 0 loses whatever the client whitelisted, so the provider reads the lists
+    // back empty and diffs on every plan. AWS omits Items entirely when the quantity is zero.
+    private String xmlForwardedNames(String wrapper, String itemName, List<String> names) {
+        XmlBuilder xml = new XmlBuilder().start(wrapper).elem("Quantity", names.size());
+        if (!names.isEmpty()) {
+            xml.start("Items");
+            for (String name : names) {
+                xml.elem(itemName, name);
+            }
+            xml.end("Items");
+        }
+        return xml.end(wrapper).build();
     }
 
     private String xmlActiveTrustedKeyGroups(DistributionConfig config) {
@@ -2554,9 +2646,11 @@ public class CloudFrontController {
             boolean inOrigin = false;
             boolean inS3OriginConfig = false;
             boolean inCustomOriginConfig = false;
+            boolean inOriginSslProtocols = false;
             Origin current = null;
             Map<String, String> s3Config = null;
             Map<String, Object> customConfig = null;
+            List<String> sslProtocols = null;
             boolean inCustomHeaders = false;
             boolean inCustomHeaderItems = false;
             boolean customHeaderItemsSeen = false;
@@ -2606,6 +2700,17 @@ public class CloudFrontController {
                             if (inOrigin) {
                                 inCustomOriginConfig = true;
                                 customConfig = new LinkedHashMap<>();
+                            }
+                        }
+                        case "OriginSslProtocols" -> {
+                            if (inCustomOriginConfig) {
+                                inOriginSslProtocols = true;
+                                sslProtocols = new ArrayList<>();
+                            }
+                        }
+                        case "SslProtocol" -> {
+                            if (inOriginSslProtocols && sslProtocols != null) {
+                                sslProtocols.add(r.getElementText());
                             }
                         }
                         case "Id" -> {
@@ -2716,6 +2821,13 @@ public class CloudFrontController {
                             }
                             inS3OriginConfig = false;
                             s3Config = null;
+                        }
+                        case "OriginSslProtocols" -> {
+                            if (inCustomOriginConfig && customConfig != null && sslProtocols != null) {
+                                customConfig.put("OriginSslProtocols", sslProtocols);
+                            }
+                            inOriginSslProtocols = false;
+                            sslProtocols = null;
                         }
                         case "CustomOriginConfig" -> {
                             if (inCustomOriginConfig && current != null) {
@@ -2847,6 +2959,40 @@ public class CloudFrontController {
         }
     }
 
+    private static long parseLongOrZero(String value) {
+        if (value == null) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    private static Map<String, Object> forwardedValuesModel(
+            Boolean queryString,
+            String cookiesForward,
+            List<String> cookieNames,
+            List<String> headers,
+            List<String> queryStringCacheKeys) {
+        Map<String, Object> forwardedValues = new LinkedHashMap<>();
+        forwardedValues.put("QueryString", queryString != null && queryString);
+        if (cookiesForward != null) {
+            forwardedValues.put("CookiesForward", cookiesForward);
+        }
+        if (cookieNames != null && !cookieNames.isEmpty()) {
+            forwardedValues.put("CookieNames", List.copyOf(cookieNames));
+        }
+        if (headers != null && !headers.isEmpty()) {
+            forwardedValues.put("Headers", List.copyOf(headers));
+        }
+        if (queryStringCacheKeys != null && !queryStringCacheKeys.isEmpty()) {
+            forwardedValues.put("QueryStringCacheKeys", List.copyOf(queryStringCacheKeys));
+        }
+        return forwardedValues;
+    }
+
     private DefaultCacheBehavior parseDefaultCacheBehavior(String body) {
         DefaultCacheBehavior dcb = new DefaultCacheBehavior();
         if (body == null || body.isEmpty()) {
@@ -2864,6 +3010,17 @@ public class CloudFrontController {
             List<String> allowedMethods = new ArrayList<>();
             List<String> cachedMethods = new ArrayList<>();
             List<String> trustedKeyGroups = new ArrayList<>();
+            boolean inForwardedValues = false;
+            boolean inForwardedCookies = false;
+            boolean inForwardedCookieNames = false;
+            boolean inForwardedHeaders = false;
+            boolean inForwardedQueryStringCacheKeys = false;
+            boolean sawForwardedValues = false;
+            Boolean forwardedQueryString = null;
+            String forwardedCookiesForward = null;
+            List<String> forwardedCookieNames = new ArrayList<>();
+            List<String> forwardedHeaders = new ArrayList<>();
+            List<String> forwardedQueryStringCacheKeys = new ArrayList<>();
             boolean inLambdaAssociations = false;
             boolean inFunctionAssociations = false;
             Map<String, Object> currentLambdaAssociation = null;
@@ -2957,6 +3114,41 @@ public class CloudFrontController {
                         case "CachedMethods" -> {
                             if (inAllowedMethods) inCachedMethods = true;
                         }
+                        case "ForwardedValues" -> {
+                            if (inDcb) {
+                                inForwardedValues = true;
+                                sawForwardedValues = true;
+                            }
+                        }
+                        case "Cookies" -> {
+                            if (inForwardedValues) inForwardedCookies = true;
+                        }
+                        case "WhitelistedNames" -> {
+                            if (inForwardedCookies) inForwardedCookieNames = true;
+                        }
+                        case "Headers" -> {
+                            if (inForwardedValues) inForwardedHeaders = true;
+                        }
+                        case "QueryStringCacheKeys" -> {
+                            if (inForwardedValues) inForwardedQueryStringCacheKeys = true;
+                        }
+                        case "Name" -> {
+                            if (inForwardedCookieNames) {
+                                forwardedCookieNames.add(r.getElementText());
+                            } else if (inForwardedHeaders) {
+                                forwardedHeaders.add(r.getElementText());
+                            } else if (inForwardedQueryStringCacheKeys) {
+                                forwardedQueryStringCacheKeys.add(r.getElementText());
+                            }
+                        }
+                        case "QueryString" -> {
+                            if (inForwardedValues && !inForwardedCookies) {
+                                forwardedQueryString = "true".equalsIgnoreCase(r.getElementText());
+                            }
+                        }
+                        case "Forward" -> {
+                            if (inForwardedCookies) forwardedCookiesForward = r.getElementText();
+                        }
                         case "TargetOriginId" -> {
                             if (inDcb) dcb.setTargetOriginId(r.getElementText());
                         }
@@ -2981,6 +3173,18 @@ public class CloudFrontController {
                         case "Compress" -> {
                             if (inDcb) dcb.setCompress("true".equalsIgnoreCase(r.getElementText()));
                         }
+                        case "SmoothStreaming" -> {
+                            if (inDcb) dcb.setSmoothStreaming("true".equalsIgnoreCase(r.getElementText()));
+                        }
+                        case "MinTTL" -> {
+                            if (inDcb) dcb.setMinTTL(parseLongOrZero(r.getElementText()));
+                        }
+                        case "DefaultTTL" -> {
+                            if (inDcb) dcb.setDefaultTTL(parseLongOrZero(r.getElementText()));
+                        }
+                        case "MaxTTL" -> {
+                            if (inDcb) dcb.setMaxTTL(parseLongOrZero(r.getElementText()));
+                        }
                         case "Method" -> {
                             if (inCachedMethods) {
                                 cachedMethods.add(r.getElementText());
@@ -2995,6 +3199,11 @@ public class CloudFrontController {
                     switch (r.getLocalName()) {
                         case "CachedMethods" -> inCachedMethods = false;
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "WhitelistedNames" -> inForwardedCookieNames = false;
+                        case "Headers" -> inForwardedHeaders = false;
+                        case "QueryStringCacheKeys" -> inForwardedQueryStringCacheKeys = false;
+                        case "Cookies" -> inForwardedCookies = false;
+                        case "ForwardedValues" -> inForwardedValues = false;
                         case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "DefaultCacheBehavior" -> inDcb = false;
                         case "LambdaFunctionAssociations" -> inLambdaAssociations = false;
@@ -3022,6 +3231,14 @@ public class CloudFrontController {
             }
             if (!cachedMethods.isEmpty()) {
                 dcb.setCachedMethods(cachedMethods);
+            }
+            if (sawForwardedValues) {
+                dcb.setForwardedValues(forwardedValuesModel(
+                        forwardedQueryString,
+                        forwardedCookiesForward,
+                        forwardedCookieNames,
+                        forwardedHeaders,
+                        forwardedQueryStringCacheKeys));
             }
             if (!trustedKeyGroups.isEmpty()) {
                 dcb.setTrustedKeyGroups(trustedKeyGroups);
@@ -3078,6 +3295,17 @@ public class CloudFrontController {
             List<String> allowedMethods = new ArrayList<>();
             List<String> cachedMethods = new ArrayList<>();
             List<String> trustedKeyGroups = new ArrayList<>();
+            boolean inForwardedValues = false;
+            boolean inForwardedCookies = false;
+            boolean inForwardedCookieNames = false;
+            boolean inForwardedHeaders = false;
+            boolean inForwardedQueryStringCacheKeys = false;
+            boolean sawForwardedValues = false;
+            Boolean forwardedQueryString = null;
+            String forwardedCookiesForward = null;
+            List<String> forwardedCookieNames = new ArrayList<>();
+            List<String> forwardedHeaders = new ArrayList<>();
+            List<String> forwardedQueryStringCacheKeys = new ArrayList<>();
             boolean inLambdaAssociations = false;
             boolean inFunctionAssociations = false;
             Map<String, Object> currentLambdaAssociation = null;
@@ -3103,6 +3331,12 @@ public class CloudFrontController {
                                 allowedMethods = new ArrayList<>();
                                 cachedMethods = new ArrayList<>();
                                 trustedKeyGroups = new ArrayList<>();
+                                sawForwardedValues = false;
+                                forwardedQueryString = null;
+                                forwardedCookiesForward = null;
+                                forwardedCookieNames = new ArrayList<>();
+                                forwardedHeaders = new ArrayList<>();
+                                forwardedQueryStringCacheKeys = new ArrayList<>();
                                 lambdaAssociations = new ArrayList<>();
                                 functionAssociations = new ArrayList<>();
                                 lambdaAssociationsQuantity = null;
@@ -3187,6 +3421,41 @@ public class CloudFrontController {
                         case "CachedMethods" -> {
                             if (inAllowedMethods) inCachedMethods = true;
                         }
+                        case "ForwardedValues" -> {
+                            if (inCacheBehavior) {
+                                inForwardedValues = true;
+                                sawForwardedValues = true;
+                            }
+                        }
+                        case "Cookies" -> {
+                            if (inForwardedValues) inForwardedCookies = true;
+                        }
+                        case "WhitelistedNames" -> {
+                            if (inForwardedCookies) inForwardedCookieNames = true;
+                        }
+                        case "Headers" -> {
+                            if (inForwardedValues) inForwardedHeaders = true;
+                        }
+                        case "QueryStringCacheKeys" -> {
+                            if (inForwardedValues) inForwardedQueryStringCacheKeys = true;
+                        }
+                        case "Name" -> {
+                            if (inForwardedCookieNames) {
+                                forwardedCookieNames.add(r.getElementText());
+                            } else if (inForwardedHeaders) {
+                                forwardedHeaders.add(r.getElementText());
+                            } else if (inForwardedQueryStringCacheKeys) {
+                                forwardedQueryStringCacheKeys.add(r.getElementText());
+                            }
+                        }
+                        case "QueryString" -> {
+                            if (inForwardedValues && !inForwardedCookies) {
+                                forwardedQueryString = "true".equalsIgnoreCase(r.getElementText());
+                            }
+                        }
+                        case "Forward" -> {
+                            if (inForwardedCookies) forwardedCookiesForward = r.getElementText();
+                        }
                         case "PathPattern" -> {
                             if (inCacheBehavior && current != null) current.setPathPattern(r.getElementText());
                         }
@@ -3207,9 +3476,33 @@ public class CloudFrontController {
                             if (inCacheBehavior && current != null)
                                 current.setResponseHeadersPolicyId(r.getElementText());
                         }
+                        case "FieldLevelEncryptionId" -> {
+                            if (inCacheBehavior && current != null)
+                                current.setFieldLevelEncryptionId(r.getElementText());
+                        }
                         case "Compress" -> {
                             if (inCacheBehavior && current != null) {
                                 current.setCompress("true".equalsIgnoreCase(r.getElementText()));
+                            }
+                        }
+                        case "SmoothStreaming" -> {
+                            if (inCacheBehavior && current != null) {
+                                current.setSmoothStreaming("true".equalsIgnoreCase(r.getElementText()));
+                            }
+                        }
+                        case "MinTTL" -> {
+                            if (inCacheBehavior && current != null) {
+                                current.setMinTTL(parseLongOrZero(r.getElementText()));
+                            }
+                        }
+                        case "DefaultTTL" -> {
+                            if (inCacheBehavior && current != null) {
+                                current.setDefaultTTL(parseLongOrZero(r.getElementText()));
+                            }
+                        }
+                        case "MaxTTL" -> {
+                            if (inCacheBehavior && current != null) {
+                                current.setMaxTTL(parseLongOrZero(r.getElementText()));
                             }
                         }
                         case "Method" -> {
@@ -3226,6 +3519,11 @@ public class CloudFrontController {
                     switch (r.getLocalName()) {
                         case "CachedMethods" -> inCachedMethods = false;
                         case "AllowedMethods" -> inAllowedMethods = false;
+                        case "WhitelistedNames" -> inForwardedCookieNames = false;
+                        case "Headers" -> inForwardedHeaders = false;
+                        case "QueryStringCacheKeys" -> inForwardedQueryStringCacheKeys = false;
+                        case "Cookies" -> inForwardedCookies = false;
+                        case "ForwardedValues" -> inForwardedValues = false;
                         case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
                         case "LambdaFunctionAssociations" -> inLambdaAssociations = false;
                         case "FunctionAssociations" -> inFunctionAssociations = false;
@@ -3248,6 +3546,14 @@ public class CloudFrontController {
                                 }
                                 if (!cachedMethods.isEmpty()) {
                                     current.setCachedMethods(cachedMethods);
+                                }
+                                if (sawForwardedValues) {
+                                    current.setForwardedValues(forwardedValuesModel(
+                                            forwardedQueryString,
+                                            forwardedCookiesForward,
+                                            forwardedCookieNames,
+                                            forwardedHeaders,
+                                            forwardedQueryStringCacheKeys));
                                 }
                                 if (!trustedKeyGroups.isEmpty()) {
                                     current.setTrustedKeyGroups(trustedKeyGroups);

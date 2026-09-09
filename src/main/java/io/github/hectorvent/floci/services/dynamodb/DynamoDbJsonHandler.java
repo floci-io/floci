@@ -128,7 +128,9 @@ public class DynamoDbJsonHandler {
         List<GlobalSecondaryIndex> gsis = new ArrayList<>();
         JsonNode gsiArray = request.path("GlobalSecondaryIndexes");
         if (!gsiArray.isMissingNode() && gsiArray.isArray()) {
+            var gsiPosition = 0;
             for (JsonNode gsiNode : gsiArray) {
+                gsiPosition++;
                 String indexName = gsiNode.path("IndexName").asText();
                 List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
                 gsiNode.path("KeySchema").forEach(ks ->
@@ -143,6 +145,8 @@ public class DynamoDbJsonHandler {
                         nonKeyAttributes.add(nonKeyAttr.asText());
                     }
                 }
+                rejectEmptyNonKeyAttributes(nonKeyAttrArray, "globalSecondaryIndexes." + gsiPosition + ".member");
+                validateProjectionSpec(projectionType, nonKeyAttributes);
                 GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                 JsonNode gsiPt = gsiNode.path("ProvisionedThroughput");
                 if (!gsiPt.isMissingNode()) {
@@ -165,7 +169,9 @@ public class DynamoDbJsonHandler {
         List<LocalSecondaryIndex> lsis = new ArrayList<>();
         JsonNode lsiArray = request.path("LocalSecondaryIndexes");
         if (!lsiArray.isMissingNode() && lsiArray.isArray()) {
+            var lsiPosition = 0;
             for (JsonNode lsiNode : lsiArray) {
+                lsiPosition++;
                 String indexName = lsiNode.path("IndexName").asText();
                 List<KeySchemaElement> lsiKeySchema = new ArrayList<>();
                 lsiNode.path("KeySchema").forEach(ks ->
@@ -178,6 +184,8 @@ public class DynamoDbJsonHandler {
                 if (!lsiNonKeyAttrArray.isMissingNode() && lsiNonKeyAttrArray.isArray()) {
                     lsiNonKeyAttrArray.forEach(a -> lsiNonKeyAttributes.add(a.asText()));
                 }
+                rejectEmptyNonKeyAttributes(lsiNonKeyAttrArray, "localSecondaryIndexes." + lsiPosition + ".member");
+                validateProjectionSpec(projectionType, lsiNonKeyAttributes);
                 lsis.add(new LocalSecondaryIndex(indexName, lsiKeySchema, null, projectionType, lsiNonKeyAttributes));
             }
         }
@@ -195,6 +203,20 @@ public class DynamoDbJsonHandler {
         String sseType = sseEnabled ? sseSpec.path("SSEType").asText(SSE_TYPE_KMS) : null;
         if (sseEnabled) {
             validateSseType(sseType);
+        }
+
+        if ("PAY_PER_REQUEST".equals(billingMode) && !pt.isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Neither ReadCapacityUnits nor WriteCapacityUnits "
+                    + "can be specified when BillingMode is PAY_PER_REQUEST", 400);
+        }
+
+        JsonNode streamSpecCheck = request.path("StreamSpecification");
+        if (streamSpecCheck.isObject() && !streamSpecCheck.path("StreamEnabled").asBoolean(false)
+                && streamSpecCheck.hasNonNull("StreamViewType")) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: StreamViewType cannot be specified "
+                    + "when StreamEnabled is false", 400);
         }
 
         TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,
@@ -268,6 +290,31 @@ public class DynamoDbJsonHandler {
                     "1 validation error detected: Value '" + sseType
                     + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [AES256, KMS]", 400);
+        }
+    }
+
+    // AWS reports an empty list as a length constraint on the 1-based member path, before the
+    // projection type check. A null NonKeyAttributes counts as not specified.
+    private static void rejectEmptyNonKeyAttributes(JsonNode nonKeyAttrArray, String memberPath) {
+        if (nonKeyAttrArray.isArray() && nonKeyAttrArray.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '[]' at '" + memberPath
+                    + ".projection.nonKeyAttributes' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1", 400);
+        }
+    }
+
+    // INCLUDE requires the NonKeyAttributes list; every other projection type forbids it.
+    private static void validateProjectionSpec(String projectionType, List<String> nonKeyAttributes) {
+        if ("INCLUDE".equals(projectionType) && nonKeyAttributes.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: "
+                    + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", 400);
+        }
+        if (!"INCLUDE".equals(projectionType) && !nonKeyAttributes.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: "
+                    + "ProjectionType is " + projectionType + ", but NonKeyAttributes is specified", 400);
         }
     }
 
@@ -568,6 +615,11 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
         }
+
+        // EAN/EAV with no expression to reference them, mirroring the PutItem guard.
+        rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
+                updateExpression != null || conditionExpression != null,
+                "UpdateExpression is null, ConditionExpression is null");
 
         ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
@@ -994,6 +1046,12 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "The Segment parameter is required but was not present in the request when parameter TotalSegments is present", 400);
         }
+        if (totalSegments != null && totalSegments > 1_000_000) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + totalSegments
+                    + "' at 'totalSegments' failed to satisfy constraint: "
+                    + "Member must have value less than or equal to 1000000", 400);
+        }
         if (segment != null && totalSegments != null && segment >= totalSegments) {
             throw new AwsException("ValidationException",
                     "The Segment parameter is zero-based and must be less than parameter TotalSegments: "
@@ -1126,7 +1184,8 @@ public class DynamoDbJsonHandler {
                 JsonNode keyNode = writeReq.has("PutRequest")
                         ? writeReq.get("PutRequest").get("Item")
                         : writeReq.get("DeleteRequest").get("Key");
-                String key = dynamoDbService.buildItemKey(bwTable, keyNode);
+                String key = dynamoDbService.buildItemKey(bwTable, keyNode,
+                        DynamoDbService.KeySurface.BATCH_WRITE);
                 if (!seen.add(key)) {
                     throw new AwsException("ValidationException",
                             "Provided list of item keys contains duplicates", 400);
@@ -1298,7 +1357,9 @@ public class DynamoDbJsonHandler {
         List<JsonNode> gsiUpdatesToApply = new ArrayList<>();
         JsonNode gsiUpdates = request.path("GlobalSecondaryIndexUpdates");
         if (!gsiUpdates.isMissingNode() && gsiUpdates.isArray()) {
+            var updatePosition = 0;
             for (JsonNode update : gsiUpdates) {
+                updatePosition++;
                 JsonNode createNode = update.path("Create");
                 if (!createNode.isMissingNode()) {
                     String indexName = createNode.path("IndexName").asText();
@@ -1315,6 +1376,9 @@ public class DynamoDbJsonHandler {
                             nonKeyAttributes.add(nonKeyAttr.asText());
                         }
                     }
+                    rejectEmptyNonKeyAttributes(nonKeyAttrArray,
+                            "globalSecondaryIndexUpdates." + updatePosition + ".member.create");
+                    validateProjectionSpec(projectionType, nonKeyAttributes);
                     GlobalSecondaryIndex newGsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                     JsonNode newGsiPt = createNode.path("ProvisionedThroughput");
                     if (!newGsiPt.isMissingNode()) {

@@ -88,7 +88,7 @@ public class GuardDutyController {
             @QueryParam("maxResults") String maxResults,
             @QueryParam("nextToken") String nextToken) {
         GuardDutyService.Page<String> page = service.listDetectorIds(
-                regionResolver.resolveRegion(headers), maxResults, nextToken);
+                regionResolver.resolveRegion(headers), regionResolver.getAccountId(), maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode ids = response.putArray("detectorIds");
         page.items().forEach(ids::add);

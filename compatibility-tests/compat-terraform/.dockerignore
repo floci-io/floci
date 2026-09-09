@@ -1,0 +1,11 @@
+# Keep host-side Terraform working state out of the image. CI builds from a fresh
+# checkout where none of this exists (.terraform/ and .terraform.lock.hcl are
+# gitignored), so copying a local run's leftovers in would make the image behave
+# differently from CI and quietly skew any timing comparison.
+.terraform
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+errored.tfstate
+test-results
+large-object.bin

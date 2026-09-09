@@ -1931,16 +1931,19 @@ public class AslExecutor {
             throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
         }
 
+        JsonNode effectiveInput = applyInputPath(stateDef, input);
         JsonNode choices = stateDef.path("Choices");
         for (JsonNode choice : choices) {
-            if (evaluateCondition(choice, input)) {
-                return new StateResult(input, choice.path("Next").asText());
+            if (evaluateCondition(choice, effectiveInput)) {
+                JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+                return new StateResult(output, choice.path("Next").asText());
             }
         }
         // Default branch
         String defaultState = stateDef.path("Default").asText(null);
         if (defaultState != null) {
-            return new StateResult(input, defaultState);
+            JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+            return new StateResult(output, defaultState);
         }
         throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
     }
@@ -1961,6 +1964,7 @@ public class AslExecutor {
                                          ObjectNode variables, long executionDeadlineNanos)
             throws InterruptedException {
         int seconds = 0;
+        JsonNode effectiveInput = input;
         if (jsonata) {
             if (stateDef.has("Seconds")) {
                 JsonNode secondsNode = stateDef.get("Seconds");
@@ -1974,10 +1978,11 @@ public class AslExecutor {
                 }
             }
         } else {
+            effectiveInput = applyInputPath(stateDef, input);
             if (stateDef.has("Seconds")) {
                 seconds = Math.min(stateDef.get("Seconds").asInt(), MAX_WAIT_SECONDS);
             } else if (stateDef.has("SecondsPath")) {
-                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), input);
+                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput);
                 seconds = Math.min(val.asInt(), MAX_WAIT_SECONDS);
             }
         }
@@ -1989,7 +1994,8 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, null, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
-        return new StateResult(input, stateDef.path("Next").asText(null));
+        JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+        return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
     /**
@@ -2015,7 +2021,8 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, input, context, variables);
             return new StateResult(output, null);
         }
-        return new StateResult(applyOutputPath(stateDef, input, input), null);
+        JsonNode effectiveInput = applyInputPath(stateDef, input);
+        return new StateResult(applyOutputPath(stateDef, input, effectiveInput), null);
     }
 
     private StateResult executeFail(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -2042,6 +2049,7 @@ public class AslExecutor {
                                               String topLevelQueryLanguage, JsonNode context,
                                               ObjectNode variables, long executionDeadlineNanos)
             throws Exception {
+        JsonNode effectiveInput = jsonata ? input : applyInputPath(stateDef, input);
         JsonNode branches = stateDef.path("Branches");
         chain.publish("ParallelStateStarted", null);
         var branchChains = new ArrayList<HistoryChain>();
@@ -2050,7 +2058,7 @@ public class AslExecutor {
         for (JsonNode branch : branches) {
             String startAt = branch.path("StartAt").asText();
             JsonNode branchStates = branch.path("States");
-            JsonNode capturedInput = input;
+            JsonNode capturedInput = effectiveInput;
             // Each branch gets an isolated copy of the current variables: assignments inside a
             // branch are scoped to that branch and do not leak back to the parent after the state.
             ObjectNode branchVariables = variables.deepCopy();

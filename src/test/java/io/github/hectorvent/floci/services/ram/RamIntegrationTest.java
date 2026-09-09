@@ -2,21 +2,40 @@ package io.github.hectorvent.floci.services.ram;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 
 /**
  * Verifies the RAM restJson1 organization-sharing opt-in:
  * {@code POST /enablesharingwithawsorganization} succeeds with or without a request body.
  */
 @QuarkusTest
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class RamIntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ram/aws4_request";
+
+    private static String authFor(String accountId) {
+        return "AWS4-HMAC-SHA256 Credential=" + accountId + "/20260101/us-east-1/ram/aws4_request";
+    }
+
+    private static RequestSpecification organizations(String accountId, String action, String body) {
+        return given()
+                .header("Authorization", authFor(accountId))
+                .header("X-Amz-Target", "AWSOrganizationsV20161128." + action)
+                .contentType("application/x-amz-json-1.1")
+                .body(body);
+    }
 
     @BeforeAll
     static void configureRestAssured() {
@@ -24,6 +43,21 @@ class RamIntegrationTest {
     }
 
     @Test
+    @Order(1)
+    void createOrganizationBeforeEnablingRamIntegration() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", AUTH_HEADER)
+            .header("X-Amz-Target", "AWSOrganizationsV20161128.CreateOrganization")
+            .body("{\"FeatureSet\":\"ALL\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(4)
     void enableSharingWithAwsOrganization_returnsTrue() {
         given()
             .contentType("application/json")
@@ -37,6 +71,7 @@ class RamIntegrationTest {
     }
 
     @Test
+    @Order(5)
     void enableSharingWithAwsOrganization_withoutBody_returnsTrue() {
         given()
             .header("Authorization", AUTH_HEADER)
@@ -48,6 +83,42 @@ class RamIntegrationTest {
     }
 
     @Test
+    @Order(6)
+    void enableSharingWithAwsOrganizationCreatesAwsSideEffects() {
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/enablesharingwithawsorganization")
+        .then()
+            .statusCode(200)
+            .body("returnValue", equalTo(true));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization", AUTH_HEADER)
+            .header("X-Amz-Target", "AWSOrganizationsV20161128.ListAWSServiceAccessForOrganization")
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("EnabledServicePrincipals.ServicePrincipal", hasItem("ram.amazonaws.com"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "GetRole")
+            .formParam("Version", "2010-05-08")
+            .formParam("RoleName", "AWSServiceRoleForResourceAccessManager")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("AWSServiceRoleForResourceAccessManager"));
+    }
+
+    @Test
+    @Order(2)
     void getResourceShareInvitations_returnsEmptyJson() {
         // LZA's Custom::GetResourceShare Lambda pages this first, before any share has been
         // created in this test's account. The response must be JSON (restJson1): an XML
@@ -105,6 +176,179 @@ class RamIntegrationTest {
         .then()
             .statusCode(200)
             .body("returnValue", equalTo(true));
+    }
+
+    @Test
+    void readOperationsOnlyExposeAResourceShareToItsOwnerOrInvitedAccount() {
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor("111111111111"))
+                .body("""
+                    {
+                        "name": "account-visible-share",
+                        "principals": ["222222222222"],
+                        "resourceArns": ["arn:aws:ec2:us-east-1:111111111111:transit-gateway/tgw-visibility"]
+                    }
+                    """)
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", authFor("111111111111"))
+            .body("{ \"resourceOwner\": \"SELF\", \"resourceShareArns\": [\"%s\"] }".formatted(shareArn))
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(200)
+            .body("resourceShares.size()", equalTo(1));
+
+        for (String path : new String[] {"/getresourceshares", "/listresources", "/listprincipals"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor("222222222222"))
+                .body("{ \"resourceOwner\": \"OTHER-ACCOUNTS\", \"resourceShareArns\": [\"%s\"] }".formatted(shareArn))
+            .when()
+                .post(path)
+            .then()
+                .statusCode(200)
+                .body(path.equals("/getresourceshares") ? "resourceShares.size()"
+                        : path.equals("/listresources") ? "resources.size()" : "principals.size()", equalTo(1));
+
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor("333333333333"))
+                .body("{ \"resourceOwner\": \"OTHER-ACCOUNTS\", \"resourceShareArns\": [\"%s\"] }".formatted(shareArn))
+            .when()
+                .post(path)
+            .then()
+                .statusCode(200)
+                .body(path.equals("/getresourceshares") ? "resourceShares.size()"
+                        : path.equals("/listresources") ? "resources.size()" : "principals.size()", equalTo(0));
+        }
+    }
+
+    @Test
+    void organizationAndOuSharesOnlyReachMembers() {
+        String owner = "444444444444";
+        String organizationId =
+            organizations(owner, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+            .extract().path("Organization.Id");
+        String rootId =
+            organizations(owner, "ListRoots", "{}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+            .extract().path("Roots[0].Id");
+        String ouArn =
+            organizations(owner, "CreateOrganizationalUnit",
+                    "{\"ParentId\":\"%s\",\"Name\":\"RamVisibility\"}".formatted(rootId))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+            .extract().path("OrganizationalUnit.Arn");
+        String member =
+            organizations(owner, "CreateAccount",
+                    "{\"Email\":\"ram-visibility-%s@example.com\",\"AccountName\":\"RamMember\"}"
+                            .formatted(organizationId))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+            .extract().path("CreateAccountStatus.AccountId");
+        String memberRoot = rootId;
+        organizations(owner, "MoveAccount",
+                "{\"AccountId\":\"%s\",\"SourceParentId\":\"%s\",\"DestinationParentId\":\"%s\"}"
+                        .formatted(member, memberRoot, ouArn.substring(ouArn.lastIndexOf('/') + 1)))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        organizations(member, "DescribeOrganization", "{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Organization.Id", equalTo(organizationId));
+
+        String organizationArn = "arn:aws:organizations::" + owner + ":organization/" + organizationId;
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor(owner))
+                .body(("{\"name\":\"organization-visible-share\",\"principals\":[\"%s\"],"
+                        + "\"resourceArns\":[\"arn:aws:ec2:us-east-1:%s:transit-gateway/tgw-org\"]}")
+                        .formatted(organizationArn, owner))
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+
+        assertShareVisibility(shareArn, member, true);
+        assertShareVisibility(shareArn, "666666666666", false);
+
+        given()
+            .header("Authorization", authFor(owner))
+        .when()
+            .post("/enablesharingwithawsorganization")
+        .then()
+            .statusCode(200);
+
+        String accountShareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor(owner))
+                .body(("{\"name\":\"organization-account-visible-share\",\"principals\":[\"%s\"],"
+                        + "\"resourceArns\":[\"arn:aws:ec2:us-east-1:%s:transit-gateway/tgw-account\"]}")
+                        .formatted(member, owner))
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+        assertShareVisibility(accountShareArn, member, true);
+        assertShareVisibility(accountShareArn, "666666666666", false);
+
+        String ouShareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", authFor(owner))
+                .body(("{\"name\":\"ou-visible-share\",\"principals\":[\"%s\"],"
+                        + "\"resourceArns\":[\"arn:aws:ec2:us-east-1:%s:transit-gateway/tgw-ou\"]}")
+                        .formatted(ouArn, owner))
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+
+        assertShareVisibility(ouShareArn, member, true);
+        assertShareVisibility(ouShareArn, "666666666666", false);
+    }
+
+    private static void assertShareVisibility(String shareArn, String caller, boolean visible) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", authFor(caller))
+            .body("{\"resourceOwner\":\"OTHER-ACCOUNTS\",\"resourceShareArns\":[\"%s\"]}"
+                    .formatted(shareArn))
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(200)
+            .body("resourceShares.size()", equalTo(visible ? 1 : 0));
     }
 
     @Test
@@ -348,6 +592,7 @@ class RamIntegrationTest {
     }
 
     @Test
+    @Order(3)
     void acceptResourceShareInvitationOverHttp() {
         // A bare account-id principal (not an OU/organization ARN) gets a real PENDING
         // invitation; targeting this test's own account keeps the whole flow within one

@@ -69,9 +69,7 @@ public class AcmJsonHandler {
         Certificate cert = service.describeCertificate(certificateArn, region);
         boolean domainMatchesCertificate = domain.equalsIgnoreCase(cert.getDomainName())
             || cert.getSubjectAlternativeNames().stream().anyMatch(domain::equalsIgnoreCase);
-        boolean validationDomainIsSuperdomain = domain.equalsIgnoreCase(validationDomain)
-            || domain.toLowerCase(java.util.Locale.ROOT).endsWith("." + validationDomain.toLowerCase(java.util.Locale.ROOT));
-        if (!domainMatchesCertificate || !validationDomainIsSuperdomain) {
+        if (!domainMatchesCertificate || !AcmService.isValidationDomainOf(domain, validationDomain)) {
             return Response.status(400)
                 .entity(new AwsErrorResponse("InvalidDomainValidationOptionsException",
                     "One or more values in the DomainValidationOption structure is incorrect."))
@@ -95,9 +93,10 @@ public class AcmJsonHandler {
         String certAuthorityArn = request.path("CertificateAuthorityArn").asText(null);
         CertificateOptions options = parseOptions(request.path("Options"));
         Map<String, String> tags = parseTags(request.path("Tags"));
+        Map<String, String> validationDomains = parseDomainValidationOptions(request.path("DomainValidationOptions"));
 
         Certificate cert = service.requestCertificate(domainName, sans, validationMethod,
-            idempotencyToken, keyAlgorithm, certAuthorityArn, options, tags, region);
+            idempotencyToken, keyAlgorithm, certAuthorityArn, options, tags, validationDomains, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CertificateArn", cert.getArn());
@@ -505,6 +504,30 @@ public class AcmJsonHandler {
             tags.put(key, value);
         }
         return tags;
+    }
+
+    /**
+     * Reads the requested {@code DomainValidationOptions} into a {@code ValidationDomain} per
+     * {@code DomainName}. Both members are required, so an entry missing either is rejected rather
+     * than dropped back to the default of validating the domain against itself.
+     */
+    private Map<String, String> parseDomainValidationOptions(JsonNode optionsNode) {
+        if (!optionsNode.isArray()) {
+            return Map.of();
+        }
+        Map<String, String> validationDomains = new LinkedHashMap<>();
+        for (JsonNode option : optionsNode) {
+            String domainName = option.path("DomainName").asText(null);
+            String validationDomain = option.path("ValidationDomain").asText(null);
+            if (domainName == null || domainName.isBlank() || validationDomain == null || validationDomain.isBlank()) {
+                throw new io.github.hectorvent.floci.core.common.AwsException(
+                    "InvalidDomainValidationOptionsException",
+                    "One or more values in the DomainValidationOption structure is incorrect.",
+                    400);
+            }
+            validationDomains.put(domainName, validationDomain);
+        }
+        return validationDomains;
     }
 
     private ValidationMethod parseValidationMethod(String method) {

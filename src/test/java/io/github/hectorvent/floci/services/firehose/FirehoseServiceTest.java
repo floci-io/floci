@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -23,18 +24,23 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,6 +54,7 @@ class FirehoseServiceTest {
     private FirehoseService firehoseService;
     private KinesisService kinesisService;
     private StorageFactory storageFactory;
+    private Map<String, AccountAwareStorageBackend<?>> backends;
     private S3Service s3Service;
     private MutableClock clock;
 
@@ -59,7 +66,7 @@ class FirehoseServiceTest {
         // the map FirehoseService.scan() reads as delivery streams; a fresh instance per
         // create() call would make a second service over "the same storage" impossible
         // to build, which is what the restart test needs.
-        Map<String, AccountAwareStorageBackend<?>> backends = new HashMap<>();
+        backends = new HashMap<>();
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(invocation -> backends.computeIfAbsent(
                         invocation.getArgument(0) + "/" + invocation.getArgument(1),
@@ -136,6 +143,85 @@ class FirehoseServiceTest {
     private void verifyNothingDelivered() {
         verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(),
                 anyMap(), any(PutObjectOptions.class));
+    }
+
+    @Test
+    void migratesLegacyAccountAndNameKeysOnlyForMatchingOwner() {
+        DeliveryStreamDescription legacy = new DeliveryStreamDescription(
+                "legacy", "arn:aws:firehose:us-east-1:111111111111:deliverystream/legacy", null, null);
+        legacy.setAccountId("111111111111");
+        AccountAwareStorageBackend<DeliveryStreamDescription> streams =
+                (AccountAwareStorageBackend<DeliveryStreamDescription>) backends.get("firehose/streams.json");
+        streams.putForAccount("111111111111", "legacy", legacy);
+
+        assertEquals("legacy", firehoseService.describeDeliveryStream("111111111111", "us-east-1", "legacy")
+                .getDeliveryStreamName());
+        assertFalse(streams.getForAccount("111111111111", "legacy").isPresent());
+        assertTrue(streams.getForAccount("111111111111", "us-east-1/legacy").isPresent());
+
+        DeliveryStreamDescription wrongRegion = new DeliveryStreamDescription(
+                "wrong-region", "arn:aws:firehose:eu-west-1:111111111111:deliverystream/wrong-region", null, null);
+        wrongRegion.setAccountId("111111111111");
+        streams.putForAccount("111111111111", "wrong-region", wrongRegion);
+        assertThrows(AwsException.class,
+                () -> firehoseService.describeDeliveryStream("111111111111", "us-east-1", "wrong-region"),
+                "legacy entries from another region must not be adopted");
+    }
+
+    @Test
+    void isolatesSameStreamNameAcrossAccountsAndRegionsIncludingFlushAndDelete() {
+        String firstArn = firehoseService.createDeliveryStream("us-east-1", "111111111111", "shared", null,
+                List.of(), null, null);
+        String secondArn = firehoseService.createDeliveryStream("eu-west-1", "222222222222", "shared", null,
+                List.of(), null, null);
+
+        assertTrue(firstArn.contains(":us-east-1:111111111111:deliverystream/shared"));
+        assertTrue(secondArn.contains(":eu-west-1:222222222222:deliverystream/shared"));
+
+        firehoseService.putRecord("111111111111", "us-east-1", "shared",
+                new Record("first".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.putRecord("222222222222", "eu-west-1", "shared",
+                new Record("second".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.flush("111111111111", "us-east-1", "shared");
+
+        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(),
+                argThat(body -> new String(body, StandardCharsets.UTF_8).equals("first\n")),
+                eq(OCTET_STREAM), anyMap(), any(PutObjectOptions.class));
+        verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+        assertEquals("shared", firehoseService.describeDeliveryStream("222222222222", "eu-west-1", "shared")
+                .getDeliveryStreamName());
+
+        firehoseService.deleteDeliveryStream("111111111111", "us-east-1", "shared");
+        assertEquals("shared", firehoseService.describeDeliveryStream("222222222222", "eu-west-1", "shared")
+                .getDeliveryStreamName());
+    }
+
+    @Test
+    void sameNameIsIndependentForEachAccountRegionDimension() {
+        List<String[]> owners = List.of(
+                new String[] {"111111111111", "us-east-1"},
+                new String[] {"111111111111", "eu-west-1"},
+                new String[] {"222222222222", "us-east-1"},
+                new String[] {"222222222222", "eu-west-1"});
+        for (int i = 0; i < owners.size(); i++) {
+            firehoseService.createDeliveryStream(owners.get(i)[1], owners.get(i)[0], "matrix", null,
+                    List.of(), null, null);
+            firehoseService.putRecord(owners.get(i)[0], owners.get(i)[1], "matrix",
+                    new Record(("owner-" + i).getBytes(StandardCharsets.UTF_8)));
+        }
+
+        firehoseService.flush("111111111111", "us-east-1", "matrix");
+
+        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(),
+                argThat(body -> new String(body, StandardCharsets.UTF_8).equals("owner-0\n")),
+                eq(OCTET_STREAM), anyMap(), any(PutObjectOptions.class));
+        verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+        for (String[] owner : owners) {
+            assertEquals("matrix", firehoseService.describeDeliveryStream(owner[0], owner[1], "matrix")
+                    .getDeliveryStreamName());
+        }
     }
 
     @Test

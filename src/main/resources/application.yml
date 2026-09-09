@@ -645,6 +645,8 @@ floci:
       enabled: true
     inspector2:
       enabled: true
+    securityhub:
+      enabled: true
     detective:
       enabled: true
     controltower:
