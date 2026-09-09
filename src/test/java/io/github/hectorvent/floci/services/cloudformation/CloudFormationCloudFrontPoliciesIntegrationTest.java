@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
@@ -13,8 +14,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -294,16 +293,7 @@ class CloudFormationCloudFrontPoliciesIntegrationTest {
     }
 
     private static String output(String describeStacks, String key) {
-        Matcher member = Pattern.compile("<member>(.*?)</member>", Pattern.DOTALL).matcher(describeStacks);
-        while (member.find()) {
-            String block = member.group(1);
-            if (block.contains("<OutputKey>" + key + "</OutputKey>")) {
-                Matcher value = Pattern.compile("<OutputValue>(.*?)</OutputValue>", Pattern.DOTALL).matcher(block);
-                if (value.find()) {
-                    return value.group(1);
-                }
-            }
-        }
-        return fail("Output " + key + " missing from: " + describeStacks);
+        String value = XmlParser.extractPairs(describeStacks, "Outputs", "OutputKey", "OutputValue").get(key);
+        return value != null ? value : fail("Output " + key + " missing from: " + describeStacks);
     }
 }
