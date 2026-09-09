@@ -1,11 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.not;
 
 /**
  * End-to-end check that CloudFormation provisions AWS::EC2::VPCEndpoint for
@@ -69,14 +69,16 @@ class CloudFormationVpcEndpointIntegrationTest {
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
             .body(containsString("<OutputValue>vpce-"));
 
-        given()
+        String endpointsBeforeDelete = given()
             .formParam("Action", "DescribeVpcEndpoints")
             .header("Authorization", EC2_AUTH)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("com.amazonaws.us-east-1.s3"));
+            .extract().asString();
+        String endpointId = XmlParser.extractFirst(endpointsBeforeDelete, "vpcEndpointId", null);
+        org.junit.jupiter.api.Assertions.assertNotNull(endpointId);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -88,13 +90,14 @@ class CloudFormationVpcEndpointIntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
+        String endpointsAfterDelete = given()
             .formParam("Action", "DescribeVpcEndpoints")
             .header("Authorization", EC2_AUTH)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body(not(containsString("com.amazonaws.us-east-1.s3")));
+            .extract().asString();
+        org.junit.jupiter.api.Assertions.assertFalse(endpointsAfterDelete.contains(endpointId));
     }
 }
