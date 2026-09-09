@@ -56,12 +56,15 @@ fi
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bats-run-XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 mkdir -p "$RESULTS_DIR"
-# Reports from an earlier run are not all overwritten: a renamed or removed bats file, or a run
-# that stops early, leaves its XML behind, and every consumer globs the directory. CI always
-# starts from an empty one, but a local test-results/ persists between runs, so this is what
-# keeps a developer's summary from mixing generations. The glob covers the single junit.xml the
-# previous runner wrote, which the per-file names would never replace.
-rm -f "${RESULTS_DIR}"/junit*.xml
+# Clear only the reports this run will write. A run that stops before rewriting every one
+# would otherwise leave the survivors beside the new results, and every consumer globs the
+# directory. Naming the files rather than globbing junit*.xml is deliberate:
+# docker/run-docker-tests.sh mounts one shared test-results directory for all eight suites, so
+# a glob here would delete compat-terraform's reports when compat-opentofu starts, and both
+# would delete the junit.xml that sdk-test-awscli and compat-cdk write.
+for report in "${FILES[@]}"; do
+    rm -f "${RESULTS_DIR}/junit-$(basename "$report" .bats).xml"
+done
 
 # One shared provider download instead of one per file. Every fixture deletes its
 # lock file in setup_file and re-resolves, so without this the concurrent inits
