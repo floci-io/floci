@@ -183,6 +183,38 @@ class EventsCfnProvisionerTest {
         assertTrue(thrown.getMessage().contains("requires resource replacement"));
     }
 
+    // ── the policy statement id is held to the modeled pattern ────────────────
+
+    @Test
+    void aStatementIdCarryingTheIdSeparatorIsRejected() {
+        // AWS models StatementId as [a-zA-Z0-9-_]+, so a pipe cannot reach the service. Refusing it
+        // is parity first, and it also keeps "<bus>|<sid>" splittable back into the pair.
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBusPolicy", "Policy"),
+                policyProps("orders-bus|sid"), ctx(null)));
+
+        assertEquals("ValidationException", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("StatementId"));
+    }
+
+    @Test
+    void aStatementIdBeyondTheModeledLengthIsRejected() {
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBusPolicy", "Policy"),
+                policyProps("s".repeat(65)), ctx(null)));
+
+        assertEquals("ValidationException", thrown.getErrorCode());
+        verify(events, never()).putPermission(anyString(), any(), any(), anyString(), any(), any(), anyString());
+    }
+
+    private ObjectNode policyProps(String statementId) {
+        return mapper.createObjectNode()
+                .put("EventBusName", "orders-bus")
+                .put("StatementId", statementId)
+                .put("Action", "events:PutEvents")
+                .put("Principal", "111122223333");
+    }
+
     private void doThrowOnRemovePermission(AwsException e) {
         org.mockito.Mockito.doThrow(e).when(events)
                 .removePermission(anyString(), anyString(), org.mockito.ArgumentMatchers.anyBoolean(), anyString());

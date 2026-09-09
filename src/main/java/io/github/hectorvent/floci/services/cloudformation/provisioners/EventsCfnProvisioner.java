@@ -52,6 +52,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             Set.of("Name", "Description", "Tags", "Policy");
     private static final Pattern EVENT_BUS_TAG_PATTERN =
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
+    private static final Pattern STATEMENT_ID_PATTERN = Pattern.compile("[a-zA-Z0-9\\-_]+");
+    private static final int STATEMENT_ID_MAX_LENGTH = 64;
 
     private final EventBridgeService eventBridgeService;
     private final ObjectMapper objectMapper;
@@ -520,6 +522,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         if (statementId == null || statementId.isBlank()) {
             throw new AwsException("ValidationException", "EventBusPolicy StatementId is required.", 400);
         }
+        validateStatementId(statementId);
 
         if (props != null && props.has("Statement") && props.get("Statement").isObject()) {
             // Statement form: merge the full statement into the bus policy, keyed by Sid,
@@ -576,6 +579,22 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         eventBridgeService.putPermission(busName, action, principal, statementId, conditionJson, null, ctx.region());
 
         r.setPhysicalId(busName + "|" + statementId);
+    }
+
+    /**
+     * Holds a policy statement id to what the registry schema for {@code AWS::Events::EventBusPolicy}
+     * models: {@code [a-zA-Z0-9-_]+}, 1 to 64 characters. Rejecting here is parity first, since AWS
+     * refuses the same values, and it also keeps the physical id unambiguous: the id this
+     * provisioner assigns is {@code <bus name>|<statement id>}, and neither the modeled bus-name
+     * pattern nor this one admits the separator, so {@link #removeEventBusPolicySafe} can always
+     * split it back into the pair it was built from.
+     */
+    private void validateStatementId(String statementId) {
+        if (statementId.length() > STATEMENT_ID_MAX_LENGTH
+                || !STATEMENT_ID_PATTERN.matcher(statementId).matches()) {
+            throw new AwsException("ValidationException",
+                    "Invalid EventBusPolicy StatementId: " + statementId, 400);
+        }
     }
 
     private void removeEventBusPolicySafe(String physicalId, String region) {
