@@ -11,6 +11,7 @@ import jakarta.inject.Inject;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * CloudFormation provisioning for Batch: {@code AWS::Batch::ComputeEnvironment},
@@ -49,6 +50,81 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             default -> throw new IllegalStateException(
                     "BatchCfnProvisioner cannot handle " + r.getResourceType());
         }
+    }
+
+    /**
+     * Batch refuses to delete a running entity, exactly as AWS does: DeleteJobQueue rejects an
+     * {@code ENABLED} queue and DeleteComputeEnvironment rejects one that is not {@code DISABLED}
+     * or is still referenced by a queue. So each delete disables first, which is what the real
+     * resource handlers do. CloudFormation already tears down in reverse dependency order, so a
+     * queue is gone before the environment it points at.
+     *
+     * <p>Deliberately no {@code CfnDeletes.safeDelete} here. Every {@link BatchService} failure is
+     * {@code ClientException}, so tolerating that code would be a catch-all: a real refusal such
+     * as "still associated with a job queue" would be swallowed into a green stack delete instead
+     * of failing it. Already-gone is handled by looking first, which is also what keeps the
+     * disable step from throwing on a resource someone removed out of band.
+     */
+    @Override
+    public void delete(String resourceType, String physicalId, String region) {
+        if (physicalId == null || physicalId.isBlank()) {
+            return;
+        }
+        switch (resourceType) {
+            case "AWS::Batch::ComputeEnvironment" -> deleteComputeEnvironment(physicalId);
+            case "AWS::Batch::JobQueue" -> deleteJobQueue(physicalId);
+            case "AWS::Batch::JobDefinition" -> deregisterJobDefinition(physicalId);
+            default -> {
+                // no other type reaches this provisioner
+            }
+        }
+    }
+
+    private void deleteComputeEnvironment(String physicalId) {
+        if (!exists("computeEnvironments", physicalId,
+                req -> batchService.describeComputeEnvironments(req))) {
+            return;
+        }
+        ObjectNode disable = JsonNodeFactory.instance.objectNode();
+        disable.put("computeEnvironment", physicalId);
+        disable.put("state", "DISABLED");
+        batchService.updateComputeEnvironment(disable);
+
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.put("computeEnvironment", physicalId);
+        batchService.deleteComputeEnvironment(req);
+    }
+
+    private void deleteJobQueue(String physicalId) {
+        if (!exists("jobQueues", physicalId, req -> batchService.describeJobQueues(req))) {
+            return;
+        }
+        ObjectNode disable = JsonNodeFactory.instance.objectNode();
+        disable.put("jobQueue", physicalId);
+        disable.put("state", "DISABLED");
+        batchService.updateJobQueue(disable);
+
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.put("jobQueue", physicalId);
+        batchService.deleteJobQueue(req);
+    }
+
+    private void deregisterJobDefinition(String physicalId) {
+        // Unlike the other two, deregister throws when the definition is gone, so the existence
+        // check is what makes a repeated stack delete idempotent.
+        if (!exists("jobDefinitions", physicalId, req -> batchService.describeJobDefinitions(req))) {
+            return;
+        }
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.put("jobDefinition", physicalId);
+        batchService.deregisterJobDefinition(req);
+    }
+
+    private boolean exists(String requestKey, String physicalId,
+                           Function<ObjectNode, ObjectNode> describe) {
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.putArray(requestKey).add(physicalId);
+        return !describe.apply(req).path(requestKey).isEmpty();
     }
 
     private void provisionComputeEnvironment(StackResource r, JsonNode props, ProvisionContext ctx) {
