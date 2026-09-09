@@ -129,7 +129,7 @@ public class CloudTrailLogWriter {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
             // Trail was deleted while records were pending — drop them.
-            cloudTrailService.drainPendingRecords(key);
+            cloudTrailService.discardPendingRecords(key);
             return;
         }
 
@@ -167,6 +167,7 @@ public class CloudTrailLogWriter {
         } catch (RuntimeException e) {
             LOG.warnv(e, "CloudTrail delivery success status update failed for trail {0}", key.trailName());
         }
+        cloudTrailService.completeDelivery(key);
 
         // The write above already succeeded and durably delivered the records —
         // from here on, records must never be re-queued. Doing so on a failure

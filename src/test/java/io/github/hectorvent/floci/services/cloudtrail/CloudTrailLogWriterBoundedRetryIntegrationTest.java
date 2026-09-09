@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudtrail;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -183,6 +184,40 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
                 "the record cap must apply to the trail, not each event region");
         assertTrue(delivered.stream().anyMatch(record -> "us-east-1".equals(record.path("awsRegion").asText())));
         assertTrue(delivered.stream().anyMatch(record -> "us-west-2".equals(record.path("awsRegion").asText())));
+    }
+
+    @Test
+    void retryBudgetIncludesRecordsInFlightAcrossEventRegions() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "in-flight-source-" + suffix;
+        String destinationBucket = "in-flight-logs-" + suffix;
+        String trailName = "in-flight-trail-" + suffix;
+
+        createBucket(sourceBucket);
+        createTrail(trailName, destinationBucket, true);
+        selectSourceBucket(trailName, sourceBucket);
+        startLogging(trailName);
+
+        emitEvents(sourceBucket, "us-east-1", RETRY_RECORD_LIMIT, "east");
+        CloudTrailService.TrailKey eastKey =
+                new CloudTrailService.TrailKey("us-east-1", trailName, "us-east-1");
+        List<ObjectNode> inFlight = cloudTrailService.drainPendingRecords(eastKey);
+
+        emitEvents(sourceBucket, "us-west-2", 80, "west");
+        cloudTrailService.requeueRecords(eastKey, inFlight);
+
+        List<ObjectNode> retainedEast = cloudTrailService.drainPendingRecords(eastKey);
+        List<ObjectNode> retainedWest = cloudTrailService.drainPendingRecords(
+                new CloudTrailService.TrailKey("us-east-1", trailName, "us-west-2"));
+
+        assertEquals(RETRY_RECORD_LIMIT, retainedEast.size(),
+                "in-flight records must reserve the trail-wide retry budget");
+        assertTrue(retainedWest.isEmpty(),
+                "events from another region must not displace older in-flight records");
+        for (int i = 0; i < RETRY_RECORD_LIMIT; i++) {
+            assertEquals("east/" + eventKey(i),
+                    retainedEast.get(i).path("requestParameters").path("key").asText());
+        }
     }
 
     private static void createTrail(String trailName, String destinationBucket) {

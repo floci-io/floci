@@ -387,6 +387,20 @@ public class CloudTrailService {
         }
     }
 
+    public void completeDelivery(TrailKey key) {
+        pendingRecordsByTrail.computeIfPresent(pendingTrailKey(key), (ignored, buffer) -> {
+            buffer.completeDelivery(key.eventRegion());
+            return buffer.isEmpty() ? null : buffer;
+        });
+    }
+
+    public void discardPendingRecords(TrailKey key) {
+        pendingRecordsByTrail.computeIfPresent(pendingTrailKey(key), (ignored, buffer) -> {
+            buffer.discard(key.eventRegion());
+            return buffer.isEmpty() ? null : buffer;
+        });
+    }
+
     public List<ObjectNode> drainPendingRecords(TrailKey key) {
         List<ObjectNode> drained = new ArrayList<>();
         pendingRecordsByTrail.compute(pendingTrailKey(key), (ignored, buffer) -> {
@@ -461,10 +475,16 @@ public class CloudTrailService {
 
     private final class PendingRecordBuffer {
         private final Map<String, ArrayDeque<PendingRecord>> recordsByRegion = new ConcurrentHashMap<>();
+        private final Map<String, List<PendingRecord>> inFlightByRegion = new ConcurrentHashMap<>();
         private int recordCount;
         private long byteCount;
 
         synchronized boolean append(String eventRegion, ObjectNode record, long recordBytes) {
+            if (!inFlightByRegion.isEmpty()
+                    && (recordCount >= MAX_PENDING_RECORDS_PER_TRAIL
+                    || byteCount + recordBytes > MAX_PENDING_BYTES_PER_TRAIL)) {
+                return false;
+            }
             recordsByRegion.computeIfAbsent(eventRegion, ignored -> new ArrayDeque<>())
                     .addLast(new PendingRecord(record, recordBytes));
             recordCount++;
@@ -475,11 +495,14 @@ public class CloudTrailService {
         synchronized void requeueFront(String eventRegion, List<PendingRecord> drained) {
             ArrayDeque<PendingRecord> records = recordsByRegion.computeIfAbsent(
                     eventRegion, ignored -> new ArrayDeque<>());
+            boolean wasInFlight = inFlightByRegion.remove(eventRegion) != null;
             for (int i = drained.size() - 1; i >= 0; i--) {
                 PendingRecord pending = drained.get(i);
                 records.addFirst(pending);
-                recordCount++;
-                byteCount += pending.byteCount();
+                if (!wasInFlight) {
+                    recordCount++;
+                    byteCount += pending.byteCount();
+                }
             }
             trimTailToLimit(eventRegion);
         }
@@ -489,23 +512,53 @@ public class CloudTrailService {
             if (records == null || records.isEmpty()) {
                 return List.of();
             }
+            inFlightByRegion.put(eventRegion, new ArrayList<>(records));
             List<ObjectNode> drained = new ArrayList<>(records.size());
             for (PendingRecord pending : records) {
                 drained.add(pending.record());
-                recordCount--;
-                byteCount -= pending.byteCount();
             }
             return drained;
         }
 
+        synchronized void completeDelivery(String eventRegion) {
+            List<PendingRecord> inFlight = inFlightByRegion.remove(eventRegion);
+            if (inFlight == null) {
+                return;
+            }
+            for (PendingRecord pending : inFlight) {
+                recordCount--;
+                byteCount -= pending.byteCount();
+            }
+        }
+
+        synchronized void discard(String eventRegion) {
+            ArrayDeque<PendingRecord> queued = recordsByRegion.remove(eventRegion);
+            if (queued != null) {
+                for (PendingRecord pending : queued) {
+                    recordCount--;
+                    byteCount -= pending.byteCount();
+                }
+            }
+            List<PendingRecord> inFlight = inFlightByRegion.remove(eventRegion);
+            if (inFlight != null) {
+                for (PendingRecord pending : inFlight) {
+                    recordCount--;
+                    byteCount -= pending.byteCount();
+                }
+            }
+        }
+
         synchronized boolean isEmpty() {
-            return recordCount == 0;
+            return recordCount == 0 && inFlightByRegion.isEmpty();
         }
 
         synchronized List<String> eventRegions() {
-            return recordsByRegion.entrySet().stream()
-                    .filter(entry -> !entry.getValue().isEmpty())
-                    .map(Map.Entry::getKey)
+            return java.util.stream.Stream.concat(recordsByRegion.keySet().stream(), inFlightByRegion.keySet().stream())
+                    .distinct()
+                    .filter(eventRegion -> {
+                        ArrayDeque<PendingRecord> records = recordsByRegion.get(eventRegion);
+                        return (records != null && !records.isEmpty()) || inFlightByRegion.containsKey(eventRegion);
+                    })
                     .toList();
         }
 
