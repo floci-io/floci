@@ -95,6 +95,9 @@ public class Ec2InstanceTypeCatalog {
             if (instanceType.supportedArchitectures == null || instanceType.supportedArchitectures.isEmpty()) {
                 throw new IllegalStateException("EC2 instance type catalog entry is missing supportedArchitectures: " + name);
             }
+            if (instanceType.supportedUsageClasses == null || instanceType.supportedUsageClasses.isEmpty()) {
+                throw new IllegalStateException("EC2 instance type catalog entry is missing supportedUsageClasses: " + name);
+            }
             if (instanceType.encryptionInTransitSupported == null) {
                 throw new IllegalStateException(
                         "EC2 instance type catalog entry is missing encryptionInTransitSupported: " + name);
@@ -156,6 +159,7 @@ public class Ec2InstanceTypeCatalog {
         public int memoryMib;
         public int localStorageGiB;
         public List<String> supportedArchitectures = List.of();
+        public List<String> supportedUsageClasses = List.of("on-demand", "spot");
         public Boolean currentGeneration;
         public Boolean encryptionInTransitSupported;
         public Integer defaultNetworkCardIndex;
@@ -170,6 +174,7 @@ public class Ec2InstanceTypeCatalog {
             type.put("instanceStorageSupported", localStorageGiB > 0);
             type.put("localStorageGiB", localStorageGiB);
             type.put("supportedArchitectures", List.copyOf(supportedArchitectures));
+            type.put("supportedUsageClasses", List.copyOf(supportedUsageClasses));
             type.put("currentGeneration", currentGeneration == null || currentGeneration);
             Map<String, Object> networkInfo = new LinkedHashMap<>();
             networkInfo.put("encryptionInTransitSupported", encryptionInTransitSupported);

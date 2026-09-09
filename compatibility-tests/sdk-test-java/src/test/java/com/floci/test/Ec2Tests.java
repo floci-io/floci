@@ -280,6 +280,21 @@ class Ec2Tests {
 
     @Test
     @Order(7)
+    @DisplayName("DescribeInstanceTypes - supported usage classes")
+    void describeInstanceTypeSupportedUsageClasses() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.M5_LARGE, InstanceType.fromValue("t4g.medium"),
+                        InstanceType.fromValue("m6gd.large"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(3);
+        assertThat(resp.instanceTypes()).allSatisfy(instanceType ->
+                assertThat(instanceType.supportedUsageClassesAsStrings())
+                        .containsExactlyInAnyOrder("on-demand", "spot"));
+    }
+
+    @Test
+    @Order(7)
     @DisplayName("CreateFleet - dry-run and instant on-demand launch")
     void createFleetDryRunAndLaunch() {
         String launchTemplateId = ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
