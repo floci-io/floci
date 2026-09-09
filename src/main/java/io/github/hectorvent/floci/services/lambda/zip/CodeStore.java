@@ -70,11 +70,12 @@ public class CodeStore {
      *
      * <p>The {@link #VERSIONS_DIR_SUFFIX} is what keeps that sibling from colliding with a real
      * function. {@link #sanitizeName} maps every name into {@code [a-zA-Z0-9_.-]}, so no function
-     * can produce a directory name containing {@code @}, whatever it is called. Floci does not
-     * restrict the character set of {@code FunctionName} today, only that it is non-blank, so a
-     * plainer {@code <name>.v<n>} sibling carried no such guarantee: a function genuinely named
-     * {@code foo.v1} owns the exact directory {@code foo}'s version 1 would otherwise claim, and
-     * deleting either one silently corrupts the other.
+     * can produce a directory name containing {@code @}, whatever it is called. A plainer
+     * {@code <name>.v<n>} sibling carried no such guarantee, because a dot is an accepted character
+     * in a function name: {@code LambdaArnUtils} validates against {@code [a-zA-Z0-9-_.]+}, which is
+     * wider than the live service (issue #3238). So a function genuinely named {@code foo.v1} owns
+     * the exact directory {@code foo}'s version 1 would otherwise claim, and deleting either one
+     * silently corrupts the other.
      */
     public Path getVersionsPath(String accountId, String region, String functionName) {
         return baseDir.resolve(sanitizeName(accountId))
